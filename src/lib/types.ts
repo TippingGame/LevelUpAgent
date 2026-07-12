@@ -1,0 +1,275 @@
+export type ProviderProtocol =
+  | "openai_responses"
+  | "openai_chat"
+  | "anthropic_messages"
+  | "gemini_generate_content";
+
+export interface ProviderProfile {
+  id: string;
+  name: string;
+  baseUrl: string;
+  model: string;
+  protocol: ProviderProtocol;
+  priority: number;
+  failoverEnabled: boolean;
+}
+
+export interface ProviderSettings {
+  profiles: ProviderProfile[];
+  activeProfileId: string;
+}
+
+export interface ToolCall {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+export type ModelProviderBrand =
+  | "openai"
+  | "anthropic"
+  | "gemini"
+  | "antigravity"
+  | "grok"
+  | "levelup";
+
+export interface AgentMessage {
+  id: string;
+  role: "user" | "assistant" | "tool";
+  content: string;
+  toolCalls: ToolCall[];
+  toolCallId?: string;
+  createdAt: number;
+  isError?: boolean;
+  requestId?: string;
+  modelName?: string;
+  providerBrand?: ModelProviderBrand;
+  durationMs?: number;
+  internal?: boolean;
+  attachments: ImageAttachment[];
+}
+
+export interface ImageAttachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  kind: "image" | "text" | "document";
+}
+
+export interface AgentTurnResponse {
+  content: string;
+  toolCalls: ToolCall[];
+  inputTokens?: number;
+  outputTokens?: number;
+  requestId?: string;
+  providerId?: string;
+  failoverCount: number;
+}
+
+export interface ProviderHealth {
+  profileId: string;
+  consecutiveFailures: number;
+  lastError?: string;
+  lastSuccessAt?: number;
+  lastFailureAt?: number;
+  cooldownUntil?: number;
+  totalRequests: number;
+  totalFailovers: number;
+  averageLatencyMs?: number;
+}
+
+export interface ProviderRequestLog {
+  id: string;
+  threadId?: string;
+  profileId: string;
+  model: string;
+  protocol: string;
+  startedAt: number;
+  latencyMs: number;
+  status: "success" | "error" | "cancelled" | "configuration_error";
+  inputTokens?: number;
+  outputTokens?: number;
+  requestId?: string;
+  failoverIndex: number;
+  error?: string;
+}
+
+export interface GatewayDiagnostics {
+  profileId: string;
+  healthOk: boolean;
+  latencyMs: number;
+  usage: Record<string, unknown>;
+  requestId?: string;
+  checkedAt: number;
+}
+
+export interface AppUpdateInfo {
+  currentVersion: string;
+  version: string;
+  date?: string;
+  body?: string;
+}
+
+export type ExternalConfigTarget = "codex" | "claude" | "gemini" | "opencode";
+
+export interface ConfigFilePreview {
+  path: string;
+  exists: boolean;
+  diff: string;
+}
+
+export interface ConfigWritePreview {
+  target: ExternalConfigTarget;
+  files: ConfigFilePreview[];
+  confirmationToken: string;
+}
+
+export interface ConfigWriteResult {
+  target: ExternalConfigTarget;
+  backupId: string;
+  changedFiles: string[];
+}
+
+export interface AgentStreamEvent {
+  kind: "content_delta";
+  delta?: string;
+}
+
+export interface ToolExecutionResponse {
+  output: string;
+  isError: boolean;
+}
+
+export type McpTransport = "stdio" | "streamable_http";
+
+export interface McpServerConfig {
+  id: string;
+  name: string;
+  enabled: boolean;
+  transport: McpTransport;
+  command?: string;
+  args: string[];
+  url?: string;
+  environment: Record<string, string>;
+  headers: Record<string, string>;
+  secretEnvironmentKeys: string[];
+  secretHeaderKeys: string[];
+}
+
+export interface McpSecretValues {
+  environment: Record<string, string>;
+  headers: Record<string, string>;
+}
+
+export interface McpServerSnapshot {
+  server: McpServerConfig;
+  status: "disabled" | "connected" | "error" | "stopped";
+  toolCount: number;
+  lastError?: string;
+}
+
+export interface SkillInfo {
+  id: string;
+  name: string;
+  description: string;
+  path: string;
+  source: string;
+  enabled: boolean;
+  valid: boolean;
+  warning?: string;
+}
+
+export interface ModelInfo {
+  id: string;
+  ownedBy?: string;
+}
+
+export interface ExternalConfigCandidate {
+  id: string;
+  source: string;
+  name: string;
+  baseUrl: string;
+  model: string;
+  protocol: ProviderProtocol;
+  hasSecret: boolean;
+  warning?: string;
+}
+
+export interface GitFileChange {
+  path: string;
+  indexStatus: string;
+  worktreeStatus: string;
+}
+
+export interface GitStatus {
+  isAvailable: boolean;
+  isRepository: boolean;
+  branch?: string;
+  changes: GitFileChange[];
+}
+
+export interface GitDiff {
+  path: string;
+  content: string;
+  truncated: boolean;
+}
+
+export interface GitRollbackPreview {
+  path: string;
+  status: string;
+  action: "restore_head" | "delete_untracked";
+  diff: string;
+  truncated: boolean;
+  confirmationToken: string;
+}
+
+export interface GitRollbackResult {
+  path: string;
+  action: "restore_head" | "delete_untracked";
+}
+
+export interface AgentThread {
+  id: string;
+  title: string;
+  workspace?: string;
+  messages: AgentMessage[];
+  updatedAt: number;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+export interface PendingApproval {
+  calls: ToolCall[];
+  history: AgentMessage[];
+  mode: AgentMode;
+  permissionLevel: PermissionLevel;
+  startedAt: number;
+}
+
+export type AgentMode = "agent" | "plan" | "goal" | "chat";
+export type PermissionLevel = "request" | "agent" | "full";
+
+export type GoalStatus =
+  | "active"
+  | "paused"
+  | "auditing"
+  | "completed"
+  | "blocked"
+  | "cancelled";
+
+export interface GoalState {
+  id: string;
+  threadId: string;
+  objective: string;
+  status: GoalStatus;
+  tokenBudget?: number;
+  inputTokens: number;
+  outputTokens: number;
+  turns: number;
+  blockedAttempts: number;
+  lastBlocker?: string;
+  auditNote?: string;
+  createdAt: number;
+  updatedAt: number;
+}

@@ -1,0 +1,2011 @@
+mod agent;
+mod attachment;
+mod config_writeback;
+mod database;
+mod filesystem;
+mod git;
+mod mcp;
+mod migration;
+mod models;
+mod process;
+mod skill;
+mod subagent;
+mod tools;
+
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use models::{
+    AgentMessage, AgentSkillSummary, AgentStreamEvent, AgentToolDefinition, AgentTurnRequest,
+    AgentTurnResponse, ConfigWritePreview, ConfigWriteResult, ExternalConfigCandidate,
+    ExternalConfigTarget, GatewayDiagnostics, GitDiff, GitRollbackPreview, GitRollbackResult,
+    GitStatus, GoalCreateRequest, GoalState, ImageAttachment, McpSecretValues, McpServerConfig,
+    McpServerSnapshot, McpServerUpsert, ModelInfo, ProviderHealth, ProviderProfile,
+    ProviderRequestLog, ProviderSettings, SkillInfo, StoredThread, ToolExecutionRequest,
+    ToolExecutionResponse,
+};
+use reqwest::Client;
+use tauri::Manager;
+use tauri::ipc::Channel;
+use tokio_util::sync::CancellationToken;
+
+const KEYRING_SERVICE: &str = "com.levelup.agent";
+const PROVIDER_CREDENTIAL_PREFIX: &str = "provider:";
+const MCP_CREDENTIAL_PREFIX: &str = "mcp:";
+const MAX_PENDING_CONFIRMATIONS: usize = 128;
+
+struct AppState {
+    client: Client,
+    active_requests: Mutex<HashMap<String, CancellationToken>>,
+    pending_config_writes: Mutex<HashMap<String, PendingConfigWrite>>,
+    pending_prompt_writes: Mutex<HashMap<String, PendingPromptWrite>>,
+    pending_git_rollbacks: Mutex<HashMap<String, PendingGitRollback>>,
+}
+
+struct PendingConfigWrite {
+    target: ExternalConfigTarget,
+    profile: ProviderProfile,
+    created_at: Instant,
+}
+
+struct PendingPromptWrite {
+    target: ExternalConfigTarget,
+    content: String,
+    created_at: Instant,
+}
+
+struct PendingGitRollback {
+    candidate: git::GitRollbackCandidate,
+    created_at: Instant,
+}
+
+fn credential(account: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(KEYRING_SERVICE, account)
+        .map_err(|error| format!("Could not open the system credential vault: {error}"))
+}
+
+fn validate_provider_id(profile_id: &str) -> Result<(), String> {
+    if profile_id.is_empty()
+        || profile_id.len() > 200
+        || !profile_id.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+    {
+        return Err(
+            "Provider ID may only contain letters, numbers, dashes, underscores, and dots"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn provider_credential(profile_id: &str) -> Result<keyring::Entry, String> {
+    validate_provider_id(profile_id)?;
+    credential(&format!("{PROVIDER_CREDENTIAL_PREFIX}{profile_id}"))
+}
+
+fn load_api_key(profile_id: &str) -> Result<String, String> {
+    let entry = provider_credential(profile_id)?;
+    match entry.get_password() {
+        Ok(value) => Ok(value),
+        Err(keyring::Error::NoEntry) => {
+            // 0.11 and earlier used the bare Provider ID. Migrate once without exposing it.
+            let legacy = credential(profile_id)?;
+            let value = legacy.get_password().map_err(|_| {
+                "This provider has no API key in the system credential vault".to_owned()
+            })?;
+            entry
+                .set_password(&value)
+                .map_err(|error| format!("Could not migrate the provider API key: {error}"))?;
+            let _ = legacy.delete_credential();
+            Ok(value)
+        }
+        Err(_) => Err("This provider has no API key in the system credential vault".to_owned()),
+    }
+}
+
+fn mcp_credential(server_id: &str) -> Result<keyring::Entry, String> {
+    credential(&format!("{MCP_CREDENTIAL_PREFIX}{server_id}"))
+}
+
+fn load_mcp_secrets(server_id: &str) -> Result<McpSecretValues, String> {
+    match mcp_credential(server_id)?.get_password() {
+        Ok(value) => serde_json::from_str(&value)
+            .map_err(|_| "The MCP credential entry is invalid".to_owned()),
+        Err(keyring::Error::NoEntry) => Ok(McpSecretValues::default()),
+        Err(error) => Err(format!("Could not read MCP credentials: {error}")),
+    }
+}
+
+fn save_mcp_secrets(server: &McpServerConfig, incoming: McpSecretValues) -> Result<(), String> {
+    let mut secrets = load_mcp_secrets(&server.id)?;
+    secrets
+        .environment
+        .retain(|key, _| server.secret_environment_keys.contains(key));
+    secrets
+        .headers
+        .retain(|key, _| server.secret_header_keys.contains(key));
+    for (key, value) in incoming.environment {
+        if server.secret_environment_keys.contains(&key) && !value.is_empty() {
+            secrets.environment.insert(key, value);
+        }
+    }
+    for (key, value) in incoming.headers {
+        if server.secret_header_keys.contains(&key) && !value.is_empty() {
+            secrets.headers.insert(key, value);
+        }
+    }
+    let entry = mcp_credential(&server.id)?;
+    if secrets.environment.is_empty() && secrets.headers.is_empty() {
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(format!("Could not clear MCP credentials: {error}")),
+        }
+    } else {
+        let value = serde_json::to_string(&secrets)
+            .map_err(|error| format!("Could not encode MCP credentials: {error}"))?;
+        entry
+            .set_password(&value)
+            .map_err(|error| format!("Could not save MCP credentials: {error}"))
+    }
+}
+
+async fn attach_mcp_tools(
+    database: &database::Database,
+    manager: &mcp::McpManager,
+    request: &mut AgentTurnRequest,
+) -> Result<(), String> {
+    if !matches!(request.mode.as_str(), "agent" | "goal") {
+        return Ok(());
+    }
+    for server in database
+        .list_mcp_servers()?
+        .into_iter()
+        .filter(|server| server.enabled)
+    {
+        let secrets = match load_mcp_secrets(&server.id) {
+            Ok(secrets) => secrets,
+            Err(error) => {
+                manager.set_error(&server.id, &error).await;
+                continue;
+            }
+        };
+        match manager.ensure_tools(&server, &secrets).await {
+            Ok(tools) => {
+                let remaining = 256_usize.saturating_sub(request.available_tools.len());
+                request
+                    .available_tools
+                    .extend(tools.into_iter().take(remaining));
+                if request.available_tools.len() >= 256 {
+                    break;
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+    Ok(())
+}
+
+fn discover_skills(
+    app: &tauri::AppHandle,
+    database: &database::Database,
+    workspace: Option<&str>,
+) -> Result<Vec<SkillInfo>, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Could not locate the application data directory: {error}"))?;
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|error| format!("Could not locate the home directory: {error}"))?;
+    Ok(skill::scan(
+        &app_data,
+        &home,
+        workspace.map(std::path::Path::new),
+        &database.skill_preferences()?,
+    ))
+}
+
+fn attach_skills(
+    app: &tauri::AppHandle,
+    database: &database::Database,
+    request: &mut AgentTurnRequest,
+) -> Result<(), String> {
+    if !matches!(request.mode.as_str(), "agent" | "goal" | "plan") {
+        return Ok(());
+    }
+    let enabled: Vec<_> = discover_skills(app, database, request.workspace.as_deref())?
+        .into_iter()
+        .filter(|skill| skill.enabled && skill.valid)
+        .take(64)
+        .collect();
+    request.available_skills = enabled
+        .iter()
+        .map(|skill| AgentSkillSummary {
+            id: skill.id.clone(),
+            name: skill.name.clone(),
+            description: skill.description.chars().take(500).collect(),
+        })
+        .collect();
+    if !enabled.is_empty() {
+        request.available_tools.push(AgentToolDefinition {
+            name: "read_skill".to_owned(),
+            description: "Read an enabled Skill's SKILL.md or a referenced UTF-8 file inside that Skill directory.".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "skillId": {
+                        "type": "string",
+                        "enum": enabled.iter().map(|skill| skill.id.clone()).collect::<Vec<_>>()
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Optional Skill-relative file path; defaults to SKILL.md"
+                    }
+                },
+                "required": ["skillId"]
+            }),
+            read_only: true,
+        });
+    }
+    Ok(())
+}
+
+fn attach_goal(
+    database: &database::Database,
+    request: &mut AgentTurnRequest,
+) -> Result<(), String> {
+    if request.mode != "goal" {
+        return Ok(());
+    }
+    let thread_id = request
+        .thread_id
+        .as_deref()
+        .ok_or_else(|| "Goal mode requires a task ID".to_owned())?;
+    let goal = database
+        .get_goal(thread_id)?
+        .ok_or_else(|| "This task has no Goal".to_owned())?;
+    if !matches!(
+        goal.status,
+        models::GoalStatus::Active | models::GoalStatus::Auditing
+    ) {
+        return Err("Goal is not active; resume it before continuing".to_owned());
+    }
+    request.goal = Some(goal);
+    request.available_tools.extend([
+        AgentToolDefinition {
+            name: "get_goal".to_owned(),
+            description: "Read the current persistent Goal, status, budget, usage, and audit state.".to_owned(),
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            read_only: true,
+        },
+        AgentToolDefinition {
+            name: "update_goal".to_owned(),
+            description: "Request Goal completion or report a repeated blocker with concrete evidence. The first completion request starts an audit; a second evidence-backed request during auditing completes it.".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "status": { "type": "string", "enum": ["complete", "blocked"] },
+                    "evidence": { "type": "string" }
+                },
+                "required": ["status", "evidence"]
+            }),
+            read_only: true,
+        },
+    ]);
+    Ok(())
+}
+
+fn attach_custom_instructions(
+    database: &database::Database,
+    request: &mut AgentTurnRequest,
+) -> Result<(), String> {
+    let content = database.custom_instructions()?;
+    request.custom_instructions = (!content.is_empty()).then_some(content);
+    Ok(())
+}
+
+fn attach_subagent_tools(request: &mut AgentTurnRequest) {
+    if !matches!(request.mode.as_str(), "agent" | "goal") || request.workspace.is_none() {
+        return;
+    }
+    request.available_tools.extend([
+        AgentToolDefinition {
+            name: "delegate_task".to_owned(),
+            description: "Delegate one bounded implementation task to a child Agent in a temporary isolated Git worktree. The child may read, search, and write UTF-8 files but cannot run commands. The main worktree remains unchanged until a separate apply_subagent_patch approval.".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task": { "type": "string", "description": "Concrete implementation task with acceptance criteria" },
+                    "scope": { "type": "string", "description": "Optional files or subsystem the child should stay within" },
+                    "maxTurns": { "type": "integer", "minimum": 1, "maximum": 8, "default": 6 }
+                },
+                "required": ["task"]
+            }),
+            read_only: false,
+        },
+        AgentToolDefinition {
+            name: "apply_subagent_patch".to_owned(),
+            description: "Apply a previously reviewed child Agent patch to the clean main Git worktree. Requires a second user approval and fails if HEAD or the worktree changed.".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "runId": { "type": "string", "description": "32-character run ID returned by delegate_task" }
+                },
+                "required": ["runId"]
+            }),
+            read_only: false,
+        },
+    ]);
+}
+
+fn attachment_storage(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Could not locate the application data directory: {error}"))?
+        .join("attachments"))
+}
+
+fn subagent_storage(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Could not locate the application data directory: {error}"))?
+        .join("subagents"))
+}
+
+fn attach_images(app: &tauri::AppHandle, request: &mut AgentTurnRequest) -> Result<(), String> {
+    attachment::resolve(&attachment_storage(app)?, &mut request.messages)
+}
+
+fn provider_candidates(request: &AgentTurnRequest) -> Vec<ProviderProfile> {
+    let mut seen = HashSet::from([request.profile.id.clone()]);
+    let mut fallbacks = request
+        .fallback_profiles
+        .iter()
+        .filter(|profile| profile.failover_enabled)
+        .cloned()
+        .collect::<Vec<_>>();
+    fallbacks.sort_by(|left, right| {
+        left.priority
+            .cmp(&right.priority)
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let mut candidates = vec![request.profile.clone()];
+    candidates.extend(
+        fallbacks
+            .into_iter()
+            .filter(|profile| seen.insert(profile.id.clone()))
+            .take(7),
+    );
+    candidates
+}
+
+fn now_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
+}
+
+fn provider_is_cooling_down(
+    database: &database::Database,
+    profile_id: &str,
+) -> Result<bool, String> {
+    Ok(database
+        .get_provider_health(profile_id)?
+        .cooldown_until
+        .is_some_and(|deadline| deadline > now_millis()))
+}
+
+fn provider_protocol_id(protocol: &models::ProviderProtocol) -> &'static str {
+    match protocol {
+        models::ProviderProtocol::OpenaiResponses => "openai_responses",
+        models::ProviderProtocol::OpenaiChat => "openai_chat",
+        models::ProviderProtocol::AnthropicMessages => "anthropic_messages",
+        models::ProviderProtocol::GeminiGenerateContent => "gemini_generate_content",
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_provider_request(
+    database: &database::Database,
+    request: &AgentTurnRequest,
+    profile: &ProviderProfile,
+    started_at: i64,
+    latency_ms: u64,
+    status: &str,
+    response: Option<&AgentTurnResponse>,
+    failover_index: u32,
+    error: Option<&str>,
+) -> Result<(), String> {
+    database.record_provider_request(&ProviderRequestLog {
+        id: uuid::Uuid::new_v4().to_string(),
+        thread_id: request.thread_id.clone(),
+        profile_id: profile.id.clone(),
+        model: profile.model.clone(),
+        protocol: provider_protocol_id(&profile.protocol).to_owned(),
+        started_at,
+        latency_ms,
+        status: status.to_owned(),
+        input_tokens: response.and_then(|item| item.input_tokens),
+        output_tokens: response.and_then(|item| item.output_tokens),
+        request_id: response.and_then(|item| item.request_id.clone()),
+        failover_index,
+        error: error.map(str::to_owned),
+    })
+}
+
+async fn run_agent_turn_with_failover<F>(
+    client: &Client,
+    database: &database::Database,
+    mut request: AgentTurnRequest,
+    mut key_loader: F,
+) -> Result<AgentTurnResponse, String>
+where
+    F: FnMut(&str) -> Result<String, String>,
+{
+    let candidates = provider_candidates(&request);
+    request.fallback_profiles.clear();
+    let mut last_error = "No provider is available".to_owned();
+    let mut failover_attempts = 0_u32;
+    for (index, profile) in candidates.into_iter().enumerate() {
+        if index > 0 && provider_is_cooling_down(database, &profile.id)? {
+            continue;
+        }
+        if index > 0 {
+            failover_attempts = failover_attempts.saturating_add(1);
+        }
+        let started_at = now_millis();
+        let api_key = match key_loader(&profile.id) {
+            Ok(api_key) => api_key,
+            Err(error) => {
+                record_provider_request(
+                    database,
+                    &request,
+                    &profile,
+                    started_at,
+                    0,
+                    "configuration_error",
+                    None,
+                    failover_attempts,
+                    Some(&error),
+                )?;
+                last_error = error;
+                continue;
+            }
+        };
+        let mut attempt = request.clone();
+        attempt.profile = profile.clone();
+        let started = Instant::now();
+        match agent::run_turn(client, attempt, &api_key).await {
+            Ok(mut result) => {
+                let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                database.record_provider_success(&profile.id, latency_ms, index > 0)?;
+                result.provider_id = Some(profile.id.clone());
+                result.failover_count = failover_attempts;
+                record_provider_request(
+                    database,
+                    &request,
+                    &profile,
+                    started_at,
+                    latency_ms,
+                    "success",
+                    Some(&result),
+                    failover_attempts,
+                    None,
+                )?;
+                return Ok(result);
+            }
+            Err(error) => {
+                let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                let status = if error.contains("REQUEST_CANCELLED") {
+                    "cancelled"
+                } else {
+                    "error"
+                };
+                record_provider_request(
+                    database,
+                    &request,
+                    &profile,
+                    started_at,
+                    latency_ms,
+                    status,
+                    None,
+                    failover_attempts,
+                    Some(&error),
+                )?;
+                if agent::is_retryable_provider_error(&error) {
+                    database.record_provider_failure(&profile.id, &error)?;
+                    last_error = error;
+                    continue;
+                }
+                return Err(error);
+            }
+        }
+    }
+    Err(last_error)
+}
+
+#[tauri::command]
+fn save_api_key(profile_id: String, api_key: String) -> Result<(), String> {
+    let value = api_key.trim();
+    if value.is_empty() {
+        return Err("API key cannot be empty".to_owned());
+    }
+    provider_credential(&profile_id)?
+        .set_password(value)
+        .map_err(|error| format!("Could not save API key: {error}"))
+}
+
+#[tauri::command]
+fn has_api_key(profile_id: String) -> bool {
+    load_api_key(&profile_id).is_ok()
+}
+
+#[tauri::command]
+fn delete_api_key(profile_id: String) -> Result<(), String> {
+    validate_provider_id(&profile_id)?;
+    let current = provider_credential(&profile_id)?.delete_credential();
+    let legacy = credential(&profile_id)?.delete_credential();
+    for result in [current, legacy] {
+        match result {
+            Ok(()) | Err(keyring::Error::NoEntry) => {}
+            Err(error) => return Err(format!("Could not delete API key: {error}")),
+        }
+    }
+    Ok(())
+}
+
+fn validate_provider_settings(settings: &ProviderSettings) -> Result<(), String> {
+    if settings.profiles.is_empty() || settings.profiles.len() > 64 {
+        return Err("Provider settings must contain 1-64 connections".to_owned());
+    }
+    let mut ids = HashSet::new();
+    for profile in &settings.profiles {
+        validate_provider_id(&profile.id)?;
+        if !ids.insert(profile.id.as_str()) {
+            return Err("Provider IDs must be unique".to_owned());
+        }
+        if profile.name.trim().is_empty() || profile.name.chars().count() > 120 {
+            return Err("Provider name must contain 1-120 characters".to_owned());
+        }
+        if profile.model.trim().is_empty() || profile.model.chars().count() > 240 {
+            return Err("Provider model must contain 1-240 characters".to_owned());
+        }
+        if !(-100_000..=100_000).contains(&profile.priority) {
+            return Err("Provider priority is outside the supported range".to_owned());
+        }
+        agent::validate_provider_base_url(&profile.base_url)?;
+    }
+    if !ids.contains(settings.active_profile_id.as_str()) {
+        return Err("Active Provider must reference a saved connection".to_owned());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn get_provider_settings(
+    database: tauri::State<'_, database::Database>,
+) -> Result<Option<ProviderSettings>, String> {
+    let settings = database.provider_settings()?;
+    if let Some(settings) = &settings {
+        validate_provider_settings(settings)?;
+    }
+    Ok(settings)
+}
+
+#[tauri::command]
+fn save_provider_settings(
+    database: tauri::State<'_, database::Database>,
+    settings: ProviderSettings,
+) -> Result<(), String> {
+    validate_provider_settings(&settings)?;
+    database.set_provider_settings(&settings)
+}
+
+#[tauri::command]
+fn import_image_attachments(
+    app: tauri::AppHandle,
+    source_paths: Vec<String>,
+) -> Result<Vec<ImageAttachment>, String> {
+    if source_paths.len() > 12 {
+        return Err("Select at most 12 attachments at a time".to_owned());
+    }
+    let storage = attachment_storage(&app)?;
+    let mut imported = Vec::new();
+    for path in source_paths {
+        match attachment::import(&storage, std::path::Path::new(&path)) {
+            Ok(item) => imported.push(item),
+            Err(error) => {
+                for item in &imported {
+                    let _ = attachment::delete(&storage, &item.id);
+                }
+                return Err(error);
+            }
+        }
+    }
+    Ok(imported)
+}
+
+#[tauri::command]
+fn delete_image_attachment(app: tauri::AppHandle, attachment_id: String) -> Result<bool, String> {
+    attachment::delete(&attachment_storage(&app)?, &attachment_id)
+}
+
+#[tauri::command]
+fn list_provider_health(
+    database: tauri::State<'_, database::Database>,
+) -> Result<Vec<ProviderHealth>, String> {
+    database.list_provider_health()
+}
+
+#[tauri::command]
+fn list_provider_requests(
+    database: tauri::State<'_, database::Database>,
+) -> Result<Vec<ProviderRequestLog>, String> {
+    database.list_provider_requests(300)
+}
+
+#[tauri::command]
+fn reset_provider_health(
+    database: tauri::State<'_, database::Database>,
+    profile_id: String,
+) -> Result<(), String> {
+    database.reset_provider_health(&profile_id)
+}
+
+#[tauri::command]
+async fn get_gateway_diagnostics(
+    state: tauri::State<'_, AppState>,
+    profile: ProviderProfile,
+) -> Result<GatewayDiagnostics, String> {
+    let api_key = load_api_key(&profile.id)?;
+    agent::fetch_gateway_diagnostics(&state.client, &profile, &api_key).await
+}
+
+#[tauri::command]
+fn get_custom_instructions(
+    database: tauri::State<'_, database::Database>,
+) -> Result<String, String> {
+    database.custom_instructions()
+}
+
+#[tauri::command]
+fn save_custom_instructions(
+    database: tauri::State<'_, database::Database>,
+    content: String,
+) -> Result<(), String> {
+    database.set_custom_instructions(&content)
+}
+
+#[tauri::command]
+async fn agent_turn(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    database: tauri::State<'_, database::Database>,
+    manager: tauri::State<'_, mcp::McpManager>,
+    mut request: AgentTurnRequest,
+) -> Result<AgentTurnResponse, String> {
+    attach_images(&app, &mut request)?;
+    attach_custom_instructions(&database, &mut request)?;
+    attach_goal(&database, &mut request)?;
+    attach_subagent_tools(&mut request);
+    attach_skills(&app, &database, &mut request)?;
+    attach_mcp_tools(&database, &manager, &mut request).await?;
+    let goal_thread = (request.mode == "goal")
+        .then(|| request.thread_id.clone())
+        .flatten();
+    let response =
+        run_agent_turn_with_failover(&state.client, &database, request, load_api_key).await?;
+    if let Some(thread_id) = goal_thread {
+        database.record_goal_usage(
+            &thread_id,
+            response.input_tokens.unwrap_or(0),
+            response.output_tokens.unwrap_or(0),
+        )?;
+    }
+    Ok(response)
+}
+
+#[tauri::command]
+async fn agent_turn_stream(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    database: tauri::State<'_, database::Database>,
+    manager: tauri::State<'_, mcp::McpManager>,
+    mut request: AgentTurnRequest,
+    operation_id: String,
+    on_event: Channel<AgentStreamEvent>,
+) -> Result<AgentTurnResponse, String> {
+    attach_images(&app, &mut request)?;
+    attach_custom_instructions(&database, &mut request)?;
+    attach_goal(&database, &mut request)?;
+    attach_subagent_tools(&mut request);
+    attach_skills(&app, &database, &mut request)?;
+    attach_mcp_tools(&database, &manager, &mut request).await?;
+    let goal_thread = (request.mode == "goal")
+        .then(|| request.thread_id.clone())
+        .flatten();
+    let candidates = provider_candidates(&request);
+    request.fallback_profiles.clear();
+    let cancellation = CancellationToken::new();
+    {
+        let mut active = state
+            .active_requests
+            .lock()
+            .map_err(|_| "Could not lock active request state".to_owned())?;
+        if let Some(previous) = active.insert(operation_id.clone(), cancellation.clone()) {
+            previous.cancel();
+        }
+    }
+
+    let mut last_error = "No provider is available".to_owned();
+    let mut result = None;
+    let mut failover_attempts = 0_u32;
+    for (index, profile) in candidates.into_iter().enumerate() {
+        if index > 0 && provider_is_cooling_down(&database, &profile.id)? {
+            continue;
+        }
+        if index > 0 {
+            failover_attempts = failover_attempts.saturating_add(1);
+        }
+        let started_at = now_millis();
+        let api_key = match load_api_key(&profile.id) {
+            Ok(api_key) => api_key,
+            Err(error) => {
+                record_provider_request(
+                    &database,
+                    &request,
+                    &profile,
+                    started_at,
+                    0,
+                    "configuration_error",
+                    None,
+                    failover_attempts,
+                    Some(&error),
+                )?;
+                last_error = error;
+                continue;
+            }
+        };
+        let mut attempt = request.clone();
+        attempt.profile = profile.clone();
+        let emitted = Arc::new(AtomicBool::new(false));
+        let output_started = emitted.clone();
+        let event_channel = on_event.clone();
+        let started = Instant::now();
+        match agent::run_turn_stream(
+            &state.client,
+            attempt,
+            &api_key,
+            cancellation.clone(),
+            move |event| {
+                if event
+                    .delta
+                    .as_deref()
+                    .is_some_and(|delta| !delta.is_empty())
+                {
+                    output_started.store(true, Ordering::Release);
+                }
+                let _ = event_channel.send(event);
+            },
+        )
+        .await
+        {
+            Ok(mut response) => {
+                let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                database.record_provider_success(&profile.id, latency_ms, index > 0)?;
+                response.provider_id = Some(profile.id.clone());
+                response.failover_count = failover_attempts;
+                record_provider_request(
+                    &database,
+                    &request,
+                    &profile,
+                    started_at,
+                    latency_ms,
+                    "success",
+                    Some(&response),
+                    failover_attempts,
+                    None,
+                )?;
+                result = Some(Ok(response));
+                break;
+            }
+            Err(error) => {
+                let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                let status = if error.contains("REQUEST_CANCELLED") {
+                    "cancelled"
+                } else {
+                    "error"
+                };
+                record_provider_request(
+                    &database,
+                    &request,
+                    &profile,
+                    started_at,
+                    latency_ms,
+                    status,
+                    None,
+                    failover_attempts,
+                    Some(&error),
+                )?;
+                let retryable = agent::is_retryable_provider_error(&error);
+                if retryable {
+                    database.record_provider_failure(&profile.id, &error)?;
+                }
+                if emitted.load(Ordering::Acquire) || !retryable {
+                    result = Some(Err(error));
+                    break;
+                }
+                last_error = error;
+            }
+        }
+    }
+    let result = result.unwrap_or(Err(last_error));
+
+    if let Ok(mut active) = state.active_requests.lock() {
+        active.remove(&operation_id);
+    }
+    if let (Some(thread_id), Ok(response)) = (&goal_thread, &result) {
+        database.record_goal_usage(
+            thread_id,
+            response.input_tokens.unwrap_or(0),
+            response.output_tokens.unwrap_or(0),
+        )?;
+    }
+    result
+}
+
+#[tauri::command]
+fn cancel_agent_turn(state: tauri::State<'_, AppState>, operation_id: String) -> bool {
+    let Ok(active) = state.active_requests.lock() else {
+        return false;
+    };
+    if let Some(cancellation) = active.get(&operation_id) {
+        cancellation.cancel();
+        true
+    } else {
+        false
+    }
+}
+
+#[tauri::command]
+async fn fetch_models(
+    state: tauri::State<'_, AppState>,
+    profile: ProviderProfile,
+    api_key: Option<String>,
+) -> Result<Vec<ModelInfo>, String> {
+    let api_key = api_key
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_owned())
+        .map(Ok)
+        .unwrap_or_else(|| load_api_key(&profile.id))?;
+    agent::fetch_models(&state.client, profile, &api_key).await
+}
+
+struct IsolatedSubagentTask<'a> {
+    task: &'a str,
+    scope: Option<&'a str>,
+    max_turns: usize,
+}
+
+async fn run_isolated_subagent<F>(
+    client: &Client,
+    database: &database::Database,
+    request: &ToolExecutionRequest,
+    worktree: &subagent::IsolatedWorktree,
+    delegated: IsolatedSubagentTask<'_>,
+    mut key_loader: F,
+) -> Result<String, String>
+where
+    F: FnMut(&str) -> Result<String, String>,
+{
+    let profile = request
+        .profile
+        .clone()
+        .ok_or_else(|| "Sub-Agent delegation requires the active provider".to_owned())?;
+    let mut history = vec![AgentMessage {
+        role: "user".to_owned(),
+        content: format!(
+            "Work as a bounded child Agent inside an isolated Git worktree. Inspect the current repository state, implement the task with focused UTF-8 file edits, and finish with a concise summary of changed files and unresolved validation. You cannot run commands; do not claim tests ran. Stay within the optional scope when provided.\n\nTask:\n{}\n\nScope:\n{}",
+            delegated.task,
+            delegated
+                .scope
+                .unwrap_or("Repository-wide only where required by the task")
+        ),
+        tool_calls: Vec::new(),
+        tool_call_id: None,
+        internal: false,
+        attachments: Vec::new(),
+    }];
+    let mut last_summary = String::new();
+    let child_thread_id = format!(
+        "{}:subagent:{}",
+        request.thread_id.as_deref().unwrap_or("standalone"),
+        worktree.run_id
+    );
+    for _ in 0..delegated.max_turns {
+        let turn = AgentTurnRequest {
+            profile: profile.clone(),
+            messages: history.clone(),
+            mode: "subagent".to_owned(),
+            workspace: Some(worktree.path.to_string_lossy().into_owned()),
+            thread_id: Some(child_thread_id.clone()),
+            available_tools: Vec::new(),
+            available_skills: Vec::new(),
+            goal: None,
+            fallback_profiles: request.fallback_profiles.clone(),
+            custom_instructions: Some(
+                "This is an isolated child run. Never attempt shell commands, delegation, Goal updates, MCP calls, or access outside the selected worktree. Main-worktree application requires a separate approval."
+                    .to_owned(),
+            ),
+        };
+        let response = run_agent_turn_with_failover(client, database, turn, |profile_id| {
+            key_loader(profile_id)
+        })
+        .await?;
+        if !response.content.trim().is_empty() {
+            last_summary = response.content.trim().to_owned();
+        }
+        let tool_calls = response.tool_calls.clone();
+        history.push(AgentMessage {
+            role: "assistant".to_owned(),
+            content: response.content,
+            tool_calls: response.tool_calls,
+            tool_call_id: None,
+            internal: false,
+            attachments: Vec::new(),
+        });
+        if tool_calls.is_empty() {
+            return Ok(if last_summary.is_empty() {
+                "Child Agent finished without a textual summary.".to_owned()
+            } else {
+                last_summary
+            });
+        }
+        for call in tool_calls {
+            let result = if matches!(
+                call.name.as_str(),
+                "list_files" | "read_file" | "search_files" | "write_file" | "delete_file"
+            ) {
+                tools::execute(ToolExecutionRequest {
+                    name: call.name,
+                    arguments: call.arguments,
+                    workspace: worktree.path.to_string_lossy().into_owned(),
+                    thread_id: Some(child_thread_id.clone()),
+                    profile: None,
+                    fallback_profiles: Vec::new(),
+                })
+                .await
+            } else {
+                ToolExecutionResponse {
+                    output: "This tool is unavailable inside an isolated child Agent".to_owned(),
+                    is_error: true,
+                }
+            };
+            history.push(AgentMessage {
+                role: "tool".to_owned(),
+                content: result.output,
+                tool_calls: Vec::new(),
+                tool_call_id: Some(call.id),
+                internal: false,
+                attachments: Vec::new(),
+            });
+        }
+    }
+    Ok(format!(
+        "{}\n\nChild Agent reached its {}-turn limit; review the patch carefully.",
+        if last_summary.is_empty() {
+            "No final summary was produced."
+        } else {
+            &last_summary
+        },
+        delegated.max_turns,
+    ))
+}
+
+async fn delegate_task(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    database: &database::Database,
+    subagents: &subagent::SubagentManager,
+    request: &ToolExecutionRequest,
+) -> Result<String, String> {
+    let task = request
+        .arguments
+        .get("task")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Missing string argument: task".to_owned())?;
+    if task.chars().count() > 20_000 {
+        return Err("Sub-Agent task is longer than 20,000 characters".to_owned());
+    }
+    let scope = request
+        .arguments
+        .get("scope")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if scope.is_some_and(|value| value.chars().count() > 4_000) {
+        return Err("Sub-Agent scope is longer than 4,000 characters".to_owned());
+    }
+    let max_turns = request
+        .arguments
+        .get("maxTurns")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(6);
+    if !(1..=8).contains(&max_turns) {
+        return Err("Sub-Agent maxTurns must be between 1 and 8".to_owned());
+    }
+
+    let worktree = subagent::create_worktree(
+        &subagent_storage(app)?,
+        std::path::Path::new(&request.workspace),
+    )
+    .await?;
+    let result = run_isolated_subagent(
+        &state.client,
+        database,
+        request,
+        &worktree,
+        IsolatedSubagentTask {
+            task,
+            scope,
+            max_turns: max_turns as usize,
+        },
+        load_api_key,
+    )
+    .await;
+    let summary = match result {
+        Ok(summary) => summary,
+        Err(error) => {
+            let cleanup = subagent::cleanup_worktree(&worktree).await;
+            return Err(match cleanup {
+                Ok(()) => error,
+                Err(cleanup_error) => format!("{error}; cleanup also failed: {cleanup_error}"),
+            });
+        }
+    };
+    let captured = subagent::capture_patch(&worktree).await;
+    let cleanup = subagent::cleanup_worktree(&worktree).await;
+    let (patch, stat) = captured?;
+    cleanup?;
+    if patch.trim().is_empty() {
+        return Ok(format!(
+            "Sub-Agent completed in isolation and made no file changes.\n\nSummary:\n{summary}"
+        ));
+    }
+    subagents.store(subagent::pending_patch(
+        &worktree,
+        patch.clone(),
+        stat.clone(),
+        summary.clone(),
+    ))?;
+    Ok(format!(
+        "Sub-Agent completed in an isolated worktree. The main workspace is unchanged.\nRun ID: {}\n\nSummary:\n{}\n\nDiff stat:\n{}\n\nReviewable patch:\n```diff\n{}```\nCall apply_subagent_patch with this run ID only after reviewing the patch; that call requires a second user approval.",
+        worktree.run_id,
+        summary,
+        if stat.trim().is_empty() {
+            "No stat available"
+        } else {
+            stat.trim()
+        },
+        patch,
+    ))
+}
+
+async fn apply_delegated_patch(
+    subagents: &subagent::SubagentManager,
+    request: &ToolExecutionRequest,
+) -> Result<String, String> {
+    let run_id = request
+        .arguments
+        .get("runId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "Missing string argument: runId".to_owned())?;
+    let pending = subagents.get(run_id, std::path::Path::new(&request.workspace))?;
+    let stat = subagent::apply_patch(&pending).await?;
+    subagents.remove(run_id);
+    Ok(format!(
+        "Applied reviewed sub-Agent patch {} to the main worktree as unstaged changes.\n\nChild summary:\n{}\n\nCurrent diff stat:\n{}",
+        pending.run_id,
+        pending.summary,
+        if stat.trim().is_empty() {
+            "No changes"
+        } else {
+            stat.trim()
+        },
+    ))
+}
+
+fn tool_execution_result(result: Result<String, String>) -> ToolExecutionResponse {
+    match result {
+        Ok(output) => ToolExecutionResponse {
+            output,
+            is_error: false,
+        },
+        Err(output) => ToolExecutionResponse {
+            output,
+            is_error: true,
+        },
+    }
+}
+
+#[tauri::command]
+async fn execute_tool(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    database: tauri::State<'_, database::Database>,
+    manager: tauri::State<'_, mcp::McpManager>,
+    subagents: tauri::State<'_, subagent::SubagentManager>,
+    request: ToolExecutionRequest,
+) -> Result<ToolExecutionResponse, String> {
+    Ok(if request.name == "delegate_task" {
+        tool_execution_result(delegate_task(&app, &state, &database, &subagents, &request).await)
+    } else if request.name == "apply_subagent_patch" {
+        tool_execution_result(apply_delegated_patch(&subagents, &request).await)
+    } else if request.name == "get_goal" {
+        let thread_id = request
+            .thread_id
+            .as_deref()
+            .ok_or_else(|| "Goal tool requires a task ID".to_owned())?;
+        match database.get_goal(thread_id)? {
+            Some(goal) => ToolExecutionResponse {
+                output: serde_json::to_string_pretty(&goal)
+                    .map_err(|error| format!("Could not encode Goal: {error}"))?,
+                is_error: false,
+            },
+            None => ToolExecutionResponse {
+                output: "This task has no Goal".to_owned(),
+                is_error: true,
+            },
+        }
+    } else if request.name == "update_goal" {
+        let thread_id = request
+            .thread_id
+            .as_deref()
+            .ok_or_else(|| "Goal tool requires a task ID".to_owned())?;
+        let status = request
+            .arguments
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "Missing string argument: status".to_owned())?;
+        let evidence = request
+            .arguments
+            .get("evidence")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "Missing string argument: evidence".to_owned())?;
+        match database.update_goal_from_agent(thread_id, status, evidence) {
+            Ok(goal) => ToolExecutionResponse {
+                output: format!(
+                    "Goal status is now {:?}. Completion requires a separate audit; blocked requires three consecutive identical reports.",
+                    goal.status
+                ),
+                is_error: false,
+            },
+            Err(output) => ToolExecutionResponse {
+                output,
+                is_error: true,
+            },
+        }
+    } else if request.name == "read_skill" {
+        let skill_id = request
+            .arguments
+            .get("skillId")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "Missing string argument: skillId".to_owned())?;
+        let relative = request
+            .arguments
+            .get("path")
+            .and_then(serde_json::Value::as_str);
+        let skills = discover_skills(&app, &database, Some(&request.workspace))?;
+        match skill::read_enabled(&skills, skill_id, relative) {
+            Ok(output) => ToolExecutionResponse {
+                output,
+                is_error: false,
+            },
+            Err(output) => ToolExecutionResponse {
+                output,
+                is_error: true,
+            },
+        }
+    } else if request.name.starts_with("mcp_") {
+        manager.execute(&request.name, request.arguments).await
+    } else {
+        tools::execute(request).await
+    })
+}
+
+#[tauri::command]
+fn create_goal(
+    database: tauri::State<'_, database::Database>,
+    request: GoalCreateRequest,
+) -> Result<GoalState, String> {
+    database.create_goal(&request)
+}
+
+#[tauri::command]
+fn get_goal(
+    database: tauri::State<'_, database::Database>,
+    thread_id: String,
+) -> Result<Option<GoalState>, String> {
+    database.get_goal(&thread_id)
+}
+
+#[tauri::command]
+fn change_goal_status(
+    database: tauri::State<'_, database::Database>,
+    thread_id: String,
+    action: String,
+) -> Result<GoalState, String> {
+    database.set_goal_status(&thread_id, &action)
+}
+
+#[tauri::command]
+fn set_goal_budget(
+    database: tauri::State<'_, database::Database>,
+    thread_id: String,
+    token_budget: Option<u64>,
+) -> Result<GoalState, String> {
+    database.set_goal_budget(&thread_id, token_budget)
+}
+
+#[tauri::command]
+fn scan_skills(
+    app: tauri::AppHandle,
+    database: tauri::State<'_, database::Database>,
+    workspace: Option<String>,
+) -> Result<Vec<SkillInfo>, String> {
+    discover_skills(&app, &database, workspace.as_deref())
+}
+
+#[tauri::command]
+fn set_skill_enabled(
+    app: tauri::AppHandle,
+    database: tauri::State<'_, database::Database>,
+    workspace: Option<String>,
+    skill_id: String,
+    enabled: bool,
+) -> Result<SkillInfo, String> {
+    let skills = discover_skills(&app, &database, workspace.as_deref())?;
+    let selected = skills
+        .iter()
+        .find(|skill| skill.id == skill_id)
+        .ok_or_else(|| "Skill is no longer available".to_owned())?;
+    if !selected.valid {
+        return Err(selected
+            .warning
+            .clone()
+            .unwrap_or_else(|| "Invalid Skill cannot be enabled".to_owned()));
+    }
+    database.set_skill_enabled(&selected.id, &selected.path, enabled)?;
+    discover_skills(&app, &database, workspace.as_deref())?
+        .into_iter()
+        .find(|skill| skill.id == skill_id)
+        .ok_or_else(|| "Skill is no longer available".to_owned())
+}
+
+#[tauri::command]
+async fn list_mcp_servers(
+    database: tauri::State<'_, database::Database>,
+    manager: tauri::State<'_, mcp::McpManager>,
+) -> Result<Vec<McpServerSnapshot>, String> {
+    let mut snapshots = Vec::new();
+    for server in database.list_mcp_servers()? {
+        snapshots.push(manager.snapshot(server).await);
+    }
+    Ok(snapshots)
+}
+
+#[tauri::command]
+async fn upsert_mcp_server(
+    database: tauri::State<'_, database::Database>,
+    manager: tauri::State<'_, mcp::McpManager>,
+    mut input: McpServerUpsert,
+) -> Result<McpServerSnapshot, String> {
+    normalize_mcp_config(&mut input.server)?;
+    database.save_mcp_server(&input.server)?;
+    save_mcp_secrets(&input.server, input.secrets)?;
+    manager.stop(&input.server.id).await;
+    Ok(manager.snapshot(input.server).await)
+}
+
+#[tauri::command]
+async fn start_mcp_server(
+    database: tauri::State<'_, database::Database>,
+    manager: tauri::State<'_, mcp::McpManager>,
+    server_id: String,
+) -> Result<McpServerSnapshot, String> {
+    let server = database
+        .get_mcp_server(&server_id)?
+        .ok_or_else(|| "MCP server does not exist".to_owned())?;
+    let secrets = load_mcp_secrets(&server.id)?;
+    manager.start(&server, &secrets).await?;
+    Ok(manager.snapshot(server).await)
+}
+
+#[tauri::command]
+async fn stop_mcp_server(
+    database: tauri::State<'_, database::Database>,
+    manager: tauri::State<'_, mcp::McpManager>,
+    server_id: String,
+) -> Result<McpServerSnapshot, String> {
+    let server = database
+        .get_mcp_server(&server_id)?
+        .ok_or_else(|| "MCP server does not exist".to_owned())?;
+    manager.stop(&server_id).await;
+    Ok(manager.snapshot(server).await)
+}
+
+#[tauri::command]
+async fn delete_mcp_server(
+    database: tauri::State<'_, database::Database>,
+    manager: tauri::State<'_, mcp::McpManager>,
+    server_id: String,
+) -> Result<bool, String> {
+    manager.stop(&server_id).await;
+    let deleted = database.delete_mcp_server(&server_id)?;
+    match mcp_credential(&server_id)?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(deleted),
+        Err(error) => Err(format!(
+            "MCP server was deleted, but its credential could not be removed: {error}"
+        )),
+    }
+}
+
+fn normalize_mcp_config(server: &mut McpServerConfig) -> Result<(), String> {
+    server.id = server.id.trim().to_owned();
+    server.name = server.name.trim().to_owned();
+    if server.id.is_empty()
+        || server.id.len() > 128
+        || !server
+            .id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return Err(
+            "MCP server ID must be 1-128 letters, numbers, dashes, or underscores".to_owned(),
+        );
+    }
+    if server.name.is_empty() {
+        return Err("MCP server name is required".to_owned());
+    }
+    server.secret_environment_keys.sort();
+    server.secret_environment_keys.dedup();
+    server.secret_header_keys.sort();
+    server.secret_header_keys.dedup();
+    for key in &server.secret_environment_keys {
+        server.environment.remove(key);
+    }
+    let secret_headers: std::collections::HashSet<_> = server
+        .secret_header_keys
+        .iter()
+        .map(|key| key.to_ascii_lowercase())
+        .collect();
+    server
+        .headers
+        .retain(|key, _| !secret_headers.contains(&key.to_ascii_lowercase()));
+    Ok(())
+}
+
+#[tauri::command]
+fn list_threads(
+    database: tauri::State<'_, database::Database>,
+) -> Result<Vec<StoredThread>, String> {
+    database.list_threads()
+}
+
+#[tauri::command]
+fn save_thread(
+    database: tauri::State<'_, database::Database>,
+    thread: StoredThread,
+) -> Result<(), String> {
+    database.save_thread(&thread)
+}
+
+#[tauri::command]
+fn delete_thread(
+    app: tauri::AppHandle,
+    database: tauri::State<'_, database::Database>,
+    thread_id: String,
+) -> Result<bool, String> {
+    let attachment_ids = database
+        .list_threads()?
+        .into_iter()
+        .find(|thread| thread.id == thread_id)
+        .map(|thread| {
+            thread
+                .messages
+                .into_iter()
+                .flat_map(|message| message.attachments.into_iter().map(|item| item.id))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let deleted = database.delete_thread(&thread_id)?;
+    if deleted {
+        let storage = attachment_storage(&app)?;
+        for id in attachment_ids {
+            let _ = attachment::delete(&storage, &id);
+        }
+    }
+    Ok(deleted)
+}
+
+#[tauri::command]
+fn scan_external_configs(app: tauri::AppHandle) -> Result<Vec<ExternalConfigCandidate>, String> {
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|error| format!("Could not locate the home directory: {error}"))?;
+    Ok(migration::scan(&home)
+        .into_iter()
+        .map(|item| item.candidate)
+        .collect())
+}
+
+#[tauri::command]
+fn import_external_config(
+    app: tauri::AppHandle,
+    candidate_id: String,
+) -> Result<ProviderProfile, String> {
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|error| format!("Could not locate the home directory: {error}"))?;
+    let material = migration::scan(&home)
+        .into_iter()
+        .find(|item| item.candidate.id == candidate_id)
+        .ok_or_else(|| "The selected external configuration is no longer available".to_owned())?;
+    let api_key = material
+        .api_key
+        .ok_or_else(|| "The selected configuration has no importable API key".to_owned())?;
+    let profile = migration::profile_from_candidate(&material.candidate);
+    provider_credential(&profile.id)?
+        .set_password(api_key.trim())
+        .map_err(|error| format!("Could not save imported API key: {error}"))?;
+    Ok(profile)
+}
+
+#[tauri::command]
+async fn get_git_status(workspace: String) -> Result<GitStatus, String> {
+    git::status(&workspace).await
+}
+
+#[tauri::command]
+async fn get_git_diff(workspace: String, path: String, staged: bool) -> Result<GitDiff, String> {
+    git::diff(&workspace, &path, staged).await
+}
+
+#[tauri::command]
+async fn preview_git_rollback(
+    state: tauri::State<'_, AppState>,
+    workspace: String,
+    path: String,
+) -> Result<GitRollbackPreview, String> {
+    let candidate = git::rollback_candidate(&workspace, &path).await?;
+    let mut preview = candidate.preview();
+    let token = uuid::Uuid::new_v4().to_string();
+    let mut pending = state
+        .pending_git_rollbacks
+        .lock()
+        .map_err(|_| "Could not lock pending Git rollbacks".to_owned())?;
+    pending.retain(|_, item| item.created_at.elapsed() < std::time::Duration::from_secs(600));
+    if pending.len() >= MAX_PENDING_CONFIRMATIONS {
+        return Err("Too many Git rollbacks are waiting for confirmation".to_owned());
+    }
+    pending.insert(
+        token.clone(),
+        PendingGitRollback {
+            candidate,
+            created_at: Instant::now(),
+        },
+    );
+    preview.confirmation_token = token;
+    Ok(preview)
+}
+
+#[tauri::command]
+async fn apply_git_rollback(
+    state: tauri::State<'_, AppState>,
+    confirmation_token: String,
+) -> Result<GitRollbackResult, String> {
+    let pending = state
+        .pending_git_rollbacks
+        .lock()
+        .map_err(|_| "Could not lock pending Git rollbacks".to_owned())?
+        .remove(&confirmation_token)
+        .ok_or_else(|| "Rollback preview expired; review the Git change again".to_owned())?;
+    if pending.created_at.elapsed() >= std::time::Duration::from_secs(600) {
+        return Err("Rollback preview expired; review the Git change again".to_owned());
+    }
+    git::apply_rollback(&pending.candidate).await
+}
+
+#[tauri::command]
+fn preview_external_config_write(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    profile: ProviderProfile,
+    target: ExternalConfigTarget,
+) -> Result<ConfigWritePreview, String> {
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|error| format!("Could not locate the home directory: {error}"))?;
+    let api_key = load_api_key(&profile.id)?;
+    let mut preview = config_writeback::preview(&home, target, &profile, &api_key)?;
+    let token = uuid::Uuid::new_v4().to_string();
+    let mut pending = state
+        .pending_config_writes
+        .lock()
+        .map_err(|_| "Could not lock pending configuration writes".to_owned())?;
+    pending.retain(|_, item| item.created_at.elapsed() < std::time::Duration::from_secs(600));
+    if pending.len() >= MAX_PENDING_CONFIRMATIONS {
+        return Err("Too many configuration previews are waiting for confirmation".to_owned());
+    }
+    pending.insert(
+        token.clone(),
+        PendingConfigWrite {
+            target,
+            profile: profile.clone(),
+            created_at: Instant::now(),
+        },
+    );
+    preview.confirmation_token = token;
+    Ok(preview)
+}
+
+#[tauri::command]
+fn apply_external_config_write(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    profile: ProviderProfile,
+    target: ExternalConfigTarget,
+    confirmation_token: String,
+) -> Result<ConfigWriteResult, String> {
+    let pending = state
+        .pending_config_writes
+        .lock()
+        .map_err(|_| "Could not lock pending configuration writes".to_owned())?
+        .remove(&confirmation_token)
+        .ok_or_else(|| "Preview expired; review the configuration diff again".to_owned())?;
+    if pending.created_at.elapsed() >= std::time::Duration::from_secs(600)
+        || pending.target != target
+        || pending.profile != profile
+    {
+        return Err("Preview no longer matches this configuration write".to_owned());
+    }
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|error| format!("Could not locate the home directory: {error}"))?;
+    let api_key = load_api_key(&profile.id)?;
+    config_writeback::apply(&home, target, &profile, &api_key)
+}
+
+#[tauri::command]
+fn rollback_external_config_write(
+    app: tauri::AppHandle,
+    target: ExternalConfigTarget,
+    backup_id: String,
+) -> Result<Vec<String>, String> {
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|error| format!("Could not locate the home directory: {error}"))?;
+    config_writeback::rollback(&home, target, &backup_id)
+}
+
+#[tauri::command]
+fn preview_external_prompt_write(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    target: ExternalConfigTarget,
+    content: String,
+) -> Result<ConfigWritePreview, String> {
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|error| format!("Could not locate the home directory: {error}"))?;
+    let mut preview = config_writeback::prompt_preview(&home, target, &content)?;
+    let token = uuid::Uuid::new_v4().to_string();
+    let mut pending = state
+        .pending_prompt_writes
+        .lock()
+        .map_err(|_| "Could not lock pending instruction writes".to_owned())?;
+    pending.retain(|_, item| item.created_at.elapsed() < std::time::Duration::from_secs(600));
+    if pending.len() >= MAX_PENDING_CONFIRMATIONS {
+        return Err("Too many instruction previews are waiting for confirmation".to_owned());
+    }
+    pending.insert(
+        token.clone(),
+        PendingPromptWrite {
+            target,
+            content,
+            created_at: Instant::now(),
+        },
+    );
+    preview.confirmation_token = token;
+    Ok(preview)
+}
+
+#[tauri::command]
+fn apply_external_prompt_write(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    target: ExternalConfigTarget,
+    confirmation_token: String,
+) -> Result<ConfigWriteResult, String> {
+    let pending = state
+        .pending_prompt_writes
+        .lock()
+        .map_err(|_| "Could not lock pending instruction writes".to_owned())?
+        .remove(&confirmation_token)
+        .ok_or_else(|| "Preview expired; review the instruction diff again".to_owned())?;
+    if pending.created_at.elapsed() >= std::time::Duration::from_secs(600)
+        || pending.target != target
+    {
+        return Err("Preview no longer matches this instruction write".to_owned());
+    }
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|error| format!("Could not locate the home directory: {error}"))?;
+    config_writeback::prompt_apply(&home, target, &pending.content)
+}
+
+#[tauri::command]
+fn rollback_external_prompt_write(
+    app: tauri::AppHandle,
+    target: ExternalConfigTarget,
+    backup_id: String,
+) -> Result<Vec<String>, String> {
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|error| format!("Could not locate the home directory: {error}"))?;
+    config_writeback::prompt_rollback(&home, target, &backup_id)
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    let builder = tauri::Builder::default()
+        .manage(AppState {
+            client: Client::builder()
+                .user_agent(concat!("LevelUpAgent/", env!("CARGO_PKG_VERSION")))
+                .timeout(std::time::Duration::from_secs(180))
+                .build()
+                .expect("failed to build HTTP client"),
+            active_requests: Mutex::new(HashMap::new()),
+            pending_config_writes: Mutex::new(HashMap::new()),
+            pending_prompt_writes: Mutex::new(HashMap::new()),
+            pending_git_rollbacks: Mutex::new(HashMap::new()),
+        })
+        .manage(mcp::McpManager::default())
+        .manage(subagent::SubagentManager::default())
+        .setup(|app| {
+            let database_path = app.path().app_data_dir()?.join("levelup-agent.sqlite3");
+            let database = database::Database::open(&database_path)
+                .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+            app.manage(database);
+            Ok(())
+        })
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init());
+    let builder = if option_env!("LEVELUP_ENABLE_UPDATER").is_some() {
+        builder.plugin(tauri_plugin_updater::Builder::new().build())
+    } else {
+        builder
+    };
+    builder
+        .invoke_handler(tauri::generate_handler![
+            save_api_key,
+            has_api_key,
+            delete_api_key,
+            get_provider_settings,
+            save_provider_settings,
+            import_image_attachments,
+            delete_image_attachment,
+            list_provider_health,
+            list_provider_requests,
+            reset_provider_health,
+            get_gateway_diagnostics,
+            get_custom_instructions,
+            save_custom_instructions,
+            fetch_models,
+            agent_turn,
+            agent_turn_stream,
+            cancel_agent_turn,
+            execute_tool,
+            create_goal,
+            get_goal,
+            change_goal_status,
+            set_goal_budget,
+            scan_skills,
+            set_skill_enabled,
+            list_mcp_servers,
+            upsert_mcp_server,
+            start_mcp_server,
+            stop_mcp_server,
+            delete_mcp_server,
+            list_threads,
+            save_thread,
+            delete_thread,
+            scan_external_configs,
+            import_external_config,
+            get_git_status,
+            get_git_diff,
+            preview_git_rollback,
+            apply_git_rollback,
+            preview_external_config_write,
+            apply_external_config_write,
+            rollback_external_config_write,
+            preview_external_prompt_write,
+            apply_external_prompt_write,
+            rollback_external_prompt_write
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::process::Command as StdCommand;
+    use std::thread;
+
+    fn profile(id: &str, priority: i32, failover_enabled: bool) -> ProviderProfile {
+        ProviderProfile {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            base_url: "https://example.test".to_owned(),
+            model: "test".to_owned(),
+            protocol: models::ProviderProtocol::OpenaiResponses,
+            priority,
+            failover_enabled,
+        }
+    }
+
+    #[test]
+    fn provider_candidates_keep_primary_first_and_sort_enabled_fallbacks() {
+        let request = AgentTurnRequest {
+            profile: profile("primary", 999, false),
+            messages: Vec::new(),
+            mode: "chat".to_owned(),
+            workspace: None,
+            thread_id: None,
+            available_tools: Vec::new(),
+            available_skills: Vec::new(),
+            goal: None,
+            fallback_profiles: vec![
+                profile("slow", 80, true),
+                profile("disabled", 1, false),
+                profile("fast", 10, true),
+                profile("primary", 0, true),
+            ],
+            custom_instructions: None,
+        };
+        let ids = provider_candidates(&request)
+            .into_iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["primary", "fast", "slow"]);
+    }
+
+    #[test]
+    fn provider_ids_cannot_collide_with_mcp_or_escape_the_credential_namespace() {
+        for valid in ["provider-123", "cc-switch_claude", "local.test"] {
+            assert!(validate_provider_id(valid).is_ok(), "{valid}");
+        }
+        for invalid in [
+            "",
+            "mcp:server",
+            "../secret",
+            "provider/key",
+            "provider key",
+        ] {
+            assert!(validate_provider_id(invalid).is_err(), "{invalid}");
+        }
+        assert_ne!(PROVIDER_CREDENTIAL_PREFIX, MCP_CREDENTIAL_PREFIX);
+    }
+
+    #[test]
+    fn provider_settings_require_unique_valid_connections_and_active_selection() {
+        let first = profile("primary", 10, true);
+        let second = profile("fallback", 20, true);
+        let mut settings = ProviderSettings {
+            profiles: vec![first.clone(), second.clone()],
+            active_profile_id: first.id.clone(),
+        };
+        assert!(validate_provider_settings(&settings).is_ok());
+
+        settings.active_profile_id = "missing".to_owned();
+        assert!(validate_provider_settings(&settings).is_err());
+        settings.active_profile_id = first.id.clone();
+        settings.profiles.push(first);
+        assert!(validate_provider_settings(&settings).is_err());
+        settings.profiles = vec![second];
+        settings.profiles[0].base_url = "file:///tmp/provider".to_owned();
+        settings.active_profile_id = settings.profiles[0].id.clone();
+        assert!(validate_provider_settings(&settings).is_err());
+    }
+
+    fn mock_responses_server(status: &'static str, body: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = vec![0_u8; 32 * 1024];
+            let size = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..size]);
+            assert!(request.starts_with("POST /v1/responses "));
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        format!("http://{address}")
+    }
+
+    fn mock_responses_sequence_server(bodies: Vec<&'static str>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            for body in bodies {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = vec![0_u8; 32 * 1024];
+                let size = stream.read(&mut request).unwrap();
+                assert!(
+                    String::from_utf8_lossy(&request[..size]).starts_with("POST /v1/responses ")
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn real_http_failure_fails_over_and_records_both_attempts() {
+        let root = std::env::temp_dir().join(format!("levelup-failover-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let database = database::Database::open(&root.join("test.sqlite3")).unwrap();
+        let mut primary = profile("primary", 10, true);
+        primary.base_url =
+            mock_responses_server("503 Service Unavailable", r#"{"error":{"message":"busy"}}"#);
+        let mut fallback = profile("fallback", 20, true);
+        fallback.base_url = mock_responses_server(
+            "200 OK",
+            r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"fallback worked"}]}],"usage":{"input_tokens":4,"output_tokens":2}}"#,
+        );
+        let request = AgentTurnRequest {
+            profile: primary,
+            messages: vec![models::AgentMessage {
+                role: "user".to_owned(),
+                content: "test".to_owned(),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                internal: false,
+                attachments: Vec::new(),
+            }],
+            mode: "chat".to_owned(),
+            workspace: None,
+            thread_id: Some("thread-failover".to_owned()),
+            available_tools: Vec::new(),
+            available_skills: Vec::new(),
+            goal: None,
+            fallback_profiles: vec![fallback],
+            custom_instructions: None,
+        };
+        let result = run_agent_turn_with_failover(&Client::new(), &database, request, |_| {
+            Ok("test-key".to_owned())
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.content, "fallback worked");
+        assert_eq!(result.provider_id.as_deref(), Some("fallback"));
+        assert_eq!(result.failover_count, 1);
+        assert_eq!(
+            database
+                .get_provider_health("primary")
+                .unwrap()
+                .consecutive_failures,
+            1
+        );
+        let logs = database.list_provider_requests(10).unwrap();
+        assert_eq!(logs.len(), 2);
+        assert!(
+            logs.iter()
+                .any(|item| item.profile_id == "primary" && item.status == "error")
+        );
+        assert!(
+            logs.iter()
+                .any(|item| item.profile_id == "fallback" && item.status == "success")
+        );
+        drop(database);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn isolated_subagent_runs_a_real_provider_tool_loop_without_shell_access() {
+        let suite =
+            std::env::temp_dir().join(format!("levelup-subagent-loop-{}", uuid::Uuid::new_v4()));
+        let repository = suite.join("repository");
+        std::fs::create_dir_all(&repository).unwrap();
+        let git = |args: &[&str]| {
+            let output = StdCommand::new("git")
+                .current_dir(&repository)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init"]);
+        git(&["config", "user.email", "levelup@example.test"]);
+        git(&["config", "user.name", "LevelUpAgent Test"]);
+        std::fs::write(repository.join("README.md"), "# Fixture\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "initial"]);
+
+        let worktree = subagent::create_worktree(&suite.join("worktrees"), &repository)
+            .await
+            .unwrap();
+        let database = database::Database::open(&suite.join("requests.sqlite3")).unwrap();
+        let mut child_profile = profile("child-provider", 10, true);
+        child_profile.base_url = mock_responses_sequence_server(vec![
+            r#"{"output":[{"type":"function_call","call_id":"write-one","name":"write_file","arguments":"{\"path\":\"child.txt\",\"content\":\"hello from child\\n\"}"}],"usage":{"input_tokens":8,"output_tokens":4}}"#,
+            r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"Created child.txt in the isolated worktree."}]}],"usage":{"input_tokens":12,"output_tokens":5}}"#,
+        ]);
+        let request = ToolExecutionRequest {
+            name: "delegate_task".to_owned(),
+            arguments: serde_json::json!({ "task": "Create child.txt" }),
+            workspace: repository.to_string_lossy().into_owned(),
+            thread_id: Some("parent-thread".to_owned()),
+            profile: Some(child_profile),
+            fallback_profiles: Vec::new(),
+        };
+        let summary = run_isolated_subagent(
+            &Client::new(),
+            &database,
+            &request,
+            &worktree,
+            IsolatedSubagentTask {
+                task: "Create child.txt",
+                scope: Some("child.txt"),
+                max_turns: 4,
+            },
+            |_| Ok("test-key".to_owned()),
+        )
+        .await
+        .unwrap();
+        assert!(summary.contains("Created child.txt"));
+        assert_eq!(
+            std::fs::read_to_string(worktree.path.join("child.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "hello from child\n"
+        );
+        subagent::cleanup_worktree(&worktree).await.unwrap();
+        drop(database);
+        let _ = std::fs::remove_dir_all(suite);
+    }
+}

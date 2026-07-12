@@ -1,0 +1,48 @@
+[package]
+name = "levelup-agent"
+version = "1.0.0"
+description = "A local-first, multi-model AI agent for LevelUpAPI"
+authors = ["LevelUpAgent contributors"]
+license = "LGPL-3.0-only"
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "levelup_agent_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-process = "2"
+tauri-plugin-updater = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+tokio = { version = "1", features = ["process", "fs", "io-util", "macros", "rt-multi-thread"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+futures-util = "0.3"
+eventsource-stream = "0.2"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+thiserror = "2"
+walkdir = "2"
+globset = "0.4"
+rusqlite = { version = "0.32", features = ["bundled"] }
+toml = "0.8"
+json5 = "0.4"
+base64 = "0.22"
+http = "1"
+rmcp = { version = "2.2.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+lopdf = "0.36"
+quick-xml = "0.37"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }

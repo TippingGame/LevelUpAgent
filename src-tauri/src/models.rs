@@ -1,0 +1,444 @@
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderProtocol {
+    OpenaiResponses,
+    OpenaiChat,
+    AnthropicMessages,
+    GeminiGenerateContent,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderProfile {
+    pub id: String,
+    pub name: String,
+    pub base_url: String,
+    pub model: String,
+    pub protocol: ProviderProtocol,
+    #[serde(default = "default_provider_priority")]
+    pub priority: i32,
+    #[serde(default = "default_true")]
+    pub failover_enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSettings {
+    pub profiles: Vec<ProviderProfile>,
+    pub active_profile_id: String,
+}
+
+fn default_provider_priority() -> i32 {
+    100
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentMessage {
+    pub role: String,
+    pub content: String,
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCall>,
+    pub tool_call_id: Option<String>,
+    #[serde(default)]
+    pub internal: bool,
+    #[serde(default)]
+    pub attachments: Vec<ImageAttachment>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageAttachment {
+    pub id: String,
+    pub name: String,
+    pub mime_type: String,
+    pub size_bytes: u64,
+    #[serde(default)]
+    pub kind: AttachmentKind,
+    #[serde(skip)]
+    pub data_base64: Option<String>,
+    #[serde(skip)]
+    pub text_content: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentKind {
+    #[default]
+    Image,
+    Text,
+    Document,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTurnRequest {
+    pub profile: ProviderProfile,
+    pub messages: Vec<AgentMessage>,
+    pub mode: String,
+    pub workspace: Option<String>,
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub available_tools: Vec<AgentToolDefinition>,
+    #[serde(default)]
+    pub available_skills: Vec<AgentSkillSummary>,
+    pub goal: Option<GoalState>,
+    #[serde(default)]
+    pub fallback_profiles: Vec<ProviderProfile>,
+    #[serde(default)]
+    pub custom_instructions: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTurnResponse {
+    pub content: String,
+    pub tool_calls: Vec<ToolCall>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub request_id: Option<String>,
+    pub provider_id: Option<String>,
+    pub failover_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderHealth {
+    pub profile_id: String,
+    pub consecutive_failures: u32,
+    pub last_error: Option<String>,
+    pub last_success_at: Option<i64>,
+    pub last_failure_at: Option<i64>,
+    pub cooldown_until: Option<i64>,
+    pub total_requests: u64,
+    pub total_failovers: u64,
+    pub average_latency_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderRequestLog {
+    pub id: String,
+    pub thread_id: Option<String>,
+    pub profile_id: String,
+    pub model: String,
+    pub protocol: String,
+    pub started_at: i64,
+    pub latency_ms: u64,
+    pub status: String,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub request_id: Option<String>,
+    pub failover_index: u32,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayDiagnostics {
+    pub profile_id: String,
+    pub health_ok: bool,
+    pub latency_ms: u64,
+    pub usage: serde_json::Value,
+    pub request_id: Option<String>,
+    pub checked_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalConfigTarget {
+    Codex,
+    Claude,
+    Gemini,
+    Opencode,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigFilePreview {
+    pub path: String,
+    pub exists: bool,
+    pub diff: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigWritePreview {
+    pub target: ExternalConfigTarget,
+    pub files: Vec<ConfigFilePreview>,
+    pub confirmation_token: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigWriteResult {
+    pub target: ExternalConfigTarget,
+    pub backup_id: String,
+    pub changed_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStreamEvent {
+    pub kind: String,
+    pub delta: Option<String>,
+}
+
+impl AgentStreamEvent {
+    pub fn content(delta: String) -> Self {
+        Self {
+            kind: "content_delta".to_owned(),
+            delta: Some(delta),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolExecutionRequest {
+    pub name: String,
+    pub arguments: serde_json::Value,
+    pub workspace: String,
+    pub thread_id: Option<String>,
+    pub profile: Option<ProviderProfile>,
+    #[serde(default)]
+    pub fallback_profiles: Vec<ProviderProfile>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolExecutionResponse {
+    pub output: String,
+    pub is_error: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpTransport {
+    Stdio,
+    StreamableHttp,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerConfig {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub transport: McpTransport,
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub url: Option<String>,
+    #[serde(default)]
+    pub environment: BTreeMap<String, String>,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    #[serde(default)]
+    pub secret_environment_keys: Vec<String>,
+    #[serde(default)]
+    pub secret_header_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpSecretValues {
+    #[serde(default)]
+    pub environment: BTreeMap<String, String>,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerUpsert {
+    pub server: McpServerConfig,
+    #[serde(default)]
+    pub secrets: McpSecretValues,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerSnapshot {
+    pub server: McpServerConfig,
+    pub status: String,
+    pub tool_count: usize,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSkillSummary {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInfo {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub path: String,
+    pub source: String,
+    pub enabled: bool,
+    pub valid: bool,
+    pub warning: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelInfo {
+    pub id: String,
+    pub owned_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredMessage {
+    pub id: String,
+    pub role: String,
+    pub content: String,
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCall>,
+    pub tool_call_id: Option<String>,
+    pub created_at: i64,
+    #[serde(default)]
+    pub is_error: bool,
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub internal: bool,
+    #[serde(default)]
+    pub attachments: Vec<ImageAttachment>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalStatus {
+    Active,
+    Paused,
+    Auditing,
+    Completed,
+    Blocked,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalState {
+    pub id: String,
+    pub thread_id: String,
+    pub objective: String,
+    pub status: GoalStatus,
+    pub token_budget: Option<u64>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub turns: u64,
+    pub blocked_attempts: u32,
+    pub last_blocker: Option<String>,
+    pub audit_note: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalCreateRequest {
+    pub thread_id: String,
+    pub objective: String,
+    pub token_budget: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredThread {
+    pub id: String,
+    pub title: String,
+    pub workspace: Option<String>,
+    pub messages: Vec<StoredMessage>,
+    pub updated_at: i64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalConfigCandidate {
+    pub id: String,
+    pub source: String,
+    pub name: String,
+    pub base_url: String,
+    pub model: String,
+    pub protocol: ProviderProtocol,
+    pub has_secret: bool,
+    pub warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitFileChange {
+    pub path: String,
+    pub index_status: String,
+    pub worktree_status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitStatus {
+    pub is_available: bool,
+    pub is_repository: bool,
+    pub branch: Option<String>,
+    pub changes: Vec<GitFileChange>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitDiff {
+    pub path: String,
+    pub content: String,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRollbackPreview {
+    pub path: String,
+    pub status: String,
+    pub action: String,
+    pub diff: String,
+    pub truncated: bool,
+    pub confirmation_token: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRollbackResult {
+    pub path: String,
+    pub action: String,
+}
