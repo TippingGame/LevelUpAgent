@@ -58,11 +58,11 @@ Checksums for the current local Windows validation artifacts are recorded in [th
 ### 2. Connect a model
 
 1. Open **Model connections** in the lower-left corner.
-2. Add LevelUpAPI or another compatible provider URL, API key, protocol, and model.
-3. Select **Test** to verify the model list, latency, and connection.
+2. Add LevelUpAPI or another compatible provider URL, protocol, and model. Trusted local or LAN services can explicitly allow a missing API key.
+3. Enter a model ID directly, or select **Test** to retrieve it from a compatible model-list endpoint.
 4. Optionally add up to seven fallback connections and set their priority.
 
-A LevelUpAPI URL may be a service root such as <code>https://api.example.com</code>, or already include <code>/v1</code>. LevelUpAgent normalizes request paths and avoids duplicated version prefixes.
+A Base URL may be a service root such as <code>https://api.example.com</code>, or already include a version prefix such as <code>/v1</code> or <code>/v4</code>. LevelUpAgent previews the resolved request URL and avoids duplicated version prefixes. Local servers must expose an OpenAI-, Anthropic-, or Gemini-compatible endpoint—for example Ollama at <code>http://127.0.0.1:11434/v1</code>, not its native <code>/api/chat</code> endpoint.
 
 ### 3. Start working
 
@@ -83,6 +83,7 @@ Choose a project directory, create a conversation, and describe the outcome you 
 - Browse, read, search, write, and delete files, plus approved command execution
 - Default, Plan, Goal, and Ask modes
 - Project conversations, Markdown output, token accounting, and local SQLite persistence
+- Conversations without a selected project automatically use the `%LOCALAPPDATA%\\com.levelup.agent\\workspace` temporary workspace while retaining applicable Agent, MCP, Skill, and media capabilities; multiple conversations run and await approval independently
 - Managed image, text, source code, PDF, DOCX, XLSX, and PPTX context
 - Persistent Instructions with reviewable synchronization to popular CLI instruction files
 - Long-running Goals with pause/resume, completion audits, and blocked audits

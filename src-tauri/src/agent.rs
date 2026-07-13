@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
-use reqwest::Client;
+use reqwest::{Client, RequestBuilder};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -20,6 +20,33 @@ const USER_MESSAGE_MAX_CHARS: usize = 64_000;
 const ASSISTANT_MESSAGE_MAX_CHARS: usize = 32_000;
 const TOOL_RESULT_MAX_CHARS: usize = 12_000;
 const TOOL_ARGUMENTS_MAX_CHARS: usize = 8_000;
+pub const TOOL_CALLING_UNSUPPORTED_MARKER: &str = "[LEVELUP_TOOL_CALLING_UNSUPPORTED]";
+
+fn bearer_auth_if_present(request: RequestBuilder, api_key: &str) -> RequestBuilder {
+    if api_key.is_empty() {
+        request
+    } else {
+        request.bearer_auth(api_key)
+    }
+}
+
+fn anthropic_auth_if_present(request: RequestBuilder, api_key: &str) -> RequestBuilder {
+    if api_key.is_empty() {
+        request
+    } else {
+        request.header("x-api-key", api_key).bearer_auth(api_key)
+    }
+}
+
+fn gemini_auth_if_present(request: RequestBuilder, api_key: &str) -> RequestBuilder {
+    if api_key.is_empty() {
+        request
+    } else {
+        request
+            .header("x-goog-api-key", api_key)
+            .bearer_auth(api_key)
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ContextOmission {
@@ -115,9 +142,9 @@ pub async fn fetch_models(
         "/v1/models"
     };
     let url = endpoint(&profile.base_url, path)?;
-    let mut request = client.get(url).bearer_auth(api_key);
+    let mut request = bearer_auth_if_present(client.get(url), api_key);
     if gemini {
-        request = request.header("x-goog-api-key", api_key);
+        request = gemini_auth_if_present(request, api_key);
     }
     let response = request
         .send()
@@ -168,9 +195,7 @@ pub async fn fetch_gateway_diagnostics(
         .map(|response| response.status().is_success())
         .unwrap_or(false);
     let usage_url = endpoint(&profile.base_url, "/v1/usage?days=30")?;
-    let response = client
-        .get(usage_url)
-        .bearer_auth(api_key)
+    let response = bearer_auth_if_present(client.get(usage_url), api_key)
         .send()
         .await
         .map_err(|error| format!("Connection failed: {error}"))?;
@@ -207,6 +232,34 @@ pub fn is_retryable_provider_error(error: &str) -> bool {
         .any(|status| error.contains(status))
 }
 
+pub fn annotate_tool_compatibility_error(error: String, request: &AgentTurnRequest) -> String {
+    if request.mode == "chat" || error.contains(TOOL_CALLING_UNSUPPORTED_MARKER) {
+        return error;
+    }
+    let normalized = error.to_ascii_lowercase();
+    let mentions_tools = normalized.contains("tool")
+        || normalized.contains("function call")
+        || normalized.contains("function_call");
+    let rejects_feature = [
+        "not support",
+        "doesn't support",
+        "unsupported",
+        "unknown field",
+        "unknown parameter",
+        "unrecognized",
+        "extra inputs",
+        "cannot use",
+        "invalid parameter",
+    ]
+    .iter()
+    .any(|term| normalized.contains(term));
+    if mentions_tools && rejects_feature {
+        format!("{error}\n{TOOL_CALLING_UNSUPPORTED_MARKER}")
+    } else {
+        error
+    }
+}
+
 async fn run_gemini_generate_content(
     client: &Client,
     request: AgentTurnRequest,
@@ -217,10 +270,7 @@ async fn run_gemini_generate_content(
         &request.profile.base_url,
         &format!("/v1beta/models/{model}:generateContent"),
     )?;
-    let response = client
-        .post(url)
-        .header("x-goog-api-key", api_key)
-        .bearer_auth(api_key)
+    let response = gemini_auth_if_present(client.post(url), api_key)
         .json(&gemini_body(&request))
         .send()
         .await
@@ -238,9 +288,7 @@ async fn run_openai_chat(
     let url = endpoint(&request.profile.base_url, "/v1/chat/completions")?;
     let body = chat_body(&request, false);
 
-    let response = client
-        .post(url)
-        .bearer_auth(api_key)
+    let response = bearer_auth_if_present(client.post(url), api_key)
         .json(&body)
         .send()
         .await
@@ -258,9 +306,7 @@ async fn run_openai_responses(
     let url = endpoint(&request.profile.base_url, "/v1/responses")?;
     let body = responses_body(&request, false);
 
-    let response = client
-        .post(url)
-        .bearer_auth(api_key)
+    let response = bearer_auth_if_present(client.post(url), api_key)
         .header("OpenAI-Beta", "responses=experimental")
         .json(&body)
         .send()
@@ -278,10 +324,7 @@ async fn run_anthropic_messages(
 ) -> Result<AgentTurnResponse, String> {
     let url = endpoint(&request.profile.base_url, "/v1/messages")?;
     let body = anthropic_body(&request, false);
-    let response = client
-        .post(url)
-        .header("x-api-key", api_key)
-        .bearer_auth(api_key)
+    let response = anthropic_auth_if_present(client.post(url), api_key)
         .header("anthropic-version", "2023-06-01")
         .json(&body)
         .send()
@@ -310,9 +353,7 @@ where
     F: FnMut(AgentStreamEvent),
 {
     let url = endpoint(&request.profile.base_url, "/v1/chat/completions")?;
-    let response = client
-        .post(url)
-        .bearer_auth(api_key)
+    let response = bearer_auth_if_present(client.post(url), api_key)
         .json(&chat_body(&request, true))
         .send()
         .await
@@ -398,9 +439,7 @@ where
     F: FnMut(AgentStreamEvent),
 {
     let url = endpoint(&request.profile.base_url, "/v1/responses")?;
-    let response = client
-        .post(url)
-        .bearer_auth(api_key)
+    let response = bearer_auth_if_present(client.post(url), api_key)
         .header("OpenAI-Beta", "responses=experimental")
         .json(&responses_body(&request, true))
         .send()
@@ -521,10 +560,7 @@ where
     F: FnMut(AgentStreamEvent),
 {
     let url = endpoint(&request.profile.base_url, "/v1/messages")?;
-    let response = client
-        .post(url)
-        .header("x-api-key", api_key)
-        .bearer_auth(api_key)
+    let response = anthropic_auth_if_present(client.post(url), api_key)
         .header("anthropic-version", "2023-06-01")
         .json(&anthropic_body(&request, true))
         .send()
@@ -642,10 +678,7 @@ where
         &request.profile.base_url,
         &format!("/v1beta/models/{model}:streamGenerateContent?alt=sse"),
     )?;
-    let response = client
-        .post(url)
-        .header("x-goog-api-key", api_key)
-        .bearer_auth(api_key)
+    let response = gemini_auth_if_present(client.post(url), api_key)
         .json(&gemini_body(&request))
         .send()
         .await
@@ -737,8 +770,9 @@ fn chat_body(request: &AgentTurnRequest, stream: bool) -> Value {
     if stream {
         body["stream_options"] = json!({ "include_usage": true });
     }
-    if request.mode != "chat" {
-        body["tools"] = Value::Array(chat_tools(request));
+    let tools = chat_tools(request);
+    if request.mode != "chat" && !tools.is_empty() {
+        body["tools"] = Value::Array(tools);
         body["tool_choice"] = json!("auto");
     }
     body
@@ -753,8 +787,9 @@ fn responses_body(request: &AgentTurnRequest, stream: bool) -> Value {
         "stream": stream,
         "store": false
     });
-    if request.mode != "chat" {
-        body["tools"] = Value::Array(responses_tools(request));
+    let tools = responses_tools(request);
+    if request.mode != "chat" && !tools.is_empty() {
+        body["tools"] = Value::Array(tools);
         body["tool_choice"] = json!("auto");
     }
     body
@@ -769,8 +804,9 @@ fn anthropic_body(request: &AgentTurnRequest, stream: bool) -> Value {
         "max_tokens": 8192,
         "stream": stream
     });
-    if request.mode != "chat" {
-        body["tools"] = Value::Array(anthropic_tools(request));
+    let tools = anthropic_tools(request);
+    if request.mode != "chat" && !tools.is_empty() {
+        body["tools"] = Value::Array(tools);
     }
     body
 }
@@ -783,8 +819,9 @@ fn gemini_body(request: &AgentTurnRequest) -> Value {
         },
         "contents": gemini_contents(&context.messages)
     });
-    if request.mode != "chat" {
-        body["tools"] = json!([{ "functionDeclarations": gemini_tools(request) }]);
+    let tools = gemini_tools(request);
+    if request.mode != "chat" && !tools.is_empty() {
+        body["tools"] = json!([{ "functionDeclarations": tools }]);
         body["toolConfig"] = json!({
             "functionCallingConfig": { "mode": "AUTO" }
         });
@@ -1277,10 +1314,24 @@ fn message_char_cost(message: &AgentMessage) -> usize {
             .sum::<usize>()
 }
 
+fn request_has_workspace(request: &AgentTurnRequest) -> bool {
+    request
+        .workspace
+        .as_deref()
+        .is_some_and(|workspace| !workspace.trim().is_empty())
+}
+
 fn system_prompt_with_omission(request: &AgentTurnRequest, omission: &ContextOmission) -> String {
-    let mut prompt = match request.workspace.as_deref() {
+    let mut prompt = match request
+        .workspace
+        .as_deref()
+        .map(str::trim)
+        .filter(|workspace| !workspace.is_empty())
+    {
         Some(workspace) => format!("{SYSTEM_PROMPT}\nSelected workspace: {workspace}"),
-        None => SYSTEM_PROMPT.to_owned(),
+        None => format!(
+            "{SYSTEM_PROMPT}\nNo project workspace is selected. Do not claim workspace file or shell access; use the non-workspace tools provided for this turn."
+        ),
     };
     if let Some(instructions) = request
         .custom_instructions
@@ -1641,24 +1692,29 @@ fn tool_specs() -> Vec<(&'static str, &'static str, Value)> {
 
 fn allowed_tool_specs(
     mode: &str,
+    has_workspace: bool,
     additional: &[AgentToolDefinition],
 ) -> Vec<(String, String, Value)> {
-    let mut tools: Vec<_> = tool_specs()
-        .into_iter()
-        .filter(|(name, _, _)| {
-            if mode == "plan" {
-                matches!(*name, "list_files" | "read_file" | "search_files")
-            } else if mode == "subagent" {
-                matches!(
-                    *name,
-                    "list_files" | "read_file" | "search_files" | "write_file" | "delete_file"
-                )
-            } else {
-                true
-            }
-        })
-        .map(|(name, description, schema)| (name.to_owned(), description.to_owned(), schema))
-        .collect();
+    let mut tools: Vec<_> = if has_workspace {
+        tool_specs()
+            .into_iter()
+            .filter(|(name, _, _)| {
+                if mode == "plan" {
+                    matches!(*name, "list_files" | "read_file" | "search_files")
+                } else if mode == "subagent" {
+                    matches!(
+                        *name,
+                        "list_files" | "read_file" | "search_files" | "write_file" | "delete_file"
+                    )
+                } else {
+                    true
+                }
+            })
+            .map(|(name, description, schema)| (name.to_owned(), description.to_owned(), schema))
+            .collect()
+    } else {
+        Vec::new()
+    };
     if matches!(mode, "agent" | "goal" | "plan") {
         tools.extend(
             additional
@@ -1677,7 +1733,11 @@ fn allowed_tool_specs(
 }
 
 fn chat_tools(request: &AgentTurnRequest) -> Vec<Value> {
-    allowed_tool_specs(&request.mode, &request.available_tools)
+    allowed_tool_specs(
+        &request.mode,
+        request_has_workspace(request),
+        &request.available_tools,
+    )
         .into_iter()
         .map(|(name, description, parameters)| {
             json!({ "type": "function", "function": { "name": name, "description": description, "parameters": parameters } })
@@ -1686,7 +1746,11 @@ fn chat_tools(request: &AgentTurnRequest) -> Vec<Value> {
 }
 
 fn responses_tools(request: &AgentTurnRequest) -> Vec<Value> {
-    allowed_tool_specs(&request.mode, &request.available_tools)
+    allowed_tool_specs(
+        &request.mode,
+        request_has_workspace(request),
+        &request.available_tools,
+    )
         .into_iter()
         .map(|(name, description, parameters)| {
             json!({ "type": "function", "name": name, "description": description, "parameters": parameters, "strict": false })
@@ -1695,7 +1759,11 @@ fn responses_tools(request: &AgentTurnRequest) -> Vec<Value> {
 }
 
 fn anthropic_tools(request: &AgentTurnRequest) -> Vec<Value> {
-    allowed_tool_specs(&request.mode, &request.available_tools)
+    allowed_tool_specs(
+        &request.mode,
+        request_has_workspace(request),
+        &request.available_tools,
+    )
         .into_iter()
         .map(|(name, description, input_schema)| {
             json!({ "name": name, "description": description, "input_schema": input_schema })
@@ -1704,7 +1772,11 @@ fn anthropic_tools(request: &AgentTurnRequest) -> Vec<Value> {
 }
 
 fn gemini_tools(request: &AgentTurnRequest) -> Vec<Value> {
-    allowed_tool_specs(&request.mode, &request.available_tools)
+    allowed_tool_specs(
+        &request.mode,
+        request_has_workspace(request),
+        &request.available_tools,
+    )
         .into_iter()
         .map(|(name, description, parameters)| {
             json!({ "name": name, "description": description, "parameters": parameters })
@@ -1764,12 +1836,13 @@ pub(crate) fn endpoint(base_url: &str, path: &str) -> Result<Url, String> {
     }
     let requested = path.trim_start_matches('/');
     let version = requested.split('/').next().unwrap_or_default();
-    let normalized = if !version.is_empty()
-        && base
-            .path()
-            .trim_end_matches('/')
-            .ends_with(&format!("/{version}"))
-    {
+    let base_version = base
+        .path_segments()
+        .and_then(|segments| segments.filter(|segment| !segment.is_empty()).next_back());
+    let normalized = if is_api_version_segment(version)
+        && base_version.is_some_and(|base_version| {
+            base_version.eq_ignore_ascii_case(version) || is_api_version_segment(base_version)
+        }) {
         requested
             .strip_prefix(&format!("{version}/"))
             .unwrap_or(requested)
@@ -1784,12 +1857,27 @@ fn service_root_endpoint(base_url: &str, path: &str) -> Result<Url, String> {
     let mut base = parse_base_url(base_url)?;
     let normalized = base.path().trim_end_matches('/');
     let root_path = normalized
-        .strip_suffix("/v1beta")
-        .or_else(|| normalized.strip_suffix("/v1"))
-        .unwrap_or(normalized);
+        .rsplit_once('/')
+        .map_or(normalized, |(root, tail)| {
+            if is_api_version_segment(tail) {
+                root
+            } else {
+                normalized
+            }
+        });
     base.set_path(&format!("{}/", root_path.trim_end_matches('/')));
     base.join(path.trim_start_matches('/'))
         .map_err(|_| "Could not build service endpoint".to_owned())
+}
+
+fn is_api_version_segment(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix('v').or_else(|| value.strip_prefix('V')) else {
+        return false;
+    };
+    rest.starts_with(|character: char| character.is_ascii_digit())
+        && rest
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
 }
 
 fn parse_base_url(base_url: &str) -> Result<Url, String> {
@@ -1873,6 +1961,25 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_preserves_custom_provider_version_prefix() {
+        let url = endpoint(
+            "https://open.bigmodel.example/api/paas/v4",
+            "/v1/chat/completions",
+        )
+        .unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://open.bigmodel.example/api/paas/v4/chat/completions"
+        );
+        let health =
+            service_root_endpoint("https://open.bigmodel.example/api/paas/v4", "health").unwrap();
+        assert_eq!(
+            health.as_str(),
+            "https://open.bigmodel.example/api/paas/health"
+        );
+    }
+
+    #[test]
     fn provider_base_urls_reject_embedded_credentials_and_ambiguous_suffixes() {
         for invalid in [
             "file:///tmp/api",
@@ -1922,6 +2029,26 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_tool_errors_are_marked_only_outside_chat_mode() {
+        let mut request = test_request(
+            "https://levelup.example".to_owned(),
+            ProviderProtocol::OpenaiChat,
+        );
+        request.mode = "agent".to_owned();
+        let annotated = annotate_tool_compatibility_error(
+            "Provider returned 400 Bad Request: this model does not support tools".to_owned(),
+            &request,
+        );
+        assert!(annotated.contains(TOOL_CALLING_UNSUPPORTED_MARKER));
+        request.mode = "chat".to_owned();
+        let plain = annotate_tool_compatibility_error(
+            "Provider returned 400 Bad Request: this model does not support tools".to_owned(),
+            &request,
+        );
+        assert!(!plain.contains(TOOL_CALLING_UNSUPPORTED_MARKER));
+    }
+
+    #[test]
     fn diagnostics_resolve_health_from_the_service_root() {
         let url = service_root_endpoint("https://levelup.example/v1", "health").unwrap();
         assert_eq!(url.as_str(), "https://levelup.example/health");
@@ -1962,7 +2089,7 @@ mod tests {
 
     #[test]
     fn plan_mode_only_exposes_read_tools() {
-        let tools = allowed_tool_specs("plan", &[]);
+        let tools = allowed_tool_specs("plan", true, &[]);
         assert_eq!(tools.len(), 3);
         assert!(
             tools
@@ -1973,7 +2100,7 @@ mod tests {
 
     #[test]
     fn subagent_mode_can_edit_isolated_files_but_cannot_run_commands() {
-        let tools = allowed_tool_specs("subagent", &[])
+        let tools = allowed_tool_specs("subagent", true, &[])
             .into_iter()
             .map(|item| item.0)
             .collect::<Vec<_>>();
@@ -1998,7 +2125,7 @@ mod tests {
                 read_only: false,
             },
         ];
-        let allowed = allowed_tool_specs("plan", &tools);
+        let allowed = allowed_tool_specs("plan", true, &tools);
         assert!(allowed.iter().any(|(name, _, _)| name == "read_skill"));
         assert!(!allowed.iter().any(|(name, _, _)| name == "mcp_write"));
     }
@@ -2222,6 +2349,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn no_workspace_agent_keeps_dynamic_tools_without_local_file_tools() {
+        let mut request = test_request(
+            "https://levelup.example".to_owned(),
+            ProviderProtocol::OpenaiResponses,
+        );
+        request.workspace = None;
+        request.available_tools.push(AgentToolDefinition {
+            name: "generate_images".to_owned(),
+            description: "Generate a raster image".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": { "prompt": { "type": "string" } },
+                "required": ["prompt"]
+            }),
+            read_only: false,
+        });
+
+        let tools = responses_tools(&request);
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool.get("name") == Some(&json!("generate_images")))
+        );
+        assert!(
+            !tools
+                .iter()
+                .any(|tool| tool.get("name") == Some(&json!("read_file")))
+        );
+        assert_eq!(
+            responses_body(&request, false).pointer("/tools/0/name"),
+            Some(&json!("generate_images"))
+        );
+        assert!(system_prompt(&request).contains("No project workspace is selected"));
+    }
+
     fn mock_server(expected_path: &'static str, response_body: &'static str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -2405,6 +2568,7 @@ mod tests {
                 base_url,
                 model: "test-model".to_owned(),
                 protocol,
+                allow_unauthenticated: false,
                 priority: 100,
                 failover_enabled: true,
             },
@@ -2819,6 +2983,45 @@ mod tests {
                     assert!(headers.contains("x-goog-api-key: levelup-test-key"));
                 }
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_compatible_service_omits_all_credential_headers() {
+        let cases = [
+            (
+                ProviderProtocol::OpenaiChat,
+                "/v1/chat/completions",
+                r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#,
+            ),
+            (
+                ProviderProtocol::AnthropicMessages,
+                "/v1/messages",
+                r#"{"content":[{"type":"text","text":"ok"}]}"#,
+            ),
+            (
+                ProviderProtocol::GeminiGenerateContent,
+                "/v1beta/models/test-model:generateContent",
+                r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}"#,
+            ),
+        ];
+        for (protocol, path, response) in cases {
+            let (base_url, capture) = mock_contract_server(response);
+            let request = test_request(base_url, protocol);
+            let result = run_turn(&Client::new(), request, "").await.unwrap();
+            assert_eq!(result.content, "ok");
+            let captured = capture
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            let headers = captured
+                .split_once("\r\n\r\n")
+                .unwrap()
+                .0
+                .to_ascii_lowercase();
+            assert!(!headers.contains("authorization:"));
+            assert!(!headers.contains("x-api-key:"));
+            assert!(!headers.contains("x-goog-api-key:"));
+            let _ = captured_json_request(captured, path);
         }
     }
 

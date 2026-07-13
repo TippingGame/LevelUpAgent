@@ -15,6 +15,7 @@ export const defaultProfile: ProviderProfile = {
   baseUrl: "http://127.0.0.1:8080",
   model: "gpt-5.5",
   protocol: "openai_responses",
+  allowUnauthenticated: false,
   priority: 10,
   failoverEnabled: true,
 };
@@ -33,6 +34,7 @@ export function loadProfiles(): ProviderProfile[] {
   const available = profiles.length > 0 ? profiles : [defaultProfile];
   return available.map((profile, index) => ({
     ...profile,
+    allowUnauthenticated: profile.allowUnauthenticated ?? false,
     priority: Number.isFinite(profile.priority) ? profile.priority : (index + 1) * 10,
     failoverEnabled: profile.failoverEnabled ?? true,
   }));

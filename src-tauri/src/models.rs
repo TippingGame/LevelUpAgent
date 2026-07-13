@@ -18,6 +18,8 @@ pub struct ProviderProfile {
     pub base_url: String,
     pub model: String,
     pub protocol: ProviderProtocol,
+    #[serde(default)]
+    pub allow_unauthenticated: bool,
     #[serde(default = "default_provider_priority")]
     pub priority: i32,
     #[serde(default = "default_true")]
@@ -74,6 +76,15 @@ pub struct ImageAttachment {
     pub data_base64: Option<String>,
     #[serde(skip)]
     pub text_content: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentPreview {
+    pub kind: AttachmentKind,
+    pub mime_type: String,
+    pub data_base64: Option<String>,
+    pub text: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]

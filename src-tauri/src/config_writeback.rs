@@ -702,6 +702,7 @@ mod tests {
             base_url: "http://127.0.0.1:8080/v1".to_owned(),
             model: "test-model".to_owned(),
             protocol,
+            allow_unauthenticated: false,
             priority: 10,
             failover_enabled: true,
         }

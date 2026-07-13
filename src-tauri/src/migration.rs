@@ -419,6 +419,7 @@ pub fn profile_from_candidate(candidate: &ExternalConfigCandidate) -> ProviderPr
         base_url: candidate.base_url.clone(),
         model: candidate.model.clone(),
         protocol: candidate.protocol.clone(),
+        allow_unauthenticated: false,
         priority: 100,
         failover_enabled: true,
     }

@@ -1469,6 +1469,7 @@ mod tests {
                 base_url: "https://api.example.test/v1".to_owned(),
                 model: "gpt-test".to_owned(),
                 protocol: crate::models::ProviderProtocol::OpenaiResponses,
+                allow_unauthenticated: false,
                 priority: 10,
                 failover_enabled: true,
             }],

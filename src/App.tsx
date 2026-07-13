@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -19,8 +19,6 @@ import {
   Cpu,
   FileCode2,
   FileInput,
-  FileSpreadsheet,
-  FileText,
   ExternalLink,
   Flag,
   Folder,
@@ -44,7 +42,6 @@ import {
   Pin,
   PinOff,
   Play,
-  Presentation,
   Plus,
   Power,
   RefreshCw,
@@ -62,7 +59,9 @@ import {
   X,
 } from "lucide-react";
 import { IconButton } from "./components/IconButton";
+import { AttachmentChip } from "./components/AttachmentChip";
 import { MediaAssetCard, MediaStudio } from "./components/MediaStudio";
+import packageMetadata from "../package.json";
 import {
   agentTurnStream,
   applyGitRollback,
@@ -80,6 +79,7 @@ import {
   getGitDiff,
   getGitStatus,
   getGoal,
+  getDefaultWorkspace,
   getGatewayDiagnostics,
   getCustomInstructions,
   getProviderSettings,
@@ -132,7 +132,7 @@ import {
   saveThreads,
 } from "./lib/storage";
 import { getAppLocale, setAppLocale, tr, type AppLocale } from "./lib/i18n";
-import { executeCallsWithParallelMedia, isMediaTool } from "./lib/mediaConcurrency";
+import { executeCallsWithParallelMedia } from "./lib/mediaConcurrency";
 import type {
   AgentMessage,
   AgentMode,
@@ -266,12 +266,14 @@ function App() {
   const [sidebarQuery, setSidebarQuery] = useState("");
   const [mode, setMode] = useState<AgentMode>("agent");
   const [workspaceView, setWorkspaceView] = useState<"chat" | "media">("chat");
+  const [defaultWorkspace, setDefaultWorkspace] = useState<string>();
+  const [mediaReferenceDrop, setMediaReferenceDrop] = useState<{ id: string; paths: string[] } | null>(null);
   const [permissionLevel, setPermissionLevel] = useState<PermissionLevel>(loadPermissionLevel);
   const [draft, setDraft] = useState("");
   const [draftAttachments, setDraftAttachments] = useState<ImageAttachment[]>([]);
   const [fileDragActive, setFileDragActive] = useState(false);
-  const [running, setRunning] = useState(false);
-  const [pending, setPending] = useState<PendingApproval | null>(null);
+  const [runningThreadIds, setRunningThreadIds] = useState<Set<string>>(() => new Set());
+  const [pendingApprovals, setPendingApprovals] = useState<Record<string, PendingApproval>>({});
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const [threadMenuOpen, setThreadMenuOpen] = useState(false);
@@ -293,7 +295,12 @@ function App() {
   const [gitDiff, setGitDiff] = useState<GitDiff | null>(null);
   const [goalState, setGoalState] = useState<GoalState | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
-  const operationIdRef = useRef<string | null>(null);
+  const runningThreadIdsRef = useRef<Set<string>>(new Set());
+  const pendingApprovalsRef = useRef<Record<string, PendingApproval>>({});
+  const operationIdsRef = useRef<Map<string, string>>(new Map());
+  const runModesRef = useRef<Map<string, AgentMode>>(new Map());
+  const activeThreadIdRef = useRef(activeThreadId);
+  const workspaceViewRef = useRef(workspaceView);
   const draftAttachmentsRef = useRef(draftAttachments);
   const databaseReadyRef = useRef(false);
   const persistenceQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -302,10 +309,17 @@ function App() {
     profiles.find((profile) => profile.id === activeProfileId) ?? profiles[0];
   const activeThread =
     threads.find((thread) => thread.id === activeThreadId) ?? threads[0];
-  const projectGroups = groupThreadsByWorkspace(threads, pinnedThreadIds);
+  activeThreadIdRef.current = activeThread.id;
+  workspaceViewRef.current = workspaceView;
+  const running = runningThreadIds.has(activeThread.id);
+  const pending = pendingApprovals[activeThread.id] ?? null;
+  const projectGroups = groupThreadsByWorkspace(threads, pinnedThreadIds, defaultWorkspace);
   const displayedProjectGroups = projectGroups.filter((project) => !project.workspace || !hiddenProjectKeys.has(project.key));
   const activeProjectKey = workspaceKey(activeThread.workspace);
-  const connectionReady = keyStatusLoaded && keyConfigured && Boolean(activeProfile.model.trim());
+  const activeUsesDefaultWorkspace = isDefaultWorkspace(activeThread.workspace, defaultWorkspace);
+  const connectionReady = keyStatusLoaded
+    && (keyConfigured || activeProfile.allowUnauthenticated)
+    && Boolean(activeProfile.model.trim());
   const connectionNeedsSetup = keyStatusLoaded && !connectionReady;
   const normalizedSidebarQuery = sidebarQuery.trim().toLocaleLowerCase(locale);
   const visibleProjectGroups = normalizedSidebarQuery
@@ -370,17 +384,29 @@ function App() {
     let disposed = false;
     const initializeDatabase = async () => {
       try {
-        const persisted = await listPersistedThreads();
+        const [resolvedDefaultWorkspace, persisted] = await Promise.all([
+          getDefaultWorkspace(),
+          listPersistedThreads(),
+        ]);
         if (disposed) return;
-        if (persisted.length > 0) {
-          threadsRef.current = persisted;
-          setThreads(persisted);
-          setActiveThreadId((current) =>
-            persisted.some((thread) => thread.id === current) ? current : loadActiveThreadId(persisted),
-          );
-        } else {
-          for (const thread of threadsRef.current) await savePersistedThread(thread);
-        }
+        if (!resolvedDefaultWorkspace) throw new Error("The temporary workspace is unavailable");
+        setDefaultWorkspace(resolvedDefaultWorkspace);
+        const sourceThreads = persisted.length > 0 ? persisted : threadsRef.current;
+        const migratedThreadIds = new Set(
+          sourceThreads.filter((thread) => !thread.workspace?.trim()).map((thread) => thread.id),
+        );
+        const hydratedThreads = sourceThreads.map((thread) => thread.workspace?.trim()
+          ? thread
+          : { ...thread, workspace: resolvedDefaultWorkspace });
+        threadsRef.current = hydratedThreads;
+        setThreads(hydratedThreads);
+        setActiveThreadId((current) =>
+          hydratedThreads.some((thread) => thread.id === current) ? current : loadActiveThreadId(hydratedThreads),
+        );
+        const threadsToPersist = persisted.length > 0
+          ? hydratedThreads.filter((thread) => migratedThreadIds.has(thread.id))
+          : hydratedThreads;
+        for (const thread of threadsToPersist) await savePersistedThread(thread);
         const providerSettings = await getProviderSettings();
         if (disposed) return;
         if (providerSettings?.profiles.length) {
@@ -550,6 +576,11 @@ function App() {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [activeThread.messages.length, lastMessageLength, running, pending]);
 
+  useLayoutEffect(() => {
+    if (workspaceView !== "chat") return;
+    endRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
+  }, [workspaceView, activeThread.id]);
+
   const enqueuePersistence = (operation: () => Promise<unknown>) => {
     persistenceQueueRef.current = persistenceQueueRef.current
       .then(async () => {
@@ -570,6 +601,28 @@ function App() {
     if (persist && isDesktop() && databaseReadyRef.current) {
       enqueuePersistence(() => savePersistedThread(next));
     }
+  };
+
+  const setThreadRunning = (threadId: string, value: boolean) => {
+    const next = new Set(runningThreadIdsRef.current);
+    if (value) next.add(threadId);
+    else next.delete(threadId);
+    runningThreadIdsRef.current = next;
+    setRunningThreadIds(next);
+  };
+
+  const setThreadPending = (threadId: string, value: PendingApproval | null) => {
+    const next = { ...pendingApprovalsRef.current };
+    if (value) next[threadId] = value;
+    else delete next[threadId];
+    pendingApprovalsRef.current = next;
+    setPendingApprovals(next);
+  };
+
+  const finishThreadRun = (threadId: string) => {
+    operationIdsRef.current.delete(threadId);
+    runModesRef.current.delete(threadId);
+    setThreadRunning(threadId, false);
   };
 
   const beginThreadRename = () => {
@@ -622,13 +675,12 @@ function App() {
     setWorkspaceView("chat");
   };
 
-  const newThread = (workspace = activeThread?.workspace) => {
+  const newThread = (workspace = activeThread?.workspace ?? defaultWorkspace) => {
     const next = createThread(workspace);
     revealProject(workspaceKey(workspace));
     commitThread(next);
     setActiveThreadId(next.id);
     expandProject(workspaceKey(workspace));
-    setPending(null);
     setDraft("");
     for (const attachment of draftAttachments) void deleteImageAttachment(attachment.id).catch(() => undefined);
     setDraftAttachments([]);
@@ -669,7 +721,7 @@ function App() {
   };
 
   const removeProjectFromList = (projectKey: string) => {
-    if (projectKey === workspaceKey()) return;
+    if (projectKey === workspaceKey() || projectKey === workspaceKey(defaultWorkspace)) return;
     const nextHidden = new Set(hiddenProjectKeys);
     nextHidden.add(projectKey);
     setHiddenProjectKeys(nextHidden);
@@ -686,7 +738,7 @@ function App() {
       expandProject(workspaceKey(fallback.workspace));
       return;
     }
-    const next = createThread();
+    const next = createThread(defaultWorkspace);
     commitThread(next);
     setActiveThreadId(next.id);
   };
@@ -717,12 +769,16 @@ function App() {
     runMode: AgentMode = mode,
     runPermission: PermissionLevel = permissionLevel,
     runStartedAt = Date.now(),
+    runProfile: ProviderProfile = activeProfile,
+    runFallbackProfiles: ProviderProfile[] = profiles.filter((profile) => profile.id !== activeProfile.id),
   ): Promise<void> => {
+    const threadId = thread.id;
     const roundLimit = runMode === "goal" ? MAX_GOAL_ROUNDS : MAX_TOOL_ROUNDS;
     if (round >= roundLimit) {
       if (runMode === "goal" && isDesktop()) {
         try {
-          setGoalState(await changeGoalStatus(thread.id, "pause"));
+          const paused = await changeGoalStatus(thread.id, "pause");
+          if (activeThreadIdRef.current === threadId) setGoalState(paused);
         } catch {
           // The Goal may already have reached a terminal state.
         }
@@ -731,18 +787,19 @@ function App() {
         ...history,
         message("assistant", runMode === "goal" ? tr("已达到本次连续执行上限，Goal 已暂停。检查结果后可继续。", "The continuous-run limit was reached and the Goal is paused. Review the result before continuing.") : tr("已达到本轮工具调用上限，请确认结果后继续。", "The tool-call limit was reached. Review the result before continuing."), {
           isError: true,
-          ...assistantMessageIdentity(activeProfile),
+          ...assistantMessageIdentity(runProfile),
         }),
       ], runStartedAt);
       commitThread({ ...thread, messages: stopped, updatedAt: Date.now() });
-      setRunning(false);
+      finishThreadRun(threadId);
       return;
     }
 
-    setRunning(true);
+    setThreadRunning(threadId, true);
+    runModesRef.current.set(threadId, runMode);
     const operationId = crypto.randomUUID();
-    operationIdRef.current = operationId;
-    const streamingAssistant = message("assistant", "", assistantMessageIdentity(activeProfile));
+    operationIdsRef.current.set(threadId, operationId);
+    const streamingAssistant = message("assistant", "", assistantMessageIdentity(runProfile));
     let streamedContent = "";
     let frameId: number | null = null;
     commitThread({
@@ -752,9 +809,9 @@ function App() {
     }, false);
     try {
       const result = await agentTurnStream(
-        activeProfile,
+        runProfile,
         history,
-        thread.workspace ? runMode : "chat",
+        runMode,
         thread.workspace,
         operationId,
         (delta) => {
@@ -773,13 +830,13 @@ function App() {
           });
         },
         thread.id,
-        profiles.filter((profile) => profile.id !== activeProfile.id),
+        runFallbackProfiles,
       );
       if (frameId !== null) window.cancelAnimationFrame(frameId);
-      if (operationIdRef.current === operationId) operationIdRef.current = null;
+      if (operationIdsRef.current.get(threadId) === operationId) operationIdsRef.current.delete(threadId);
       const respondingProfile = result.providerId
-        ? profiles.find((profile) => profile.id === result.providerId) ?? activeProfile
-        : activeProfile;
+        ? [runProfile, ...runFallbackProfiles].find((profile) => profile.id === result.providerId) ?? runProfile
+        : runProfile;
       const assistant: AgentMessage = {
         ...streamingAssistant,
         content: result.content || streamedContent,
@@ -787,8 +844,8 @@ function App() {
         requestId: result.requestId,
         ...assistantMessageIdentity(respondingProfile),
       };
-      if (result.providerId && result.providerId !== activeProfile.id) {
-        const providerName = profiles.find((profile) => profile.id === result.providerId)?.name ?? result.providerId;
+      if (result.providerId && result.providerId !== runProfile.id) {
+        const providerName = runFallbackProfiles.find((profile) => profile.id === result.providerId)?.name ?? result.providerId;
         setNotice(`${tr("主连接不可用，已安全切换到", "Primary connection unavailable; safely failed over to")} ${providerName}`);
       }
       let nextHistory = [...history, assistant];
@@ -805,9 +862,7 @@ function App() {
       const approvalRequired = result.toolCalls.filter((call) => toolNeedsApproval(call, runPermission));
 
       const automaticResults = await executeCallsWithParallelMedia(automatic, async (call) => (
-        thread.workspace || isMediaTool(call.name)
-          ? executeTool(call, thread.workspace ?? "", thread.id, activeProfile, profiles.filter((profile) => profile.id !== activeProfile.id))
-          : { output: "No workspace selected", isError: true }
+        executeTool(call, thread.workspace ?? "", thread.id, runProfile, runFallbackProfiles)
       ));
       for (const { call, result: toolResult } of automaticResults) {
         nextHistory = [
@@ -822,22 +877,30 @@ function App() {
       commitThread(nextThread);
 
       if (approvalRequired.length > 0) {
-        setPending({ calls: approvalRequired, history: nextHistory, mode: runMode, permissionLevel: runPermission, startedAt: runStartedAt });
-        setRunning(false);
+        setThreadPending(threadId, {
+          calls: approvalRequired,
+          history: nextHistory,
+          mode: runMode,
+          permissionLevel: runPermission,
+          startedAt: runStartedAt,
+          nextRound: round + 1,
+          profileId: runProfile.id,
+        });
+        finishThreadRun(threadId);
         return;
       }
       const currentGoal = runMode === "goal" && isDesktop()
         ? await getGoal(thread.id)
         : null;
-      if (runMode === "goal") setGoalState(currentGoal);
+      if (runMode === "goal" && activeThreadIdRef.current === threadId) setGoalState(currentGoal);
       const goalContinues = currentGoal?.status === "active" || currentGoal?.status === "auditing";
       if (automatic.length > 0) {
         if (runMode !== "goal" || goalContinues) {
-          await runAgent(nextThread, nextHistory, round + 1, runMode, runPermission, runStartedAt);
+          await runAgent(nextThread, nextHistory, round + 1, runMode, runPermission, runStartedAt, runProfile, runFallbackProfiles);
         } else {
           const completedHistory = finalizeConversationMessages(nextHistory, runStartedAt);
           commitThread({ ...nextThread, messages: completedHistory, updatedAt: Date.now() });
-          setRunning(false);
+          finishThreadRun(threadId);
         }
       } else if (runMode === "goal" && goalContinues) {
         const continuation = message(
@@ -850,15 +913,15 @@ function App() {
         nextHistory = [...nextHistory, continuation];
         nextThread = { ...nextThread, messages: nextHistory, updatedAt: Date.now() };
         commitThread(nextThread);
-        await runAgent(nextThread, nextHistory, round + 1, runMode, runPermission, runStartedAt);
+        await runAgent(nextThread, nextHistory, round + 1, runMode, runPermission, runStartedAt, runProfile, runFallbackProfiles);
       } else {
         const completedHistory = finalizeConversationMessages(nextHistory, runStartedAt);
         commitThread({ ...nextThread, messages: completedHistory, updatedAt: Date.now() });
-        setRunning(false);
+        finishThreadRun(threadId);
       }
     } catch (error) {
       if (frameId !== null) window.cancelAnimationFrame(frameId);
-      if (operationIdRef.current === operationId) operationIdRef.current = null;
+      if (operationIdsRef.current.get(threadId) === operationId) operationIdsRef.current.delete(threadId);
       const reason = error instanceof Error ? error.message : String(error);
       if (reason.includes("REQUEST_CANCELLED")) {
         const cancelledHistory = finalizeConversationMessages(streamedContent
@@ -869,13 +932,13 @@ function App() {
           messages: cancelledHistory,
           updatedAt: Date.now(),
         });
-        setRunning(false);
+        finishThreadRun(threadId);
         return;
       }
       const failure = message(
         "assistant",
-        reason,
-        { isError: true, ...assistantMessageIdentity(activeProfile) },
+        friendlyAgentError(reason),
+        { isError: true, ...assistantMessageIdentity(runProfile) },
       );
       const failedHistory = finalizeConversationMessages([...history, failure], runStartedAt);
       commitThread({
@@ -883,20 +946,21 @@ function App() {
         messages: failedHistory,
         updatedAt: Date.now(),
       });
-      setRunning(false);
+      finishThreadRun(threadId);
     }
   };
 
   const stopAgent = async (pauseGoal = true) => {
-    const operationId = operationIdRef.current;
+    const threadId = activeThread.id;
+    const operationId = operationIdsRef.current.get(threadId);
     if (!operationId) {
       setNotice(tr("正在完成本地工具操作", "Finishing a local tool operation"));
       return;
     }
     await cancelAgentTurn(operationId);
-    if (pauseGoal && mode === "goal" && goalState && (goalState.status === "active" || goalState.status === "auditing")) {
+    if (pauseGoal && runModesRef.current.get(threadId) === "goal" && goalState && (goalState.status === "active" || goalState.status === "auditing")) {
       try {
-        setGoalState(await changeGoalStatus(activeThread.id, "pause"));
+        setGoalState(await changeGoalStatus(threadId, "pause"));
       } catch {
         // The Goal may have transitioned while cancellation was in flight.
       }
@@ -905,43 +969,44 @@ function App() {
 
   const send = async () => {
     const value = draft.trim();
-    if ((!value && draftAttachments.length === 0) || running || pending) return;
-    if (!keyConfigured || !activeProfile.model.trim()) {
+    const thread = activeThread;
+    if ((!value && draftAttachments.length === 0)
+      || runningThreadIdsRef.current.has(thread.id)
+      || pendingApprovalsRef.current[thread.id]) return;
+    if (!connectionReady) {
       setSettingsOpen(true);
-      return;
-    }
-    if (mode === "goal" && !activeThread.workspace) {
-      setNotice(tr("Goal 模式需要先选择一个项目工作区", "Goal mode requires a project workspace"));
       return;
     }
     if (mode === "goal" && isDesktop()) {
       try {
-        let goal = await getGoal(activeThread.id);
+        let goal = await getGoal(thread.id);
         if (!goal || goal.status === "completed" || goal.status === "cancelled") {
-          goal = await createGoal(activeThread.id, value || tr("分析附件并完成请求", "Analyze the attachments and complete the request"));
+          goal = await createGoal(thread.id, value || tr("分析附件并完成请求", "Analyze the attachments and complete the request"));
         } else if (goal.status === "paused" || goal.status === "blocked") {
-          goal = await changeGoalStatus(activeThread.id, "resume");
+          goal = await changeGoalStatus(thread.id, "resume");
         }
-        setGoalState(goal);
+        if (activeThreadIdRef.current === thread.id) setGoalState(goal);
       } catch (error) {
         setNotice(`${tr("无法启动 Goal", "Could not start Goal")}: ${error instanceof Error ? error.message : String(error)}`);
         return;
       }
     }
     const user = message("user", value, { attachments: draftAttachments });
-    const title = activeThread.messages.length === 0 && isDefaultThreadTitle(activeThread.title)
+    const title = thread.messages.length === 0 && isDefaultThreadTitle(thread.title)
       ? (value || draftAttachments[0]?.name || tr("附件任务", "Attachment task")).slice(0, 42)
-      : activeThread.title;
+      : thread.title;
     const next = {
-      ...activeThread,
+      ...thread,
       title,
-      messages: [...activeThread.messages, user],
+      messages: [...thread.messages, user],
       updatedAt: Date.now(),
     };
     setDraft("");
     setDraftAttachments([]);
     commitThread(next);
-    await runAgent(next, next.messages, 0, mode, permissionLevel, Date.now());
+    const runProfile = activeProfile;
+    const runFallbackProfiles = profiles.filter((profile) => profile.id !== runProfile.id);
+    await runAgent(next, next.messages, 0, mode, permissionLevel, Date.now(), runProfile, runFallbackProfiles);
   };
 
   const addDroppedAttachments = async (paths: string[]) => {
@@ -975,7 +1040,11 @@ function App() {
           setFileDragActive(false);
         } else {
           setFileDragActive(false);
-          void addDroppedAttachments(event.payload.paths);
+          if (workspaceViewRef.current === "media") {
+            setMediaReferenceDrop({ id: crypto.randomUUID(), paths: event.payload.paths });
+          } else {
+            void addDroppedAttachments(event.payload.paths);
+          }
         }
       }))
       .then((stop) => {
@@ -995,29 +1064,50 @@ function App() {
   };
 
   const resolvePending = async (approved: boolean) => {
-    if (!pending) return;
-    setRunning(true);
-    let history = pending.history;
-    const resolved = approved
-      ? await executeCallsWithParallelMedia(pending.calls, async (call) => (
-          activeThread.workspace || isMediaTool(call.name)
-            ? executeTool(call, activeThread.workspace ?? "", activeThread.id, activeProfile, profiles.filter((profile) => profile.id !== activeProfile.id))
-            : { output: "No workspace selected", isError: true }
-        ))
-      : pending.calls.map((call) => ({ call, result: { output: "User denied this tool call", isError: true } }));
-    for (const { call, result } of resolved) {
-      history = [
-        ...history,
-        message("tool", result.output, {
-          toolCallId: call.id,
-          isError: result.isError,
-        }),
-      ];
+    const thread = activeThread;
+    const approval = pendingApprovalsRef.current[thread.id];
+    if (!approval) return;
+    const runProfile = profilesRef.current.find((profile) => profile.id === approval.profileId) ?? activeProfile;
+    const runFallbackProfiles = profilesRef.current.filter((profile) => profile.id !== runProfile.id);
+    setThreadRunning(thread.id, true);
+    setThreadPending(thread.id, null);
+    try {
+      let history = approval.history;
+      const resolved = approved
+        ? await executeCallsWithParallelMedia(approval.calls, async (call) => (
+            executeTool(call, thread.workspace ?? "", thread.id, runProfile, runFallbackProfiles)
+          ))
+        : approval.calls.map((call) => ({ call, result: { output: "User denied this tool call", isError: true } }));
+      for (const { call, result } of resolved) {
+        history = [
+          ...history,
+          message("tool", result.output, {
+            toolCallId: call.id,
+            isError: result.isError,
+          }),
+        ];
+      }
+      const next = { ...thread, messages: history, updatedAt: Date.now() };
+      commitThread(next);
+      await runAgent(
+        next,
+        history,
+        approval.nextRound,
+        approval.mode,
+        approval.permissionLevel,
+        approval.startedAt,
+        runProfile,
+        runFallbackProfiles,
+      );
+    } catch (error) {
+      const failure = message("assistant", errorText(error), {
+        isError: true,
+        ...assistantMessageIdentity(runProfile),
+      });
+      const failedHistory = finalizeConversationMessages([...approval.history, failure], approval.startedAt);
+      commitThread({ ...thread, messages: failedHistory, updatedAt: Date.now() });
+      finishThreadRun(thread.id);
     }
-    const next = { ...activeThread, messages: history, updatedAt: Date.now() };
-    setPending(null);
-    commitThread(next);
-    await runAgent(next, history, 1, pending.mode, pending.permissionLevel, pending.startedAt);
   };
 
   const togglePinnedThread = (threadId: string) => {
@@ -1030,14 +1120,19 @@ function App() {
   };
 
   const requestDeleteThread = (threadId: string) => {
+    if (runningThreadIdsRef.current.has(threadId) || pendingApprovalsRef.current[threadId]) {
+      setNotice(tr("请先停止该会话或处理待批准操作", "Stop the conversation or resolve its pending approval first"));
+      return;
+    }
     const thread = threadsRef.current.find((item) => item.id === threadId);
     if (thread) setThreadPendingDelete(thread);
   };
 
   const deleteThread = (threadId: string) => {
+    if (runningThreadIdsRef.current.has(threadId) || pendingApprovalsRef.current[threadId]) return;
     const removed = threadsRef.current.find((thread) => thread.id === threadId);
     const remaining = threadsRef.current.filter((thread) => thread.id !== threadId);
-    const nextThreads = remaining.length > 0 ? remaining : [createThread()];
+    const nextThreads = remaining.length > 0 ? remaining : [createThread(defaultWorkspace)];
     threadsRef.current = nextThreads;
     setThreads(nextThreads);
     setThreadPendingDelete(null);
@@ -1156,7 +1251,9 @@ function App() {
   const balanceHint = balanceError
     ? `${tr("余额读取失败", "Balance unavailable")}: ${balanceError}`
     : !keyConfigured
-      ? tr("请先配置当前连接的 API Key", "Configure an API key for this connection")
+      ? activeProfile.allowUnauthenticated
+        ? tr("无密钥兼容连接不提供余额查询", "Balance lookup is unavailable for a keyless compatible connection")
+        : tr("请先配置当前连接的 API Key", "Configure an API key for this connection")
       : tr("点击刷新，余额每 60 秒自动更新", "Click to refresh; updates automatically every 60 seconds");
 
   return (
@@ -1165,7 +1262,7 @@ function App() {
         <div className="sidebar-header">
           <button className="brand" type="button" title={tr("访问 LevelUpAPI 官网", "Visit LevelUpAPI")} onClick={() => void openLevelUpWebsite()}>
             <span className="brand-mark"><img src="/logo.png" alt="" /></span>
-            <span>LevelUpAgent</span>
+            <span className="brand-copy"><strong>LevelUpAgent</strong><small>v{packageMetadata.version}</small></span>
           </button>
           <IconButton
             className="sidebar-search-toggle"
@@ -1262,7 +1359,7 @@ function App() {
                       <small>{project.threads.length} {tr("个会话", "conversations")}</small>
                     </span>
                   </button>
-                  {project.workspace && (
+                  {project.workspace && !isDefaultWorkspace(project.workspace, defaultWorkspace) && (
                     <div className="project-menu-control">
                       <IconButton
                         className="project-menu-trigger"
@@ -1295,7 +1392,11 @@ function App() {
                           title={localizedThreadTitle(thread.title)}
                           onClick={() => activateThread(thread.id)}
                         >
-                          <MessageSquareText size={14} />
+                          {pendingApprovals[thread.id]
+                            ? <ShieldCheck size={14} />
+                            : runningThreadIds.has(thread.id)
+                              ? <Activity className="spin" size={14} />
+                              : <MessageSquareText size={14} />}
                           <span>{localizedThreadTitle(thread.title)}</span>
                         </button>
                         <IconButton
@@ -1308,7 +1409,7 @@ function App() {
                         </IconButton>
                         <IconButton
                           label={tr("删除会话", "Delete conversation")}
-                          disabled={thread.id === activeThread.id && (running || Boolean(pending))}
+                          disabled={runningThreadIds.has(thread.id) || Boolean(pendingApprovals[thread.id])}
                           onClick={() => requestDeleteThread(thread.id)}
                         >
                           <Trash2 size={13} />
@@ -1338,7 +1439,13 @@ function App() {
       </aside>
 
       {workspaceView === "media" ? (
-        <MediaStudio locale={locale} onConfigureConnection={() => setSettingsOpen(true)} />
+        <MediaStudio
+          locale={locale}
+          dropActive={fileDragActive}
+          referenceDrop={mediaReferenceDrop}
+          onReferenceDropHandled={(id) => setMediaReferenceDrop((current) => current?.id === id ? null : current)}
+          onConfigureConnection={() => setSettingsOpen(true)}
+        />
       ) : (
       <main
         className={`workspace-shell${fileDragActive ? " file-drag-active" : ""}`}
@@ -1407,7 +1514,9 @@ function App() {
                 </div>
               )}
             </div>
-            <span>{activeThread.workspace ? shortPath(activeThread.workspace) : tr("无项目", "No project")}</span>
+            <span>{activeUsesDefaultWorkspace
+              ? tr("临时工作区", "Temporary workspace")
+              : activeThread.workspace ? shortPath(activeThread.workspace) : tr("无项目", "No project")}</span>
           </div>
           <div className="topbar-actions">
             <IconButton label={tr("切换到 English", "Switch to 中文")} onClick={toggleLocale}>
@@ -1427,6 +1536,7 @@ function App() {
           {activeThread.messages.length === 0 ? (
             <EmptyState
               workspace={activeThread.workspace}
+              temporaryWorkspace={activeUsesDefaultWorkspace}
               connectionNeedsSetup={connectionNeedsSetup}
               onChooseWorkspace={chooseWorkspace}
               onConfigureConnection={() => setSettingsOpen(true)}
@@ -1592,11 +1702,13 @@ function App() {
 
 function EmptyState({
   workspace,
+  temporaryWorkspace,
   connectionNeedsSetup,
   onChooseWorkspace,
   onConfigureConnection,
 }: {
   workspace?: string;
+  temporaryWorkspace: boolean;
   connectionNeedsSetup: boolean;
   onChooseWorkspace: () => void;
   onConfigureConnection: () => void;
@@ -1607,7 +1719,7 @@ function EmptyState({
       <h1>{connectionNeedsSetup ? tr("新增模型连接", "Add a model connection") : "LevelUpAgent"}</h1>
       <p>{connectionNeedsSetup
         ? tr("配置 API Key 并选择模型后，就可以开始使用 LevelUpAgent。", "Configure an API key and choose a model to start using LevelUpAgent.")
-        : workspace ? shortPath(workspace) : tr("准备就绪", "Ready")}</p>
+        : temporaryWorkspace ? tr("临时工作区", "Temporary workspace") : workspace ? shortPath(workspace) : tr("准备就绪", "Ready")}</p>
       {connectionNeedsSetup && (
         <button className="connection-setup-button" onClick={onConfigureConnection}>
           <Plus size={16} />
@@ -1616,7 +1728,9 @@ function EmptyState({
       )}
       <button className="workspace-button" onClick={onChooseWorkspace}>
         <Folder size={16} />
-        {workspace ? tr("更换项目", "Change project") : tr("打开项目", "Open project")}
+        {temporaryWorkspace
+          ? tr("选择正式项目", "Choose a project")
+          : workspace ? tr("更换项目", "Change project") : tr("打开项目", "Open project")}
       </button>
     </div>
   );
@@ -1695,6 +1809,7 @@ function MessageRow({ item }: { item: AgentMessage }) {
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{item.content}</ReactMarkdown>
           </div>
         )}
+        <MessageCopyButton content={item.content} />
       </div>
     </article>
   );
@@ -1713,6 +1828,10 @@ function AssistantMessageGroup({
   const modelName = identity?.modelName || fallbackProfile.model || fallbackProfile.name || "LevelUpAgent";
   const providerBrand = identity?.providerBrand ?? modelProviderBrand(fallbackProfile);
   const requestIds = items.flatMap((item) => item.requestId ? [item.requestId] : []);
+  const copyContent = items
+    .filter((item) => item.role === "assistant" && item.content.trim())
+    .map((item) => item.content.trim())
+    .join("\n\n");
   let durationMs: number | undefined;
   for (let index = items.length - 1; index >= 0; index -= 1) {
     if (items[index].durationMs != null) {
@@ -1732,6 +1851,7 @@ function AssistantMessageGroup({
         <div className="assistant-message-content">
           {items.map((item) => <AssistantMessageSegment item={item} pending={pending} key={item.id} />)}
         </div>
+        <MessageCopyButton content={copyContent} />
         {durationMs != null && (
           <div className="message-duration"><Timer size={13} />{tr("处理总时长", "Total processing time")} {formatDuration(durationMs)}</div>
         )}
@@ -1750,16 +1870,34 @@ function AssistantAvatar({ brand, modelName }: { brand: ModelProviderBrand; mode
   );
 }
 
+function MessageCopyButton({ content }: { content: string }) {
+  const [status, setStatus] = useState<"idle" | "copied" | "error">("idle");
+  if (!content.trim()) return null;
+  const copy = async () => {
+    try {
+      await copyText(content);
+      setStatus("copied");
+      window.setTimeout(() => setStatus("idle"), 1_500);
+    } catch {
+      setStatus("error");
+    }
+  };
+  return (
+    <div className="message-copy-action">
+      <button type="button" onClick={() => void copy()} title={tr("复制这段内容", "Copy this message")}>
+        {status === "copied" ? <Check size={13} /> : <Copy size={13} />}
+        {status === "copied" ? tr("已复制", "Copied") : status === "error" ? tr("复制失败", "Copy failed") : tr("复制", "Copy")}
+      </button>
+    </div>
+  );
+}
+
 function MessageAttachments({ item }: { item: AgentMessage }) {
   if (item.attachments.length === 0) return null;
   return (
     <div className="message-attachments" aria-label={tr("消息附件", "Message attachments")}>
       {item.attachments.map((attachment) => (
-        <span key={attachment.id} title={`${attachment.name} · ${attachmentFormatLabel(attachment)} · ${formatBytes(attachment.sizeBytes)}`}>
-          <AttachmentGlyph attachment={attachment} size={14} />
-          <strong>{attachment.name}</strong>
-          <small>{attachmentFormatLabel(attachment)} · {formatBytes(attachment.sizeBytes)}</small>
-        </span>
+        <AttachmentChip attachment={attachment} detailed key={attachment.id} />
       ))}
     </div>
   );
@@ -1813,11 +1951,11 @@ function AssistantMessageSegment({ item, pending }: { item: AgentMessage; pendin
         {item.toolCalls.length > 0 && (
           <div className="tool-call-list">
             {item.toolCalls.map((call) => (
-              <div className="tool-call" key={call.id}>
+              <div className={`tool-call${typeof call.arguments.prompt === "string" ? " prompt-tool-call" : ""}`} key={call.id}>
                 <span className="tool-kind">{toolIcon(call)}</span>
                 <span>
                   <strong>{toolLabel(call)}</strong>
-                  <small>{toolSummary(call)}</small>
+                  <small title={toolFullSummary(call)}>{toolSummary(call)}</small>
                 </span>
                 <span className={`tool-status ${pending?.calls.some((item) => item.id === call.id) ? "waiting" : ""}`}>
                   {pending?.calls.some((item) => item.id === call.id) ? tr("待批准", "Awaiting approval") : tr("已提交", "Submitted")}
@@ -1896,11 +2034,7 @@ function Composer({
         {attachments.length > 0 && (
           <div className="composer-attachments" aria-label={tr("待发送附件", "Attachments to send")}>
             {attachments.map((attachment) => (
-              <span key={attachment.id} title={`${attachment.name} · ${attachmentFormatLabel(attachment)} · ${formatBytes(attachment.sizeBytes)}`}>
-                <AttachmentGlyph attachment={attachment} size={13} />
-                <strong>{attachment.name}</strong>
-                <button aria-label={`${tr("移除", "Remove")} ${attachment.name}`} onClick={() => onRemoveAttachment(attachment)}><X size={12} /></button>
-              </span>
+              <AttachmentChip attachment={attachment} onRemove={onRemoveAttachment} key={attachment.id} />
             ))}
           </div>
         )}
@@ -2303,6 +2437,7 @@ function ConnectionDialog({
       baseUrl: profile.baseUrl,
       model: profile.model,
       protocol: profile.protocol,
+      allowUnauthenticated: false,
       priority: Math.max(10, ...profiles.map((item) => item.priority + 10)),
       failoverEnabled: true,
     });
@@ -2483,6 +2618,9 @@ function ConnectionDialog({
           <label className="field wide">
             <span>Base URL</span>
             <input value={draftProfile.baseUrl} onChange={(event) => update("baseUrl", event.target.value)} placeholder="https://api.example.com/v1" />
+            <small className="endpoint-preview" title={providerEndpointPreview(draftProfile)}>
+              {tr("最终请求", "Resolved endpoint")}: {providerEndpointPreview(draftProfile) || tr("等待有效地址和模型", "Enter a valid URL and model")}
+            </small>
           </label>
           <div className="field wide">
             <span>
@@ -2521,18 +2659,27 @@ function ConnectionDialog({
             </small>
           </div>
           <label className="field wide">
-            <span>API Key <small>{localKeyConfigured ? tr("已存入系统凭据库", "Stored in OS credential vault") : tr("未保存", "Not saved")}</small></span>
-            <input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={localKeyConfigured ? "••••••••••••••••" : "sk-…"} autoComplete="off" />
+            <span>API Key <small>{localKeyConfigured
+              ? tr("已存入系统凭据库", "Stored in OS credential vault")
+              : draftProfile.allowUnauthenticated ? tr("可留空", "Optional") : tr("未保存", "Not saved")}</small></span>
+            <input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={localKeyConfigured ? "••••••••••••••••" : draftProfile.allowUnauthenticated ? tr("本地服务可留空", "Optional for local services") : "sk-…"} autoComplete="off" />
+          </label>
+          <label className="failover-toggle wide">
+            <input type="checkbox" checked={draftProfile.allowUnauthenticated} onChange={(event) => update("allowUnauthenticated", event.target.checked)} />
+            <span><strong>{tr("允许无 API Key", "Allow connection without an API key")}</strong><small>{tr("仅用于你信任的本机或局域网服务；如果已保存密钥，仍会优先发送密钥。", "Use only with a trusted local or LAN service. A saved key is still sent when present.")}</small></span>
           </label>
           <label className="field">
             <span>{tr("模型", "Model")}</span>
-            <select aria-label={tr("模型", "Model")} value={draftProfile.model} onChange={(event) => update("model", event.target.value)}>
-              {!draftProfile.model && <option value="">{tr("请先检测模型", "Check models first")}</option>}
-              {draftProfile.model && !models.some((item) => item.id === draftProfile.model) && (
-                <option value={draftProfile.model}>{draftProfile.model}</option>
-              )}
-              {models.map((item) => <option value={item.id} key={item.id}>{item.id}</option>)}
-            </select>
+            <input
+              aria-label={tr("模型 ID", "Model ID")}
+              list={`provider-models-${draftProfile.id}`}
+              value={draftProfile.model}
+              onChange={(event) => update("model", event.target.value)}
+              placeholder={tr("可手动输入模型 ID", "Enter a model ID")}
+            />
+            <datalist id={`provider-models-${draftProfile.id}`}>
+              {models.map((item) => <option value={item.id} key={item.id} />)}
+            </datalist>
           </label>
           <div className="field connection-test">
             <span>{tr("连接检查", "Connection check")}</span>
@@ -2550,7 +2697,7 @@ function ConnectionDialog({
             health={health.find((item) => item.profileId === draftProfile.id)}
             diagnostics={diagnostics}
             busy={busy}
-            canDiagnose={localKeyConfigured}
+            canDiagnose={localKeyConfigured || draftProfile.allowUnauthenticated}
             onDiagnose={runDiagnostics}
             onReset={clearHealth}
           />
@@ -3348,6 +3495,32 @@ function errorText(reason: unknown) {
   return reason instanceof Error ? reason.message : String(reason);
 }
 
+function friendlyAgentError(reason: string) {
+  const marker = "[LEVELUP_TOOL_CALLING_UNSUPPORTED]";
+  if (!reason.includes(marker)) return reason;
+  const detail = reason.replace(marker, "").trim();
+  return `${detail}\n\n${tr(
+    "该模型或兼容接口不支持工具调用。请切换到“问答”模式，或选择支持 Function/Tool Calling 的模型。",
+    "This model or compatible endpoint does not support tool calling. Switch to Ask mode or choose a model with Function/Tool Calling support.",
+  )}`;
+}
+
+async function copyText(content: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(content);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = content;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("Copy is unavailable");
+}
+
 function parseMediaToolAssets(content: string): MediaAsset[] | null {
   if (!content.trimStart().startsWith("{")) return null;
   try {
@@ -3409,9 +3582,15 @@ function toolLabel(call: ToolCall) {
 }
 
 function toolSummary(call: ToolCall) {
+  if (typeof call.arguments.prompt === "string") return call.arguments.prompt;
   const value = call.arguments.path ?? call.arguments.command ?? call.arguments.query ?? call.arguments.task ?? call.arguments.runId;
   if (value !== undefined) return String(value).slice(0, 100);
   return JSON.stringify(call.arguments).slice(0, 100);
+}
+
+function toolFullSummary(call: ToolCall) {
+  if (typeof call.arguments.prompt === "string") return call.arguments.prompt;
+  return JSON.stringify(call.arguments, null, 2);
 }
 
 function shortPath(path: string) {
@@ -3433,7 +3612,11 @@ function workspaceKey(workspace?: string) {
   return /^[a-z]:\//i.test(normalized) ? normalized.toLocaleLowerCase("en-US") : normalized;
 }
 
-function groupThreadsByWorkspace(threads: AgentThread[], pinnedThreadIds: Set<string>): ThreadProjectGroup[] {
+function isDefaultWorkspace(workspace?: string, defaultWorkspace?: string) {
+  return Boolean(workspace && defaultWorkspace && workspaceKey(workspace) === workspaceKey(defaultWorkspace));
+}
+
+function groupThreadsByWorkspace(threads: AgentThread[], pinnedThreadIds: Set<string>, defaultWorkspace?: string): ThreadProjectGroup[] {
   const projects = new Map<string, ThreadProjectGroup>();
   for (const thread of [...threads].sort((left, right) => {
     const pinnedOrder = Number(pinnedThreadIds.has(right.id)) - Number(pinnedThreadIds.has(left.id));
@@ -3448,7 +3631,9 @@ function groupThreadsByWorkspace(threads: AgentThread[], pinnedThreadIds: Set<st
     }
     projects.set(key, {
       key,
-      name: thread.workspace ? shortPath(thread.workspace) : tr("未选择项目", "No project"),
+      name: isDefaultWorkspace(thread.workspace, defaultWorkspace)
+        ? tr("临时工作区", "Temporary workspace")
+        : thread.workspace ? shortPath(thread.workspace) : tr("未选择项目", "No project"),
       workspace: thread.workspace,
       threads: [thread],
       updatedAt: thread.updatedAt,
@@ -3474,6 +3659,33 @@ function protocolLabel(protocol: ProviderProtocol) {
   if (protocol === "openai_chat") return "Chat Completions";
   if (protocol === "anthropic_messages") return "Messages";
   return "GenerateContent";
+}
+
+function providerEndpointPreview(profile: ProviderProfile) {
+  const model = profile.model.trim().replace(/^models\//, "") || "MODEL_ID";
+  const path = profile.protocol === "openai_responses"
+    ? "/v1/responses"
+    : profile.protocol === "openai_chat"
+      ? "/v1/chat/completions"
+      : profile.protocol === "anthropic_messages"
+        ? "/v1/messages"
+        : `/v1beta/models/${model}:generateContent`;
+  try {
+    const base = new URL(profile.baseUrl.trim());
+    if (!base.pathname.endsWith("/")) base.pathname += "/";
+    const requested = path.replace(/^\/+/, "").split("/");
+    const baseSegments = base.pathname.split("/").filter(Boolean);
+    const requestedVersion = requested[0] ?? "";
+    const baseVersion = baseSegments[baseSegments.length - 1] ?? "";
+    if (isApiVersionSegment(requestedVersion) && isApiVersionSegment(baseVersion)) requested.shift();
+    return new URL(requested.join("/"), base).toString();
+  } catch {
+    return "";
+  }
+}
+
+function isApiVersionSegment(value: string) {
+  return /^v\d+[a-z0-9_-]*$/i.test(value);
 }
 
 function validateProviderBaseUrl(value: string) {
@@ -3512,22 +3724,6 @@ function goalStatusLabel(status: GoalState["status"]) {
 function formatTokens(value: number) {
   if (value < 1000) return String(value);
   return `${(value / 1000).toFixed(value < 10_000 ? 1 : 0)}K`;
-}
-
-function formatBytes(value: number) {
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
-  return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
-}
-
-function attachmentFormatLabel(attachment: ImageAttachment) {
-  if (attachment.kind === "image") return tr("图片", "Image");
-  if (attachment.kind === "text") return tr("文本", "Text");
-  if (attachment.mimeType === "application/pdf") return "PDF";
-  if (attachment.mimeType.includes("wordprocessingml")) return "Word";
-  if (attachment.mimeType.includes("spreadsheetml")) return "Excel";
-  if (attachment.mimeType.includes("presentationml")) return "PowerPoint";
-  return tr("文档", "Document");
 }
 
 function modeLabel(mode: AgentMode) {
@@ -3615,14 +3811,6 @@ function permissionIcon(level: PermissionLevel, size: number) {
   if (level === "request") return <Hand size={size} />;
   if (level === "agent") return <Bot size={size} />;
   return <ShieldAlert size={size} />;
-}
-
-function AttachmentGlyph({ attachment, size }: { attachment: ImageAttachment; size: number }) {
-  if (attachment.kind === "image") return <ImagePlus size={size} />;
-  if (attachment.kind === "text") return <FileCode2 size={size} />;
-  if (attachment.mimeType.includes("spreadsheetml")) return <FileSpreadsheet size={size} />;
-  if (attachment.mimeType.includes("presentationml")) return <Presentation size={size} />;
-  return <FileText size={size} />;
 }
 
 function formatTime(value: number) {

@@ -5,7 +5,7 @@ use base64::Engine;
 use futures_util::{StreamExt, future::join_all};
 use reqwest::header::CONTENT_TYPE;
 use reqwest::multipart::{Form, Part};
-use reqwest::{Client, Response};
+use reqwest::{Client, RequestBuilder, Response};
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 
@@ -27,6 +27,24 @@ const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
 pub struct MediaProvider {
     pub profile: ProviderProfile,
     pub api_key: String,
+}
+
+fn bearer_auth_if_present(request: RequestBuilder, provider: &MediaProvider) -> RequestBuilder {
+    if provider.api_key.is_empty() {
+        request
+    } else {
+        request.bearer_auth(&provider.api_key)
+    }
+}
+
+fn gemini_auth_if_present(request: RequestBuilder, provider: &MediaProvider) -> RequestBuilder {
+    if provider.api_key.is_empty() {
+        request
+    } else {
+        request
+            .bearer_auth(&provider.api_key)
+            .header("x-goog-api-key", &provider.api_key)
+    }
 }
 
 #[derive(Clone)]
@@ -202,6 +220,7 @@ pub async fn generate_batch(
     references: &[ManagedImage],
 ) -> Result<MediaBatchResult, String> {
     validate_request(request, references)?;
+    validate_model_request(&selection.model, request)?;
     let batch_id = uuid::Uuid::new_v4().simple().to_string();
     match request.kind {
         MediaKind::Image => {
@@ -507,6 +526,48 @@ fn validate_request(
     Ok(())
 }
 
+fn validate_model_request(model: &str, request: &MediaGenerationRequest) -> Result<(), String> {
+    if request.kind == MediaKind::Image
+        && request
+            .background
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("transparent"))
+        && model.to_ascii_lowercase().contains("gpt-image-2")
+    {
+        return Err(
+            "gpt-image-2 does not support a transparent background. Use background=auto/opaque, or select a transparency-capable image model such as gpt-image-1.5."
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+pub fn prompt_requests_transparency(prompt: &str) -> bool {
+    let normalized = prompt.to_ascii_lowercase();
+    [
+        "transparent background",
+        "transparent png",
+        "alpha channel",
+        "no background",
+        "background removal",
+        "remove the background",
+        "cutout",
+    ]
+    .iter()
+    .any(|term| normalized.contains(term))
+        || [
+            "透明背景",
+            "背景透明",
+            "透明底",
+            "无背景",
+            "去除背景",
+            "移除背景",
+            "抠图",
+        ]
+        .iter()
+        .any(|term| prompt.contains(term))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn generate_images(
     client: &Client,
@@ -601,7 +662,7 @@ async fn call_openai_images(
         insert_optional_string(&mut body, "quality", request.quality.as_deref());
         insert_optional_string(&mut body, "output_format", request.output_format.as_deref());
         insert_optional_string(&mut body, "background", request.background.as_deref());
-        send_json(client.post(url).bearer_auth(&provider.api_key).json(&body)).await
+        send_json(bearer_auth_if_present(client.post(url), provider).json(&body)).await
     } else {
         let url = agent::endpoint(&provider.profile.base_url, "/v1/images/edits")?;
         let mut form = Form::new()
@@ -626,13 +687,7 @@ async fn call_openai_images(
                 .map_err(|error| format!("Invalid reference image MIME type: {error}"))?;
             form = form.part("image", part);
         }
-        send_json(
-            client
-                .post(url)
-                .bearer_auth(&provider.api_key)
-                .multipart(form),
-        )
-        .await
+        send_json(bearer_auth_if_present(client.post(url), provider).multipart(form)).await
     };
 
     let value = match result {
@@ -668,7 +723,7 @@ async fn call_openai_chat_image(
         "modalities": ["text", "image"],
         "n": request.count
     });
-    send_json(client.post(url).bearer_auth(&provider.api_key).json(&body)).await
+    send_json(bearer_auth_if_present(client.post(url), provider).json(&body)).await
 }
 
 async fn call_gemini_image(
@@ -707,14 +762,7 @@ async fn call_gemini_image(
         "contents": [{ "role": "user", "parts": parts }],
         "generationConfig": generation_config
     });
-    let value = send_json(
-        client
-            .post(url)
-            .bearer_auth(&provider.api_key)
-            .header("x-goog-api-key", &provider.api_key)
-            .json(&body),
-    )
-    .await?;
+    let value = send_json(gemini_auth_if_present(client.post(url), provider).json(&body)).await?;
     resolve_image_sources(client, parse_image_sources(&value)?).await
 }
 
@@ -925,9 +973,7 @@ async fn call_openai_audio(
         "response_format": requested_format
     });
     insert_optional_string(&mut body, "instructions", request.instructions.as_deref());
-    let response = client
-        .post(url)
-        .bearer_auth(&provider.api_key)
+    let response = bearer_auth_if_present(client.post(url), provider)
         .json(&body)
         .send()
         .await
@@ -983,14 +1029,7 @@ async fn call_gemini_audio(
             }
         }
     });
-    let value = send_json(
-        client
-            .post(url)
-            .bearer_auth(&provider.api_key)
-            .header("x-goog-api-key", &provider.api_key)
-            .json(&body),
-    )
-    .await?;
+    let value = send_json(gemini_auth_if_present(client.post(url), provider).json(&body)).await?;
     let inline = value
         .get("candidates")
         .and_then(Value::as_array)
@@ -1119,13 +1158,8 @@ async fn create_openai_video(
     if let Some(seconds) = request.seconds {
         form = form.text("seconds", seconds.to_string());
     }
-    let value = send_json(
-        client
-            .post(url)
-            .bearer_auth(&provider.api_key)
-            .multipart(form),
-    )
-    .await?;
+    let value =
+        send_json(bearer_auth_if_present(client.post(url), provider).multipart(form)).await?;
     let id = value
         .get("id")
         .and_then(Value::as_str)
@@ -1162,14 +1196,7 @@ async fn create_gemini_video(
         "instances": [{ "prompt": request.prompt.trim() }],
         "parameters": parameters
     });
-    let value = send_json(
-        client
-            .post(url)
-            .bearer_auth(&provider.api_key)
-            .header("x-goog-api-key", &provider.api_key)
-            .json(&body),
-    )
-    .await?;
+    let value = send_json(gemini_auth_if_present(client.post(url), provider).json(&body)).await?;
     let name = value
         .get("name")
         .and_then(Value::as_str)
@@ -1192,7 +1219,7 @@ async fn poll_openai_video(
         &provider.profile.base_url,
         &format!("/v1/videos/{remote_id}"),
     )?;
-    let value = send_json(client.get(url).bearer_auth(&provider.api_key)).await?;
+    let value = send_json(bearer_auth_if_present(client.get(url), provider)).await?;
     let status = parse_video_status(value.get("status").and_then(Value::as_str));
     if status == MediaStatus::Failed {
         return Ok(VideoPoll::Failed {
@@ -1210,9 +1237,7 @@ async fn poll_openai_video(
         &provider.profile.base_url,
         &format!("/v1/videos/{remote_id}/content"),
     )?;
-    let response = client
-        .get(url)
-        .bearer_auth(&provider.api_key)
+    let response = bearer_auth_if_present(client.get(url), provider)
         .send()
         .await
         .map_err(|error| format!("Video download failed: {error}"))?;
@@ -1231,13 +1256,7 @@ async fn poll_gemini_video(
         format!("/v1beta/{}", remote_id.trim_start_matches('/'))
     };
     let url = agent::endpoint(&provider.profile.base_url, &operation_path)?;
-    let value = send_json(
-        client
-            .get(url)
-            .bearer_auth(&provider.api_key)
-            .header("x-goog-api-key", &provider.api_key),
-    )
-    .await?;
+    let value = send_json(gemini_auth_if_present(client.get(url), provider)).await?;
     if value.get("done").and_then(Value::as_bool) != Some(true) {
         return Ok(VideoPoll::Pending {
             status: MediaStatus::InProgress,
@@ -1255,10 +1274,7 @@ async fn poll_gemini_video(
         .ok_or_else(|| {
             "Gemini completed the video job without a downloadable video URI".to_owned()
         })?;
-    let response = client
-        .get(video_uri)
-        .bearer_auth(&provider.api_key)
-        .header("x-goog-api-key", &provider.api_key)
+    let response = gemini_auth_if_present(client.get(video_uri), provider)
         .send()
         .await
         .map_err(|error| format!("Gemini video download failed: {error}"))?;
@@ -1827,6 +1843,7 @@ mod tests {
                 base_url: "https://example.test".to_owned(),
                 model: model.to_owned(),
                 protocol: ProviderProtocol::OpenaiChat,
+                allow_unauthenticated: false,
                 priority: 100,
                 failover_enabled: true,
             },
@@ -2021,6 +2038,18 @@ mod tests {
         assert_eq!(parsed[0].mime_type.as_deref(), Some("image/png"));
         let mixed = b"{\"error\":{\"message\":\"Upstream request failed\"}}event: error\ndata: {\"error\":{\"message\":\"Upstream request failed\"}}";
         assert_eq!(provider_error_detail(mixed), "Upstream request failed");
+    }
+
+    #[test]
+    fn transparency_intent_and_gpt_image_2_compatibility_are_enforced_locally() {
+        assert!(!prompt_requests_transparency("一只可爱的像素小猫"));
+        assert!(prompt_requests_transparency(
+            "一只可爱的像素小猫，透明背景 PNG"
+        ));
+        let mut request = request(MediaKind::Image, 1);
+        request.background = Some("transparent".to_owned());
+        assert!(validate_model_request("gpt-image-2", &request).is_err());
+        assert!(validate_model_request("gpt-image-1.5", &request).is_ok());
     }
 
     #[test]

@@ -10,6 +10,7 @@ export interface ProviderProfile {
   baseUrl: string;
   model: string;
   protocol: ProviderProtocol;
+  allowUnauthenticated: boolean;
   priority: number;
   failoverEnabled: boolean;
 }
@@ -55,6 +56,13 @@ export interface ImageAttachment {
   mimeType: string;
   sizeBytes: number;
   kind: "image" | "text" | "document";
+}
+
+export interface AttachmentPreview {
+  kind: "image" | "text" | "document";
+  mimeType: string;
+  dataBase64?: string;
+  text?: string;
 }
 
 export interface AgentTurnResponse {
@@ -310,6 +318,8 @@ export interface PendingApproval {
   mode: AgentMode;
   permissionLevel: PermissionLevel;
   startedAt: number;
+  nextRound: number;
+  profileId: string;
 }
 
 export type AgentMode = "agent" | "plan" | "goal" | "chat";

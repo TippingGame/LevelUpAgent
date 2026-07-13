@@ -7,9 +7,10 @@ use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 use zip::ZipArchive;
 
-use crate::models::{AgentMessage, AttachmentKind, ImageAttachment};
+use crate::models::{AgentMessage, AttachmentKind, AttachmentPreview, ImageAttachment};
 
 const MAX_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
+const MAX_PREVIEW_CHARS: usize = 4_000;
 const MAX_TEXT_BYTES: u64 = 1024 * 1024;
 const MAX_IMAGES_PER_MESSAGE: usize = 8;
 const MAX_DOCUMENTS_PER_MESSAGE: usize = 8;
@@ -138,6 +139,55 @@ pub fn read_managed_image(storage: &Path, attachment_id: &str) -> Result<Managed
         mime_type,
         bytes,
     })
+}
+
+pub fn preview(
+    storage: &Path,
+    attachment_id: &str,
+    name: &str,
+) -> Result<AttachmentPreview, String> {
+    validate_id(attachment_id)?;
+    let path = storage.join(format!("{attachment_id}.bin"));
+    let metadata = std::fs::metadata(&path)
+        .map_err(|_| "The selected attachment is no longer available".to_owned())?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_ATTACHMENT_BYTES {
+        return Err("The selected attachment has an invalid size".to_owned());
+    }
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("Could not read the selected attachment: {error}"))?;
+    let (kind, mime_type) = classify_attachment(name, &bytes)?;
+    let (data_base64, text) = match &kind {
+        AttachmentKind::Image => (
+            Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+            None,
+        ),
+        AttachmentKind::Text => {
+            let text = std::str::from_utf8(&bytes)
+                .map_err(|_| "The selected text attachment is not valid UTF-8".to_owned())?;
+            (None, Some(preview_excerpt(text)))
+        }
+        AttachmentKind::Document => {
+            let document_type = document_type_from_mime(&mime_type)
+                .ok_or_else(|| "The selected document is not supported".to_owned())?;
+            let extracted = extract_document(document_type, &bytes)
+                .map_err(|error| format!("Could not extract the selected document: {error}"))?;
+            (None, Some(preview_excerpt(&extracted.text)))
+        }
+    };
+    Ok(AttachmentPreview {
+        kind,
+        mime_type,
+        data_base64,
+        text,
+    })
+}
+
+fn preview_excerpt(text: &str) -> String {
+    let mut excerpt = text.chars().take(MAX_PREVIEW_CHARS).collect::<String>();
+    if text.chars().count() > MAX_PREVIEW_CHARS {
+        excerpt.push_str("\n…");
+    }
+    excerpt
 }
 
 pub fn resolve(storage: &Path, messages: &mut [AgentMessage]) -> Result<(), String> {
@@ -1023,6 +1073,10 @@ mod tests {
         std::fs::write(&source, b"\x89PNG\r\n\x1a\ncontent").unwrap();
         let storage = root.join("managed");
         let mut attachment = import(&storage, &source).unwrap();
+        let preview = preview(&storage, &attachment.id, &attachment.name).unwrap();
+        assert_eq!(preview.kind, AttachmentKind::Image);
+        assert_eq!(preview.mime_type, "image/png");
+        assert!(preview.data_base64.is_some());
         attachment.mime_type = "image/jpeg".to_owned();
         let mut messages = vec![user_message(vec![attachment])];
         resolve(&storage, &mut messages).unwrap();
@@ -1058,6 +1112,8 @@ mod tests {
         let storage = root.join("managed");
         let attachment = import(&storage, &source).unwrap();
         assert_eq!(attachment.kind, AttachmentKind::Text);
+        let preview = preview(&storage, &attachment.id, &attachment.name).unwrap();
+        assert!(preview.text.as_deref().unwrap().contains("println"));
         let mut messages = vec![user_message(vec![attachment])];
         resolve(&storage, &mut messages).unwrap();
         let context = messages[0].attachments[0].text_content.as_deref().unwrap();

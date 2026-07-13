@@ -20,13 +20,13 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use models::{
     AgentMessage, AgentSkillSummary, AgentStreamEvent, AgentToolDefinition, AgentTurnRequest,
-    AgentTurnResponse, ConfigWritePreview, ConfigWriteResult, ExternalConfigCandidate,
-    ExternalConfigTarget, GatewayDiagnostics, GitDiff, GitRollbackPreview, GitRollbackResult,
-    GitStatus, GoalCreateRequest, GoalState, ImageAttachment, McpSecretValues, McpServerConfig,
-    McpServerSnapshot, McpServerUpsert, MediaAsset, MediaBatchResult, MediaCatalog,
-    MediaGenerationRequest, MediaKind, MediaStatus, ModelInfo, ProviderHealth, ProviderProfile,
-    ProviderRequestLog, ProviderSettings, SkillInfo, StoredThread, ToolExecutionRequest,
-    ToolExecutionResponse,
+    AgentTurnResponse, AttachmentPreview, ConfigWritePreview, ConfigWriteResult,
+    ExternalConfigCandidate, ExternalConfigTarget, GatewayDiagnostics, GitDiff, GitRollbackPreview,
+    GitRollbackResult, GitStatus, GoalCreateRequest, GoalState, ImageAttachment, McpSecretValues,
+    McpServerConfig, McpServerSnapshot, McpServerUpsert, MediaAsset, MediaBatchResult,
+    MediaCatalog, MediaGenerationRequest, MediaKind, MediaStatus, ModelInfo, ProviderHealth,
+    ProviderProfile, ProviderRequestLog, ProviderSettings, SkillInfo, StoredThread,
+    ToolExecutionRequest, ToolExecutionResponse,
 };
 use reqwest::Client;
 use tauri::Manager;
@@ -105,6 +105,14 @@ fn load_api_key(profile_id: &str) -> Result<String, String> {
             Ok(value)
         }
         Err(_) => Err("This provider has no API key in the system credential vault".to_owned()),
+    }
+}
+
+fn load_profile_api_key(profile: &ProviderProfile) -> Result<String, String> {
+    match load_api_key(&profile.id) {
+        Ok(api_key) => Ok(api_key),
+        Err(_) if profile.allow_unauthenticated => Ok(String::new()),
+        Err(error) => Err(error),
     }
 }
 
@@ -351,7 +359,7 @@ fn attach_media_tools(request: &mut AgentTurnRequest) {
     request.available_tools.extend([
         AgentToolDefinition {
             name: "generate_images".to_owned(),
-            description: "Generate or edit images using the newest suitable image model from configured connections by default. Multiple generate_images calls in one response run concurrently. This may incur provider charges and requires approval unless full access is enabled.".to_owned(),
+            description: "Generate or edit raster images using the newest suitable image model from configured connections by default. When the user asks for an image, call this tool instead of writing an SVG, HTML, or other code-drawn substitute unless they explicitly request vector or code-native output. Multiple generate_images calls in one response run concurrently. This may incur provider charges and requires approval unless full access is enabled.".to_owned(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -362,7 +370,7 @@ fn attach_media_tools(request: &mut AgentTurnRequest) {
                     "size": { "type": "string", "description": "Examples: 1024x1024, 1536x1024, 1024x1536, 16:9" },
                     "quality": { "type": "string", "description": "Provider-specific quality such as auto, high, medium, 2K, or 4K" },
                     "outputFormat": { "type": "string", "enum": ["png", "jpeg", "webp"] },
-                    "background": { "type": "string", "enum": ["auto", "transparent", "opaque"] },
+                    "background": { "type": "string", "enum": ["auto", "transparent", "opaque"], "description": "Set transparent only when the user explicitly requests a transparent background; omit it otherwise. Model compatibility is enforced by the media backend." },
                     "referenceAttachmentIds": { "type": "array", "items": { "type": "string" }, "maxItems": 8, "description": "Managed image attachment IDs for edits or visual references" }
                 },
                 "required": ["prompt"]
@@ -432,6 +440,36 @@ fn media_storage(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
         .app_data_dir()
         .map_err(|error| format!("Could not locate the application data directory: {error}"))?
         .join("media"))
+}
+
+fn ensure_default_workspace(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let workspace = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| format!("Could not locate the local application data directory: {error}"))?
+        .join("workspace");
+    std::fs::create_dir_all(&workspace)
+        .map_err(|error| format!("Could not create the temporary workspace: {error}"))?;
+    filesystem::restrict_directory(&workspace)?;
+    Ok(workspace)
+}
+
+fn attach_default_workspace(
+    app: &tauri::AppHandle,
+    request: &mut AgentTurnRequest,
+) -> Result<(), String> {
+    if request
+        .workspace
+        .as_deref()
+        .is_none_or(|workspace| workspace.trim().is_empty())
+    {
+        request.workspace = Some(
+            ensure_default_workspace(app)?
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    Ok(())
 }
 
 fn subagent_storage(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
@@ -549,6 +587,7 @@ where
         let started_at = now_millis();
         let api_key = match key_loader(&profile.id) {
             Ok(api_key) => api_key,
+            Err(_) if profile.allow_unauthenticated => String::new(),
             Err(error) => {
                 record_provider_request(
                     database,
@@ -588,6 +627,7 @@ where
                 return Ok(result);
             }
             Err(error) => {
+                let error = agent::annotate_tool_compatibility_error(error, &request);
                 let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
                 let status = if error.contains("REQUEST_CANCELLED") {
                     "cancelled"
@@ -700,7 +740,7 @@ fn configured_media_providers(
     let mut providers = Vec::new();
     let mut errors = Vec::new();
     for profile in &settings.profiles {
-        match load_api_key(&profile.id) {
+        match load_profile_api_key(profile) {
             Ok(api_key) => providers.push(media::MediaProvider {
                 profile: profile.clone(),
                 api_key,
@@ -911,7 +951,7 @@ async fn refresh_media_asset_internal(
         .find(|profile| profile.id == asset.provider_id)
         .ok_or_else(|| "The connection used by this video job no longer exists".to_owned())?;
     let provider = media::MediaProvider {
-        api_key: load_api_key(&profile.id)?,
+        api_key: load_profile_api_key(&profile)?,
         profile,
     };
     media::refresh_asset(&state.client, &storage, database, &provider, asset).await
@@ -979,6 +1019,22 @@ fn delete_image_attachment(app: tauri::AppHandle, attachment_id: String) -> Resu
 }
 
 #[tauri::command]
+fn get_default_workspace(app: tauri::AppHandle) -> Result<String, String> {
+    Ok(ensure_default_workspace(&app)?
+        .to_string_lossy()
+        .into_owned())
+}
+
+#[tauri::command]
+fn preview_attachment(
+    app: tauri::AppHandle,
+    attachment_id: String,
+    name: String,
+) -> Result<AttachmentPreview, String> {
+    attachment::preview(&attachment_storage(&app)?, &attachment_id, &name)
+}
+
+#[tauri::command]
 fn list_provider_health(
     database: tauri::State<'_, database::Database>,
 ) -> Result<Vec<ProviderHealth>, String> {
@@ -1005,7 +1061,7 @@ async fn get_gateway_diagnostics(
     state: tauri::State<'_, AppState>,
     profile: ProviderProfile,
 ) -> Result<GatewayDiagnostics, String> {
-    let api_key = load_api_key(&profile.id)?;
+    let api_key = load_profile_api_key(&profile)?;
     agent::fetch_gateway_diagnostics(&state.client, &profile, &api_key).await
 }
 
@@ -1032,6 +1088,7 @@ async fn agent_turn(
     manager: tauri::State<'_, mcp::McpManager>,
     mut request: AgentTurnRequest,
 ) -> Result<AgentTurnResponse, String> {
+    attach_default_workspace(&app, &mut request)?;
     attach_images(&app, &mut request)?;
     attach_custom_instructions(&database, &mut request)?;
     attach_goal(&database, &mut request)?;
@@ -1064,6 +1121,7 @@ async fn agent_turn_stream(
     operation_id: String,
     on_event: Channel<AgentStreamEvent>,
 ) -> Result<AgentTurnResponse, String> {
+    attach_default_workspace(&app, &mut request)?;
     attach_images(&app, &mut request)?;
     attach_custom_instructions(&database, &mut request)?;
     attach_goal(&database, &mut request)?;
@@ -1098,7 +1156,7 @@ async fn agent_turn_stream(
             failover_attempts = failover_attempts.saturating_add(1);
         }
         let started_at = now_millis();
-        let api_key = match load_api_key(&profile.id) {
+        let api_key = match load_profile_api_key(&profile) {
             Ok(api_key) => api_key,
             Err(error) => {
                 record_provider_request(
@@ -1160,6 +1218,7 @@ async fn agent_turn_stream(
                 break;
             }
             Err(error) => {
+                let error = agent::annotate_tool_compatibility_error(error, &request);
                 let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
                 let status = if error.contains("REQUEST_CANCELLED") {
                     "cancelled"
@@ -1227,7 +1286,7 @@ async fn fetch_models(
         .filter(|value| !value.trim().is_empty())
         .map(|value| value.trim().to_owned())
         .map(Ok)
-        .unwrap_or_else(|| load_api_key(&profile.id))?;
+        .unwrap_or_else(|| load_profile_api_key(&profile))?;
     agent::fetch_models(&state.client, profile, &api_key).await
 }
 
@@ -1498,6 +1557,18 @@ fn media_request_from_tool(
         "kind".to_owned(),
         serde_json::Value::String(kind.to_owned()),
     );
+    if name == "generate_images"
+        && object
+            .get("background")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| value.eq_ignore_ascii_case("transparent"))
+        && !object
+            .get("prompt")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(media::prompt_requests_transparency)
+    {
+        object.remove("background");
+    }
     serde_json::from_value(value)
         .map_err(|error| format!("Invalid media generation arguments: {error}"))
 }
@@ -1633,8 +1704,13 @@ async fn execute_tool(
     database: tauri::State<'_, database::Database>,
     manager: tauri::State<'_, mcp::McpManager>,
     subagents: tauri::State<'_, subagent::SubagentManager>,
-    request: ToolExecutionRequest,
+    mut request: ToolExecutionRequest,
 ) -> Result<ToolExecutionResponse, String> {
+    if request.workspace.trim().is_empty() {
+        request.workspace = ensure_default_workspace(&app)?
+            .to_string_lossy()
+            .into_owned();
+    }
     Ok(
         if matches!(
             request.name.as_str(),
@@ -1703,7 +1779,9 @@ async fn execute_tool(
                 .arguments
                 .get("path")
                 .and_then(serde_json::Value::as_str);
-            let skills = discover_skills(&app, &database, Some(&request.workspace))?;
+            let workspace =
+                (!request.workspace.trim().is_empty()).then_some(request.workspace.as_str());
+            let skills = discover_skills(&app, &database, workspace)?;
             match skill::read_enabled(&skills, skill_id, relative) {
                 Ok(output) => ToolExecutionResponse {
                     output,
@@ -2181,6 +2259,8 @@ pub fn run() {
         .manage(mcp::McpManager::default())
         .manage(subagent::SubagentManager::default())
         .setup(|app| {
+            ensure_default_workspace(app.handle())
+                .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
             let app_data = app.path().app_data_dir()?;
             let media_directory = app_data.join("media");
             std::fs::create_dir_all(&media_directory)?;
@@ -2217,6 +2297,8 @@ pub fn run() {
             delete_media_asset,
             import_image_attachments,
             delete_image_attachment,
+            get_default_workspace,
+            preview_attachment,
             list_provider_health,
             list_provider_requests,
             reset_provider_health,
@@ -2273,6 +2355,7 @@ mod tests {
             base_url: "https://example.test".to_owned(),
             model: "test".to_owned(),
             protocol: models::ProviderProtocol::OpenaiResponses,
+            allow_unauthenticated: false,
             priority,
             failover_enabled,
         }
@@ -2302,6 +2385,52 @@ mod tests {
             .map(|item| item.id)
             .collect::<Vec<_>>();
         assert_eq!(ids, vec!["primary", "fast", "slow"]);
+    }
+
+    #[test]
+    fn media_tools_are_attached_without_a_project_workspace() {
+        let mut request = AgentTurnRequest {
+            profile: profile("primary", 10, true),
+            messages: Vec::new(),
+            mode: "agent".to_owned(),
+            workspace: None,
+            thread_id: Some("thread-media".to_owned()),
+            available_tools: Vec::new(),
+            available_skills: Vec::new(),
+            goal: None,
+            fallback_profiles: Vec::new(),
+            custom_instructions: None,
+        };
+        attach_media_tools(&mut request);
+        assert!(
+            request
+                .available_tools
+                .iter()
+                .any(|tool| tool.name == "generate_images")
+        );
+    }
+
+    #[test]
+    fn agent_image_tool_drops_accidental_transparency_but_keeps_explicit_intent() {
+        let accidental = media_request_from_tool(
+            "generate_images",
+            &serde_json::json!({
+                "prompt": "一只可爱的像素小猫",
+                "background": "transparent"
+            }),
+        )
+        .unwrap();
+        assert_eq!(accidental.background, None);
+
+        let explicit = media_request_from_tool(
+            "generate_images",
+            &serde_json::json!({
+                "prompt": "一只可爱的像素小猫，透明背景 PNG",
+                "background": "transparent"
+            }),
+        )
+        .unwrap();
+        assert_eq!(explicit.background.as_deref(), Some("transparent"));
     }
 
     #[test]
@@ -2458,6 +2587,46 @@ mod tests {
             logs.iter()
                 .any(|item| item.profile_id == "fallback" && item.status == "success")
         );
+        drop(database);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn explicitly_unauthenticated_profile_runs_without_a_saved_key() {
+        let root = std::env::temp_dir().join(format!("levelup-noauth-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let database = database::Database::open(&root.join("test.sqlite3")).unwrap();
+        let mut local = profile("local", 10, false);
+        local.allow_unauthenticated = true;
+        local.base_url = mock_responses_server(
+            "200 OK",
+            r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"local worked"}]}]}"#,
+        );
+        let request = AgentTurnRequest {
+            profile: local,
+            messages: vec![models::AgentMessage {
+                role: "user".to_owned(),
+                content: "test".to_owned(),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                internal: false,
+                attachments: Vec::new(),
+            }],
+            mode: "chat".to_owned(),
+            workspace: None,
+            thread_id: Some("thread-local".to_owned()),
+            available_tools: Vec::new(),
+            available_skills: Vec::new(),
+            goal: None,
+            fallback_profiles: Vec::new(),
+            custom_instructions: None,
+        };
+        let result = run_agent_turn_with_failover(&Client::new(), &database, request, |_| {
+            Err("No API key is stored".to_owned())
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.content, "local worked");
         drop(database);
         let _ = std::fs::remove_dir_all(root);
     }

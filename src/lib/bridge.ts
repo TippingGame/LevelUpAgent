@@ -18,6 +18,7 @@ import type {
   GoalState,
   GatewayDiagnostics,
   ImageAttachment,
+  AttachmentPreview,
   ModelInfo,
   McpSecretValues,
   McpServerConfig,
@@ -36,6 +37,11 @@ import type {
 } from "./types";
 
 export const isDesktop = () => "__TAURI_INTERNALS__" in window;
+
+export async function getDefaultWorkspace(): Promise<string | null> {
+  if (!isDesktop()) return null;
+  return invoke<string>("get_default_workspace");
+}
 
 export async function selectWorkspace(): Promise<string | null> {
   if (!isDesktop()) return null;
@@ -65,6 +71,13 @@ export async function importAttachments(sourcePaths: string[]): Promise<ImageAtt
 export async function deleteImageAttachment(attachmentId: string): Promise<boolean> {
   if (!isDesktop()) return false;
   return invoke<boolean>("delete_image_attachment", { attachmentId });
+}
+
+export async function previewAttachment(attachment: ImageAttachment): Promise<AttachmentPreview> {
+  return invoke<AttachmentPreview>("preview_attachment", {
+    attachmentId: attachment.id,
+    name: attachment.name,
+  });
 }
 
 export async function selectImageReferences(): Promise<ImageAttachment[]> {

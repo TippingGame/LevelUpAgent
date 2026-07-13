@@ -23,6 +23,7 @@ import {
   exportMediaAsset,
   generateMedia,
   getMediaCatalog,
+  importAttachments,
   listMediaAssets,
   mediaAssetUrl,
   refreshMediaAsset,
@@ -36,6 +37,7 @@ import type {
   MediaKind,
   MediaModelInfo,
 } from "../lib/types";
+import { AttachmentChip } from "./AttachmentChip";
 
 interface PromptDraft {
   id: string;
@@ -44,6 +46,9 @@ interface PromptDraft {
 
 interface MediaStudioProps {
   locale: string;
+  dropActive: boolean;
+  referenceDrop: { id: string; paths: string[] } | null;
+  onReferenceDropHandled: (id: string) => void;
   onConfigureConnection: () => void;
 }
 
@@ -53,7 +58,7 @@ const KIND_TABS: Array<{ kind: MediaKind; icon: typeof Image }> = [
   { kind: "audio", icon: AudioLines },
 ];
 
-export function MediaStudio({ locale, onConfigureConnection }: MediaStudioProps) {
+export function MediaStudio({ locale, dropActive, referenceDrop, onReferenceDropHandled, onConfigureConnection }: MediaStudioProps) {
   const [kind, setKind] = useState<MediaKind>("image");
   const [catalog, setCatalog] = useState<Awaited<ReturnType<typeof getMediaCatalog>> | null>(null);
   const [assets, setAssets] = useState<MediaAsset[]>([]);
@@ -83,6 +88,7 @@ export function MediaStudio({ locale, onConfigureConnection }: MediaStudioProps)
   const selected = models.find((model) => modelKey(model) === selectedKey)
     ?? models.find((model) => model.recommended)
     ?? models[0];
+  const transparentBackgroundSupported = !selected?.id.toLocaleLowerCase().includes("gpt-image-2");
   const visibleAssets = assets.filter((asset) => asset.kind === kind);
   const pendingVideoIds = assets
     .filter((asset) => asset.kind === "video" && (asset.status === "queued" || asset.status === "in_progress"))
@@ -116,6 +122,10 @@ export function MediaStudio({ locale, onConfigureConnection }: MediaStudioProps)
       setSelectedModels((current) => ({ ...current, [kind]: key }));
     }
   }, [kind, selected?.id, selected?.profileId]);
+
+  useEffect(() => {
+    if (!transparentBackgroundSupported && background === "transparent") setBackground("auto");
+  }, [transparentBackgroundSupported]);
 
   useEffect(() => {
     if (kind === "image") {
@@ -160,14 +170,47 @@ export function MediaStudio({ locale, onConfigureConnection }: MediaStudioProps)
   const addReferences = async () => {
     try {
       const selectedImages = await selectImageReferences();
-      setReferences((current) => {
-        const ids = new Set(current.map((item) => item.id));
-        return [...current, ...selectedImages.filter((item) => item.kind === "image" && !ids.has(item.id))].slice(0, 8);
-      });
+      await acceptReferences(selectedImages);
     } catch (reason) {
       setError(errorText(reason));
     }
   };
+
+  const acceptReferences = async (incoming: ImageAttachment[]) => {
+    const ids = new Set(references.map((item) => item.id));
+    const available = Math.max(0, 8 - references.length);
+    const accepted = incoming
+      .filter((item) => item.kind === "image" && !ids.has(item.id))
+      .slice(0, available);
+    const acceptedIds = new Set(accepted.map((item) => item.id));
+    const discarded = incoming.filter((item) => !acceptedIds.has(item.id));
+    setReferences((current) => [...current, ...accepted].slice(0, 8));
+    await Promise.all(discarded.map((item) => deleteImageAttachment(item.id).catch(() => false)));
+    if (incoming.some((item) => item.kind !== "image")) {
+      setError(tr("创作空间的拖拽区域只接受图片参考", "The Media Studio drop zone accepts image references only"));
+    } else if (accepted.length < incoming.length) {
+      setError(tr("最多添加 8 张参考图", "You can add up to 8 reference images"));
+    }
+  };
+
+  const importReferencePaths = async (paths: string[]) => {
+    const available = Math.max(0, 8 - references.length);
+    if (available === 0) {
+      setError(tr("最多添加 8 张参考图", "You can add up to 8 reference images"));
+      return;
+    }
+    const imported = await importAttachments(paths.slice(0, 12));
+    await acceptReferences(imported);
+  };
+
+  useEffect(() => {
+    if (!referenceDrop) return;
+    setKind("image");
+    setError(null);
+    void importReferencePaths(referenceDrop.paths)
+      .catch((reason) => setError(errorText(reason)))
+      .finally(() => onReferenceDropHandled(referenceDrop.id));
+  }, [referenceDrop?.id]);
 
   const removeReference = async (attachment: ImageAttachment) => {
     setReferences((current) => current.filter((item) => item.id !== attachment.id));
@@ -219,7 +262,19 @@ export function MediaStudio({ locale, onConfigureConnection }: MediaStudioProps)
   };
 
   return (
-    <main className="media-studio">
+    <main
+      className={`media-studio${dropActive ? " file-drag-active" : ""}`}
+      onDragEnter={(event) => event.preventDefault()}
+      onDragOver={(event) => event.preventDefault()}
+      onDrop={(event) => event.preventDefault()}
+    >
+      {dropActive && (
+        <div className="media-drop-overlay" role="status" aria-live="polite">
+          <span><ImagePlus size={28} /></span>
+          <strong>{tr("拖入即可作为参考图", "Drop to add image references")}</strong>
+          <small>{tr("图片会添加到当前创作任务，不会进入会话附件", "Images are added to Media Studio, not to the conversation")}</small>
+        </div>
+      )}
       <header className="media-topbar" data-tauri-drag-region>
         <div>
           <span className="media-title-icon"><WandSparkles size={17} /></span>
@@ -284,7 +339,11 @@ export function MediaStudio({ locale, onConfigureConnection }: MediaStudioProps)
               </select></label>
             )}
             {kind === "image" && <label><span>{tr("质量", "Quality")}</span><select value={quality} onChange={(event) => setQuality(event.target.value)}>{["auto", "high", "medium", "2K", "4K"].map((value) => <option key={value}>{value}</option>)}</select></label>}
-            {kind === "image" && <label><span>{tr("背景", "Background")}</span><select value={background} onChange={(event) => setBackground(event.target.value)}>{["auto", "transparent", "opaque"].map((value) => <option key={value}>{value}</option>)}</select></label>}
+            {kind === "image" && <label><span>{tr("背景", "Background")}</span><select value={background} onChange={(event) => setBackground(event.target.value)}>
+              <option value="auto">auto</option>
+              <option value="transparent" disabled={!transparentBackgroundSupported}>{transparentBackgroundSupported ? "transparent" : tr("transparent（当前模型不支持）", "transparent (unsupported by this model)")}</option>
+              <option value="opaque">opaque</option>
+            </select></label>}
             {kind !== "video" && <label><span>{tr("格式", "Format")}</span><select value={outputFormat} onChange={(event) => setOutputFormat(event.target.value)}>{(kind === "image" ? ["png", "webp", "jpeg"] : ["mp3", "wav", "aac", "flac", "opus"]).map((value) => <option key={value}>{value}</option>)}</select></label>}
             {kind === "video" && <label><span>{tr("时长", "Duration")}</span><select value={seconds} onChange={(event) => setSeconds(Number(event.target.value))}>{[4, 8, 12].map((value) => <option value={value} key={value}>{value}s</option>)}</select></label>}
             <label><span>{tr("每条数量", "Outputs each")}</span><select value={count} onChange={(event) => setCount(Number(event.target.value))}>{Array.from({ length: kind === "image" ? 8 : 4 }, (_, index) => index + 1).map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
@@ -295,8 +354,11 @@ export function MediaStudio({ locale, onConfigureConnection }: MediaStudioProps)
 
           {kind === "image" && (
             <div className="media-reference-row">
-              <button onClick={() => void addReferences()}><ImagePlus size={14} />{tr("添加参考图", "Add references")}</button>
-              <div>{references.map((attachment) => <span key={attachment.id}>{attachment.name}<button onClick={() => void removeReference(attachment)}><X size={11} /></button></span>)}</div>
+              <div className="media-reference-heading">
+                <span>{tr("参考图", "References")}<small>{tr("可直接拖拽图片到创作空间", "Drop images anywhere in Media Studio")}</small></span>
+                <button onClick={() => void addReferences()}><ImagePlus size={14} />{tr("选择图片", "Choose images")}</button>
+              </div>
+              <div>{references.map((attachment) => <AttachmentChip attachment={attachment} onRemove={() => void removeReference(attachment)} key={attachment.id} />)}</div>
             </div>
           )}
 
@@ -330,8 +392,10 @@ export function MediaStudio({ locale, onConfigureConnection }: MediaStudioProps)
 export function MediaAssetCard({ asset, locale, onDelete }: { asset: MediaAsset; locale: string; onDelete?: () => void }) {
   const url = mediaAssetUrl(asset);
   const [exporting, setExporting] = useState(false);
+  const [promptExpanded, setPromptExpanded] = useState(false);
   const [exportFeedback, setExportFeedback] = useState<{ error: boolean; text: string } | null>(null);
   const canExport = asset.status === "completed" && Boolean(asset.filePath && asset.fileName);
+  const canExpandPrompt = asset.prompt.trim().length > 42;
 
   const exportAsset = async () => {
     if (!canExport || exporting) return;
@@ -359,8 +423,15 @@ export function MediaAssetCard({ asset, locale, onDelete }: { asset: MediaAsset;
         {asset.status === "failed" && <div className="failed-preview"><CircleAlert size={24} /><strong>{tr("生成失败", "Generation failed")}</strong></div>}
       </div>
       <div className="media-asset-content">
-        <p title={asset.prompt}>{asset.prompt}</p>
-        <div><span>{asset.model}</span><span>{asset.providerName}</span></div>
+        <div className={`media-asset-prompt${promptExpanded ? " expanded" : ""}`}>
+          <p title={asset.prompt}>{asset.prompt}</p>
+          {canExpandPrompt && (
+            <button type="button" onClick={() => setPromptExpanded((value) => !value)}>
+              {promptExpanded ? tr("收起提示词", "Collapse prompt") : tr("展开完整提示词", "Show full prompt")}
+            </button>
+          )}
+        </div>
+        <div className="media-asset-meta"><span>{asset.model}</span><span>{asset.providerName}</span></div>
         <small><Clock3 size={11} />{new Intl.DateTimeFormat(locale, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(asset.createdAt)}</small>
         {asset.error && <em title={asset.error}>{mediaErrorSummary(asset.error)}</em>}
         {exportFeedback && <em className={exportFeedback.error ? "media-export-error" : "media-export-success"} title={exportFeedback.text}>{exportFeedback.error ? <CircleAlert size={11} /> : <Check size={11} />}{exportFeedback.text}</em>}
