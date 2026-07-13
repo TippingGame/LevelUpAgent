@@ -5,6 +5,7 @@ mod database;
 mod filesystem;
 mod git;
 mod mcp;
+mod media;
 mod migration;
 mod models;
 mod process;
@@ -22,7 +23,8 @@ use models::{
     AgentTurnResponse, ConfigWritePreview, ConfigWriteResult, ExternalConfigCandidate,
     ExternalConfigTarget, GatewayDiagnostics, GitDiff, GitRollbackPreview, GitRollbackResult,
     GitStatus, GoalCreateRequest, GoalState, ImageAttachment, McpSecretValues, McpServerConfig,
-    McpServerSnapshot, McpServerUpsert, ModelInfo, ProviderHealth, ProviderProfile,
+    McpServerSnapshot, McpServerUpsert, MediaAsset, MediaBatchResult, MediaCatalog,
+    MediaGenerationRequest, MediaKind, MediaStatus, ModelInfo, ProviderHealth, ProviderProfile,
     ProviderRequestLog, ProviderSettings, SkillInfo, StoredThread, ToolExecutionRequest,
     ToolExecutionResponse,
 };
@@ -342,12 +344,94 @@ fn attach_subagent_tools(request: &mut AgentTurnRequest) {
     ]);
 }
 
+fn attach_media_tools(request: &mut AgentTurnRequest) {
+    if !matches!(request.mode.as_str(), "agent" | "goal") {
+        return;
+    }
+    request.available_tools.extend([
+        AgentToolDefinition {
+            name: "generate_images".to_owned(),
+            description: "Generate or edit images using the newest suitable image model from configured connections by default. Multiple generate_images calls in one response run concurrently. This may incur provider charges and requires approval unless full access is enabled.".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string", "description": "Detailed image prompt" },
+                    "count": { "type": "integer", "minimum": 1, "maximum": 8, "default": 1 },
+                    "model": { "type": "string", "description": "Optional explicit image model; omit to use the newest recommended model" },
+                    "profileId": { "type": "string", "description": "Optional configured connection ID" },
+                    "size": { "type": "string", "description": "Examples: 1024x1024, 1536x1024, 1024x1536, 16:9" },
+                    "quality": { "type": "string", "description": "Provider-specific quality such as auto, high, medium, 2K, or 4K" },
+                    "outputFormat": { "type": "string", "enum": ["png", "jpeg", "webp"] },
+                    "background": { "type": "string", "enum": ["auto", "transparent", "opaque"] },
+                    "referenceAttachmentIds": { "type": "array", "items": { "type": "string" }, "maxItems": 8, "description": "Managed image attachment IDs for edits or visual references" }
+                },
+                "required": ["prompt"]
+            }),
+            read_only: false,
+        },
+        AgentToolDefinition {
+            name: "generate_videos".to_owned(),
+            description: "Start one or more video generations using the newest suitable video model by default. Returns persistent job assets. If any job is queued or in progress, call check_media_jobs until terminal before giving the final summary. Multiple generation calls run concurrently and may incur provider charges.".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string", "description": "Detailed video prompt including subject, motion, camera, lighting, and timing" },
+                    "count": { "type": "integer", "minimum": 1, "maximum": 4, "default": 1 },
+                    "model": { "type": "string", "description": "Optional explicit video model; omit for newest recommended" },
+                    "profileId": { "type": "string" },
+                    "size": { "type": "string", "description": "Examples: 1280x720, 720x1280, 16:9, 9:16" },
+                    "seconds": { "type": "integer", "minimum": 1, "maximum": 20 }
+                },
+                "required": ["prompt"]
+            }),
+            read_only: false,
+        },
+        AgentToolDefinition {
+            name: "generate_speech".to_owned(),
+            description: "Generate spoken audio from text using the newest suitable TTS model by default. Multiple speech calls run concurrently and may incur provider charges.".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string", "description": "Exact text to speak" },
+                    "voice": { "type": "string", "description": "Provider voice name; defaults to alloy for OpenAI and Kore for Gemini" },
+                    "instructions": { "type": "string", "description": "Delivery, emotion, accent, or pacing instructions" },
+                    "outputFormat": { "type": "string", "enum": ["mp3", "wav", "aac", "flac", "opus", "pcm"] },
+                    "count": { "type": "integer", "minimum": 1, "maximum": 4, "default": 1 },
+                    "model": { "type": "string", "description": "Optional explicit TTS model; omit for newest recommended" },
+                    "profileId": { "type": "string" }
+                },
+                "required": ["prompt"]
+            }),
+            read_only: false,
+        },
+        AgentToolDefinition {
+            name: "check_media_jobs".to_owned(),
+            description: "Refresh persistent video generation jobs and return their latest status and local paths. Call again while any requested asset is queued or in progress; summarize only after all are completed or failed.".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "assetIds": { "type": "array", "items": { "type": "string" }, "maxItems": 16, "description": "Video asset IDs returned by generate_videos; omit to refresh this task's pending video jobs" }
+                }
+            }),
+            read_only: true,
+        },
+    ]);
+}
+
 fn attachment_storage(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(app
         .path()
         .app_data_dir()
         .map_err(|error| format!("Could not locate the application data directory: {error}"))?
         .join("attachments"))
+}
+
+fn media_storage(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Could not locate the application data directory: {error}"))?
+        .join("media"))
 }
 
 fn subagent_storage(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
@@ -610,6 +694,261 @@ fn save_provider_settings(
     database.set_provider_settings(&settings)
 }
 
+fn configured_media_providers(
+    settings: &ProviderSettings,
+) -> (Vec<media::MediaProvider>, Vec<String>) {
+    let mut providers = Vec::new();
+    let mut errors = Vec::new();
+    for profile in &settings.profiles {
+        match load_api_key(&profile.id) {
+            Ok(api_key) => providers.push(media::MediaProvider {
+                profile: profile.clone(),
+                api_key,
+            }),
+            Err(error) => errors.push(format!("{}: {error}", profile.name)),
+        }
+    }
+    (providers, errors)
+}
+
+fn media_settings(database: &database::Database) -> Result<ProviderSettings, String> {
+    let settings = database.provider_settings()?.ok_or_else(|| {
+        "Configure at least one model connection before using Media Studio".to_owned()
+    })?;
+    validate_provider_settings(&settings)?;
+    Ok(settings)
+}
+
+#[tauri::command]
+async fn get_media_catalog(
+    state: tauri::State<'_, AppState>,
+    database: tauri::State<'_, database::Database>,
+) -> Result<MediaCatalog, String> {
+    let settings = media_settings(&database)?;
+    let (providers, mut credential_errors) = configured_media_providers(&settings);
+    let mut catalog =
+        media::discover_catalog(&state.client, &providers, &settings.active_profile_id).await;
+    credential_errors.append(&mut catalog.errors);
+    catalog.errors = credential_errors;
+    Ok(catalog)
+}
+
+fn read_media_references(
+    app: &tauri::AppHandle,
+    request: &MediaGenerationRequest,
+) -> Result<Vec<attachment::ManagedImage>, String> {
+    let storage = attachment_storage(app)?;
+    let mut seen = HashSet::new();
+    request
+        .reference_attachment_ids
+        .iter()
+        .filter(|id| seen.insert((*id).clone()))
+        .map(|id| attachment::read_managed_image(&storage, id))
+        .collect()
+}
+
+async fn generate_media_internal(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    database: &database::Database,
+    request: MediaGenerationRequest,
+    thread_id: Option<&str>,
+) -> Result<MediaBatchResult, String> {
+    let settings = media_settings(database)?;
+    let (providers, credential_errors) = configured_media_providers(&settings);
+    if providers.is_empty() {
+        return Err(if credential_errors.is_empty() {
+            "No media-capable connection is configured".to_owned()
+        } else {
+            credential_errors.join("; ")
+        });
+    }
+    let (selections, catalog) = match (
+        request.profile_id.as_deref(),
+        request
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+    ) {
+        (Some(profile_id), Some(model)) => {
+            let provider = providers
+                .iter()
+                .find(|provider| provider.profile.id == profile_id)
+                .cloned()
+                .ok_or_else(|| {
+                    "The selected media connection is unavailable or has no API key".to_owned()
+                })?;
+            (
+                vec![media::MediaSelection {
+                    provider,
+                    model: model.trim_start_matches("models/").to_owned(),
+                }],
+                None,
+            )
+        }
+        _ => {
+            let catalog =
+                media::discover_catalog(&state.client, &providers, &settings.active_profile_id)
+                    .await;
+            let selections = media::selection_candidates(&providers, &catalog, &request);
+            (selections, Some(catalog))
+        }
+    };
+    if selections.is_empty() {
+        let catalog = catalog.expect("automatic media selection always has a catalog");
+        let detail = if catalog.models.is_empty() {
+            "No image, video, or TTS model was discovered. Check that the connection exposes /models and that the account can access a generation model."
+        } else {
+            "No discovered media model matches the requested kind, connection, and model."
+        };
+        let errors = credential_errors
+            .into_iter()
+            .chain(catalog.errors)
+            .collect::<Vec<_>>();
+        return Err(if errors.is_empty() {
+            detail.to_owned()
+        } else {
+            format!("{detail} {}", errors.join("; "))
+        });
+    }
+    let references = read_media_references(app, &request)?;
+    let storage = media_storage(app)?;
+    let mut failures = Vec::new();
+    for selection in &selections {
+        match media::generate_batch(
+            &state.client,
+            &storage,
+            database,
+            selection,
+            &request,
+            thread_id,
+            &references,
+        )
+        .await
+        {
+            Ok(result) => return Ok(result),
+            Err(error) => failures.push((
+                format!("{} / {}", selection.provider.profile.name, selection.model),
+                error,
+            )),
+        }
+    }
+    let first = &selections[0];
+    let error = format_media_failures(&failures);
+    media::failed_asset(
+        database,
+        &request,
+        thread_id,
+        &first.provider.profile.id,
+        &first.provider.profile.name,
+        &first.model,
+        &error,
+    )
+}
+
+fn format_media_failures(failures: &[(String, String)]) -> String {
+    let mut groups: Vec<(String, Vec<&str>)> = Vec::new();
+    for (candidate, error) in failures {
+        if let Some((_, candidates)) = groups.iter_mut().find(|(value, _)| value == error) {
+            candidates.push(candidate);
+        } else {
+            groups.push((error.clone(), vec![candidate]));
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(error, candidates)| {
+            let label = if candidates.len() == 1 {
+                candidates[0].to_owned()
+            } else {
+                format!("{} (+{} candidates)", candidates[0], candidates.len() - 1)
+            };
+            format!("{label}: {error}")
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+#[tauri::command]
+async fn generate_media(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    database: tauri::State<'_, database::Database>,
+    request: MediaGenerationRequest,
+    thread_id: Option<String>,
+) -> Result<MediaBatchResult, String> {
+    generate_media_internal(&app, &state, &database, request, thread_id.as_deref()).await
+}
+
+#[tauri::command]
+fn list_media_assets(
+    app: tauri::AppHandle,
+    database: tauri::State<'_, database::Database>,
+    limit: Option<usize>,
+) -> Result<Vec<MediaAsset>, String> {
+    media::list_assets(&database, &media_storage(&app)?, limit.unwrap_or(200))
+}
+
+async fn refresh_media_asset_internal(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    database: &database::Database,
+    asset_id: &str,
+) -> Result<MediaAsset, String> {
+    let storage = media_storage(app)?;
+    let asset = media::get_asset(database, &storage, asset_id)?
+        .ok_or_else(|| "Media asset was not found".to_owned())?;
+    if asset.kind != MediaKind::Video
+        || matches!(asset.status, MediaStatus::Completed | MediaStatus::Failed)
+    {
+        return Ok(asset);
+    }
+    let settings = media_settings(database)?;
+    let profile = settings
+        .profiles
+        .into_iter()
+        .find(|profile| profile.id == asset.provider_id)
+        .ok_or_else(|| "The connection used by this video job no longer exists".to_owned())?;
+    let provider = media::MediaProvider {
+        api_key: load_api_key(&profile.id)?,
+        profile,
+    };
+    media::refresh_asset(&state.client, &storage, database, &provider, asset).await
+}
+
+#[tauri::command]
+async fn refresh_media_asset(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    database: tauri::State<'_, database::Database>,
+    asset_id: String,
+) -> Result<MediaAsset, String> {
+    refresh_media_asset_internal(&app, &state, &database, &asset_id).await
+}
+
+#[tauri::command]
+async fn export_media_asset(
+    app: tauri::AppHandle,
+    database: tauri::State<'_, database::Database>,
+    asset_id: String,
+    destination_path: String,
+) -> Result<String, String> {
+    let destination = std::path::PathBuf::from(destination_path);
+    let exported =
+        media::export_asset(&database, &media_storage(&app)?, &asset_id, &destination).await?;
+    Ok(exported.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn delete_media_asset(
+    app: tauri::AppHandle,
+    database: tauri::State<'_, database::Database>,
+    asset_id: String,
+) -> Result<bool, String> {
+    media::delete_asset(&database, &media_storage(&app)?, &asset_id)
+}
+
 #[tauri::command]
 fn import_image_attachments(
     app: tauri::AppHandle,
@@ -697,6 +1036,7 @@ async fn agent_turn(
     attach_custom_instructions(&database, &mut request)?;
     attach_goal(&database, &mut request)?;
     attach_subagent_tools(&mut request);
+    attach_media_tools(&mut request);
     attach_skills(&app, &database, &mut request)?;
     attach_mcp_tools(&database, &manager, &mut request).await?;
     let goal_thread = (request.mode == "goal")
@@ -728,6 +1068,7 @@ async fn agent_turn_stream(
     attach_custom_instructions(&database, &mut request)?;
     attach_goal(&database, &mut request)?;
     attach_subagent_tools(&mut request);
+    attach_media_tools(&mut request);
     attach_skills(&app, &database, &mut request)?;
     attach_mcp_tools(&database, &manager, &mut request).await?;
     let goal_thread = (request.mode == "goal")
@@ -1139,6 +1480,152 @@ fn tool_execution_result(result: Result<String, String>) -> ToolExecutionRespons
     }
 }
 
+fn media_request_from_tool(
+    name: &str,
+    arguments: &serde_json::Value,
+) -> Result<MediaGenerationRequest, String> {
+    let kind = match name {
+        "generate_images" => "image",
+        "generate_videos" => "video",
+        "generate_speech" => "audio",
+        _ => return Err("Unknown media generation tool".to_owned()),
+    };
+    let mut value = arguments.clone();
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "Media tool arguments must be an object".to_owned())?;
+    object.insert(
+        "kind".to_owned(),
+        serde_json::Value::String(kind.to_owned()),
+    );
+    serde_json::from_value(value)
+        .map_err(|error| format!("Invalid media generation arguments: {error}"))
+}
+
+async fn execute_media_generation_tool(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    database: &database::Database,
+    request: &ToolExecutionRequest,
+) -> ToolExecutionResponse {
+    let result = match media_request_from_tool(&request.name, &request.arguments) {
+        Ok(generation) => {
+            generate_media_internal(
+                app,
+                state,
+                database,
+                generation,
+                request.thread_id.as_deref(),
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    };
+    match result {
+        Ok(result) => {
+            let is_error = result
+                .assets
+                .iter()
+                .all(|asset| asset.status == MediaStatus::Failed);
+            ToolExecutionResponse {
+                output: serde_json::to_string(&result)
+                    .unwrap_or_else(|error| format!("Could not encode media result: {error}")),
+                is_error,
+            }
+        }
+        Err(output) => ToolExecutionResponse {
+            output,
+            is_error: true,
+        },
+    }
+}
+
+async fn execute_media_job_check(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    database: &database::Database,
+    request: &ToolExecutionRequest,
+) -> ToolExecutionResponse {
+    let requested: Vec<String> = request
+        .arguments
+        .get("assetIds")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let ids: Vec<String> = if requested.is_empty() {
+        let storage = match media_storage(app) {
+            Ok(path) => path,
+            Err(output) => {
+                return ToolExecutionResponse {
+                    output,
+                    is_error: true,
+                };
+            }
+        };
+        match media::list_assets(database, &storage, 200) {
+            Ok(assets) => assets
+                .into_iter()
+                .filter(|asset| {
+                    asset.kind == MediaKind::Video
+                        && !matches!(asset.status, MediaStatus::Completed | MediaStatus::Failed)
+                        && request
+                            .thread_id
+                            .as_deref()
+                            .is_none_or(|thread_id| asset.thread_id.as_deref() == Some(thread_id))
+                })
+                .map(|asset| asset.id)
+                .collect(),
+            Err(output) => {
+                return ToolExecutionResponse {
+                    output,
+                    is_error: true,
+                };
+            }
+        }
+    } else {
+        requested.into_iter().take(16).collect()
+    };
+    let mut assets = Vec::new();
+    let mut refresh_errors = Vec::new();
+    for attempt in 0..6 {
+        assets.clear();
+        refresh_errors.clear();
+        for id in &ids {
+            match refresh_media_asset_internal(app, state, database, id).await {
+                Ok(asset) => assets.push(asset),
+                Err(error) => {
+                    refresh_errors.push(serde_json::json!({ "assetId": id, "error": error }))
+                }
+            }
+        }
+        let all_terminal = assets
+            .iter()
+            .all(|asset| matches!(asset.status, MediaStatus::Completed | MediaStatus::Failed));
+        if all_terminal || !refresh_errors.is_empty() || attempt == 5 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+    let all_terminal = assets
+        .iter()
+        .all(|asset| matches!(asset.status, MediaStatus::Completed | MediaStatus::Failed));
+    ToolExecutionResponse {
+        output: serde_json::to_string(&serde_json::json!({
+            "assets": assets,
+            "refreshErrors": refresh_errors,
+            "allTerminal": all_terminal
+        }))
+        .unwrap_or_else(|error| format!("Could not encode media job status: {error}")),
+        is_error: !refresh_errors.is_empty(),
+    }
+}
+
 #[tauri::command]
 async fn execute_tool(
     app: tauri::AppHandle,
@@ -1148,80 +1635,91 @@ async fn execute_tool(
     subagents: tauri::State<'_, subagent::SubagentManager>,
     request: ToolExecutionRequest,
 ) -> Result<ToolExecutionResponse, String> {
-    Ok(if request.name == "delegate_task" {
-        tool_execution_result(delegate_task(&app, &state, &database, &subagents, &request).await)
-    } else if request.name == "apply_subagent_patch" {
-        tool_execution_result(apply_delegated_patch(&subagents, &request).await)
-    } else if request.name == "get_goal" {
-        let thread_id = request
-            .thread_id
-            .as_deref()
-            .ok_or_else(|| "Goal tool requires a task ID".to_owned())?;
-        match database.get_goal(thread_id)? {
-            Some(goal) => ToolExecutionResponse {
-                output: serde_json::to_string_pretty(&goal)
-                    .map_err(|error| format!("Could not encode Goal: {error}"))?,
-                is_error: false,
-            },
-            None => ToolExecutionResponse {
-                output: "This task has no Goal".to_owned(),
-                is_error: true,
-            },
-        }
-    } else if request.name == "update_goal" {
-        let thread_id = request
-            .thread_id
-            .as_deref()
-            .ok_or_else(|| "Goal tool requires a task ID".to_owned())?;
-        let status = request
-            .arguments
-            .get("status")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "Missing string argument: status".to_owned())?;
-        let evidence = request
-            .arguments
-            .get("evidence")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "Missing string argument: evidence".to_owned())?;
-        match database.update_goal_from_agent(thread_id, status, evidence) {
-            Ok(goal) => ToolExecutionResponse {
-                output: format!(
-                    "Goal status is now {:?}. Completion requires a separate audit; blocked requires three consecutive identical reports.",
-                    goal.status
-                ),
-                is_error: false,
-            },
-            Err(output) => ToolExecutionResponse {
-                output,
-                is_error: true,
-            },
-        }
-    } else if request.name == "read_skill" {
-        let skill_id = request
-            .arguments
-            .get("skillId")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "Missing string argument: skillId".to_owned())?;
-        let relative = request
-            .arguments
-            .get("path")
-            .and_then(serde_json::Value::as_str);
-        let skills = discover_skills(&app, &database, Some(&request.workspace))?;
-        match skill::read_enabled(&skills, skill_id, relative) {
-            Ok(output) => ToolExecutionResponse {
-                output,
-                is_error: false,
-            },
-            Err(output) => ToolExecutionResponse {
-                output,
-                is_error: true,
-            },
-        }
-    } else if request.name.starts_with("mcp_") {
-        manager.execute(&request.name, request.arguments).await
-    } else {
-        tools::execute(request).await
-    })
+    Ok(
+        if matches!(
+            request.name.as_str(),
+            "generate_images" | "generate_videos" | "generate_speech"
+        ) {
+            execute_media_generation_tool(&app, &state, &database, &request).await
+        } else if request.name == "check_media_jobs" {
+            execute_media_job_check(&app, &state, &database, &request).await
+        } else if request.name == "delegate_task" {
+            tool_execution_result(
+                delegate_task(&app, &state, &database, &subagents, &request).await,
+            )
+        } else if request.name == "apply_subagent_patch" {
+            tool_execution_result(apply_delegated_patch(&subagents, &request).await)
+        } else if request.name == "get_goal" {
+            let thread_id = request
+                .thread_id
+                .as_deref()
+                .ok_or_else(|| "Goal tool requires a task ID".to_owned())?;
+            match database.get_goal(thread_id)? {
+                Some(goal) => ToolExecutionResponse {
+                    output: serde_json::to_string_pretty(&goal)
+                        .map_err(|error| format!("Could not encode Goal: {error}"))?,
+                    is_error: false,
+                },
+                None => ToolExecutionResponse {
+                    output: "This task has no Goal".to_owned(),
+                    is_error: true,
+                },
+            }
+        } else if request.name == "update_goal" {
+            let thread_id = request
+                .thread_id
+                .as_deref()
+                .ok_or_else(|| "Goal tool requires a task ID".to_owned())?;
+            let status = request
+                .arguments
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "Missing string argument: status".to_owned())?;
+            let evidence = request
+                .arguments
+                .get("evidence")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "Missing string argument: evidence".to_owned())?;
+            match database.update_goal_from_agent(thread_id, status, evidence) {
+                Ok(goal) => ToolExecutionResponse {
+                    output: format!(
+                        "Goal status is now {:?}. Completion requires a separate audit; blocked requires three consecutive identical reports.",
+                        goal.status
+                    ),
+                    is_error: false,
+                },
+                Err(output) => ToolExecutionResponse {
+                    output,
+                    is_error: true,
+                },
+            }
+        } else if request.name == "read_skill" {
+            let skill_id = request
+                .arguments
+                .get("skillId")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "Missing string argument: skillId".to_owned())?;
+            let relative = request
+                .arguments
+                .get("path")
+                .and_then(serde_json::Value::as_str);
+            let skills = discover_skills(&app, &database, Some(&request.workspace))?;
+            match skill::read_enabled(&skills, skill_id, relative) {
+                Ok(output) => ToolExecutionResponse {
+                    output,
+                    is_error: false,
+                },
+                Err(output) => ToolExecutionResponse {
+                    output,
+                    is_error: true,
+                },
+            }
+        } else if request.name.starts_with("mcp_") {
+            manager.execute(&request.name, request.arguments).await
+        } else {
+            tools::execute(request).await
+        },
+    )
 }
 
 #[tauri::command]
@@ -1683,7 +2181,14 @@ pub fn run() {
         .manage(mcp::McpManager::default())
         .manage(subagent::SubagentManager::default())
         .setup(|app| {
-            let database_path = app.path().app_data_dir()?.join("levelup-agent.sqlite3");
+            let app_data = app.path().app_data_dir()?;
+            let media_directory = app_data.join("media");
+            std::fs::create_dir_all(&media_directory)?;
+            filesystem::restrict_directory(&media_directory)
+                .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+            app.asset_protocol_scope()
+                .allow_directory(&media_directory, true)?;
+            let database_path = app_data.join("levelup-agent.sqlite3");
             let database = database::Database::open(&database_path)
                 .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
             app.manage(database);
@@ -1704,6 +2209,12 @@ pub fn run() {
             delete_api_key,
             get_provider_settings,
             save_provider_settings,
+            get_media_catalog,
+            generate_media,
+            list_media_assets,
+            refresh_media_asset,
+            export_media_asset,
+            delete_media_asset,
             import_image_attachments,
             delete_image_attachment,
             list_provider_health,
@@ -1831,6 +2342,26 @@ mod tests {
         assert!(validate_provider_settings(&settings).is_err());
     }
 
+    #[test]
+    fn repeated_media_candidate_failures_are_compacted() {
+        let failures = vec![
+            (
+                "LevelUpAPI / gpt-image-2".to_owned(),
+                "Media provider request failed (502 Bad Gateway): Upstream request failed"
+                    .to_owned(),
+            ),
+            (
+                "LevelUpAPI / gpt-image-1.5".to_owned(),
+                "Media provider request failed (502 Bad Gateway): Upstream request failed"
+                    .to_owned(),
+            ),
+        ];
+        assert_eq!(
+            format_media_failures(&failures),
+            "LevelUpAPI / gpt-image-2 (+1 candidates): Media provider request failed (502 Bad Gateway): Upstream request failed"
+        );
+    }
+
     fn mock_responses_server(status: &'static str, body: &'static str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -1929,6 +2460,115 @@ mod tests {
         );
         drop(database);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires LEVELUP_TEST_APP_DATA and an explicitly configured real provider"]
+    async fn configured_media_provider_real_smoke() {
+        let app_data = std::env::var_os("LEVELUP_TEST_APP_DATA")
+            .map(std::path::PathBuf::from)
+            .expect("set LEVELUP_TEST_APP_DATA to the LevelUpAgent application-data directory");
+        let database = database::Database::open(&app_data.join("levelup-agent.sqlite3")).unwrap();
+        let settings = media_settings(&database).unwrap();
+        let (providers, credential_errors) = configured_media_providers(&settings);
+        assert!(
+            credential_errors.is_empty(),
+            "could not load configured media credentials: {}",
+            credential_errors.join("; ")
+        );
+        assert!(
+            !providers.is_empty(),
+            "no configured provider has a credential"
+        );
+
+        let client = Client::builder()
+            .user_agent("LevelUpAgent/real-media-smoke")
+            .timeout(std::time::Duration::from_secs(180))
+            .build()
+            .unwrap();
+        let catalog =
+            media::discover_catalog(&client, &providers, settings.active_profile_id.as_str()).await;
+        assert!(
+            catalog.errors.is_empty(),
+            "media catalog errors: {}",
+            catalog.errors.join("; ")
+        );
+        let image_models = catalog
+            .models
+            .iter()
+            .filter(|model| model.kind == MediaKind::Image)
+            .collect::<Vec<_>>();
+        let recommended = image_models
+            .iter()
+            .copied()
+            .find(|model| model.recommended)
+            .expect("no recommended image model was discovered");
+        assert!(
+            image_models
+                .iter()
+                .all(|model| recommended.rank >= model.rank),
+            "the recommended image model is not the highest-ranked available model"
+        );
+        println!(
+            "discovered_image_models={} recommended_image_model={}",
+            image_models.len(),
+            recommended.id
+        );
+
+        if std::env::var("LEVELUP_REAL_MEDIA_GENERATE").as_deref() != Ok("1") {
+            return;
+        }
+        let request = MediaGenerationRequest {
+            profile_id: None,
+            kind: MediaKind::Image,
+            model: None,
+            prompt: "A minimal verification image: one coral circle centered on a clean warm-white background, no text".to_owned(),
+            count: 1,
+            size: Some("1024x1024".to_owned()),
+            quality: None,
+            output_format: Some("png".to_owned()),
+            background: None,
+            voice: None,
+            instructions: None,
+            seconds: None,
+            reference_attachment_ids: Vec::new(),
+        };
+        let selections = media::selection_candidates(&providers, &catalog, &request);
+        let selection = selections
+            .first()
+            .expect("automatic image selection returned no candidate");
+        assert_eq!(selection.model, recommended.id);
+        let storage = app_data.join("media");
+        let result = media::generate_batch(
+            &client,
+            &storage,
+            &database,
+            selection,
+            &request,
+            Some("real-media-smoke"),
+            &[],
+        )
+        .await
+        .unwrap();
+        assert!(
+            result.errors.is_empty(),
+            "generation errors: {:?}",
+            result.errors
+        );
+        let asset = result.assets.first().expect("generation returned no asset");
+        assert_eq!(asset.status, MediaStatus::Completed);
+        let path = asset
+            .file_path
+            .as_deref()
+            .expect("completed generation has no local file path");
+        assert!(std::path::Path::new(path).is_file());
+        println!(
+            "generated_asset_id={} generated_model={}",
+            asset.id, asset.model
+        );
+        if std::env::var("LEVELUP_REAL_MEDIA_KEEP").as_deref() != Ok("1") {
+            assert!(media::delete_asset(&database, &storage, &asset.id).unwrap());
+        }
     }
 
     #[tokio::test]

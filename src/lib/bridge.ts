@@ -1,5 +1,5 @@
-import { Channel, invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
+import { Channel, convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import type {
   AgentMessage,
   AgentMode,
@@ -22,6 +22,10 @@ import type {
   McpSecretValues,
   McpServerConfig,
   McpServerSnapshot,
+  MediaAsset,
+  MediaBatchResult,
+  MediaCatalog,
+  MediaGenerationRequest,
   ProviderProfile,
   ProviderSettings,
   ProviderHealth,
@@ -61,6 +65,60 @@ export async function importAttachments(sourcePaths: string[]): Promise<ImageAtt
 export async function deleteImageAttachment(attachmentId: string): Promise<boolean> {
   if (!isDesktop()) return false;
   return invoke<boolean>("delete_image_attachment", { attachmentId });
+}
+
+export async function selectImageReferences(): Promise<ImageAttachment[]> {
+  if (!isDesktop()) return [];
+  const selected = await open({
+    multiple: true,
+    directory: false,
+    filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "gif"] }],
+  });
+  const paths = typeof selected === "string" ? [selected] : Array.isArray(selected) ? selected : [];
+  return importAttachments(paths.slice(0, 8));
+}
+
+export async function getMediaCatalog(): Promise<MediaCatalog> {
+  if (!isDesktop()) return { models: [], errors: [] };
+  return invoke<MediaCatalog>("get_media_catalog");
+}
+
+export async function generateMedia(
+  request: MediaGenerationRequest,
+  threadId?: string,
+): Promise<MediaBatchResult> {
+  return invoke<MediaBatchResult>("generate_media", { request, threadId: threadId || null });
+}
+
+export async function listMediaAssets(limit = 200): Promise<MediaAsset[]> {
+  if (!isDesktop()) return [];
+  return invoke<MediaAsset[]>("list_media_assets", { limit });
+}
+
+export async function refreshMediaAsset(assetId: string): Promise<MediaAsset> {
+  return invoke<MediaAsset>("refresh_media_asset", { assetId });
+}
+
+export async function exportMediaAsset(asset: MediaAsset): Promise<string | null> {
+  if (!isDesktop() || asset.status !== "completed" || !asset.fileName) return null;
+  const extension = asset.fileName.split(".").pop()?.toLowerCase();
+  const timestamp = new Date(asset.createdAt).toISOString().replace(/[-:]/g, "").slice(0, 15);
+  const defaultPath = `LevelUpAgent-${asset.kind}-${timestamp}${extension ? `.${extension}` : ""}`;
+  const destination = await save({
+    defaultPath,
+    filters: extension ? [{ name: `${asset.kind} output`, extensions: [extension] }] : undefined,
+  });
+  if (!destination) return null;
+  return invoke<string>("export_media_asset", { assetId: asset.id, destinationPath: destination });
+}
+
+export async function deleteMediaAsset(assetId: string): Promise<boolean> {
+  return invoke<boolean>("delete_media_asset", { assetId });
+}
+
+export function mediaAssetUrl(asset: MediaAsset): string | undefined {
+  if (!asset.filePath || !isDesktop()) return undefined;
+  return convertFileSrc(asset.filePath);
 }
 
 export async function saveApiKey(profileId: string, apiKey: string) {

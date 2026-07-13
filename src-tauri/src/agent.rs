@@ -1573,13 +1573,19 @@ fn image_data_url(attachment: &ImageAttachment) -> Option<String> {
 }
 
 fn text_attachment_block(attachment: &ImageAttachment) -> Option<String> {
-    let content = attachment.text_content.as_deref()?;
     let safe_name = attachment
         .name
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;");
+    if attachment.data_base64.is_some() {
+        return Some(format!(
+            "<managed_image_reference id=\"{}\" name=\"{safe_name}\" mime=\"{}\">Use this exact id in generate_images.referenceAttachmentIds when the user asks to edit or use this image as a generation reference.</managed_image_reference>",
+            attachment.id, attachment.mime_type
+        ));
+    }
+    let content = attachment.text_content.as_deref()?;
     Some(format!(
         "<managed_context_file name=\"{safe_name}\" mime=\"{}\">\n{content}\n</managed_context_file>",
         attachment.mime_type
@@ -1657,7 +1663,7 @@ fn allowed_tool_specs(
         tools.extend(
             additional
                 .iter()
-                .filter(|tool| mode == "agent" || tool.read_only)
+                .filter(|tool| mode != "plan" || tool.read_only)
                 .map(|tool| {
                     (
                         tool.name.clone(),
@@ -1751,7 +1757,7 @@ fn extract_text(value: Option<&Value>) -> String {
     }
 }
 
-fn endpoint(base_url: &str, path: &str) -> Result<Url, String> {
+pub(crate) fn endpoint(base_url: &str, path: &str) -> Result<Url, String> {
     let mut base = parse_base_url(base_url)?;
     if !base.path().ends_with('/') {
         base.set_path(&format!("{}/", base.path()));
@@ -2042,20 +2048,34 @@ mod tests {
             data_base64: Some("aW1hZ2U=".to_owned()),
             text_content: None,
         });
+        let responses = responses_body(&request, false);
+        let chat = chat_body(&request, false);
+        let anthropic = anthropic_body(&request, false);
+        let gemini = gemini_body(&request);
+        for reference in [
+            responses.pointer("/input/0/content/1/text"),
+            chat.pointer("/messages/1/content/1/text"),
+            anthropic.pointer("/messages/0/content/1/text"),
+            gemini.pointer("/contents/0/parts/1/text"),
+        ] {
+            let reference = reference.and_then(Value::as_str).unwrap();
+            assert!(reference.contains("managed_image_reference"));
+            assert!(reference.contains("0123456789abcdef0123456789abcdef"));
+        }
         assert_eq!(
-            responses_body(&request, false).pointer("/input/0/content/1/type"),
+            responses.pointer("/input/0/content/2/type"),
             Some(&json!("input_image"))
         );
         assert_eq!(
-            chat_body(&request, false).pointer("/messages/1/content/1/type"),
+            chat.pointer("/messages/1/content/2/type"),
             Some(&json!("image_url"))
         );
         assert_eq!(
-            anthropic_body(&request, false).pointer("/messages/0/content/1/source/media_type"),
+            anthropic.pointer("/messages/0/content/2/source/media_type"),
             Some(&json!("image/png"))
         );
         assert_eq!(
-            gemini_body(&request).pointer("/contents/0/parts/1/inlineData/mimeType"),
+            gemini.pointer("/contents/0/parts/2/inlineData/mimeType"),
             Some(&json!("image/png"))
         );
     }

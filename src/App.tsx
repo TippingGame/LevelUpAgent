@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Activity,
+  AudioLines,
   Bot,
   BrainCircuit,
   BookOpen,
@@ -51,14 +52,17 @@ import {
   Search,
   Send,
   Settings2,
+  Sparkles,
   ShieldAlert,
   ShieldCheck,
   TerminalSquare,
   Timer,
   Trash2,
+  Video,
   X,
 } from "lucide-react";
 import { IconButton } from "./components/IconButton";
+import { MediaAssetCard, MediaStudio } from "./components/MediaStudio";
 import {
   agentTurnStream,
   applyGitRollback,
@@ -128,6 +132,7 @@ import {
   saveThreads,
 } from "./lib/storage";
 import { getAppLocale, setAppLocale, tr, type AppLocale } from "./lib/i18n";
+import { executeCallsWithParallelMedia, isMediaTool } from "./lib/mediaConcurrency";
 import type {
   AgentMessage,
   AgentMode,
@@ -147,6 +152,7 @@ import type {
   McpServerConfig,
   McpServerSnapshot,
   McpTransport,
+  MediaAsset,
   ModelInfo,
   ModelProviderBrand,
   PendingApproval,
@@ -160,7 +166,7 @@ import type {
 } from "./lib/types";
 import "./App.css";
 
-const READ_ONLY_TOOLS = new Set(["list_files", "read_file", "search_files", "read_skill", "get_goal", "update_goal"]);
+const READ_ONLY_TOOLS = new Set(["list_files", "read_file", "search_files", "read_skill", "get_goal", "update_goal", "check_media_jobs"]);
 const RISKY_COMMAND_PATTERNS = [
   /\b(rm|rmdir|del|erase|remove-item|clear-content)\b/i,
   /\b(format|diskpart|shutdown|restart-computer|stop-computer|reboot|halt)\b/i,
@@ -259,6 +265,7 @@ function App() {
   const [sidebarSearchOpen, setSidebarSearchOpen] = useState(false);
   const [sidebarQuery, setSidebarQuery] = useState("");
   const [mode, setMode] = useState<AgentMode>("agent");
+  const [workspaceView, setWorkspaceView] = useState<"chat" | "media">("chat");
   const [permissionLevel, setPermissionLevel] = useState<PermissionLevel>(loadPermissionLevel);
   const [draft, setDraft] = useState("");
   const [draftAttachments, setDraftAttachments] = useState<ImageAttachment[]>([]);
@@ -612,6 +619,7 @@ function App() {
     expandProject(workspaceKey(thread.workspace));
     setProfileMenuOpen(false);
     setProjectMenuKey(null);
+    setWorkspaceView("chat");
   };
 
   const newThread = (workspace = activeThread?.workspace) => {
@@ -624,6 +632,7 @@ function App() {
     setDraft("");
     for (const attachment of draftAttachments) void deleteImageAttachment(attachment.id).catch(() => undefined);
     setDraftAttachments([]);
+    setWorkspaceView("chat");
   };
 
   const openProject = async () => {
@@ -795,10 +804,12 @@ function App() {
       const automatic = result.toolCalls.filter((call) => !toolNeedsApproval(call, runPermission));
       const approvalRequired = result.toolCalls.filter((call) => toolNeedsApproval(call, runPermission));
 
-      for (const call of automatic) {
-        const toolResult = thread.workspace
-          ? await executeTool(call, thread.workspace, thread.id, activeProfile, profiles.filter((profile) => profile.id !== activeProfile.id))
-          : { output: "No workspace selected", isError: true };
+      const automaticResults = await executeCallsWithParallelMedia(automatic, async (call) => (
+        thread.workspace || isMediaTool(call.name)
+          ? executeTool(call, thread.workspace ?? "", thread.id, activeProfile, profiles.filter((profile) => profile.id !== activeProfile.id))
+          : { output: "No workspace selected", isError: true }
+      ));
+      for (const { call, result: toolResult } of automaticResults) {
         nextHistory = [
           ...nextHistory,
           message("tool", toolResult.output, {
@@ -987,12 +998,14 @@ function App() {
     if (!pending) return;
     setRunning(true);
     let history = pending.history;
-    for (const call of pending.calls) {
-      const result = approved
-        ? activeThread.workspace
-          ? await executeTool(call, activeThread.workspace, activeThread.id, activeProfile, profiles.filter((profile) => profile.id !== activeProfile.id))
-          : { output: "No workspace selected", isError: true }
-        : { output: "User denied this tool call", isError: true };
+    const resolved = approved
+      ? await executeCallsWithParallelMedia(pending.calls, async (call) => (
+          activeThread.workspace || isMediaTool(call.name)
+            ? executeTool(call, activeThread.workspace ?? "", activeThread.id, activeProfile, profiles.filter((profile) => profile.id !== activeProfile.id))
+            : { output: "No workspace selected", isError: true }
+        ))
+      : pending.calls.map((call) => ({ call, result: { output: "User denied this tool call", isError: true } }));
+    for (const { call, result } of resolved) {
       history = [
         ...history,
         message("tool", result.output, {
@@ -1147,7 +1160,7 @@ function App() {
       : tr("点击刷新，余额每 60 秒自动更新", "Click to refresh; updates automatically every 60 seconds");
 
   return (
-    <div className={`app-shell ${rightPanelOpen ? "" : "details-collapsed"}`}>
+    <div className={`app-shell ${rightPanelOpen && workspaceView === "chat" ? "" : "details-collapsed"}`}>
       <aside className="sidebar">
         <div className="sidebar-header">
           <button className="brand" type="button" title={tr("访问 LevelUpAPI 官网", "Visit LevelUpAPI")} onClick={() => void openLevelUpWebsite()}>
@@ -1195,6 +1208,21 @@ function App() {
             <FolderPlus size={17} />
           </IconButton>
         </div>
+
+        <button
+          className={`media-nav-button${workspaceView === "media" ? " active" : ""}`}
+          type="button"
+          aria-current={workspaceView === "media" ? "page" : undefined}
+          onClick={() => {
+            setWorkspaceView("media");
+            setProfileMenuOpen(false);
+            setProjectMenuKey(null);
+          }}
+        >
+          <ImagePlus size={16} />
+          <span><strong>{tr("创作空间", "Media Studio")}</strong><small>{tr("图片 · 视频 · 语音", "Images · Video · Speech")}</small></span>
+          <Sparkles size={14} />
+        </button>
 
         {sidebarSearchOpen && (
           <div className="sidebar-search">
@@ -1309,6 +1337,9 @@ function App() {
         </div>
       </aside>
 
+      {workspaceView === "media" ? (
+        <MediaStudio locale={locale} onConfigureConnection={() => setSettingsOpen(true)} />
+      ) : (
       <main
         className={`workspace-shell${fileDragActive ? " file-drag-active" : ""}`}
         onDragEnter={(event) => {
@@ -1471,8 +1502,9 @@ function App() {
           onStop={stopAgent}
         />
       </main>
+      )}
 
-      {rightPanelOpen && (
+      {workspaceView === "chat" && rightPanelOpen && (
         <Inspector
           profile={activeProfile}
           thread={activeThread}
@@ -1749,6 +1781,18 @@ function AssistantMessageSegment({ item, pending }: { item: AgentMessage; pendin
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{item.content}</ReactMarkdown>
           </div>
         </details>
+      );
+    }
+    const mediaAssets = parseMediaToolAssets(item.content);
+    if (mediaAssets) {
+      return (
+        <div className={`tool-media-result ${item.isError ? "error" : ""}`}>
+          <div>
+            {item.isError ? <CircleAlert size={14} /> : <Check size={14} />}
+            <strong>{mediaAssets.length > 0 ? tr(`${mediaAssets.length} 个媒体结果`, `${mediaAssets.length} media results`) : tr("媒体任务已检查", "Media jobs checked")}</strong>
+          </div>
+          {mediaAssets.length > 0 && <div className="tool-media-grid">{mediaAssets.map((asset) => <MediaAssetCard asset={asset} locale={getAppLocale()} key={asset.id} />)}</div>}
+        </div>
       );
     }
     return (
@@ -3304,7 +3348,29 @@ function errorText(reason: unknown) {
   return reason instanceof Error ? reason.message : String(reason);
 }
 
+function parseMediaToolAssets(content: string): MediaAsset[] | null {
+  if (!content.trimStart().startsWith("{")) return null;
+  try {
+    const value = JSON.parse(content) as { assets?: unknown };
+    if (!Array.isArray(value.assets)) return null;
+    const assets = value.assets.filter((item): item is MediaAsset => {
+      if (!item || typeof item !== "object") return false;
+      const candidate = item as Partial<MediaAsset>;
+      return typeof candidate.id === "string"
+        && (candidate.kind === "image" || candidate.kind === "video" || candidate.kind === "audio")
+        && (candidate.status === "queued" || candidate.status === "in_progress" || candidate.status === "completed" || candidate.status === "failed");
+    });
+    return assets;
+  } catch {
+    return null;
+  }
+}
+
 function toolIcon(call: ToolCall) {
+  if (call.name === "generate_images") return <ImagePlus size={15} />;
+  if (call.name === "generate_videos") return <Video size={15} />;
+  if (call.name === "generate_speech") return <AudioLines size={15} />;
+  if (call.name === "check_media_jobs") return <RefreshCw size={15} />;
   if (call.name === "get_goal" || call.name === "update_goal") return <Flag size={15} />;
   if (call.name === "delegate_task" || call.name === "apply_subagent_patch") return <GitMerge size={15} />;
   if (call.name === "read_skill") return <BookOpen size={15} />;
@@ -3327,6 +3393,10 @@ function toolLabel(call: ToolCall) {
     read_skill: tr("读取 Skill", "Read Skill"),
     get_goal: tr("读取 Goal", "Read Goal"),
     update_goal: tr("更新 Goal", "Update Goal"),
+    generate_images: tr("生成图片", "Generate images"),
+    generate_videos: tr("生成视频", "Generate videos"),
+    generate_speech: tr("生成语音", "Generate speech"),
+    check_media_jobs: tr("检查媒体任务", "Check media jobs"),
     delegate_task: tr("子 Agent · 隔离执行", "Sub-Agent · Isolated run"),
     apply_subagent_patch: tr("子 Agent · 应用补丁", "Sub-Agent · Apply patch"),
   };

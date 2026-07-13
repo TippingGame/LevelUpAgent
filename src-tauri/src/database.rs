@@ -5,8 +5,11 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::models::{
     GoalCreateRequest, GoalState, GoalStatus, ImageAttachment, McpServerConfig, McpTransport,
-    ProviderHealth, ProviderRequestLog, ProviderSettings, StoredMessage, StoredThread, ToolCall,
+    MediaAsset, MediaKind, MediaStatus, ProviderHealth, ProviderRequestLog, ProviderSettings,
+    StoredMessage, StoredThread, ToolCall,
 };
+
+const SCHEMA_VERSION: i64 = 10;
 
 pub struct Database {
     connection: Mutex<Connection>,
@@ -112,6 +115,31 @@ impl Database {
                     updated_at INTEGER NOT NULL
                  );
 
+                 CREATE TABLE IF NOT EXISTS media_assets (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    batch_id TEXT NOT NULL,
+                    thread_id TEXT,
+                    provider_id TEXT NOT NULL,
+                    provider_name TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    prompt TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    mime_type TEXT,
+                    file_name TEXT,
+                    remote_id TEXT,
+                    revised_prompt TEXT,
+                    error TEXT,
+                    progress INTEGER,
+                    size TEXT,
+                    quality TEXT,
+                    output_format TEXT,
+                    voice TEXT,
+                    seconds INTEGER,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                 );
+
                  CREATE TABLE IF NOT EXISTS provider_health (
                     profile_id TEXT PRIMARY KEY NOT NULL,
                     consecutive_failures INTEGER NOT NULL DEFAULT 0,
@@ -200,11 +228,15 @@ impl Database {
                 "CREATE INDEX IF NOT EXISTS idx_provider_requests_started_at
                    ON provider_requests(started_at DESC);
                  CREATE INDEX IF NOT EXISTS idx_provider_requests_profile_model
-                   ON provider_requests(profile_id, model, started_at DESC);",
+                   ON provider_requests(profile_id, model, started_at DESC);
+                 CREATE INDEX IF NOT EXISTS idx_media_assets_created_at
+                   ON media_assets(created_at DESC);
+                 CREATE INDEX IF NOT EXISTS idx_media_assets_thread
+                   ON media_assets(thread_id, created_at DESC);",
             )
             .map_err(database_error)?;
         connection
-            .pragma_update(None, "user_version", 9)
+            .pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(database_error)?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -633,6 +665,131 @@ impl Database {
         self.get_goal(thread_id)
     }
 
+    pub fn save_media_asset(&self, asset: &MediaAsset) -> Result<(), String> {
+        if asset.id.trim().is_empty()
+            || asset.batch_id.trim().is_empty()
+            || asset.provider_id.trim().is_empty()
+            || asset.prompt.trim().is_empty()
+            || asset.model.trim().is_empty()
+        {
+            return Err("Media asset metadata is incomplete".to_owned());
+        }
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        connection
+            .execute(
+                "INSERT INTO media_assets
+                 (id, batch_id, thread_id, provider_id, provider_name, kind, status, prompt,
+                  model, mime_type, file_name, remote_id, revised_prompt, error, progress,
+                  size, quality, output_format, voice, seconds, created_at, updated_at)
+                 VALUES
+                 (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                  ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+                 ON CONFLICT(id) DO UPDATE SET
+                   batch_id = excluded.batch_id,
+                   thread_id = excluded.thread_id,
+                   provider_id = excluded.provider_id,
+                   provider_name = excluded.provider_name,
+                   kind = excluded.kind,
+                   status = excluded.status,
+                   prompt = excluded.prompt,
+                   model = excluded.model,
+                   mime_type = excluded.mime_type,
+                   file_name = excluded.file_name,
+                   remote_id = excluded.remote_id,
+                   revised_prompt = excluded.revised_prompt,
+                   error = excluded.error,
+                   progress = excluded.progress,
+                   size = excluded.size,
+                   quality = excluded.quality,
+                   output_format = excluded.output_format,
+                   voice = excluded.voice,
+                   seconds = excluded.seconds,
+                   updated_at = excluded.updated_at",
+                params![
+                    asset.id,
+                    asset.batch_id,
+                    asset.thread_id,
+                    asset.provider_id,
+                    asset.provider_name,
+                    media_kind_value(&asset.kind),
+                    media_status_value(&asset.status),
+                    asset.prompt,
+                    asset.model,
+                    asset.mime_type,
+                    asset.file_name,
+                    asset.remote_id,
+                    asset.revised_prompt,
+                    asset.error,
+                    asset.progress.map(i64::from),
+                    asset.size,
+                    asset.quality,
+                    asset.output_format,
+                    asset.voice,
+                    asset.seconds.map(i64::from),
+                    asset.created_at,
+                    asset.updated_at,
+                ],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+
+    pub fn list_media_assets(&self, limit: usize) -> Result<Vec<MediaAsset>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, batch_id, thread_id, provider_id, provider_name, kind, status,
+                        prompt, model, mime_type, file_name, remote_id, revised_prompt, error,
+                        progress, size, quality, output_format, voice, seconds, created_at, updated_at
+                 FROM media_assets ORDER BY created_at DESC LIMIT ?1",
+            )
+            .map_err(database_error)?;
+        statement
+            .query_map([limit.clamp(1, 500) as i64], media_asset_from_row)
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)
+    }
+
+    pub fn get_media_asset(&self, id: &str) -> Result<Option<MediaAsset>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        connection
+            .query_row(
+                "SELECT id, batch_id, thread_id, provider_id, provider_name, kind, status,
+                        prompt, model, mime_type, file_name, remote_id, revised_prompt, error,
+                        progress, size, quality, output_format, voice, seconds, created_at, updated_at
+                 FROM media_assets WHERE id = ?1",
+                [id],
+                media_asset_from_row,
+            )
+            .optional()
+            .map_err(database_error)
+    }
+
+    pub fn delete_media_asset(&self, id: &str) -> Result<Option<MediaAsset>, String> {
+        let current = self.get_media_asset(id)?;
+        if current.is_none() {
+            return Ok(None);
+        }
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        connection
+            .execute("DELETE FROM media_assets WHERE id = ?1", [id])
+            .map_err(database_error)?;
+        Ok(current)
+    }
+
     pub fn update_goal_from_agent(
         &self,
         thread_id: &str,
@@ -1016,6 +1173,68 @@ fn goal_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GoalState> {
     })
 }
 
+fn media_kind_value(kind: &MediaKind) -> &'static str {
+    match kind {
+        MediaKind::Image => "image",
+        MediaKind::Video => "video",
+        MediaKind::Audio => "audio",
+    }
+}
+
+fn media_status_value(status: &MediaStatus) -> &'static str {
+    match status {
+        MediaStatus::Queued => "queued",
+        MediaStatus::InProgress => "in_progress",
+        MediaStatus::Completed => "completed",
+        MediaStatus::Failed => "failed",
+    }
+}
+
+fn media_asset_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MediaAsset> {
+    let kind = match row.get::<_, String>(5)?.as_str() {
+        "image" => MediaKind::Image,
+        "video" => MediaKind::Video,
+        "audio" => MediaKind::Audio,
+        _ => return Err(rusqlite::Error::InvalidQuery),
+    };
+    let status = match row.get::<_, String>(6)?.as_str() {
+        "queued" => MediaStatus::Queued,
+        "in_progress" => MediaStatus::InProgress,
+        "completed" => MediaStatus::Completed,
+        "failed" => MediaStatus::Failed,
+        _ => return Err(rusqlite::Error::InvalidQuery),
+    };
+    Ok(MediaAsset {
+        id: row.get(0)?,
+        batch_id: row.get(1)?,
+        thread_id: row.get(2)?,
+        provider_id: row.get(3)?,
+        provider_name: row.get(4)?,
+        kind,
+        status,
+        prompt: row.get(7)?,
+        model: row.get(8)?,
+        mime_type: row.get(9)?,
+        file_name: row.get(10)?,
+        file_path: None,
+        remote_id: row.get(11)?,
+        revised_prompt: row.get(12)?,
+        error: row.get(13)?,
+        progress: row
+            .get::<_, Option<i64>>(14)?
+            .map(|value| value.clamp(0, 100) as u32),
+        size: row.get(15)?,
+        quality: row.get(16)?,
+        output_format: row.get(17)?,
+        voice: row.get(18)?,
+        seconds: row
+            .get::<_, Option<i64>>(19)?
+            .map(|value| value.clamp(0, u32::MAX as i64) as u32),
+        created_at: row.get(20)?,
+        updated_at: row.get(21)?,
+    })
+}
+
 fn now_millis() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1180,7 +1399,7 @@ mod tests {
                 rows.collect::<Result<Vec<_>, _>>()
             })
             .unwrap();
-        assert_eq!(version, 9);
+        assert_eq!(version, SCHEMA_VERSION);
         assert!(columns.iter().any(|column| column == "request_id"));
         assert!(columns.iter().any(|column| column == "internal"));
         assert!(columns.iter().any(|column| column == "attachments_json"));
@@ -1439,5 +1658,50 @@ mod tests {
         assert_eq!(goal.input_tokens, 800);
         assert_eq!(goal.output_tokens, 200);
         assert_eq!(goal.turns, 1);
+    }
+
+    #[test]
+    fn round_trips_and_updates_persistent_media_assets() {
+        let database = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        let mut asset = MediaAsset {
+            id: "media-1".to_owned(),
+            batch_id: "batch-1".to_owned(),
+            thread_id: Some("thread-1".to_owned()),
+            provider_id: "provider-1".to_owned(),
+            provider_name: "Provider".to_owned(),
+            kind: MediaKind::Video,
+            status: MediaStatus::Queued,
+            prompt: "A camera move".to_owned(),
+            model: "sora-2".to_owned(),
+            mime_type: None,
+            file_name: None,
+            file_path: None,
+            remote_id: Some("video-1".to_owned()),
+            revised_prompt: None,
+            error: None,
+            progress: Some(0),
+            size: Some("1280x720".to_owned()),
+            quality: None,
+            output_format: Some("mp4".to_owned()),
+            voice: None,
+            seconds: Some(8),
+            created_at: 100,
+            updated_at: 100,
+        };
+        database.save_media_asset(&asset).unwrap();
+        assert_eq!(
+            database.get_media_asset("media-1").unwrap(),
+            Some(asset.clone())
+        );
+
+        asset.status = MediaStatus::Completed;
+        asset.progress = Some(100);
+        asset.mime_type = Some("video/mp4".to_owned());
+        asset.file_name = Some("media-1.mp4".to_owned());
+        asset.updated_at = 200;
+        database.save_media_asset(&asset).unwrap();
+        assert_eq!(database.list_media_assets(10).unwrap(), vec![asset.clone()]);
+        assert_eq!(database.delete_media_asset("media-1").unwrap(), Some(asset));
+        assert!(database.list_media_assets(10).unwrap().is_empty());
     }
 }

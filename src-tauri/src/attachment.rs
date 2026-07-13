@@ -58,6 +58,13 @@ struct ExtractedDocument {
     detail: String,
 }
 
+#[derive(Clone)]
+pub struct ManagedImage {
+    pub file_name: String,
+    pub mime_type: String,
+    pub bytes: Vec<u8>,
+}
+
 pub fn import(storage: &Path, source: &Path) -> Result<ImageAttachment, String> {
     let metadata = std::fs::metadata(source)
         .map_err(|error| format!("Could not read selected attachment metadata: {error}"))?;
@@ -103,6 +110,33 @@ pub fn import(storage: &Path, source: &Path) -> Result<ImageAttachment, String> 
         kind,
         data_base64: None,
         text_content: None,
+    })
+}
+
+pub fn read_managed_image(storage: &Path, attachment_id: &str) -> Result<ManagedImage, String> {
+    validate_id(attachment_id)?;
+    let path = storage.join(format!("{attachment_id}.bin"));
+    let metadata = std::fs::metadata(&path)
+        .map_err(|_| "The selected reference image is no longer available".to_owned())?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_ATTACHMENT_BYTES {
+        return Err("The selected reference image has an invalid size".to_owned());
+    }
+    let bytes = std::fs::read(&path)
+        .map_err(|error| format!("Could not read the selected reference image: {error}"))?;
+    let (_, mime_type) = classify_attachment("reference", &bytes)?;
+    if !mime_type.starts_with("image/") {
+        return Err("Only managed image attachments can be used as references".to_owned());
+    }
+    let extension = match mime_type.as_str() {
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => "png",
+    };
+    Ok(ManagedImage {
+        file_name: format!("reference-{attachment_id}.{extension}"),
+        mime_type,
+        bytes,
     })
 }
 

@@ -319,6 +319,101 @@ pub struct ModelInfo {
     pub owned_by: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaKind {
+    Image,
+    Video,
+    Audio,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaStatus {
+    Queued,
+    InProgress,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaModelInfo {
+    pub id: String,
+    pub profile_id: String,
+    pub profile_name: String,
+    pub kind: MediaKind,
+    pub rank: i64,
+    pub recommended: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaCatalog {
+    pub models: Vec<MediaModelInfo>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaGenerationRequest {
+    pub profile_id: Option<String>,
+    pub kind: MediaKind,
+    pub model: Option<String>,
+    pub prompt: String,
+    #[serde(default = "default_media_count")]
+    pub count: u32,
+    pub size: Option<String>,
+    pub quality: Option<String>,
+    pub output_format: Option<String>,
+    pub background: Option<String>,
+    pub voice: Option<String>,
+    pub instructions: Option<String>,
+    pub seconds: Option<u32>,
+    #[serde(default)]
+    pub reference_attachment_ids: Vec<String>,
+}
+
+fn default_media_count() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaAsset {
+    pub id: String,
+    pub batch_id: String,
+    pub thread_id: Option<String>,
+    pub provider_id: String,
+    pub provider_name: String,
+    pub kind: MediaKind,
+    pub status: MediaStatus,
+    pub prompt: String,
+    pub model: String,
+    pub mime_type: Option<String>,
+    pub file_name: Option<String>,
+    pub file_path: Option<String>,
+    pub remote_id: Option<String>,
+    pub revised_prompt: Option<String>,
+    pub error: Option<String>,
+    pub progress: Option<u32>,
+    pub size: Option<String>,
+    pub quality: Option<String>,
+    pub output_format: Option<String>,
+    pub voice: Option<String>,
+    pub seconds: Option<u32>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaBatchResult {
+    pub batch_id: String,
+    pub assets: Vec<MediaAsset>,
+    pub errors: Vec<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredMessage {

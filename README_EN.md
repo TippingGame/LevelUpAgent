@@ -87,6 +87,13 @@ Choose a project directory, create a conversation, and describe the outcome you 
 - Persistent Instructions with reviewable synchronization to popular CLI instruction files
 - Long-running Goals with pause/resume, completion audits, and blocked audits
 
+### Multimodal creation
+
+- Automatically discovers and recommends the newest available image, video, and TTS model on configured connections
+- A standalone Media Studio with image references, parallel prompts, local history, previews, and Save As export
+- Conversations can call `generate_images`, `generate_videos`, and `generate_speech`; consecutive generation calls run concurrently, preserve result order, and return to the model for one summary
+- OpenAI-compatible image, speech, and Sora flows plus native Gemini image, speech, and Veo flows, with persistent video jobs and automatic polling
+
 ### Composable extensions
 
 - stdio and Streamable HTTP MCP clients

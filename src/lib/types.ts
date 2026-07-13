@@ -185,6 +185,71 @@ export interface ModelInfo {
   ownedBy?: string;
 }
 
+export type MediaKind = "image" | "video" | "audio";
+export type MediaStatus = "queued" | "in_progress" | "completed" | "failed";
+
+export interface MediaModelInfo {
+  id: string;
+  profileId: string;
+  profileName: string;
+  kind: MediaKind;
+  rank: number;
+  recommended: boolean;
+}
+
+export interface MediaCatalog {
+  models: MediaModelInfo[];
+  errors: string[];
+}
+
+export interface MediaGenerationRequest {
+  profileId?: string;
+  kind: MediaKind;
+  model?: string;
+  prompt: string;
+  count: number;
+  size?: string;
+  quality?: string;
+  outputFormat?: string;
+  background?: string;
+  voice?: string;
+  instructions?: string;
+  seconds?: number;
+  referenceAttachmentIds: string[];
+}
+
+export interface MediaAsset {
+  id: string;
+  batchId: string;
+  threadId?: string;
+  providerId: string;
+  providerName: string;
+  kind: MediaKind;
+  status: MediaStatus;
+  prompt: string;
+  model: string;
+  mimeType?: string;
+  fileName?: string;
+  filePath?: string;
+  remoteId?: string;
+  revisedPrompt?: string;
+  error?: string;
+  progress?: number;
+  size?: string;
+  quality?: string;
+  outputFormat?: string;
+  voice?: string;
+  seconds?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface MediaBatchResult {
+  batchId: string;
+  assets: MediaAsset[];
+  errors: string[];
+}
+
 export interface ExternalConfigCandidate {
   id: string;
   source: string;
