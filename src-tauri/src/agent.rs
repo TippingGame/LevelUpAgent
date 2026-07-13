@@ -1838,7 +1838,7 @@ pub(crate) fn endpoint(base_url: &str, path: &str) -> Result<Url, String> {
     let version = requested.split('/').next().unwrap_or_default();
     let base_version = base
         .path_segments()
-        .and_then(|segments| segments.filter(|segment| !segment.is_empty()).next_back());
+        .and_then(|mut segments| segments.rfind(|segment| !segment.is_empty()));
     let normalized = if is_api_version_segment(version)
         && base_version.is_some_and(|base_version| {
             base_version.eq_ignore_ascii_case(version) || is_api_version_segment(base_version)
