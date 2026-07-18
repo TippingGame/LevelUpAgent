@@ -20,6 +20,22 @@ export interface ProviderSettings {
   activeProfileId: string;
 }
 
+export interface ThemeManifest {
+  schemaVersion: 1;
+  id: string;
+  name: string;
+  version: string;
+  author: string;
+  description: string;
+  layout?: "standard" | "qq2007";
+  homepage?: string;
+  license?: string;
+}
+
+export interface ThemePackage extends ThemeManifest {
+  css: string;
+}
+
 export interface ToolCall {
   id: string;
   name: string;

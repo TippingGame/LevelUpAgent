@@ -34,9 +34,35 @@ import type {
   SkillInfo,
   ToolCall,
   ToolExecutionResponse,
+  ThemeManifest,
+  ThemePackage,
 } from "./types";
 
 export const isDesktop = () => "__TAURI_INTERNALS__" in window;
+
+export async function listThemes(): Promise<ThemeManifest[]> {
+  if (!isDesktop()) return [];
+  return invoke<ThemeManifest[]>("list_themes");
+}
+
+export async function loadTheme(themeId: string): Promise<ThemePackage> {
+  return invoke<ThemePackage>("load_theme", { themeId });
+}
+
+export async function selectAndInstallTheme(): Promise<ThemeManifest | null> {
+  if (!isDesktop()) return null;
+  const sourcePath = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: "LevelUpAgent theme", extensions: ["levelup-theme"] }],
+  });
+  if (typeof sourcePath !== "string") return null;
+  return invoke<ThemeManifest>("install_theme", { sourcePath });
+}
+
+export async function uninstallTheme(themeId: string): Promise<boolean> {
+  return invoke<boolean>("uninstall_theme", { themeId });
+}
 
 export async function getDefaultWorkspace(): Promise<string | null> {
   if (!isDesktop()) return null;

@@ -18,7 +18,7 @@
   </p>
 
   <p>
-    <img alt="Version" src="https://img.shields.io/badge/version-1.0.6-ff5a4f?style=flat-square" />
+<img alt="Version" src="https://img.shields.io/badge/version-1.0.7-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-stable-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -101,6 +101,7 @@ Base URL 既可以是服务根地址，例如 `https://api.example.com`，也可
 - Codex、Claude、Agents、LevelUpAgent 与项目级 Skill 发现
 - Skill 正文和引用按需读取，避免无关上下文膨胀
 - 子 Agent 使用隔离 Git worktree；补丁完整可见，应用前再次批准
+- `.levelup-theme` 第三方主题包安装、切换与卸载
 
 ### 克制的桌面体验
 
@@ -181,6 +182,9 @@ LevelUpAgent/
 - [替代能力审计](docs/REPLACEMENT_AUDIT.md)
 - [签名发布与自动更新](docs/RELEASE.md)
 - [参考项目研究](docs/REFERENCE_RESEARCH.md)
+- [第三方主题包](docs/THEMES.md)
+- [主题开发、构建与适配规范](docs/THEME_DEVELOPMENT.md)
+- [主题适配 Agent 工作流程](docs/THEME_AGENT_WORKFLOW.md)
 
 ## 项目状态
 

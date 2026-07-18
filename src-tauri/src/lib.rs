@@ -11,6 +11,7 @@ mod models;
 mod process;
 mod skill;
 mod subagent;
+mod theme;
 mod tools;
 
 use std::collections::{HashMap, HashSet};
@@ -478,6 +479,37 @@ fn subagent_storage(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String
         .app_data_dir()
         .map_err(|error| format!("Could not locate the application data directory: {error}"))?
         .join("subagents"))
+}
+
+fn theme_storage(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Could not locate the application data directory: {error}"))?
+        .join("themes"))
+}
+
+#[tauri::command]
+fn list_themes(app: tauri::AppHandle) -> Result<Vec<theme::ThemeManifest>, String> {
+    theme::list(&theme_storage(&app)?)
+}
+
+#[tauri::command]
+fn install_theme(
+    app: tauri::AppHandle,
+    source_path: String,
+) -> Result<theme::ThemeManifest, String> {
+    theme::install(&theme_storage(&app)?, std::path::Path::new(&source_path))
+}
+
+#[tauri::command]
+fn load_theme(app: tauri::AppHandle, theme_id: String) -> Result<theme::ThemePackage, String> {
+    theme::load(&theme_storage(&app)?, &theme_id)
+}
+
+#[tauri::command]
+fn uninstall_theme(app: tauri::AppHandle, theme_id: String) -> Result<bool, String> {
+    theme::uninstall(&theme_storage(&app)?, &theme_id)
 }
 
 fn attach_images(app: &tauri::AppHandle, request: &mut AgentTurnRequest) -> Result<(), String> {
@@ -2366,7 +2398,11 @@ pub fn run() {
             rollback_external_config_write,
             preview_external_prompt_write,
             apply_external_prompt_write,
-            rollback_external_prompt_write
+            rollback_external_prompt_write,
+            list_themes,
+            install_theme,
+            load_theme,
+            uninstall_theme
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
