@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "default",
+  "name": "LevelUpAgent Default Layout",
+  "window": {
+    "decorations": true
+  },
+  "initialState": {},
+  "root": {
+    "type": "container",
+    "id": "default-root",
+    "className": ["standard-layout"],
+    "children": [
+      { "type": "slot", "slot": "sidebar" },
+      { "type": "slot", "slot": "mediaStudio" },
+      { "type": "slot", "slot": "workspace" },
+      { "type": "slot", "slot": "inspector" }
+    ]
+  }
+}

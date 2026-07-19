@@ -19,17 +19,23 @@ struct SkillFrontmatter {
 pub fn scan(
     app_data: &Path,
     home: &Path,
+    built_in: Option<&Path>,
+    codex_home: Option<&Path>,
     workspace: Option<&Path>,
     preferences: &HashMap<(String, String), bool>,
 ) -> Vec<SkillInfo> {
-    let mut roots = vec![
+    let mut roots = Vec::new();
+    if let Some(built_in) = built_in {
+        roots.push((built_in.to_path_buf(), "LevelUpAgent built-in".to_owned()));
+    }
+    roots.extend([
         (app_data.join("skills"), "LevelUpAgent".to_owned()),
         (home.join(".codex/skills"), "Codex".to_owned()),
         (home.join(".claude/skills"), "Claude".to_owned()),
         (home.join(".agents/skills"), "Agents".to_owned()),
-    ];
-    if let Some(codex_home) = std::env::var_os("CODEX_HOME") {
-        roots.push((PathBuf::from(codex_home).join("skills"), "Codex".to_owned()));
+    ]);
+    if let Some(codex_home) = codex_home {
+        roots.push((codex_home.join("skills"), "Codex".to_owned()));
     }
     if let Some(workspace) = workspace {
         roots.extend([
@@ -361,11 +367,11 @@ mod tests {
         .unwrap();
         std::fs::write(invalid_dir.join("SKILL.md"), "# Missing frontmatter").unwrap();
 
-        let first = scan(&root, &root, None, &HashMap::new());
+        let first = scan(&root, &root, None, None, None, &HashMap::new());
         assert_eq!(first.len(), 2);
         let valid = first.iter().find(|skill| skill.valid).unwrap();
         let preferences = [((valid.id.clone(), valid.path.clone()), true)].into();
-        let second = scan(&root, &root, None, &preferences);
+        let second = scan(&root, &root, None, None, None, &preferences);
         assert!(second.iter().find(|skill| skill.valid).unwrap().enabled);
         assert!(
             second
@@ -389,7 +395,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(skill_dir.join("references/checks.md"), "Check boundaries.").unwrap();
-        let mut skills = scan(&root, &root, None, &HashMap::new());
+        let mut skills = scan(&root, &root, None, None, None, &HashMap::new());
         skills[0].enabled = true;
         assert!(
             read_enabled(&skills, &skills[0].id, Some("references/checks.md"))

@@ -4,6 +4,7 @@ mod config_writeback;
 mod database;
 mod filesystem;
 mod git;
+mod layout;
 mod mcp;
 mod media;
 mod migration;
@@ -11,6 +12,7 @@ mod models;
 mod process;
 mod skill;
 mod subagent;
+mod theme;
 mod tools;
 
 use std::collections::{HashMap, HashSet};
@@ -211,9 +213,27 @@ fn discover_skills(
         .path()
         .home_dir()
         .map_err(|error| format!("Could not locate the home directory: {error}"))?;
+    let bundled_skills = app
+        .path()
+        .resource_dir()
+        .map(|path| path.join("resources").join("skills"))
+        .unwrap_or_else(|_| std::path::PathBuf::new());
+    let source_skills = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("resources")
+        .join("skills");
+    let built_in_skills = if bundled_skills.is_dir() {
+        Some(bundled_skills.as_path())
+    } else if source_skills.is_dir() {
+        Some(source_skills.as_path())
+    } else {
+        None
+    };
+    let codex_home = std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from);
     Ok(skill::scan(
         &app_data,
         &home,
+        built_in_skills,
+        codex_home.as_deref(),
         workspace.map(std::path::Path::new),
         &database.skill_preferences()?,
     ))
@@ -478,6 +498,45 @@ fn subagent_storage(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String
         .app_data_dir()
         .map_err(|error| format!("Could not locate the application data directory: {error}"))?
         .join("subagents"))
+}
+
+fn theme_storage(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Could not locate the application data directory: {error}"))?
+        .join("themes"))
+}
+
+#[tauri::command]
+fn list_themes(app: tauri::AppHandle) -> Result<Vec<theme::ThemeManifest>, String> {
+    theme::list(&theme_storage(&app)?)
+}
+
+#[tauri::command]
+fn install_theme(
+    app: tauri::AppHandle,
+    source_path: String,
+) -> Result<theme::ThemeManifest, String> {
+    theme::install(&theme_storage(&app)?, std::path::Path::new(&source_path))
+}
+
+#[tauri::command]
+fn load_theme(app: tauri::AppHandle, theme_id: String) -> Result<theme::ThemePackage, String> {
+    theme::load(&theme_storage(&app)?, &theme_id)
+}
+
+#[tauri::command]
+fn load_theme_layout(
+    app: tauri::AppHandle,
+    theme_id: String,
+) -> Result<layout::ResolvedLayout, String> {
+    theme::load_layout(&theme_storage(&app)?, &theme_id)
+}
+
+#[tauri::command]
+fn uninstall_theme(app: tauri::AppHandle, theme_id: String) -> Result<bool, String> {
+    theme::uninstall(&theme_storage(&app)?, &theme_id)
 }
 
 fn attach_images(app: &tauri::AppHandle, request: &mut AgentTurnRequest) -> Result<(), String> {
@@ -2366,7 +2425,12 @@ pub fn run() {
             rollback_external_config_write,
             preview_external_prompt_write,
             apply_external_prompt_write,
-            rollback_external_prompt_write
+            rollback_external_prompt_write,
+            list_themes,
+            install_theme,
+            load_theme,
+            load_theme_layout,
+            uninstall_theme
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

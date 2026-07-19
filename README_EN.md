@@ -18,7 +18,7 @@
   </p>
 
   <p>
-    <img alt="Version" src="https://img.shields.io/badge/version-1.0.6-ff5a4f?style=flat-square" />
+<img alt="Version" src="https://img.shields.io/badge/version-1.0.7-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-stable-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -101,6 +101,7 @@ Choose a project directory, create a conversation, and describe the outcome you 
 - Discovery for Codex, Claude, Agents, LevelUpAgent, and project-local Skills
 - On-demand Skill body and reference loading to keep context focused
 - Sub-agents in isolated Git worktrees, with complete patch review and a second approval before application
+- Install, switch, and uninstall third-party `.levelup-theme` packages
 
 ### A calm desktop experience
 
@@ -173,6 +174,9 @@ Validate all four protocol contracts against a local LevelUpAPI checkout:
 - [Replacement audit](docs/REPLACEMENT_AUDIT.md)
 - [Signed releases and updates](docs/RELEASE.md)
 - [Reference project research](docs/REFERENCE_RESEARCH.md)
+- [Third-party theme packages](docs/THEMES.md)
+- [Theme development, build, and adaptation specification](docs/THEME_DEVELOPMENT.md)
+- [Theme adaptation workflow for agents](docs/THEME_AGENT_WORKFLOW.md)
 
 ## Project status
 

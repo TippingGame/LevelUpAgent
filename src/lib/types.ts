@@ -20,6 +20,133 @@ export interface ProviderSettings {
   activeProfileId: string;
 }
 
+export interface ThemeManifest {
+  schemaVersion: 1 | 2;
+  id: string;
+  name: string;
+  version: string;
+  author: string;
+  description: string;
+  layout?: "standard" | "qq2007";
+  layoutFile?: string;
+  homepage?: string;
+  license?: string;
+}
+
+export interface ThemePackage extends ThemeManifest {
+  css: string;
+}
+
+export type LayoutLocaleText = string | { "zh-CN": string; "en-US": string };
+export type LayoutScalar = string | number | boolean | null;
+export type LayoutValue = LayoutScalar | LayoutValue[] | { [key: string]: LayoutValue };
+
+export interface LayoutCondition {
+  path?: string;
+  equals?: LayoutValue;
+  notEquals?: LayoutValue;
+  truthy?: boolean;
+  all?: LayoutCondition[];
+  any?: LayoutCondition[];
+  not?: LayoutCondition;
+}
+
+export interface LayoutAction {
+  name: string;
+  args?: Record<string, LayoutValue>;
+}
+
+export interface LayoutNodeBase {
+  type: string;
+  id?: string;
+  className?: string[];
+  when?: LayoutCondition;
+}
+
+export interface LayoutContainerNode extends LayoutNodeBase {
+  type: "container";
+  role?: string;
+  children: LayoutNode[];
+}
+
+export interface LayoutSlotNode extends LayoutNodeBase {
+  type: "slot";
+  slot: string;
+}
+
+export interface LayoutTextNode extends LayoutNodeBase {
+  type: "text";
+  text?: LayoutLocaleText;
+  bind?: string;
+}
+
+export interface LayoutButtonNode extends LayoutNodeBase {
+  type: "button";
+  label: LayoutLocaleText;
+  action: LayoutAction;
+  icon?: string;
+  activeWhen?: LayoutCondition;
+  disabledWhen?: LayoutCondition;
+  children?: LayoutNode[];
+}
+
+export interface LayoutImageNode extends LayoutNodeBase {
+  type: "image";
+  source: string;
+  alt: LayoutLocaleText;
+}
+
+export interface LayoutIconNode extends LayoutNodeBase {
+  type: "icon";
+  name: string;
+  label?: LayoutLocaleText;
+}
+
+export interface LayoutInputNode extends LayoutNodeBase {
+  type: "input";
+  state: string;
+  label: LayoutLocaleText;
+  placeholder?: LayoutLocaleText;
+}
+
+export interface LayoutRepeatNode extends LayoutNodeBase {
+  type: "repeat";
+  source: string;
+  item: string;
+  children: LayoutNode[];
+  empty?: LayoutNode[];
+}
+
+export interface LayoutSpacerNode extends LayoutNodeBase {
+  type: "spacer";
+}
+
+export type LayoutNode =
+  | LayoutContainerNode
+  | LayoutSlotNode
+  | LayoutTextNode
+  | LayoutButtonNode
+  | LayoutImageNode
+  | LayoutIconNode
+  | LayoutInputNode
+  | LayoutRepeatNode
+  | LayoutSpacerNode;
+
+export interface LayoutDefinition {
+  schemaVersion: 1;
+  id: string;
+  name: string;
+  window?: { decorations?: boolean };
+  initialState?: Record<string, LayoutScalar>;
+  root: LayoutContainerNode;
+}
+
+export interface ResolvedLayout {
+  source: "default" | "theme" | "legacy";
+  definition: LayoutDefinition;
+  warning?: string;
+}
+
 export interface ToolCall {
   id: string;
   name: string;
