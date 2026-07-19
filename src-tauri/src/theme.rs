@@ -229,11 +229,9 @@ fn write_atomic(
             ));
         }
     };
-    if had_previous {
-        if let Err(error) = std::fs::rename(&destination, &backup) {
-            let _ = std::fs::remove_dir_all(&temporary);
-            return Err(format!("Could not stage existing theme directory: {error}"));
-        }
+    if had_previous && let Err(error) = std::fs::rename(&destination, &backup) {
+        let _ = std::fs::remove_dir_all(&temporary);
+        return Err(format!("Could not stage existing theme directory: {error}"));
     }
     if let Err(error) = std::fs::rename(&temporary, &destination) {
         restore_directory_backup(&backup, &destination);
@@ -283,13 +281,13 @@ pub fn list(storage: &Path) -> Result<Vec<ThemeManifest>, String> {
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
             continue;
         }
-        if let Ok(package) = read_package(&path.join(MANAGED_THEME_FILE)) {
-            if path.file_name().and_then(|value| value.to_str()) == Some(&package.manifest.id) {
-                themes.push(package.manifest);
-            }
+        if let Ok(package) = read_package(&path.join(MANAGED_THEME_FILE))
+            && path.file_name().and_then(|value| value.to_str()) == Some(&package.manifest.id)
+        {
+            themes.push(package.manifest);
         }
     }
-    themes.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+    themes.sort_by_key(|theme| theme.name.to_lowercase());
     Ok(themes)
 }
 
