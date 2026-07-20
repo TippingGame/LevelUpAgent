@@ -92,6 +92,7 @@ pub struct AttachmentPreview {
 pub enum AttachmentKind {
     #[default]
     Image,
+    Video,
     Text,
     Document,
 }
@@ -338,6 +339,16 @@ pub enum MediaKind {
     Audio,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoGenerationMode {
+    #[default]
+    Text,
+    Image,
+    Reference,
+    Video,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MediaStatus {
@@ -381,6 +392,10 @@ pub struct MediaGenerationRequest {
     pub voice: Option<String>,
     pub instructions: Option<String>,
     pub seconds: Option<u32>,
+    #[serde(default)]
+    pub video_mode: VideoGenerationMode,
+    pub video_resolution: Option<String>,
+    pub video_aspect_ratio: Option<String>,
     #[serde(default)]
     pub reference_attachment_ids: Vec<String>,
 }

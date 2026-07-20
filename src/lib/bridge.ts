@@ -271,6 +271,11 @@ export async function importClipboardImages(files: File[]): Promise<ImageAttachm
   return invoke<ImageAttachment[]>("import_clipboard_images", { images: payloads });
 }
 
+export async function importMediaReferences(sourcePaths: string[]): Promise<ImageAttachment[]> {
+  if (!isDesktop() || sourcePaths.length === 0) return [];
+  return invoke<ImageAttachment[]>("import_media_references", { sourcePaths: sourcePaths.slice(0, 7) });
+}
+
 export async function importClipboardAttachments(files: File[]): Promise<ImageAttachment[]> {
   const selected = files.slice(0, 12);
   if (!isDesktop() || selected.length === 0) return [];
@@ -305,6 +310,17 @@ export async function selectImageReferences(): Promise<ImageAttachment[]> {
   });
   const paths = typeof selected === "string" ? [selected] : Array.isArray(selected) ? selected : [];
   return importAttachments(paths.slice(0, 8));
+}
+
+export async function selectVideoReference(): Promise<ImageAttachment[]> {
+  if (!isDesktop()) return [];
+  const selected = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: "MP4 video", extensions: ["mp4"] }],
+  });
+  const paths = typeof selected === "string" ? [selected] : Array.isArray(selected) ? selected : [];
+  return importMediaReferences(paths.slice(0, 1));
 }
 
 export async function getMediaCatalog(): Promise<MediaCatalog> {

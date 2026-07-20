@@ -215,7 +215,6 @@ const RISKY_COMMAND_PATTERNS = [
   /\b(docker|podman)\s+(system\s+prune|rm\b|rmi\b|volume\s+rm)\b/i,
   /(?:^|\s)(?:[a-z]:\\|\\\\|\/(?:etc|usr|var|home|root)\/|~\/)/i,
 ];
-const MAX_TOOL_ROUNDS = 12;
 const LEVELUP_WEBSITE = "https://levelup.mom/";
 const DEFAULT_LAYOUT: ResolvedLayout = {
   source: "default",
@@ -1267,19 +1266,6 @@ function App() {
     rewardPetId: string = activePetIdRef.current,
   ): Promise<void> => {
     const threadId = thread.id;
-    if (runMode !== "goal" && round >= MAX_TOOL_ROUNDS) {
-      const stopped = finalizeConversationMessages([
-        ...history,
-        message("assistant", tr("已达到本轮工具调用上限，请确认结果后继续。", "The tool-call limit was reached. Review the result before continuing."), {
-          isError: true,
-          ...assistantMessageIdentity(runProfile),
-        }),
-      ], runStartedAt);
-      commitThread({ ...thread, messages: stopped, updatedAt: Date.now() });
-      finishThreadRun(threadId);
-      return;
-    }
-
     setThreadRunning(threadId, true);
     runModesRef.current.set(threadId, runMode);
     const operationId = crypto.randomUUID();

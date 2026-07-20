@@ -1130,14 +1130,14 @@ async fn get_media_catalog(
 fn read_media_references(
     app: &tauri::AppHandle,
     request: &MediaGenerationRequest,
-) -> Result<Vec<attachment::ManagedImage>, String> {
+) -> Result<Vec<attachment::ManagedReference>, String> {
     let storage = attachment_storage(app)?;
     let mut seen = HashSet::new();
     request
         .reference_attachment_ids
         .iter()
         .filter(|id| seen.insert((*id).clone()))
-        .map(|id| attachment::read_managed_image(&storage, id))
+        .map(|id| attachment::read_managed_reference(&storage, id))
         .collect()
 }
 
@@ -1355,6 +1355,30 @@ fn import_image_attachments(
     let mut imported = Vec::new();
     for path in source_paths {
         match attachment::import(&storage, std::path::Path::new(&path)) {
+            Ok(item) => imported.push(item),
+            Err(error) => {
+                for item in &imported {
+                    let _ = attachment::delete(&storage, &item.id);
+                }
+                return Err(error);
+            }
+        }
+    }
+    Ok(imported)
+}
+
+#[tauri::command]
+fn import_media_references(
+    app: tauri::AppHandle,
+    source_paths: Vec<String>,
+) -> Result<Vec<ImageAttachment>, String> {
+    if source_paths.is_empty() || source_paths.len() > 7 {
+        return Err("Select between 1 and 7 media references at a time".to_owned());
+    }
+    let storage = attachment_storage(&app)?;
+    let mut imported = Vec::new();
+    for path in source_paths {
+        match attachment::import_media_reference(&storage, std::path::Path::new(&path)) {
             Ok(item) => imported.push(item),
             Err(error) => {
                 for item in &imported {
@@ -2730,6 +2754,7 @@ pub fn run() {
             export_media_asset,
             delete_media_asset,
             import_image_attachments,
+            import_media_references,
             import_clipboard_images,
             import_clipboard_attachments,
             delete_image_attachment,
@@ -3156,6 +3181,9 @@ mod tests {
             voice: None,
             instructions: None,
             seconds: None,
+            video_mode: models::VideoGenerationMode::Text,
+            video_resolution: None,
+            video_aspect_ratio: None,
             reference_attachment_ids: Vec::new(),
         };
         let selections = media::selection_candidates(&providers, &catalog, &request);

@@ -182,11 +182,11 @@ export interface ImageAttachment {
   name: string;
   mimeType: string;
   sizeBytes: number;
-  kind: "image" | "text" | "document";
+  kind: "image" | "video" | "text" | "document";
 }
 
 export interface AttachmentPreview {
-  kind: "image" | "text" | "document";
+  kind: "image" | "video" | "text" | "document";
   mimeType: string;
   dataBase64?: string;
   text?: string;
@@ -322,6 +322,7 @@ export interface ModelInfo {
 
 export type MediaKind = "image" | "video" | "audio";
 export type MediaStatus = "queued" | "in_progress" | "completed" | "failed";
+export type VideoGenerationMode = "text" | "image" | "reference" | "video";
 
 export interface MediaModelInfo {
   id: string;
@@ -350,6 +351,9 @@ export interface MediaGenerationRequest {
   voice?: string;
   instructions?: string;
   seconds?: number;
+  videoMode?: VideoGenerationMode;
+  videoResolution?: string;
+  videoAspectRatio?: string;
   referenceAttachmentIds: string[];
 }
 

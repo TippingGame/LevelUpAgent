@@ -10,6 +10,7 @@ use zip::ZipArchive;
 use crate::models::{AgentMessage, AttachmentKind, AttachmentPreview, ImageAttachment};
 
 const MAX_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
+const MAX_MEDIA_REFERENCE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_PREVIEW_CHARS: usize = 4_000;
 const MAX_TEXT_BYTES: u64 = 1024 * 1024;
 const MAX_IMAGES_PER_MESSAGE: usize = 8;
@@ -60,20 +61,42 @@ struct ExtractedDocument {
 }
 
 #[derive(Clone)]
-pub struct ManagedImage {
+pub struct ManagedReference {
     pub file_name: String,
     pub mime_type: String,
     pub bytes: Vec<u8>,
+    pub kind: AttachmentKind,
 }
 
 pub fn import(storage: &Path, source: &Path) -> Result<ImageAttachment, String> {
+    import_path(storage, source, false)
+}
+
+pub fn import_media_reference(storage: &Path, source: &Path) -> Result<ImageAttachment, String> {
+    import_path(storage, source, true)
+}
+
+fn import_path(
+    storage: &Path,
+    source: &Path,
+    allow_video: bool,
+) -> Result<ImageAttachment, String> {
     let metadata = std::fs::metadata(source)
         .map_err(|error| format!("Could not read selected attachment metadata: {error}"))?;
     if !metadata.is_file() {
         return Err("Selected attachment is not a regular file".to_owned());
     }
-    if metadata.len() == 0 || metadata.len() > MAX_ATTACHMENT_BYTES {
-        return Err("Attachments must be between 1 byte and 20 MiB".to_owned());
+    let maximum = if allow_video {
+        MAX_MEDIA_REFERENCE_BYTES
+    } else {
+        MAX_ATTACHMENT_BYTES
+    };
+    if metadata.len() == 0 || metadata.len() > maximum {
+        return Err(if allow_video {
+            "Media references must be between 1 byte and 64 MiB".to_owned()
+        } else {
+            "Attachments must be between 1 byte and 20 MiB".to_owned()
+        });
     }
     let bytes = std::fs::read(source)
         .map_err(|error| format!("Could not read selected attachment: {error}"))?;
@@ -82,7 +105,7 @@ pub fn import(storage: &Path, source: &Path) -> Result<ImageAttachment, String> 
         .and_then(|value| value.to_str())
         .unwrap_or("attachment")
         .to_owned();
-    import_bytes(storage, &name, bytes)
+    import_bytes(storage, &name, bytes, allow_video)
 }
 
 pub fn import_base64_image(
@@ -115,12 +138,26 @@ pub fn import_base64_attachment(
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(encoded)
         .map_err(|_| "The pasted file data is invalid".to_owned())?;
-    import_bytes(storage, name, bytes)
+    import_bytes(storage, name, bytes, false)
 }
 
-fn import_bytes(storage: &Path, name: &str, bytes: Vec<u8>) -> Result<ImageAttachment, String> {
-    if bytes.is_empty() || bytes.len() as u64 > MAX_ATTACHMENT_BYTES {
-        return Err("Attachments must be between 1 byte and 20 MiB".to_owned());
+fn import_bytes(
+    storage: &Path,
+    name: &str,
+    bytes: Vec<u8>,
+    allow_video: bool,
+) -> Result<ImageAttachment, String> {
+    let maximum = if allow_video {
+        MAX_MEDIA_REFERENCE_BYTES
+    } else {
+        MAX_ATTACHMENT_BYTES
+    };
+    if bytes.is_empty() || bytes.len() as u64 > maximum {
+        return Err(if allow_video {
+            "Media references must be between 1 byte and 64 MiB".to_owned()
+        } else {
+            "Attachments must be between 1 byte and 20 MiB".to_owned()
+        });
     }
     let name = name
         .chars()
@@ -133,6 +170,17 @@ fn import_bytes(storage: &Path, name: &str, bytes: Vec<u8>) -> Result<ImageAttac
         name
     };
     let (kind, mime_type) = classify_attachment(&name, &bytes)?;
+    if kind == AttachmentKind::Video && !allow_video {
+        return Err("MP4 video references can be added from Media Studio only".to_owned());
+    }
+    if kind == AttachmentKind::Video
+        && !Path::new(&name)
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("mp4"))
+    {
+        return Err("Video references must use the .mp4 extension".to_owned());
+    }
 
     std::fs::create_dir_all(storage)
         .map_err(|error| format!("Could not create attachment storage: {error}"))?;
@@ -162,30 +210,38 @@ fn import_bytes(storage: &Path, name: &str, bytes: Vec<u8>) -> Result<ImageAttac
     })
 }
 
-pub fn read_managed_image(storage: &Path, attachment_id: &str) -> Result<ManagedImage, String> {
+pub fn read_managed_reference(
+    storage: &Path,
+    attachment_id: &str,
+) -> Result<ManagedReference, String> {
     validate_id(attachment_id)?;
     let path = storage.join(format!("{attachment_id}.bin"));
     let metadata = std::fs::metadata(&path)
         .map_err(|_| "The selected reference image is no longer available".to_owned())?;
-    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_ATTACHMENT_BYTES {
-        return Err("The selected reference image has an invalid size".to_owned());
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_MEDIA_REFERENCE_BYTES {
+        return Err("The selected media reference has an invalid size".to_owned());
     }
     let bytes = std::fs::read(&path)
         .map_err(|error| format!("Could not read the selected reference image: {error}"))?;
-    let (_, mime_type) = classify_attachment("reference", &bytes)?;
-    if !mime_type.starts_with("image/") {
-        return Err("Only managed image attachments can be used as references".to_owned());
-    }
+    let (kind, mime_type) = classify_attachment("reference", &bytes)?;
     let extension = match mime_type.as_str() {
         "image/jpeg" => "jpg",
         "image/webp" => "webp",
         "image/gif" => "gif",
+        "video/mp4" => "mp4",
         _ => "png",
     };
-    Ok(ManagedImage {
+    if !matches!(kind, AttachmentKind::Image | AttachmentKind::Video) {
+        return Err(
+            "Only managed image or MP4 video attachments can be used as media references"
+                .to_owned(),
+        );
+    }
+    Ok(ManagedReference {
         file_name: format!("reference-{attachment_id}.{extension}"),
         mime_type,
         bytes,
+        kind,
     })
 }
 
@@ -198,7 +254,7 @@ pub fn preview(
     let path = storage.join(format!("{attachment_id}.bin"));
     let metadata = std::fs::metadata(&path)
         .map_err(|_| "The selected attachment is no longer available".to_owned())?;
-    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_ATTACHMENT_BYTES {
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_MEDIA_REFERENCE_BYTES {
         return Err("The selected attachment has an invalid size".to_owned());
     }
     let bytes = std::fs::read(path)
@@ -209,6 +265,7 @@ pub fn preview(
             Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
             None,
         ),
+        AttachmentKind::Video => (None, None),
         AttachmentKind::Text => {
             let text = std::str::from_utf8(&bytes)
                 .map_err(|_| "The selected text attachment is not valid UTF-8".to_owned())?;
@@ -300,6 +357,9 @@ pub fn resolve(storage: &Path, messages: &mut [AgentMessage]) -> Result<(), Stri
                     attachment.data_base64 =
                         Some(base64::engine::general_purpose::STANDARD.encode(bytes));
                 }
+                AttachmentKind::Video => {
+                    return Err("Video attachments are supported only in Media Studio".to_owned());
+                }
                 AttachmentKind::Text => {
                     text_total = text_total.saturating_add(bytes.len() as u64);
                     if text_total > MAX_REQUEST_TEXT_BYTES {
@@ -367,6 +427,9 @@ fn classify_attachment(name: &str, bytes: &[u8]) -> Result<(AttachmentKind, Stri
     if let Some(mime_type) = detect_image_mime(bytes) {
         return Ok((AttachmentKind::Image, mime_type.to_owned()));
     }
+    if let Some(mime_type) = detect_video_mime(bytes) {
+        return Ok((AttachmentKind::Video, mime_type.to_owned()));
+    }
     if let Some(document_type) = detect_document_type(bytes)? {
         return Ok((
             AttachmentKind::Document,
@@ -377,7 +440,7 @@ fn classify_attachment(name: &str, bytes: &[u8]) -> Result<(AttachmentKind, Stri
         return Err("Text and code attachments may be at most 1 MiB".to_owned());
     }
     let mime_type = detect_text_mime(name, bytes).ok_or_else(|| {
-        "Only PNG/JPEG/WebP/GIF images, PDF/DOCX/XLSX/PPTX documents, and supported UTF-8 text or code files are allowed".to_owned()
+        "Only PNG/JPEG/WebP/GIF images, MP4 videos, PDF/DOCX/XLSX/PPTX documents, and supported UTF-8 text or code files are allowed".to_owned()
     })?;
     Ok((AttachmentKind::Text, mime_type.to_owned()))
 }
@@ -401,6 +464,10 @@ fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+fn detect_video_mime(bytes: &[u8]) -> Option<&'static str> {
+    (bytes.len() >= 12 && &bytes[4..8] == b"ftyp").then_some("video/mp4")
 }
 
 fn detect_document_type(bytes: &[u8]) -> Result<Option<DocumentType>, String> {
@@ -1076,6 +1143,7 @@ fn normalize_extracted_text(text: &str) -> String {
 fn attachment_kind_label(kind: &AttachmentKind) -> &'static str {
     match kind {
         AttachmentKind::Image => "image",
+        AttachmentKind::Video => "video",
         AttachmentKind::Text => "text",
         AttachmentKind::Document => "document",
     }
@@ -1130,6 +1198,28 @@ mod tests {
         resolve(&storage, &mut messages).unwrap();
         assert_eq!(messages[0].attachments[0].mime_type, "image/png");
         assert!(messages[0].attachments[0].data_base64.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn imports_mp4_only_through_media_reference_path() {
+        let root = root("video-reference");
+        let source = root.join("reference.mp4");
+        std::fs::write(&source, b"\0\0\0\x18ftypisom\0\0\0\0isom").unwrap();
+        let storage = root.join("managed");
+        assert!(import(&storage, &source).is_err());
+        let attachment = import_media_reference(&storage, &source).unwrap();
+        assert_eq!(attachment.kind, AttachmentKind::Video);
+        assert_eq!(attachment.mime_type, "video/mp4");
+        let managed = read_managed_reference(&storage, &attachment.id).unwrap();
+        assert_eq!(managed.kind, AttachmentKind::Video);
+        assert_eq!(
+            managed.file_name,
+            format!("reference-{}.mp4", attachment.id)
+        );
+        let preview = preview(&storage, &attachment.id, &attachment.name).unwrap();
+        assert_eq!(preview.kind, AttachmentKind::Video);
+        assert!(preview.data_base64.is_none());
         let _ = std::fs::remove_dir_all(root);
     }
 
