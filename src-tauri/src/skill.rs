@@ -123,6 +123,15 @@ pub fn read_enabled(
     }
 }
 
+/// Return the stable preference key used by `scan` for a Skill manifest.
+///
+/// Discovery canonicalizes manifest paths before hashing them. Built-in Skill
+/// setup must use the same normalization instead of a human-readable name.
+pub fn id_for_path(path: &Path) -> String {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    skill_id(&canonical.to_string_lossy())
+}
+
 fn scan_root(
     root: &Path,
     source: &str,
@@ -159,7 +168,7 @@ fn inspect_skill(
     preferences: &HashMap<(String, String), bool>,
 ) -> SkillInfo {
     let path_string = path.to_string_lossy().into_owned();
-    let id = skill_id(&path_string);
+    let id = id_for_path(path);
     let fallback_name = path
         .parent()
         .and_then(Path::file_name)
@@ -403,6 +412,22 @@ mod tests {
                 .contains("Check boundaries.")
         );
         assert!(read_enabled(&skills, &skills[0].id, Some("../secret.txt")).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn id_for_path_matches_discovered_canonical_manifest_id() {
+        let root = temp_root();
+        let manifest = root.join("skills/review/SKILL.md");
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(
+            &manifest,
+            "---\nname: review\ndescription: Review source changes.\n---\n\n# Review\n",
+        )
+        .unwrap();
+        let discovered = scan(&root, &root, None, None, None, &HashMap::new());
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(id_for_path(&manifest), discovered[0].id);
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -161,6 +161,7 @@ import {
 } from "./lib/storage";
 import { getAppLocale, setAppLocale, tr, type AppLocale } from "./lib/i18n";
 import { executeCallsWithParallelMedia } from "./lib/mediaConcurrency";
+import { advanceHatchObservationState, hatchObservationHistory } from "./lib/hatchProgress";
 import { copyText } from "./lib/clipboard";
 import type {
   AgentMessage,
@@ -1407,9 +1408,21 @@ function App() {
 
       const hatchRun = isPetHatchThread(thread);
       const hatchStats = hatchRun ? hatchGenerationHistory(history) : null;
+      const hatchObservations = hatchRun ? hatchObservationHistory(history) : null;
       const hatchBatchFingerprints = new Set<string>();
       let hatchGuardReason: string | null = null;
       const automaticResults = await executeCallsWithParallelMedia(automatic, async (call) => {
+        if (hatchGuardReason) return { output: hatchGuardReason, isError: true };
+        if (hatchRun && hatchObservations) {
+          const observationGuard = advanceHatchObservationState(hatchObservations, call);
+          if (observationGuard) {
+            hatchGuardReason = tr(
+              `桌宠孵化已暂停：模型在没有执行脚本、生图或写入的情况下反复调用“${observationGuard.toolName}”。请检查最后一条工具结果；恢复后应直接运行 prepare_pet_run.py，或通过 Goal 报告明确阻塞。`,
+              `Pet hatching was paused because the model repeatedly called "${observationGuard.toolName}" without running a script, generating an image, or writing progress. Inspect the last tool result; after resuming, run prepare_pet_run.py directly or report a concrete Goal blocker.`,
+            );
+            return { output: hatchGuardReason, isError: true };
+          }
+        }
         if (hatchRun && call.name === "generate_images" && hatchStats) {
           const fingerprint = hatchGenerationFingerprint(call);
           const duplicateCount = hatchStats.fingerprints.get(fingerprint) ?? 0;
@@ -5199,17 +5212,19 @@ function petConversationPrompt(profile: PetProfile, memories: PetMemory[], local
 
 function petHatchGenerationPrompt(request: PetGenerationRequest, locale: AppLocale) {
   const name = request.name || "Infer a short friendly name from the concept";
+  const referenceIds = request.references.map((reference) => reference.id);
   return [
     "Run a complete hatch-pet Goal for a LevelUpAgent Starlight Echo using the bundled toolchain. Do not stop at a plan or a prompt draft.",
     `Pet name: ${name}`,
     `Pet concept: ${request.description}`,
-    `User reference images attached to this request: ${request.references.length}. Treat every attached image as an identity reference.`,
+    `User reference images attached to this request: ${request.references.length}. Managed reference attachment IDs: ${referenceIds.length > 0 ? referenceIds.join(", ") : "none"}. Treat every attached image as an identity reference and pass all listed IDs in the base generate_images.referenceAttachmentIds.`,
     `Bundled Hatch Pet skill directory: ${request.environment.hatchSkillPath}`,
     `Bundled image generation skill directory: ${request.environment.imagegenSkillPath}`,
     `Python command: ${request.environment.pythonCommand}`,
     `Use this working directory for run artifacts: ${request.environment.workDirectory}`,
     `The final package must be written under: ${request.environment.packageDirectory}/<pet-slug>/pet.json and spritesheet.webp`,
-    "Before acting, read the bundled hatch-pet SKILL.md completely, then read every directly required reference it names. Keep its atlas geometry, nine animation rows, grounding-image, transparency, provenance, subagent, QA, repair, and packaging rules authoritative. Do not ask the user to choose or install Skill paths; the paths above come from the LevelUpAgent package.",
+    "Before acting, call read_skill for the enabled hatch-pet Skill and read its SKILL.md completely, then read every directly required reference with read_skill and the same Skill ID. Do not use list_files, read_file, or search_files to locate bundled Skill scripts: they intentionally live outside the selected hatch workspace. levelup-pet-hatch.json is generated runtime metadata, not a task plan; inspect it at most once. Keep the Skill's atlas geometry, nine animation rows, grounding-image, transparency, provenance, subagent, QA, repair, and packaging rules authoritative. Do not ask the user to choose or install Skill paths; the paths above come from the LevelUpAgent package.",
+    "Immediately after the required Skill reads, use run_command with the supplied Python command and bundled Hatch Pet Skill path to execute scripts/prepare_pet_run.py. Managed LevelUpAgent reference attachments do not expose arbitrary filesystem paths to the model, so prepare the run without --reference and use the listed attachment IDs on the base generate_images call; the recorded canonical base then grounds every row. Do not repeatedly call get_goal or browse the workspace instead of attempting this command. If the command cannot be issued or returns a real blocker, report that exact evidence through update_goal rather than reading the same files again.",
     "Use LevelUpAgent's generate_images tool as the visual generation layer for the base and every non-derived row. No external Codex installation is required: the LevelUpAgent adapter exports each completed hatch image unchanged to a standard generated_images/ig_* source and returns it in hatchSourcePaths. Pass that exact returned hatchSourcePaths path to record_imagegen_result.py; never pass the media/*.png path, manually copy or rename a source, or edit imagegen-jobs.json. After prepare_pet_run.py reports the concrete run directory, every generation call must include hatchRunDir=<that directory> and hatchJobId=<the exact pending manifest job id>; the adapter then loads that job's input_images (including canonical-base and layout guides) as provider references. Do not submit a job whose manifest status is already complete. Never draw, tile, mirror, or synthesize missing visual rows with local scripts, except the hatch-pet skill's explicitly approved running-left mirror path. Use the skill's deterministic Python scripts only for prompts, recording selected generated outputs, extraction, atlas assembly, validation, previews, repair queues, and packaging. Generate exactly one visual job at a time and inspect pet_job_status.py before the next job. Use image-capable subagents for row jobs when the runtime exposes them. If delegated agents cannot access generate_images, this one-click workflow explicitly authorizes the LevelUpAgent adapter to issue the grounded row calls from the parent; disclose that adapter path in the checklist and final summary.",
     "Keep a visible progress checklist in the conversation. Run final validation and inspect the contact sheet before completing the Goal. If a real prerequisite is unavailable, report the precise missing item through the Goal workflow; do not fabricate images or completion records.",
     `Write pet.json metadata using the final pet name and description. ${locale === "zh-CN" ? "最终摘要使用中文。" : "Write the final summary in English."} End the final summary with PET_PACKAGE_DIR=<absolute package directory>. LevelUpAgent will import the package automatically after the Goal completes.`,

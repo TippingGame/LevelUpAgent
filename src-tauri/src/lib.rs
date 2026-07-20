@@ -767,13 +767,17 @@ fn enable_pet_hatch_skills(
     database: &database::Database,
     environment: &pet::HatchEnvironment,
 ) -> Result<(), String> {
-    if let Some(directory) = environment.hatch_skill_path.as_deref() {
-        let path = Path::new(directory).join("SKILL.md");
-        database.set_skill_enabled("hatch-pet", &path.to_string_lossy(), true)?;
-    }
-    if let Some(directory) = environment.imagegen_skill_path.as_deref() {
-        let path = Path::new(directory).join("SKILL.md");
-        database.set_skill_enabled("imagegen", &path.to_string_lossy(), true)?;
+    for directory in [
+        environment.hatch_skill_path.as_deref(),
+        environment.imagegen_skill_path.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let path = std::fs::canonicalize(Path::new(directory).join("SKILL.md"))
+            .map_err(|error| format!("Could not resolve bundled Skill manifest: {error}"))?;
+        let id = skill::id_for_path(&path);
+        database.set_skill_enabled(&id, &path.to_string_lossy(), true)?;
     }
     Ok(())
 }
