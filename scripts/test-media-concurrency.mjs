@@ -42,3 +42,23 @@ test("consecutive generation tools run concurrently and results preserve model o
   assert.equal(isMediaTool("check_media_jobs"), true);
   assert.equal(isMediaTool("read_file"), false);
 });
+
+test("hatch workflows can opt out of media parallelism", async () => {
+  const calls = [call("first", "generate_images"), call("second", "generate_images")];
+  const events = [];
+  let active = 0;
+  let maximumActive = 0;
+  const results = await executeCallsWithParallelMedia(calls, async (item) => {
+    active += 1;
+    maximumActive = Math.max(maximumActive, active);
+    events.push(`start:${item.id}`);
+    await wait(2);
+    events.push(`end:${item.id}`);
+    active -= 1;
+    return item.id;
+  }, false);
+
+  assert.equal(maximumActive, 1);
+  assert.deepEqual(results.map((item) => item.result), ["first", "second"]);
+  assert.ok(events.indexOf("end:first") < events.indexOf("start:second"));
+});

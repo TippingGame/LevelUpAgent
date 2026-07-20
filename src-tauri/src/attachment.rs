@@ -245,6 +245,42 @@ pub fn read_managed_reference(
     })
 }
 
+/// Read a local image/video reference for a trusted in-app workflow. The
+/// caller must enforce the allowed directory; this helper only validates the
+/// file type and size before returning the exact bytes to the media provider.
+pub fn read_local_media_reference(path: &Path) -> Result<ManagedReference, String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("Could not read media reference metadata: {error}"))?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_MEDIA_REFERENCE_BYTES {
+        return Err("Media references must be between 1 byte and 64 MiB".to_owned());
+    }
+    let bytes =
+        std::fs::read(path).map_err(|error| format!("Could not read media reference: {error}"))?;
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("reference")
+        .to_owned();
+    let (kind, mime_type) = classify_attachment(&name, &bytes)?;
+    if !matches!(kind, AttachmentKind::Image | AttachmentKind::Video) {
+        return Err("Only image or MP4 video files can be media references".to_owned());
+    }
+    if kind == AttachmentKind::Video
+        && !Path::new(&name)
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("mp4"))
+    {
+        return Err("Video references must use the .mp4 extension".to_owned());
+    }
+    Ok(ManagedReference {
+        file_name: name,
+        mime_type,
+        bytes,
+        kind,
+    })
+}
+
 pub fn preview(
     storage: &Path,
     attachment_id: &str,
@@ -1198,6 +1234,19 @@ mod tests {
         resolve(&storage, &mut messages).unwrap();
         assert_eq!(messages[0].attachments[0].mime_type, "image/png");
         assert!(messages[0].attachments[0].data_base64.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reads_local_media_reference_without_storing_a_second_copy() {
+        let root = root("local-reference");
+        let source = root.join("layout-guide.png");
+        std::fs::write(&source, b"\x89PNG\r\n\x1a\ncontent").unwrap();
+        let reference = read_local_media_reference(&source).unwrap();
+        assert_eq!(reference.kind, AttachmentKind::Image);
+        assert_eq!(reference.mime_type, "image/png");
+        assert_eq!(reference.file_name, "layout-guide.png");
+        assert!(!root.join("managed").is_dir());
         let _ = std::fs::remove_dir_all(root);
     }
 

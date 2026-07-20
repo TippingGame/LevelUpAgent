@@ -1,6 +1,6 @@
 [package]
 name = "levelup-agent"
-version = "1.0.9"
+version = "1.0.10"
 description = "A local-first, multi-model AI agent for LevelUpAPI"
 authors = ["LevelUpAgent contributors"]
 license = "LGPL-3.0-only"

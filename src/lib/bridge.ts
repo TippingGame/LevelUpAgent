@@ -609,9 +609,10 @@ export async function executeTool(
   threadId?: string,
   profile?: ProviderProfile,
   fallbackProfiles: ProviderProfile[] = [],
+  hatch = false,
 ): Promise<ToolExecutionResponse> {
   return invoke<ToolExecutionResponse>("execute_tool", {
-    request: { name: call.name, arguments: call.arguments, workspace, threadId, profile, fallbackProfiles },
+    request: { name: call.name, arguments: call.arguments, workspace, threadId, profile, fallbackProfiles, hatch },
   });
 }
 

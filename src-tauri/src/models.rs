@@ -230,6 +230,11 @@ pub struct ToolExecutionRequest {
     pub profile: Option<ProviderProfile>,
     #[serde(default)]
     pub fallback_profiles: Vec<ProviderProfile>,
+    /// True when the call belongs to the bundled hatch-pet workflow.
+    /// Hatch media needs an adapter source path that the deterministic
+    /// hatch scripts can validate; ordinary media calls keep the old path.
+    #[serde(default)]
+    pub hatch: bool,
 }
 
 #[derive(Debug, Serialize)]

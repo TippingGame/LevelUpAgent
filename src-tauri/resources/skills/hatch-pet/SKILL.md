@@ -25,6 +25,10 @@ Do not call the Image API directly for the normal path. Let `$imagegen` choose i
 
 When invoking `$imagegen` from this skill, pass the generated pet prompt as the authoritative visual spec. Do not wrap it in the generic `$imagegen` shared prompt schema and do not add extra polish, hero-art, photo, product, or illustration-style augmentation. Pet prompts should stay terse, sprite-specific, and digital-pet oriented; only add role labels for input images and any essential user constraint.
 
+### LevelUpAgent adapter
+
+When this Skill is running inside LevelUpAgent, the built-in `generate_images` tool is the `$imagegen` execution boundary. An external Codex installation is not required. After `prepare_pet_run.py` creates a run, pass `hatchRunDir` and the exact pending `hatchJobId` on every image-generation call. The adapter loads that manifest job's `input_images` (including the canonical base and layout guide), rejects completed jobs, writes the unchanged provider bytes to `$CODEX_HOME/generated_images/levelup-agent/.../ig_*`, and returns the source path as `hatchSourcePaths`. Give that returned path to `record_imagegen_result.py`; never use the app's `media/` path or manually edit `imagegen-jobs.json`.
+
 Use this skill's scripts for deterministic work only: preparing prompts and manifests, ingesting selected `$imagegen` outputs, extracting frames, validating rows, composing the final atlas, creating QA media, and packaging.
 
 Hard boundary: do not create, draw, tile, warp, mirror, or synthesize pet visuals with local Python/Pillow scripts, SVG, canvas, HTML/CSS, or other code-native art as a substitute for `$imagegen`. For a normal pet run, expect up to 10 visual generation jobs: 1 base pet plus 9 row-strip jobs. The only exception is `running-left`, which may be derived by mirroring `running-right` only after `running-right` has been generated, visually inspected, and explicitly approved as safe to mirror. If mirroring is not appropriate, generate `running-left` as a normal grounded `$imagegen` row. If those calls are too expensive, blocked, or unavailable, stop and explain the blocker instead of fabricating row strips locally.

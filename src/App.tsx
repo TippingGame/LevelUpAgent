@@ -203,6 +203,13 @@ import type {
 import "./App.css";
 
 const READ_ONLY_TOOLS = new Set(["list_files", "read_file", "search_files", "read_skill", "get_goal", "update_goal", "check_media_jobs"]);
+// Ordinary Goals intentionally have no client-side turn cap. Hatch-pet is a
+// finite visual workflow, though, so keep a narrow circuit breaker for a
+// provider/model that keeps submitting the same image job after an ingest
+// failure. The limits allow one normal run plus one retry per visual job.
+const HATCH_MAX_GENERATION_CALLS = 24;
+const HATCH_MAX_DUPLICATE_GENERATIONS = 2;
+const HATCH_MAX_ROUNDS = 64;
 const RISKY_COMMAND_PATTERNS = [
   /\b(rm|rmdir|del|erase|remove-item|clear-content)\b/i,
   /\b(format|diskpart|shutdown|restart-computer|stop-computer|reboot|halt)\b/i,
@@ -232,6 +239,37 @@ interface PetHatchJob {
 }
 
 type WorkspaceView = "chat" | "media";
+
+function isPetHatchThread(thread: AgentThread) {
+  return /^(?:孵化(?:\s|·|$)|hatch(?:\s|·|$))/iu.test(thread.title)
+    && thread.workspace?.toLocaleLowerCase().includes("pet-hatch") === true;
+}
+
+function hatchGenerationFingerprint(call: ToolCall) {
+  const argumentsObject = call.arguments && typeof call.arguments === "object"
+    ? call.arguments as Record<string, unknown>
+    : {};
+  return JSON.stringify({
+    prompt: typeof argumentsObject.prompt === "string" ? argumentsObject.prompt.trim() : "",
+    model: typeof argumentsObject.model === "string" ? argumentsObject.model.trim() : "",
+    profileId: typeof argumentsObject.profileId === "string" ? argumentsObject.profileId.trim() : "",
+    size: typeof argumentsObject.size === "string" ? argumentsObject.size.trim() : "",
+    quality: typeof argumentsObject.quality === "string" ? argumentsObject.quality.trim() : "",
+    referenceAttachmentIds: Array.isArray(argumentsObject.referenceAttachmentIds)
+      ? argumentsObject.referenceAttachmentIds.map(String).sort()
+      : [],
+  });
+}
+
+function hatchGenerationHistory(history: AgentMessage[]) {
+  const calls = history.flatMap((item) => item.toolCalls).filter((call) => call.name === "generate_images");
+  const fingerprints = new Map<string, number>();
+  for (const call of calls) {
+    const fingerprint = hatchGenerationFingerprint(call);
+    fingerprints.set(fingerprint, (fingerprints.get(fingerprint) ?? 0) + 1);
+  }
+  return { count: calls.length, fingerprints };
+}
 
 function commandNeedsAgentApproval(call: ToolCall) {
   const command = typeof call.arguments.command === "string" ? call.arguments.command.trim() : "";
@@ -1266,6 +1304,30 @@ function App() {
     rewardPetId: string = activePetIdRef.current,
   ): Promise<void> => {
     const threadId = thread.id;
+    if (isPetHatchThread(thread) && round >= HATCH_MAX_ROUNDS) {
+      if (runMode === "goal" && isDesktop()) {
+        try {
+          const paused = await changeGoalStatus(threadId, "pause");
+          if (activeThreadIdRef.current === threadId) setGoalState(paused);
+        } catch {
+          // The Goal may already have reached a terminal state.
+        }
+      }
+      const stopped = finalizeConversationMessages([
+        ...history,
+        message(
+          "assistant",
+          tr(
+            "桌宠孵化已暂停：连续执行超过安全范围。请检查 imagegen-jobs.json 和最后一条失败信息后再继续。",
+            "Pet hatching was paused after exceeding the safety window. Inspect imagegen-jobs.json and the last failure before resuming.",
+          ),
+          { isError: true, ...assistantMessageIdentity(runProfile) },
+        ),
+      ], runStartedAt);
+      commitThread({ ...thread, messages: stopped, updatedAt: Date.now() });
+      finishThreadRun(threadId);
+      return;
+    }
     setThreadRunning(threadId, true);
     runModesRef.current.set(threadId, runMode);
     const operationId = crypto.randomUUID();
@@ -1343,9 +1405,48 @@ function App() {
       const automatic = result.toolCalls.filter((call) => !toolNeedsApproval(call, runPermission));
       const approvalRequired = result.toolCalls.filter((call) => toolNeedsApproval(call, runPermission));
 
-      const automaticResults = await executeCallsWithParallelMedia(automatic, async (call) => (
-        executeTool(call, thread.workspace ?? "", thread.id, runProfile, runFallbackProfiles)
-      ));
+      const hatchRun = isPetHatchThread(thread);
+      const hatchStats = hatchRun ? hatchGenerationHistory(history) : null;
+      const hatchBatchFingerprints = new Set<string>();
+      let hatchGuardReason: string | null = null;
+      const automaticResults = await executeCallsWithParallelMedia(automatic, async (call) => {
+        if (hatchRun && call.name === "generate_images" && hatchStats) {
+          const fingerprint = hatchGenerationFingerprint(call);
+          const duplicateCount = hatchStats.fingerprints.get(fingerprint) ?? 0;
+          if (hatchStats.count >= HATCH_MAX_GENERATION_CALLS) {
+            hatchGuardReason = tr(
+              "同一桌宠孵化任务已提交过过多生图请求；为避免重复扣费，任务已暂停。",
+              "This hatch task submitted too many image generations; it was paused to prevent repeated charges.",
+            );
+            return { output: hatchGuardReason, isError: true };
+          }
+          if (duplicateCount >= HATCH_MAX_DUPLICATE_GENERATIONS) {
+            hatchGuardReason = tr(
+              "检测到同一桌宠生图请求重复提交；请先检查录入结果和 imagegen-jobs.json。",
+              "The same hatch image request was submitted repeatedly; inspect the ingest result and imagegen-jobs.json first.",
+            );
+            return { output: hatchGuardReason, isError: true };
+          }
+          if (hatchBatchFingerprints.has(fingerprint)) {
+            hatchGuardReason = tr(
+              "同一轮不能重复提交同一个桌宠生图 job；请先录入第一张结果。",
+              "The same hatch image job cannot be submitted twice in one turn; ingest the first result first.",
+            );
+            return { output: hatchGuardReason, isError: true };
+          }
+          hatchStats.count += 1;
+          hatchStats.fingerprints.set(fingerprint, duplicateCount + 1);
+          hatchBatchFingerprints.add(fingerprint);
+        }
+        return executeTool(
+          call,
+          thread.workspace ?? "",
+          thread.id,
+          runProfile,
+          runFallbackProfiles,
+          hatchRun,
+        );
+      }, !hatchRun);
       for (const { call, result: toolResult } of automaticResults) {
         nextHistory = [
           ...nextHistory,
@@ -1357,6 +1458,27 @@ function App() {
       }
       nextThread = { ...nextThread, messages: nextHistory, updatedAt: Date.now() };
       commitThread(nextThread);
+
+      if (hatchGuardReason) {
+        if (runMode === "goal" && isDesktop()) {
+          try {
+            const paused = await changeGoalStatus(threadId, "pause");
+            if (activeThreadIdRef.current === threadId) setGoalState(paused);
+          } catch {
+            // The Goal may already have reached a terminal state.
+          }
+        }
+        const stopped = finalizeConversationMessages([
+          ...nextHistory,
+          message("assistant", hatchGuardReason, {
+            isError: true,
+            ...assistantMessageIdentity(runProfile),
+          }),
+        ], runStartedAt);
+        commitThread({ ...nextThread, messages: stopped, updatedAt: Date.now() });
+        finishThreadRun(threadId);
+        return;
+      }
 
       if (approvalRequired.length > 0) {
         setThreadPending(threadId, {
@@ -1672,10 +1794,11 @@ function App() {
     setThreadPending(thread.id, null);
     try {
       let history = approval.history;
+      const hatchRun = isPetHatchThread(thread);
       const resolved = approved
         ? await executeCallsWithParallelMedia(approval.calls, async (call) => (
-            executeTool(call, thread.workspace ?? "", thread.id, runProfile, runFallbackProfiles)
-          ))
+            executeTool(call, thread.workspace ?? "", thread.id, runProfile, runFallbackProfiles, hatchRun)
+          ), !hatchRun)
         : approval.calls.map((call) => ({ call, result: { output: "User denied this tool call", isError: true } }));
       for (const { call, result } of resolved) {
         history = [
@@ -5087,7 +5210,7 @@ function petHatchGenerationPrompt(request: PetGenerationRequest, locale: AppLoca
     `Use this working directory for run artifacts: ${request.environment.workDirectory}`,
     `The final package must be written under: ${request.environment.packageDirectory}/<pet-slug>/pet.json and spritesheet.webp`,
     "Before acting, read the bundled hatch-pet SKILL.md completely, then read every directly required reference it names. Keep its atlas geometry, nine animation rows, grounding-image, transparency, provenance, subagent, QA, repair, and packaging rules authoritative. Do not ask the user to choose or install Skill paths; the paths above come from the LevelUpAgent package.",
-    "Use LevelUpAgent's generate_images tool as the visual generation layer for the base and every non-derived row. Never draw, tile, mirror, or synthesize missing visual rows with local scripts, except the hatch-pet skill's explicitly approved running-left mirror path. Use the skill's deterministic Python scripts only for prompts, recording selected generated outputs, extraction, atlas assembly, validation, previews, repair queues, and packaging. Use image-capable subagents for row jobs when the runtime exposes them. If delegated agents cannot access generate_images, this one-click workflow explicitly authorizes the LevelUpAgent adapter to issue the grounded row calls from the parent, preferably as parallel tool calls; disclose that adapter path in the checklist and final summary.",
+    "Use LevelUpAgent's generate_images tool as the visual generation layer for the base and every non-derived row. No external Codex installation is required: the LevelUpAgent adapter exports each completed hatch image unchanged to a standard generated_images/ig_* source and returns it in hatchSourcePaths. Pass that exact returned hatchSourcePaths path to record_imagegen_result.py; never pass the media/*.png path, manually copy or rename a source, or edit imagegen-jobs.json. After prepare_pet_run.py reports the concrete run directory, every generation call must include hatchRunDir=<that directory> and hatchJobId=<the exact pending manifest job id>; the adapter then loads that job's input_images (including canonical-base and layout guides) as provider references. Do not submit a job whose manifest status is already complete. Never draw, tile, mirror, or synthesize missing visual rows with local scripts, except the hatch-pet skill's explicitly approved running-left mirror path. Use the skill's deterministic Python scripts only for prompts, recording selected generated outputs, extraction, atlas assembly, validation, previews, repair queues, and packaging. Generate exactly one visual job at a time and inspect pet_job_status.py before the next job. Use image-capable subagents for row jobs when the runtime exposes them. If delegated agents cannot access generate_images, this one-click workflow explicitly authorizes the LevelUpAgent adapter to issue the grounded row calls from the parent; disclose that adapter path in the checklist and final summary.",
     "Keep a visible progress checklist in the conversation. Run final validation and inspect the contact sheet before completing the Goal. If a real prerequisite is unavailable, report the precise missing item through the Goal workflow; do not fabricate images or completion records.",
     `Write pet.json metadata using the final pet name and description. ${locale === "zh-CN" ? "最终摘要使用中文。" : "Write the final summary in English."} End the final summary with PET_PACKAGE_DIR=<absolute package directory>. LevelUpAgent will import the package automatically after the Goal completes.`,
   ].join("\n\n");
