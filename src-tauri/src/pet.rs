@@ -1024,6 +1024,7 @@ fn update_runtime_pet_scale(scale: f64) {
     );
 }
 
+#[cfg(windows)]
 fn runtime_pet_scale() -> f64 {
     ACTIVE_PET_SCALE.load(Ordering::Relaxed) as f64 / PET_SCALE_UNITS
 }
