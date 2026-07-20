@@ -9,7 +9,7 @@ use crate::models::{
     StoredMessage, StoredThread, ToolCall,
 };
 
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 pub struct Database {
     connection: Mutex<Connection>,
@@ -63,11 +63,13 @@ impl Database {
                     tool_calls_json TEXT NOT NULL DEFAULT '[]',
                     tool_call_id TEXT,
                     created_at INTEGER NOT NULL,
-                    is_error INTEGER NOT NULL DEFAULT 0,
-                    request_id TEXT,
-                    internal INTEGER NOT NULL DEFAULT 0,
-                    attachments_json TEXT NOT NULL DEFAULT '[]',
-                    UNIQUE(thread_id, position)
+                     is_error INTEGER NOT NULL DEFAULT 0,
+                     request_id TEXT,
+                     internal INTEGER NOT NULL DEFAULT 0,
+                     attachments_json TEXT NOT NULL DEFAULT '[]',
+                     model_name TEXT,
+                     provider_brand TEXT,
+                     UNIQUE(thread_id, position)
                  );
 
                  CREATE INDEX IF NOT EXISTS idx_threads_updated_at
@@ -223,10 +225,40 @@ impl Database {
                 )
                 .map_err(database_error)?;
         }
+        let has_model_name = connection
+            .prepare("PRAGMA table_info(messages)")
+            .and_then(|mut statement| {
+                let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+                columns.collect::<Result<Vec<_>, _>>()
+            })
+            .map_err(database_error)?
+            .iter()
+            .any(|column| column == "model_name");
+        if !has_model_name {
+            connection
+                .execute("ALTER TABLE messages ADD COLUMN model_name TEXT", [])
+                .map_err(database_error)?;
+        }
+        let has_provider_brand = connection
+            .prepare("PRAGMA table_info(messages)")
+            .and_then(|mut statement| {
+                let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+                columns.collect::<Result<Vec<_>, _>>()
+            })
+            .map_err(database_error)?
+            .iter()
+            .any(|column| column == "provider_brand");
+        if !has_provider_brand {
+            connection
+                .execute("ALTER TABLE messages ADD COLUMN provider_brand TEXT", [])
+                .map_err(database_error)?;
+        }
         connection
             .execute_batch(
                 "CREATE INDEX IF NOT EXISTS idx_provider_requests_started_at
                    ON provider_requests(started_at DESC);
+                 CREATE INDEX IF NOT EXISTS idx_provider_requests_request_id
+                   ON provider_requests(request_id);
                  CREATE INDEX IF NOT EXISTS idx_provider_requests_profile_model
                    ON provider_requests(profile_id, model, started_at DESC);
                  CREATE INDEX IF NOT EXISTS idx_media_assets_created_at
@@ -274,8 +306,18 @@ impl Database {
         let mut threads = Vec::with_capacity(summaries.len());
         let mut message_statement = connection
             .prepare(
-                "SELECT id, role, content, tool_calls_json, tool_call_id, created_at, is_error, request_id, internal, attachments_json
-                 FROM messages WHERE thread_id = ?1 ORDER BY position ASC",
+                "SELECT m.id, m.role, m.content, m.tool_calls_json, m.tool_call_id, m.created_at, m.is_error, m.request_id, m.internal, m.attachments_json,
+                        COALESCE(m.model_name, (
+                            SELECT provider_request.model
+                            FROM provider_requests AS provider_request
+                            WHERE provider_request.request_id = m.request_id
+                              AND provider_request.status = 'success'
+                            ORDER BY provider_request.started_at DESC
+                            LIMIT 1
+                        )) AS model_name,
+                        m.provider_brand
+                 FROM messages AS m
+                 WHERE m.thread_id = ?1 ORDER BY m.position ASC",
             )
             .map_err(database_error)?;
         for (id, title, workspace, updated_at, input_tokens, output_tokens) in summaries {
@@ -299,6 +341,8 @@ impl Database {
                         request_id: row.get(7)?,
                         internal: row.get::<_, i64>(8)? != 0,
                         attachments,
+                        model_name: row.get(10)?,
+                        provider_brand: row.get(11)?,
                     })
                 })
                 .map_err(database_error)?
@@ -350,8 +394,8 @@ impl Database {
             let mut statement = transaction
                 .prepare(
                     "INSERT INTO messages
-                     (id, thread_id, position, role, content, tool_calls_json, tool_call_id, created_at, is_error, request_id, internal, attachments_json)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                     (id, thread_id, position, role, content, tool_calls_json, tool_call_id, created_at, is_error, request_id, internal, attachments_json, model_name, provider_brand)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 )
                 .map_err(database_error)?;
             for (position, message) in thread.messages.iter().enumerate() {
@@ -373,6 +417,8 @@ impl Database {
                         message.request_id,
                         i64::from(message.internal),
                         attachments,
+                        message.model_name,
+                        message.provider_brand,
                     ])
                     .map_err(database_error)?;
             }
@@ -1317,6 +1363,8 @@ mod tests {
                 request_id: Some("request-1".to_owned()),
                 internal: true,
                 attachments: Vec::new(),
+                model_name: Some("gpt-5.5".to_owned()),
+                provider_brand: Some("openai".to_owned()),
             }],
             updated_at: 1_700_000_000_000,
             input_tokens: 120,
@@ -1350,6 +1398,8 @@ mod tests {
                 request_id: None,
                 internal: false,
                 attachments: Vec::new(),
+                model_name: None,
+                provider_brand: None,
             },
         );
         database.save_thread(&thread).unwrap();
@@ -1403,6 +1453,40 @@ mod tests {
         assert!(columns.iter().any(|column| column == "request_id"));
         assert!(columns.iter().any(|column| column == "internal"));
         assert!(columns.iter().any(|column| column == "attachments_json"));
+        assert!(columns.iter().any(|column| column == "model_name"));
+        assert!(columns.iter().any(|column| column == "provider_brand"));
+    }
+
+    #[test]
+    fn restores_legacy_model_name_from_provider_request_log() {
+        let database = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        let mut thread = sample_thread();
+        thread.messages[0].model_name = None;
+        thread.messages[0].provider_brand = None;
+        database
+            .record_provider_request(&ProviderRequestLog {
+                id: "provider-log-1".to_owned(),
+                thread_id: Some(thread.id.clone()),
+                profile_id: "legacy-profile".to_owned(),
+                model: "legacy-model".to_owned(),
+                protocol: "openai_responses".to_owned(),
+                started_at: 1_700_000_000_001,
+                latency_ms: 42,
+                status: "success".to_owned(),
+                input_tokens: None,
+                output_tokens: None,
+                request_id: Some("request-1".to_owned()),
+                failover_index: 0,
+                error: None,
+            })
+            .unwrap();
+        database.save_thread(&thread).unwrap();
+        let restored = database.list_threads().unwrap();
+        assert_eq!(
+            restored[0].messages[0].model_name.as_deref(),
+            Some("legacy-model")
+        );
+        assert_eq!(restored[0].messages[0].provider_brand, None);
     }
 
     #[test]

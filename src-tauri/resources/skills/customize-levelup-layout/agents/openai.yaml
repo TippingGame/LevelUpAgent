@@ -1,0 +1,4 @@
+interface:
+  display_name: "Customize LevelUp Layout"
+  short_description: "Build safe declarative LevelUpAgent theme layouts"
+  default_prompt: "Use $customize-levelup-layout to create a theme layout from my interface requirements."

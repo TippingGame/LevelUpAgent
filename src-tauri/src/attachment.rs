@@ -90,6 +90,19 @@ pub fn import_base64_image(
     name: &str,
     encoded: &str,
 ) -> Result<ImageAttachment, String> {
+    let attachment = import_base64_attachment(storage, name, encoded)?;
+    if attachment.kind != AttachmentKind::Image {
+        let _ = delete(storage, &attachment.id);
+        return Err("Clipboard content must be a PNG, JPEG, WebP, or GIF image".to_owned());
+    }
+    Ok(attachment)
+}
+
+pub fn import_base64_attachment(
+    storage: &Path,
+    name: &str,
+    encoded: &str,
+) -> Result<ImageAttachment, String> {
     let encoded = encoded
         .strip_prefix("data:")
         .and_then(|value| value.split_once(',').map(|(_, data)| data))
@@ -97,17 +110,12 @@ pub fn import_base64_image(
         .trim();
     let maximum_encoded_len = (MAX_ATTACHMENT_BYTES as usize).div_ceil(3) * 4;
     if encoded.is_empty() || encoded.len() > maximum_encoded_len {
-        return Err("Pasted images must be between 1 byte and 20 MiB".to_owned());
+        return Err("Pasted files must be between 1 byte and 20 MiB".to_owned());
     }
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(encoded)
-        .map_err(|_| "The pasted image data is invalid".to_owned())?;
-    let attachment = import_bytes(storage, name, bytes)?;
-    if attachment.kind != AttachmentKind::Image {
-        let _ = delete(storage, &attachment.id);
-        return Err("Clipboard content must be a PNG, JPEG, WebP, or GIF image".to_owned());
-    }
-    Ok(attachment)
+        .map_err(|_| "The pasted file data is invalid".to_owned())?;
+    import_bytes(storage, name, bytes)
 }
 
 fn import_bytes(storage: &Path, name: &str, bytes: Vec<u8>) -> Result<ImageAttachment, String> {
@@ -1136,6 +1144,18 @@ mod tests {
         assert_eq!(attachment.mime_type, "image/png");
         assert!(storage.join(format!("{}.bin", attachment.id)).is_file());
         assert!(import_base64_image(&storage, "not-an-image.txt", "aGVsbG8=").is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn imports_base64_clipboard_text_into_managed_storage() {
+        let root = root("clipboard-text");
+        let storage = root.join("managed");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"clipboard text\n");
+        let attachment = import_base64_attachment(&storage, "notes.txt", &encoded).unwrap();
+        assert_eq!(attachment.kind, AttachmentKind::Text);
+        assert_eq!(attachment.mime_type, "text/plain");
+        assert!(storage.join(format!("{}.bin", attachment.id)).is_file());
         let _ = std::fs::remove_dir_all(root);
     }
 

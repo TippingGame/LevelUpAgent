@@ -27,6 +27,13 @@ import type {
   MediaBatchResult,
   MediaCatalog,
   MediaGenerationRequest,
+  HatchEnvironment,
+  PetActivity,
+  PetDashboard,
+  PetMemory,
+  PetProfile,
+  PetProgress,
+  PetRuntimeSnapshot,
   ProviderProfile,
   ProviderSettings,
   ProviderHealth,
@@ -34,9 +41,194 @@ import type {
   SkillInfo,
   ToolCall,
   ToolExecutionResponse,
+  ThemeManifest,
+  ThemePackage,
+  ResolvedLayout,
 } from "./types";
 
 export const isDesktop = () => "__TAURI_INTERNALS__" in window;
+
+const browserPetDashboard: PetDashboard = {
+  pets: [{
+    id: "yui",
+    displayName: "Yui",
+    description: "A tiny Codex digital pet inspired by Yui from Sword Art Online.",
+    spritesheetPath: "/pets/yui/spritesheet.webp",
+    removable: false,
+  }],
+  activePetId: "yui",
+  progress: {
+    petId: "yui",
+    level: 1,
+    totalXp: 0,
+    currentXp: 0,
+    requiredXp: 100,
+    progress: 0,
+    totalTokens: 0,
+    requests: 0,
+  },
+  memories: [],
+  overlayVisible: true,
+  scale: 0.75,
+};
+
+export async function getPetRuntime(): Promise<PetRuntimeSnapshot> {
+  if (!isDesktop()) return { dashboard: browserPetDashboard, activities: [] };
+  return invoke<PetRuntimeSnapshot>("get_pet_runtime");
+}
+
+export async function selectPet(petId: string): Promise<PetDashboard> {
+  if (!isDesktop()) return { ...browserPetDashboard, activePetId: petId };
+  return invoke<PetDashboard>("select_pet", { petId });
+}
+
+export async function setPetOverlayVisible(visible: boolean): Promise<PetDashboard> {
+  if (!isDesktop()) return { ...browserPetDashboard, overlayVisible: visible };
+  return invoke<PetDashboard>("set_pet_overlay_visible", { visible });
+}
+
+export async function setPetScale(petId: string, scale: number): Promise<PetDashboard> {
+  if (!isDesktop()) return { ...browserPetDashboard, activePetId: petId, scale };
+  return invoke<PetDashboard>("set_pet_scale", { petId, scale });
+}
+
+export async function selectAndInstallPet(): Promise<PetProfile | null> {
+  if (!isDesktop()) return null;
+  const sourcePath = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: "Codex pet package", extensions: ["json"] }],
+  });
+  if (typeof sourcePath !== "string") return null;
+  return installPet(sourcePath);
+}
+
+export async function installPet(sourcePath: string): Promise<PetProfile> {
+  return invoke<PetProfile>("install_pet", { sourcePath });
+}
+
+export async function removePet(petId: string): Promise<boolean> {
+  if (!isDesktop()) return false;
+  return invoke<boolean>("remove_pet", { petId });
+}
+
+export async function recordPetUsage(
+  petId: string,
+  usageId: string,
+  inputTokens: number,
+  outputTokens: number,
+): Promise<PetProgress> {
+  if (!isDesktop()) return browserPetDashboard.progress;
+  return invoke<PetProgress>("record_pet_usage", {
+    petId,
+    usageId,
+    inputTokens: Math.max(0, Math.floor(inputTokens)),
+    outputTokens: Math.max(0, Math.floor(outputTokens)),
+  });
+}
+
+export async function learnPetMemory(petId: string, text: string): Promise<PetMemory[]> {
+  if (!isDesktop()) return [];
+  return invoke<PetMemory[]>("learn_pet_memory", { petId, text });
+}
+
+export async function deletePetMemory(petId: string, memoryId: string): Promise<boolean> {
+  if (!isDesktop()) return false;
+  return invoke<boolean>("delete_pet_memory", { petId, memoryId });
+}
+
+export async function getPetHatchEnvironment(): Promise<HatchEnvironment> {
+  if (!isDesktop()) {
+    return {
+      configured: false,
+      bundled: true,
+      codexHome: "",
+      workDirectory: "",
+      packageDirectory: "",
+      missing: [{ id: "desktop", detail: "LevelUpAgent desktop app" }],
+    };
+  }
+  return invoke<HatchEnvironment>("get_pet_hatch_environment");
+}
+
+export async function configurePetHatch(): Promise<HatchEnvironment> {
+  if (!isDesktop()) return getPetHatchEnvironment();
+  return invoke<HatchEnvironment>("configure_pet_hatch");
+}
+
+export async function importHatchedPets(afterMs = 0): Promise<PetProfile[]> {
+  if (!isDesktop()) return [];
+  return invoke<PetProfile[]>("import_hatched_pets", { afterMs });
+}
+
+export async function updatePetActivities(activities: PetActivity[]): Promise<PetActivity[]> {
+  if (!isDesktop()) return activities;
+  return invoke<PetActivity[]>("update_pet_activities", { activities });
+}
+
+export async function openPetChat(petId: string): Promise<void> {
+  if (!isDesktop()) return;
+  await invoke("open_pet_chat", { petId });
+}
+
+export function petAssetUrl(path: string): string {
+  if (!path || path.startsWith("/") || /^(?:https?:|data:|blob:|asset:)/i.test(path)) return path;
+  return isDesktop() ? convertFileSrc(path) : "/pets/yui/spritesheet.webp";
+}
+
+export async function listThemes(): Promise<ThemeManifest[]> {
+  if (!isDesktop()) return [];
+  return invoke<ThemeManifest[]>("list_themes");
+}
+
+export async function loadTheme(themeId: string): Promise<ThemePackage> {
+  return invoke<ThemePackage>("load_theme", { themeId });
+}
+
+export async function loadThemeLayout(themeId: string): Promise<ResolvedLayout> {
+  return invoke<ResolvedLayout>("load_theme_layout", { themeId });
+}
+
+export async function selectAndInstallTheme(): Promise<ThemeManifest | null> {
+  if (!isDesktop()) return null;
+  const sourcePath = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: "LevelUpAgent theme", extensions: ["levelup-theme"] }],
+  });
+  if (typeof sourcePath !== "string") return null;
+  return installTheme(sourcePath);
+}
+
+export async function installTheme(sourcePath: string): Promise<ThemeManifest> {
+  if (!isDesktop()) throw new Error("Theme installation is available only in the desktop app");
+  return invoke<ThemeManifest>("install_theme", { sourcePath });
+}
+
+export async function installThemeFile(file: File, companion?: File): Promise<ThemeManifest> {
+  if (!isDesktop()) throw new Error("Theme installation is available only in the desktop app");
+  const sourcePath = (file as File & { path?: string }).path;
+  if (sourcePath?.trim() && /\.levelup-theme$/i.test(sourcePath.trim())) return installTheme(sourcePath);
+  const dataBase64 = await readFileAsBase64(file);
+  const layoutDataBase64 = companion ? await readFileAsBase64(companion) : undefined;
+  return invoke<ThemeManifest>("install_theme_data", {
+    payload: {
+      name: clipboardThemePackageName(file.name),
+      dataBase64,
+      layoutName: companion?.name,
+      layoutDataBase64,
+    },
+  });
+}
+
+export async function installThemeText(text: string): Promise<ThemeManifest> {
+  const file = new File([text], "pasted.levelup-theme", { type: "application/json" });
+  return installThemeFile(file);
+}
+
+export async function uninstallTheme(themeId: string): Promise<boolean> {
+  return invoke<boolean>("uninstall_theme", { themeId });
+}
 
 export async function getDefaultWorkspace(): Promise<string | null> {
   if (!isDesktop()) return null;
@@ -77,6 +269,19 @@ export async function importClipboardImages(files: File[]): Promise<ImageAttachm
     dataBase64: await readFileAsBase64(file),
   })));
   return invoke<ImageAttachment[]>("import_clipboard_images", { images: payloads });
+}
+
+export async function importClipboardAttachments(files: File[]): Promise<ImageAttachment[]> {
+  const selected = files.slice(0, 12);
+  if (!isDesktop() || selected.length === 0) return [];
+  const sourcePaths = selected.map((file) => (file as File & { path?: string }).path?.trim() ?? "");
+  if (sourcePaths.every(Boolean)) return importAttachments(sourcePaths);
+  const timestamp = new Date().toISOString().replace(/[-:.TZ]/g, "");
+  const attachments = await Promise.all(selected.map(async (file, index) => ({
+    name: clipboardAttachmentName(file, timestamp, index),
+    dataBase64: await readFileAsBase64(file),
+  })));
+  return invoke<ImageAttachment[]>("import_clipboard_attachments", { attachments });
 }
 
 export async function deleteImageAttachment(attachmentId: string): Promise<boolean> {
@@ -148,21 +353,40 @@ export function mediaAssetUrl(asset: MediaAsset): string | undefined {
 function readFileAsBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onerror = () => reject(reader.error ?? new Error("Could not read the pasted image"));
+    reader.onerror = () => reject(reader.error ?? new Error("Could not read the pasted file"));
     reader.onload = () => {
       if (typeof reader.result !== "string") {
-        reject(new Error("Could not read the pasted image"));
+        reject(new Error("Could not read the pasted file"));
         return;
       }
       const separator = reader.result.indexOf(",");
       if (separator < 0) {
-        reject(new Error("The pasted image data is invalid"));
+        reject(new Error("The pasted file data is invalid"));
         return;
       }
       resolve(reader.result.slice(separator + 1));
     };
     reader.readAsDataURL(file);
   });
+}
+
+function clipboardAttachmentName(file: File, timestamp: string, index: number) {
+  if (file.name.trim()) return file.name;
+  const extension = file.type.startsWith("image/")
+    ? imageExtension(file.type)
+    : file.type === "application/pdf"
+      ? "pdf"
+      : file.type === "application/json"
+        ? "json"
+        : "txt";
+  return `clipboard-${timestamp}-${index + 1}.${extension}`;
+}
+
+function clipboardThemePackageName(name: string) {
+  const trimmed = name.trim();
+  if (/\.levelup-theme$/i.test(trimmed)) return trimmed;
+  const stem = trimmed.replace(/\.[^.\\/]*$/, "").trim() || "pasted";
+  return `${stem}.levelup-theme`;
 }
 
 function imageExtension(mimeType: string) {
@@ -324,11 +548,13 @@ export async function cancelAgentTurn(operationId: string): Promise<boolean> {
 
 type PendingAppUpdate = Awaited<ReturnType<(typeof import("@tauri-apps/plugin-updater"))["check"]>>;
 let pendingAppUpdate: PendingAppUpdate = null;
+let startupAppUpdateCheck: Promise<AppUpdateInfo | null> | null = null;
+const STARTUP_APP_UPDATE_TIMEOUT_MS = 8_000;
 
-export async function checkAppUpdate(): Promise<AppUpdateInfo | null> {
+async function performAppUpdateCheck(timeout?: number): Promise<AppUpdateInfo | null> {
   if (!isDesktop()) throw new Error("Updates are available only in the desktop app");
   const { check } = await import("@tauri-apps/plugin-updater");
-  pendingAppUpdate = await check();
+  pendingAppUpdate = await check(timeout === undefined ? undefined : { timeout });
   if (!pendingAppUpdate) return null;
   return {
     currentVersion: pendingAppUpdate.currentVersion,
@@ -336,6 +562,17 @@ export async function checkAppUpdate(): Promise<AppUpdateInfo | null> {
     date: pendingAppUpdate.date,
     body: pendingAppUpdate.body,
   };
+}
+
+export async function checkAppUpdate(): Promise<AppUpdateInfo | null> {
+  return performAppUpdateCheck();
+}
+
+export function checkAppUpdateOnStartup(): Promise<AppUpdateInfo | null> {
+  if (!startupAppUpdateCheck) {
+    startupAppUpdateCheck = performAppUpdateCheck(STARTUP_APP_UPDATE_TIMEOUT_MS);
+  }
+  return startupAppUpdateCheck;
 }
 
 export async function installAppUpdate(): Promise<void> {

@@ -391,6 +391,9 @@ fn classify_media_model(model: &str) -> Vec<(MediaKind, i64)> {
         || id.contains("imagen")
         || (id.contains("gemini") && id.contains("image"))
         || id.contains("image-generation")
+        || id == "grok-imagine"
+        || id == "grok-imagine-edit"
+        || id.starts_with("grok-imagine-image")
     {
         kinds.push((MediaKind::Image, image_rank(&id)));
     }
@@ -405,6 +408,7 @@ fn classify_media_model(model: &str) -> Vec<(MediaKind, i64)> {
         || id.starts_with("veo")
         || id.contains("video-generation")
         || id.contains("text-to-video")
+        || id.starts_with("grok-imagine-video")
     {
         kinds.push((MediaKind::Video, video_rank(&id)));
     }
@@ -429,6 +433,12 @@ fn image_rank(id: &str) -> i64 {
     } else if id.contains("gemini-2.5") {
         8_200_000_000
     } else if id.contains("imagen-3") {
+        8_000_000_000
+    } else if id == "grok-imagine" || id == "grok-imagine-edit" {
+        7_900_000_000
+    } else if id.starts_with("grok-imagine-image-quality") {
+        8_100_000_000
+    } else if id.starts_with("grok-imagine-image") {
         8_000_000_000
     } else if id.contains("dall-e-3") {
         7_000_000_000
@@ -464,6 +474,10 @@ fn video_rank(id: &str) -> i64 {
         9_200_000_000
     } else if id.contains("veo-2") {
         8_500_000_000
+    } else if id.contains("grok-imagine-video-1.5") {
+        9_100_000_000
+    } else if id.starts_with("grok-imagine-video") {
+        8_900_000_000
     } else if id.contains("sora") {
         8_000_000_000
     } else {
@@ -582,7 +596,7 @@ async fn generate_images(
     let native_gemini = matches!(
         selection.provider.profile.protocol,
         ProviderProtocol::GeminiGenerateContent
-    );
+    ) && !is_grok_image_model(&selection.model);
     // Some OpenAI-compatible relays expose the Images API but reject `n > 1`
     // when they translate it to an upstream image tool. Fan out single-output
     // requests so "outputs each" works consistently for generations and edits.
@@ -652,6 +666,7 @@ async fn call_openai_images(
     references: &[ManagedImage],
 ) -> Result<Vec<GeneratedBlob>, String> {
     let prompt = effective_image_prompt(request);
+    let grok = is_grok_image_model(model);
     let result = if references.is_empty() {
         let url = agent::endpoint(&provider.profile.base_url, "/v1/images/generations")?;
         let mut body = json!({
@@ -660,10 +675,45 @@ async fn call_openai_images(
             "n": request.count,
             "response_format": "b64_json"
         });
-        insert_optional_string(&mut body, "size", request.size.as_deref());
-        insert_optional_string(&mut body, "quality", request.quality.as_deref());
-        insert_optional_string(&mut body, "output_format", request.output_format.as_deref());
-        insert_optional_string(&mut body, "background", request.background.as_deref());
+        if grok {
+            insert_grok_image_options(&mut body, request);
+        } else {
+            insert_optional_string(&mut body, "size", request.size.as_deref());
+            insert_optional_string(&mut body, "quality", request.quality.as_deref());
+            insert_optional_string(&mut body, "output_format", request.output_format.as_deref());
+            insert_optional_string(&mut body, "background", request.background.as_deref());
+        }
+        send_json(bearer_auth_if_present(client.post(url), provider).json(&body)).await
+    } else if grok {
+        if references.len() > 3 {
+            return Err("Grok image editing supports at most 3 reference images".to_owned());
+        }
+        let url = agent::endpoint(&provider.profile.base_url, "/v1/images/edits")?;
+        let mut body = json!({
+            "model": model,
+            "prompt": prompt,
+            "n": request.count,
+            "response_format": "b64_json"
+        });
+        insert_grok_image_options(&mut body, request);
+        let images = references
+            .iter()
+            .map(|image| {
+                json!({
+                    "url": format!(
+                        "data:{};base64,{}",
+                        image.mime_type,
+                        base64::engine::general_purpose::STANDARD.encode(&image.bytes)
+                    ),
+                    "type": "image_url"
+                })
+            })
+            .collect::<Vec<_>>();
+        if images.len() == 1 {
+            body["image"] = images.into_iter().next().unwrap_or_default();
+        } else {
+            body["images"] = Value::Array(images);
+        }
         send_json(bearer_auth_if_present(client.post(url), provider).json(&body)).await
     } else {
         let url = agent::endpoint(&provider.profile.base_url, "/v1/images/edits")?;
@@ -1088,6 +1138,8 @@ async fn generate_videos(
         ) && is_gemini_video_model(&selection.model)
         {
             create_gemini_video(client, &selection.provider, &selection.model, request).await
+        } else if is_grok_video_model(&selection.model) {
+            create_grok_video(client, &selection.provider, &selection.model, request).await
         } else {
             create_openai_video(client, &selection.provider, &selection.model, request).await
         }
@@ -1163,15 +1215,44 @@ async fn create_openai_video(
     }
     let value =
         send_json(bearer_auth_if_present(client.post(url), provider).multipart(form)).await?;
-    let id = value
-        .get("id")
-        .and_then(Value::as_str)
+    let id = find_string_by_keys(&value, &["id", "request_id", "requestId"])
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "The video provider returned no job ID".to_owned())?;
     let status = parse_video_status(value.get("status").and_then(Value::as_str));
     Ok(RemoteVideoJob {
         id: id.to_owned(),
         status,
+        progress: parse_progress(&value),
+    })
+}
+
+async fn create_grok_video(
+    client: &Client,
+    provider: &MediaProvider,
+    model: &str,
+    request: &MediaGenerationRequest,
+) -> Result<RemoteVideoJob, String> {
+    let url = agent::endpoint(&provider.profile.base_url, "/v1/videos/generations")?;
+    let mut body = json!({
+        "model": model,
+        "prompt": request.prompt.trim(),
+    });
+    if let Some(aspect_ratio) = grok_video_aspect_ratio(request.size.as_deref()) {
+        body["aspect_ratio"] = Value::String(aspect_ratio.to_owned());
+    }
+    if let Some(resolution) = grok_video_resolution(request.size.as_deref()) {
+        body["resolution"] = Value::String(resolution.to_owned());
+    }
+    if let Some(seconds) = request.seconds {
+        body["duration"] = Value::from(seconds);
+    }
+    let value = send_json(bearer_auth_if_present(client.post(url), provider).json(&body)).await?;
+    let id = find_string_by_keys(&value, &["id", "request_id", "requestId"])
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "The Grok video provider returned no request ID".to_owned())?;
+    Ok(RemoteVideoJob {
+        id: id.to_owned(),
+        status: parse_video_status(value.get("status").and_then(Value::as_str)),
         progress: parse_progress(&value),
     })
 }
@@ -1795,6 +1876,78 @@ fn is_gemini_video_model(model: &str) -> bool {
         .starts_with("veo")
 }
 
+fn is_grok_video_model(model: &str) -> bool {
+    model
+        .trim_start_matches("models/")
+        .to_ascii_lowercase()
+        .starts_with("grok-imagine-video")
+}
+
+fn is_grok_image_model(model: &str) -> bool {
+    let model = model.trim_start_matches("models/").to_ascii_lowercase();
+    model == "grok-imagine"
+        || model == "grok-imagine-edit"
+        || model.starts_with("grok-imagine-image")
+}
+
+fn insert_grok_image_options(body: &mut Value, request: &MediaGenerationRequest) {
+    if let Some(aspect_ratio) = request.size.as_deref().and_then(grok_image_aspect_ratio) {
+        body["aspect_ratio"] = Value::String(aspect_ratio.to_owned());
+    }
+    if let Some(resolution) =
+        grok_image_resolution(request.size.as_deref(), request.quality.as_deref())
+    {
+        body["resolution"] = Value::String(resolution.to_owned());
+    }
+}
+
+fn grok_image_aspect_ratio(size: &str) -> Option<&'static str> {
+    match size.trim().to_ascii_lowercase().as_str() {
+        "1024x1024" | "2048x2048" | "1:1" | "square" => Some("1:1"),
+        "1536x1024" | "3:2" | "landscape" => Some("3:2"),
+        "1024x1536" | "2:3" | "portrait" => Some("2:3"),
+        "2048x1152" | "3840x2160" | "16:9" => Some("16:9"),
+        "1152x2048" | "2160x3840" | "9:16" => Some("9:16"),
+        _ => None,
+    }
+}
+
+fn grok_image_resolution(size: Option<&str>, quality: Option<&str>) -> Option<&'static str> {
+    if let Some(quality) = quality.map(str::trim).filter(|value| !value.is_empty()) {
+        return match quality.to_ascii_lowercase().as_str() {
+            "1k" | "low" | "medium" => Some("1k"),
+            "2k" | "high" | "4k" => Some("2k"),
+            _ => None,
+        };
+    }
+    let size = size?.trim().to_ascii_lowercase();
+    match size.as_str() {
+        "2048x2048" | "2048x1152" | "1152x2048" | "3840x2160" | "2160x3840" => Some("2k"),
+        "1024x1024" | "1536x1024" | "1024x1536" => Some("1k"),
+        _ => None,
+    }
+}
+
+fn grok_video_resolution(size: Option<&str>) -> Option<&'static str> {
+    match size?.trim().to_ascii_lowercase().as_str() {
+        "480p" => Some("480p"),
+        "720p" => Some("720p"),
+        "1080p" => Some("1080p"),
+        // Media Studio's generic video controls are dimensions/aspect ratios;
+        // Grok's gateway accepts a resolution tier and chooses the aspect ratio.
+        "1280x720" | "720x1280" | "16:9" | "9:16" => Some("720p"),
+        _ => None,
+    }
+}
+
+fn grok_video_aspect_ratio(size: Option<&str>) -> Option<&'static str> {
+    match size?.trim().to_ascii_lowercase().as_str() {
+        "1280x720" | "16:9" => Some("16:9"),
+        "720x1280" | "9:16" => Some("9:16"),
+        _ => None,
+    }
+}
+
 fn effective_image_prompt(request: &MediaGenerationRequest) -> String {
     let prompt = request.prompt.trim();
     let Some(requirement) = request.size.as_deref().and_then(image_output_requirement) else {
@@ -2009,6 +2162,15 @@ mod tests {
             classify_media_model("imagen-4.0-generate-001")[0].0,
             MediaKind::Image
         );
+        assert_eq!(classify_media_model("grok-imagine")[0].0, MediaKind::Image);
+        assert_eq!(
+            classify_media_model("grok-imagine-image-quality")[0].0,
+            MediaKind::Image
+        );
+        assert_eq!(
+            classify_media_model("grok-imagine-edit")[0].0,
+            MediaKind::Image
+        );
         assert_eq!(
             classify_media_model("gpt-4o-mini-tts")[0].0,
             MediaKind::Audio
@@ -2021,6 +2183,10 @@ mod tests {
         assert!(video_rank("sora-2-pro") > video_rank("sora-2"));
         assert_eq!(
             classify_media_model("veo-3.1-generate-preview")[0].0,
+            MediaKind::Video
+        );
+        assert_eq!(
+            classify_media_model("grok-imagine-video-1.5")[0].0,
             MediaKind::Video
         );
         assert!(video_rank("veo-3.1-generate-preview") > video_rank("veo-3.0-generate-preview"));
@@ -2123,6 +2289,15 @@ mod tests {
         assert_eq!(gemini_aspect_ratio("2048x2048"), Some("1:1"));
         assert_eq!(gemini_aspect_ratio("3840x2160"), Some("16:9"));
         assert_eq!(gemini_aspect_ratio("2160x3840"), Some("9:16"));
+        assert_eq!(grok_image_aspect_ratio("2048x1152"), Some("16:9"));
+        assert_eq!(grok_image_aspect_ratio("21:9"), None);
+        assert_eq!(grok_image_resolution(Some("2048x1152"), None), Some("2k"));
+        assert_eq!(
+            grok_image_resolution(Some("1024x1024"), Some("high")),
+            Some("2k")
+        );
+        assert_eq!(grok_video_aspect_ratio(Some("720x1280")), Some("9:16"));
+        assert_eq!(grok_video_resolution(Some("720x1280")), Some("720p"));
         request.size = Some("auto".to_owned());
         assert_eq!(effective_image_prompt(&request), "A cinematic city");
         request.size = None;
@@ -2180,6 +2355,73 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(std::fs::read(exported).unwrap(), png);
+        server.join().unwrap();
+        drop(database);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn generates_and_persists_a_grok_image_with_native_options() {
+        let png = b"\x89PNG\r\n\x1a\nmock-grok-image";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(png);
+        let body = json!({ "data": [{ "b64_json": encoded }] })
+            .to_string()
+            .into_bytes();
+        let (base_url, server) = mock_sequence_inspecting(
+            vec![MockResponse {
+                method: "POST",
+                path: "/v1/images/generations",
+                status: 200,
+                content_type: "application/json",
+                body,
+            }],
+            |_, request| {
+                let request = String::from_utf8_lossy(request);
+                let body = request.split_once("\r\n\r\n").unwrap().1;
+                let value: Value = serde_json::from_str(body).unwrap();
+                assert_eq!(
+                    value.get("model").and_then(Value::as_str),
+                    Some("grok-imagine-image-quality")
+                );
+                assert_eq!(
+                    value.get("aspect_ratio").and_then(Value::as_str),
+                    Some("16:9")
+                );
+                assert_eq!(value.get("resolution").and_then(Value::as_str), Some("2k"));
+                assert_eq!(
+                    value.get("response_format").and_then(Value::as_str),
+                    Some("b64_json")
+                );
+                assert!(value.get("size").is_none());
+                assert!(value.get("quality").is_none());
+            },
+        );
+        let mut provider = provider("grok", "grok-imagine-image-quality");
+        provider.profile.base_url = base_url;
+        let selection = MediaSelection {
+            provider,
+            model: "grok-imagine-image-quality".to_owned(),
+        };
+        let (root, database) = temp_storage("grok-image");
+        let storage = root.join("media");
+        let mut request = request(MediaKind::Image, 1);
+        request.size = Some("2048x1152".to_owned());
+        let result = generate_batch(
+            &Client::new(),
+            &storage,
+            &database,
+            &selection,
+            &request,
+            Some("thread-grok-image"),
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.assets.len(), 1);
+        assert_eq!(
+            std::fs::read(result.assets[0].file_path.as_deref().unwrap()).unwrap(),
+            png
+        );
         server.join().unwrap();
         drop(database);
         let _ = std::fs::remove_dir_all(root);
@@ -2488,6 +2730,91 @@ mod tests {
         .unwrap();
         assert_eq!(completed.status, MediaStatus::Completed);
         assert_eq!(completed.progress, Some(100));
+        assert!(Path::new(completed.file_path.as_deref().unwrap()).is_file());
+        server.join().unwrap();
+        drop(database);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn moves_grok_video_job_from_request_id_to_downloaded_completion() {
+        let (base_url, server) = mock_sequence_inspecting(
+            vec![
+                MockResponse {
+                    method: "POST",
+                    path: "/v1/videos/generations",
+                    status: 200,
+                    content_type: "application/json",
+                    body: br#"{"request_id":"grok_video_test","status":"queued","progress":0}"#
+                        .to_vec(),
+                },
+                MockResponse {
+                    method: "GET",
+                    path: "/v1/videos/grok_video_test",
+                    status: 200,
+                    content_type: "application/json",
+                    body:
+                        br#"{"request_id":"grok_video_test","status":"completed","progress":100}"#
+                            .to_vec(),
+                },
+                MockResponse {
+                    method: "GET",
+                    path: "/v1/videos/grok_video_test/content",
+                    status: 200,
+                    content_type: "video/mp4",
+                    body: b"mock-grok-mp4-content".to_vec(),
+                },
+            ],
+            |index, request| {
+                if index == 0 {
+                    let request = String::from_utf8_lossy(request);
+                    let body = request.split_once("\r\n\r\n").unwrap().1;
+                    let value: Value = serde_json::from_str(body).unwrap();
+                    assert_eq!(
+                        value.get("resolution").and_then(Value::as_str),
+                        Some("720p")
+                    );
+                    assert_eq!(
+                        value.get("aspect_ratio").and_then(Value::as_str),
+                        Some("16:9")
+                    );
+                    assert_eq!(value.get("duration").and_then(Value::as_u64), Some(8));
+                }
+            },
+        );
+        let mut provider = provider("grok", "grok-imagine-video");
+        provider.profile.base_url = base_url;
+        let selection = MediaSelection {
+            provider: provider.clone(),
+            model: "grok-imagine-video".to_owned(),
+        };
+        let (root, database) = temp_storage("grok-video");
+        let storage = root.join("media");
+        let mut request = request(MediaKind::Video, 1);
+        request.size = Some("1280x720".to_owned());
+        request.seconds = Some(8);
+        let created = generate_batch(
+            &Client::new(),
+            &storage,
+            &database,
+            &selection,
+            &request,
+            Some("thread-grok-video"),
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.assets[0].status, MediaStatus::Queued);
+        let completed = refresh_asset(
+            &Client::new(),
+            &storage,
+            &database,
+            &provider,
+            created.assets[0].clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(completed.status, MediaStatus::Completed);
         assert!(Path::new(completed.file_path.as_deref().unwrap()).is_file());
         server.join().unwrap();
         drop(database);

@@ -4,20 +4,25 @@ mod config_writeback;
 mod database;
 mod filesystem;
 mod git;
+mod layout;
 mod mcp;
 mod media;
 mod migration;
 mod models;
+mod pet;
 mod process;
 mod skill;
 mod subagent;
+mod theme;
 mod tools;
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use base64::Engine;
 use models::{
     AgentMessage, AgentSkillSummary, AgentStreamEvent, AgentToolDefinition, AgentTurnRequest,
     AgentTurnResponse, AttachmentPreview, ConfigWritePreview, ConfigWriteResult,
@@ -29,8 +34,8 @@ use models::{
     ToolExecutionRequest, ToolExecutionResponse,
 };
 use reqwest::Client;
-use tauri::Manager;
 use tauri::ipc::Channel;
+use tauri::{Emitter, Manager};
 use tokio_util::sync::CancellationToken;
 
 const KEYRING_SERVICE: &str = "com.levelup.agent";
@@ -198,6 +203,25 @@ async fn attach_mcp_tools(
     Ok(())
 }
 
+fn built_in_skill_root(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    let bundled_skills = app
+        .path()
+        .resource_dir()
+        .map(|path| path.join("resources").join("skills"))
+        .unwrap_or_else(|_| std::path::PathBuf::new());
+    let source_skills = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("resources")
+        .join("skills");
+    if bundled_skills.is_dir() {
+        Some(bundled_skills.as_path())
+    } else if source_skills.is_dir() {
+        Some(source_skills.as_path())
+    } else {
+        None
+    }
+    .map(std::path::Path::to_path_buf)
+}
+
 fn discover_skills(
     app: &tauri::AppHandle,
     database: &database::Database,
@@ -211,9 +235,13 @@ fn discover_skills(
         .path()
         .home_dir()
         .map_err(|error| format!("Could not locate the home directory: {error}"))?;
+    let built_in_skills = built_in_skill_root(app);
+    let codex_home = std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from);
     Ok(skill::scan(
         &app_data,
         &home,
+        built_in_skills.as_deref(),
+        codex_home.as_deref(),
         workspace.map(std::path::Path::new),
         &database.skill_preferences()?,
     ))
@@ -478,6 +506,332 @@ fn subagent_storage(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String
         .app_data_dir()
         .map_err(|error| format!("Could not locate the application data directory: {error}"))?
         .join("subagents"))
+}
+
+fn theme_storage(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Could not locate the application data directory: {error}"))?
+        .join("themes"))
+}
+
+#[tauri::command]
+fn list_themes(app: tauri::AppHandle) -> Result<Vec<theme::ThemeManifest>, String> {
+    theme::list(&theme_storage(&app)?)
+}
+
+#[tauri::command]
+fn install_theme(
+    app: tauri::AppHandle,
+    source_path: String,
+) -> Result<theme::ThemeManifest, String> {
+    theme::install(&theme_storage(&app)?, std::path::Path::new(&source_path))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClipboardThemePayload {
+    name: String,
+    data_base64: String,
+    #[serde(default)]
+    layout_name: Option<String>,
+    #[serde(default)]
+    layout_data_base64: Option<String>,
+}
+
+#[tauri::command]
+fn install_theme_data(
+    app: tauri::AppHandle,
+    payload: ClipboardThemePayload,
+) -> Result<theme::ThemeManifest, String> {
+    let _name = std::path::Path::new(payload.name.trim())
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| value.to_ascii_lowercase().ends_with(".levelup-theme"))
+        .ok_or_else(|| "Clipboard content must be a .levelup-theme file".to_owned())?;
+    if payload.data_base64.len() > 16 * 1024 * 1024 {
+        return Err("Clipboard theme package is too large".to_owned());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(payload.data_base64.trim())
+        .map_err(|error| format!("Clipboard theme data is not valid base64: {error}"))?;
+    if bytes.is_empty() || bytes.len() > 12 * 1024 * 1024 {
+        return Err("Theme packages must be between 1 byte and 12 MiB".to_owned());
+    }
+    let layout = match (payload.layout_name, payload.layout_data_base64) {
+        (None, None) => None,
+        (Some(name), Some(data_base64)) => {
+            let name = std::path::Path::new(name.trim())
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| "Clipboard layout file name is invalid".to_owned())?
+                .to_owned();
+            theme::validate_layout_file_name(&name)?;
+            if data_base64.len() > 768 * 1024 {
+                return Err("Clipboard layout file is too large".to_owned());
+            }
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(data_base64.trim())
+                .map_err(|error| format!("Clipboard layout data is not valid base64: {error}"))?;
+            if bytes.is_empty() || bytes.len() > 512 * 1024 {
+                return Err("Layout files must be between 1 byte and 512 KiB".to_owned());
+            }
+            Some((name, bytes))
+        }
+        _ => return Err("Clipboard theme layout data is incomplete".to_owned()),
+    };
+
+    let import_root = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| format!("Could not locate the local application data directory: {error}"))?
+        .join("theme-imports");
+    std::fs::create_dir_all(&import_root)
+        .map_err(|error| format!("Could not create temporary theme storage: {error}"))?;
+    filesystem::restrict_directory(&import_root)?;
+    let temporary = import_root.join(format!(".{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir(&temporary)
+        .map_err(|error| format!("Could not create temporary theme directory: {error}"))?;
+    filesystem::restrict_directory(&temporary)?;
+    let source = temporary.join("pasted.levelup-theme");
+    let result = (|| {
+        std::fs::write(&source, bytes)
+            .map_err(|error| format!("Could not stage clipboard theme: {error}"))?;
+        filesystem::restrict_file(&source)?;
+        if let Some((name, bytes)) = layout {
+            let layout_path = temporary.join(name);
+            std::fs::write(&layout_path, bytes)
+                .map_err(|error| format!("Could not stage clipboard layout: {error}"))?;
+            filesystem::restrict_file(&layout_path)?;
+        }
+        theme::install(&theme_storage(&app)?, &source)
+    })();
+    let _ = std::fs::remove_dir_all(&temporary);
+    result
+}
+
+#[tauri::command]
+fn load_theme(app: tauri::AppHandle, theme_id: String) -> Result<theme::ThemePackage, String> {
+    theme::load(&theme_storage(&app)?, &theme_id)
+}
+
+#[tauri::command]
+fn load_theme_layout(
+    app: tauri::AppHandle,
+    theme_id: String,
+) -> Result<layout::ResolvedLayout, String> {
+    theme::load_layout(&theme_storage(&app)?, &theme_id)
+}
+
+#[tauri::command]
+fn uninstall_theme(app: tauri::AppHandle, theme_id: String) -> Result<bool, String> {
+    theme::uninstall(&theme_storage(&app)?, &theme_id)
+}
+
+fn emit_pet_dashboard(app: &tauri::AppHandle, manager: &pet::PetManager) {
+    if let Ok(dashboard) = manager.dashboard() {
+        let _ = app.emit_to("pet", "pet://refresh", dashboard);
+    }
+}
+
+#[tauri::command]
+fn get_pet_runtime(
+    manager: tauri::State<'_, pet::PetManager>,
+    runtime: tauri::State<'_, pet::PetRuntime>,
+) -> Result<pet::PetRuntimeSnapshot, String> {
+    Ok(pet::PetRuntimeSnapshot {
+        dashboard: manager.dashboard()?,
+        activities: runtime.activities()?,
+    })
+}
+
+#[tauri::command]
+fn select_pet(
+    app: tauri::AppHandle,
+    manager: tauri::State<'_, pet::PetManager>,
+    pet_id: String,
+) -> Result<pet::PetDashboard, String> {
+    let dashboard = manager.set_active(&pet_id)?;
+    let _ = app.emit_to("pet", "pet://refresh", &dashboard);
+    Ok(dashboard)
+}
+
+#[tauri::command]
+fn set_pet_overlay_visible(
+    app: tauri::AppHandle,
+    manager: tauri::State<'_, pet::PetManager>,
+    visible: bool,
+) -> Result<pet::PetDashboard, String> {
+    let dashboard = manager.set_overlay_visible(visible)?;
+    let window = pet::create_window(&app, visible)?;
+    if visible {
+        window
+            .show()
+            .and_then(|_| window.set_focus())
+            .map_err(|error| format!("Could not show Starlight Echo window: {error}"))?;
+    } else {
+        window
+            .hide()
+            .map_err(|error| format!("Could not hide Starlight Echo window: {error}"))?;
+    }
+    let _ = app.emit_to("pet", "pet://refresh", &dashboard);
+    Ok(dashboard)
+}
+
+#[tauri::command]
+fn set_pet_scale(
+    app: tauri::AppHandle,
+    manager: tauri::State<'_, pet::PetManager>,
+    pet_id: String,
+    scale: f64,
+) -> Result<pet::PetDashboard, String> {
+    let dashboard = manager.set_scale(&pet_id, scale)?;
+    let _ = app.emit_to("pet", "pet://refresh", &dashboard);
+    Ok(dashboard)
+}
+
+#[tauri::command]
+fn install_pet(
+    app: tauri::AppHandle,
+    manager: tauri::State<'_, pet::PetManager>,
+    source_path: String,
+) -> Result<pet::PetProfile, String> {
+    let profile = manager.install_package(Path::new(&source_path), true)?;
+    emit_pet_dashboard(&app, &manager);
+    Ok(profile)
+}
+
+#[tauri::command]
+fn remove_pet(
+    app: tauri::AppHandle,
+    manager: tauri::State<'_, pet::PetManager>,
+    pet_id: String,
+) -> Result<bool, String> {
+    let removed = manager.remove_package(&pet_id)?;
+    if removed {
+        emit_pet_dashboard(&app, &manager);
+    }
+    Ok(removed)
+}
+
+#[tauri::command]
+fn record_pet_usage(
+    app: tauri::AppHandle,
+    manager: tauri::State<'_, pet::PetManager>,
+    pet_id: String,
+    usage_id: String,
+    input_tokens: u64,
+    output_tokens: u64,
+) -> Result<pet::PetProgress, String> {
+    let progress = manager.record_usage(&pet_id, &usage_id, input_tokens, output_tokens)?;
+    emit_pet_dashboard(&app, &manager);
+    Ok(progress)
+}
+
+#[tauri::command]
+fn learn_pet_memory(
+    app: tauri::AppHandle,
+    manager: tauri::State<'_, pet::PetManager>,
+    pet_id: String,
+    text: String,
+) -> Result<Vec<pet::PetMemory>, String> {
+    let memories = manager.learn_from_message(&pet_id, &text)?;
+    emit_pet_dashboard(&app, &manager);
+    Ok(memories)
+}
+
+#[tauri::command]
+fn delete_pet_memory(
+    app: tauri::AppHandle,
+    manager: tauri::State<'_, pet::PetManager>,
+    pet_id: String,
+    memory_id: String,
+) -> Result<bool, String> {
+    let removed = manager.delete_memory(&pet_id, &memory_id)?;
+    if removed {
+        emit_pet_dashboard(&app, &manager);
+    }
+    Ok(removed)
+}
+
+#[tauri::command]
+fn get_pet_hatch_environment(manager: tauri::State<'_, pet::PetManager>) -> pet::HatchEnvironment {
+    manager.hatch_environment()
+}
+
+fn enable_pet_hatch_skills(
+    database: &database::Database,
+    environment: &pet::HatchEnvironment,
+) -> Result<(), String> {
+    if let Some(directory) = environment.hatch_skill_path.as_deref() {
+        let path = Path::new(directory).join("SKILL.md");
+        database.set_skill_enabled("hatch-pet", &path.to_string_lossy(), true)?;
+    }
+    if let Some(directory) = environment.imagegen_skill_path.as_deref() {
+        let path = Path::new(directory).join("SKILL.md");
+        database.set_skill_enabled("imagegen", &path.to_string_lossy(), true)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn configure_pet_hatch(
+    manager: tauri::State<'_, pet::PetManager>,
+    database: tauri::State<'_, database::Database>,
+) -> Result<pet::HatchEnvironment, String> {
+    let environment = manager.configure_hatch()?;
+    enable_pet_hatch_skills(&database, &environment)?;
+    Ok(environment)
+}
+
+#[tauri::command]
+fn import_hatched_pets(
+    app: tauri::AppHandle,
+    manager: tauri::State<'_, pet::PetManager>,
+    after_ms: i64,
+) -> Result<Vec<pet::PetProfile>, String> {
+    let installed = manager.import_discovered(after_ms)?;
+    if !installed.is_empty() {
+        emit_pet_dashboard(&app, &manager);
+    }
+    Ok(installed)
+}
+
+#[tauri::command]
+fn update_pet_activities(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, pet::PetRuntime>,
+    activities: Vec<pet::PetActivity>,
+) -> Result<Vec<pet::PetActivity>, String> {
+    let activities = runtime.replace(activities)?;
+    let _ = app.emit_to("pet", "pet://activities", &activities);
+    Ok(activities)
+}
+
+#[tauri::command]
+fn open_pet_chat(
+    app: tauri::AppHandle,
+    manager: tauri::State<'_, pet::PetManager>,
+    pet_id: String,
+) -> Result<(), String> {
+    let dashboard = manager.dashboard()?;
+    if !dashboard.pets.iter().any(|profile| profile.id == pet_id) {
+        return Err("The selected Starlight Echo is not installed".to_owned());
+    }
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| "The LevelUpAgent main window is unavailable".to_owned())?;
+    main.show()
+        .and_then(|_| main.unminimize())
+        .and_then(|_| main.set_focus())
+        .map_err(|error| format!("Could not focus LevelUpAgent: {error}"))?;
+    app.emit_to(
+        "main",
+        "pet://open-chat",
+        serde_json::json!({ "petId": pet_id }),
+    )
+    .map_err(|error| format!("Could not open the Starlight Echo conversation: {error}"))
 }
 
 fn attach_images(app: &tauri::AppHandle, request: &mut AgentTurnRequest) -> Result<(), String> {
@@ -1015,7 +1369,7 @@ fn import_image_attachments(
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ClipboardImagePayload {
+struct ClipboardAttachmentPayload {
     name: String,
     data_base64: String,
 }
@@ -1023,7 +1377,7 @@ struct ClipboardImagePayload {
 #[tauri::command]
 fn import_clipboard_images(
     app: tauri::AppHandle,
-    images: Vec<ClipboardImagePayload>,
+    images: Vec<ClipboardAttachmentPayload>,
 ) -> Result<Vec<ImageAttachment>, String> {
     if images.is_empty() || images.len() > 8 {
         return Err("Paste between 1 and 8 images at a time".to_owned());
@@ -1032,6 +1386,30 @@ fn import_clipboard_images(
     let mut imported = Vec::new();
     for image in images {
         match attachment::import_base64_image(&storage, &image.name, &image.data_base64) {
+            Ok(item) => imported.push(item),
+            Err(error) => {
+                for item in &imported {
+                    let _ = attachment::delete(&storage, &item.id);
+                }
+                return Err(error);
+            }
+        }
+    }
+    Ok(imported)
+}
+
+#[tauri::command]
+fn import_clipboard_attachments(
+    app: tauri::AppHandle,
+    attachments: Vec<ClipboardAttachmentPayload>,
+) -> Result<Vec<ImageAttachment>, String> {
+    if attachments.is_empty() || attachments.len() > 12 {
+        return Err("Paste between 1 and 12 files at a time".to_owned());
+    }
+    let storage = attachment_storage(&app)?;
+    let mut imported = Vec::new();
+    for payload in attachments {
+        match attachment::import_base64_attachment(&storage, &payload.name, &payload.data_base64) {
             Ok(item) => imported.push(item),
             Err(error) => {
                 for item in &imported {
@@ -2289,6 +2667,14 @@ pub fn run() {
         })
         .manage(mcp::McpManager::default())
         .manage(subagent::SubagentManager::default())
+        .on_window_event(|window, event| {
+            if window.label() == "main"
+                && matches!(event, tauri::WindowEvent::CloseRequested { .. })
+                && let Some(pet_window) = window.app_handle().get_webview_window("pet")
+            {
+                let _ = pet_window.close();
+            }
+        })
         .setup(|app| {
             ensure_default_workspace(app.handle())
                 .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
@@ -2302,7 +2688,24 @@ pub fn run() {
             let database_path = app_data.join("levelup-agent.sqlite3");
             let database = database::Database::open(&database_path)
                 .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+            let home = app.path().home_dir()?;
+            let built_in_skills = built_in_skill_root(app.handle());
+            let pet_manager =
+                pet::PetManager::open_with_skills(&app_data, &home, built_in_skills.as_deref())
+                    .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+            let hatch_environment = pet_manager
+                .configure_hatch()
+                .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+            enable_pet_hatch_skills(&database, &hatch_environment)
+                .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+            let pet_visible = pet_manager.overlay_visible();
+            app.asset_protocol_scope()
+                .allow_directory(pet_manager.root(), true)?;
             app.manage(database);
+            app.manage(pet_manager);
+            app.manage(pet::PetRuntime::default());
+            pet::create_window(app.handle(), pet_visible)
+                .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())
@@ -2328,6 +2731,7 @@ pub fn run() {
             delete_media_asset,
             import_image_attachments,
             import_clipboard_images,
+            import_clipboard_attachments,
             delete_image_attachment,
             get_default_workspace,
             preview_attachment,
@@ -2366,7 +2770,27 @@ pub fn run() {
             rollback_external_config_write,
             preview_external_prompt_write,
             apply_external_prompt_write,
-            rollback_external_prompt_write
+            rollback_external_prompt_write,
+            list_themes,
+            install_theme,
+            install_theme_data,
+            load_theme,
+            load_theme_layout,
+            uninstall_theme,
+            get_pet_runtime,
+            select_pet,
+            set_pet_overlay_visible,
+            set_pet_scale,
+            install_pet,
+            remove_pet,
+            record_pet_usage,
+            learn_pet_memory,
+            delete_pet_memory,
+            get_pet_hatch_environment,
+            configure_pet_hatch,
+            import_hatched_pets,
+            update_pet_activities,
+            open_pet_chat
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

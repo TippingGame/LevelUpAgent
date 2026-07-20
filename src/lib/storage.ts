@@ -8,11 +8,14 @@ const ACTIVE_THREAD_KEY = "levelup-agent.active-thread.v1";
 const PERMISSION_LEVEL_KEY = "levelup-agent.permission-level.v1";
 const HIDDEN_PROJECTS_KEY = "levelup-agent.hidden-projects.v1";
 const PINNED_THREADS_KEY = "levelup-agent.pinned-threads.v1";
+const ACTIVE_THEME_KEY = "levelup-agent.active-theme.v1";
+
+export const DEFAULT_LEVELUP_BASE_URL = "https://levelup.mom";
 
 export const defaultProfile: ProviderProfile = {
   id: "levelup-api",
   name: "LevelUpAPI",
-  baseUrl: "http://127.0.0.1:8080",
+  baseUrl: DEFAULT_LEVELUP_BASE_URL,
   model: "gpt-5.5",
   protocol: "openai_responses",
   allowUnauthenticated: false,
@@ -29,11 +32,20 @@ function readJson<T>(key: string, fallback: T): T {
   }
 }
 
+export function migrateDefaultProfile(profile: ProviderProfile): ProviderProfile {
+  const baseUrl = profile.baseUrl.trim().replace(/\/+$/, "");
+  if (profile.id === defaultProfile.id
+    && (baseUrl === "http://127.0.0.1:8080" || baseUrl === "http://127.0.0.1:8080/v1")) {
+    return { ...profile, baseUrl: DEFAULT_LEVELUP_BASE_URL };
+  }
+  return profile;
+}
+
 export function loadProfiles(): ProviderProfile[] {
   const profiles = readJson<ProviderProfile[]>(PROFILE_KEY, [defaultProfile]);
   const available = profiles.length > 0 ? profiles : [defaultProfile];
   return available.map((profile, index) => ({
-    ...profile,
+    ...migrateDefaultProfile(profile),
     allowUnauthenticated: profile.allowUnauthenticated ?? false,
     priority: Number.isFinite(profile.priority) ? profile.priority : (index + 1) * 10,
     failoverEnabled: profile.failoverEnabled ?? true,
@@ -107,6 +119,15 @@ export function loadPinnedThreadIds(): Set<string> {
 
 export function savePinnedThreadIds(ids: Set<string>) {
   localStorage.setItem(PINNED_THREADS_KEY, JSON.stringify([...ids]));
+}
+
+export function loadActiveThemeId(): string {
+  return localStorage.getItem(ACTIVE_THEME_KEY) ?? "default";
+}
+
+export function saveActiveThemeId(themeId: string) {
+  if (themeId === "default") localStorage.removeItem(ACTIVE_THEME_KEY);
+  else localStorage.setItem(ACTIVE_THEME_KEY, themeId);
 }
 
 export function clearLegacyThreads() {

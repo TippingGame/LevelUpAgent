@@ -10,6 +10,8 @@ import {
 import { createPortal } from "react-dom";
 import {
   AudioLines,
+  ArrowLeft,
+  ArrowRight,
   Check,
   CircleAlert,
   Clock3,
@@ -80,6 +82,7 @@ const PREVIEW_ZOOM_STEP = 1.2;
 interface MediaStudioProps {
   active: boolean;
   locale: string;
+  mediaCatalogRevision: number;
   dropActive: boolean;
   referenceDrop: { id: string; paths: string[] } | null;
   onReferenceDropHandled: (id: string) => void;
@@ -112,7 +115,7 @@ const IMAGE_RATIO_OPTIONS = ["16:9", "9:16", "21:9", "9:21"];
 const IMAGE_SIZE_OPTIONS = ["auto", ...IMAGE_DIMENSION_OPTIONS.map((option) => option.value), ...IMAGE_RATIO_OPTIONS];
 const VIDEO_SIZE_OPTIONS = ["1280x720", "720x1280", "16:9", "9:16"];
 
-export function MediaStudio({ active, locale, dropActive, referenceDrop, onReferenceDropHandled, onConfigureConnection, onPendingCountChange }: MediaStudioProps) {
+export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, referenceDrop, onReferenceDropHandled, onConfigureConnection, onPendingCountChange }: MediaStudioProps) {
   const rootRef = useRef<HTMLElement>(null);
   const [kind, setKind] = useState<MediaKind>("image");
   const [catalog, setCatalog] = useState<Awaited<ReturnType<typeof getMediaCatalog>> | null>(null);
@@ -137,6 +140,7 @@ export function MediaStudio({ active, locale, dropActive, referenceDrop, onRefer
   const [refreshing, setRefreshing] = useState(false);
   const [pastingReferences, setPastingReferences] = useState(false);
   const [previewAsset, setPreviewAsset] = useState<MediaAsset | null>(null);
+  const catalogRequestRef = useRef(0);
 
   const models = useMemo(
     () => (catalog?.models ?? []).filter((model) => model.kind === kind),
@@ -150,11 +154,15 @@ export function MediaStudio({ active, locale, dropActive, referenceDrop, onRefer
   const visibleAssets = assets.filter((asset) => asset.kind === kind);
   const visiblePendingAssets = pendingAssets.filter((asset) => asset.kind === kind);
   const displayedAssets: StudioMediaAsset[] = [...visiblePendingAssets, ...visibleAssets];
+  const previewableAssets = displayedAssets.filter(
+    (asset) => asset.kind === "image" && asset.status === "completed" && Boolean(mediaAssetUrl(asset)),
+  );
   const pendingVideoIds = assets
     .filter((asset) => asset.kind === "video" && (asset.status === "queued" || asset.status === "in_progress"))
     .map((asset) => asset.id);
 
   const load = async (showSpinner = true) => {
+    const requestId = ++catalogRequestRef.current;
     if (showSpinner) setLoading(true);
     setError(null);
     try {
@@ -162,18 +170,19 @@ export function MediaStudio({ active, locale, dropActive, referenceDrop, onRefer
         getMediaCatalog(),
         listMediaAssets(),
       ]);
+      if (requestId !== catalogRequestRef.current) return;
       setCatalog(nextCatalog);
       setAssets(nextAssets);
     } catch (reason) {
-      setError(errorText(reason));
+      if (requestId === catalogRequestRef.current) setError(errorText(reason));
     } finally {
-      setLoading(false);
+      if (requestId === catalogRequestRef.current) setLoading(false);
     }
   };
 
   useEffect(() => {
     void load();
-  }, []);
+  }, [active, mediaCatalogRevision]);
 
   useEffect(() => {
     if (!selected) return;
@@ -544,7 +553,13 @@ export function MediaStudio({ active, locale, dropActive, referenceDrop, onRefer
               : <div className="media-gallery-grid">{displayedAssets.map((asset) => <MediaAssetCard asset={asset} locale={locale} onDelete={asset.pendingOutput ? undefined : () => void removeAsset(asset)} onPreview={asset.kind === "image" && asset.status === "completed" ? () => setPreviewAsset(asset) : undefined} key={asset.id} />)}</div>}
         </section>
       </div>
-      {active && previewAsset && <MediaImagePreview asset={previewAsset} locale={locale} onClose={() => setPreviewAsset(null)} />}
+      {active && previewAsset && <MediaImagePreview
+        asset={previewAsset}
+        locale={locale}
+        previewAssets={previewableAssets}
+        onNavigate={(nextAsset) => setPreviewAsset(nextAsset)}
+        onClose={() => setPreviewAsset(null)}
+      />}
     </main>
   );
 }
@@ -627,7 +642,19 @@ export function MediaAssetCard({ asset, locale, onDelete, onPreview }: { asset: 
   );
 }
 
-function MediaImagePreview({ asset, locale, onClose }: { asset: MediaAsset; locale: string; onClose: () => void }) {
+function MediaImagePreview({
+  asset,
+  locale,
+  previewAssets,
+  onNavigate,
+  onClose,
+}: {
+  asset: MediaAsset;
+  locale: string;
+  previewAssets: MediaAsset[];
+  onNavigate: (asset: MediaAsset) => void;
+  onClose: () => void;
+}) {
   const url = mediaAssetUrl(asset);
   const canvasRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{
@@ -640,7 +667,23 @@ function MediaImagePreview({ asset, locale, onClose }: { asset: MediaAsset; loca
   const [imageSize, setImageSize] = useState({ width: 0, height: 0 });
   const [view, setView] = useState<PreviewTransform>({ zoom: 1, x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState(false);
   const imageReady = imageSize.width > 0 && imageSize.height > 0;
+  const currentIndex = previewAssets.findIndex((item) => item.id === asset.id);
+  const previousAsset = currentIndex > 0 ? previewAssets[currentIndex - 1] : undefined;
+  const nextAsset = currentIndex >= 0 && currentIndex < previewAssets.length - 1
+    ? previewAssets[currentIndex + 1]
+    : undefined;
+
+  useEffect(() => {
+    dragRef.current = null;
+    setDragging(false);
+    setImageSize({ width: 0, height: 0 });
+    setView({ zoom: 1, x: 0, y: 0 });
+    setExporting(false);
+    setExportError(false);
+  }, [asset.id]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -705,7 +748,7 @@ function MediaImagePreview({ asset, locale, onClose }: { asset: MediaAsset; loca
 
   const beginDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 || !imageReady) return;
-    if ((event.target as Element).closest(".media-image-lightbox-toolbar")) return;
+    if ((event.target as Element).closest(".media-image-lightbox-toolbar, .media-image-lightbox-nav")) return;
     event.preventDefault();
     event.currentTarget.focus();
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -747,7 +790,7 @@ function MediaImagePreview({ asset, locale, onClose }: { asset: MediaAsset; loca
   };
 
   const handleWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
-    if (!imageReady || (event.target as Element).closest(".media-image-lightbox-toolbar")) return;
+    if (!imageReady || (event.target as Element).closest(".media-image-lightbox-toolbar, .media-image-lightbox-nav")) return;
     event.preventDefault();
     const bounds = event.currentTarget.getBoundingClientRect();
     const anchor = {
@@ -786,6 +829,22 @@ function MediaImagePreview({ asset, locale, onClose }: { asset: MediaAsset; loca
   };
 
   if (!url) return null;
+  const navigateTo = (next: MediaAsset | undefined) => {
+    if (!next) return;
+    onNavigate(next);
+  };
+  const downloadImage = async () => {
+    if (exporting || asset.status !== "completed" || !asset.fileName) return;
+    setExporting(true);
+    setExportError(false);
+    try {
+      await exportMediaAsset(asset);
+    } catch {
+      setExportError(true);
+    } finally {
+      setExporting(false);
+    }
+  };
   const createdAt = new Intl.DateTimeFormat(locale, {
     year: "numeric",
     month: "short",
@@ -804,7 +863,19 @@ function MediaImagePreview({ asset, locale, onClose }: { asset: MediaAsset; loca
             <strong id="media-image-preview-title">{tr("图片预览", "Image preview")}</strong>
             <p title={asset.prompt}>{asset.prompt}</p>
           </div>
-          <button type="button" autoFocus onClick={onClose} aria-label={tr("关闭预览", "Close preview")} title={`${tr("关闭预览", "Close preview")} (Esc)`}><X size={19} /></button>
+          <div className="media-image-lightbox-actions">
+            <button
+              className={`media-image-lightbox-download${exportError ? " error" : ""}`}
+              type="button"
+              disabled={exporting || !asset.fileName}
+              onClick={() => void downloadImage()}
+              aria-label={tr("下载图片", "Download image")}
+              title={exportError ? tr("下载失败，点击重试", "Download failed, click to retry") : tr("下载图片", "Download image")}
+            >
+              {exporting ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}
+            </button>
+            <button className="media-image-lightbox-close" type="button" autoFocus onClick={onClose} aria-label={tr("关闭预览", "Close preview")} title={`${tr("关闭预览", "Close preview")} (Esc)`}><X size={19} /></button>
+          </div>
         </header>
         <div
           ref={canvasRef}
@@ -820,12 +891,23 @@ function MediaImagePreview({ asset, locale, onClose }: { asset: MediaAsset; loca
           onWheel={handleWheel}
           onKeyDown={handleCanvasKeyDown}
           onDoubleClick={(event) => {
-            if ((event.target as Element).closest(".media-image-lightbox-toolbar")) return;
+            if ((event.target as Element).closest(".media-image-lightbox-toolbar, .media-image-lightbox-nav")) return;
             if (Math.abs(view.zoom - 1) < 0.01) fitImage();
             else showActualSize();
           }}
         >
+          <button
+            className="media-image-lightbox-nav previous"
+            type="button"
+            disabled={!previousAsset}
+            onClick={() => navigateTo(previousAsset)}
+            aria-label={tr("上一张图片", "Previous image")}
+            title={tr("上一张图片", "Previous image")}
+          >
+            <ArrowLeft size={21} />
+          </button>
           <img
+            key={asset.id}
             src={url}
             alt={asset.revisedPrompt || asset.prompt}
             draggable={false}
@@ -840,6 +922,16 @@ function MediaImagePreview({ asset, locale, onClose }: { asset: MediaAsset; loca
               top: `calc(50% + ${view.y}px)`,
             } : undefined}
           />
+          <button
+            className="media-image-lightbox-nav next"
+            type="button"
+            disabled={!nextAsset}
+            onClick={() => navigateTo(nextAsset)}
+            aria-label={tr("下一张图片", "Next image")}
+            title={tr("下一张图片", "Next image")}
+          >
+            <ArrowRight size={21} />
+          </button>
           <div className="media-image-lightbox-toolbar" role="toolbar" aria-label={tr("图片缩放控制", "Image zoom controls")}>
             <button type="button" disabled={!imageReady} onClick={fitImage} title={`${tr("适应窗口", "Fit to window")} (F)`}><Maximize2 size={14} /><span>{tr("适应窗口", "Fit")}</span></button>
             <button type="button" disabled={!imageReady} onClick={() => showActualSize()} title={`${tr("原始大小", "Actual size")} (0)`}>1:1</button>

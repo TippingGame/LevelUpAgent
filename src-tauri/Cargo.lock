@@ -1980,6 +1980,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "imagesize"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09e54e57b4c48b40f7aec75635392b12b3421fa26fe8b4332e63138ed278459c"
+
+[[package]]
 name = "indexmap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2263,13 +2269,14 @@ dependencies = [
 
 [[package]]
 name = "levelup-agent"
-version = "1.0.6"
+version = "1.0.8"
 dependencies = [
  "base64 0.22.1",
  "eventsource-stream",
  "futures-util",
  "globset",
  "http",
+ "imagesize",
  "json5",
  "keyring",
  "lopdf",
@@ -2292,6 +2299,7 @@ dependencies = [
  "url",
  "uuid",
  "walkdir",
+ "windows 0.61.3",
  "zip 2.4.2",
 ]
 

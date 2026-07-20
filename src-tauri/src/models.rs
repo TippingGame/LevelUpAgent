@@ -442,6 +442,13 @@ pub struct StoredMessage {
     pub internal: bool,
     #[serde(default)]
     pub attachments: Vec<ImageAttachment>,
+    /// The model identity captured when this assistant response was created.
+    /// These fields are optional so databases/messages written by older builds
+    /// continue to deserialize and can be displayed with a stable fallback.
+    #[serde(default)]
+    pub model_name: Option<String>,
+    #[serde(default)]
+    pub provider_brand: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
