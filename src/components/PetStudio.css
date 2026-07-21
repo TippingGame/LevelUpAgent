@@ -71,10 +71,23 @@
 .pet-scale-control output { color: var(--text); font-size: var(--font-compact); font-variant-numeric: tabular-nums; font-weight: 760; text-align: right; }
 
 .pet-control-panel { min-width: 0; min-height: 0; overflow: hidden; display: grid; grid-template-rows: 44px minmax(0, 1fr); padding: 10px; border-left: 1px solid var(--line); background: color-mix(in srgb, var(--panel) 88%, var(--surface)); }
-.pet-control-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 3px; border-radius: 8px; background: color-mix(in srgb, var(--line) 65%, transparent); }
+.pet-control-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; padding: 3px; border-radius: 8px; background: color-mix(in srgb, var(--line) 65%, transparent); }
 .pet-control-tabs button { min-width: 0; display: flex; align-items: center; justify-content: center; gap: 6px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: var(--font-small); cursor: pointer; }
 .pet-control-tabs button.active { background: var(--surface); color: var(--text); box-shadow: 0 1px 4px rgba(15,23,42,.08); }
-.pet-hatch-panel, .pet-memory-panel { min-width: 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding: 12px 2px 2px; }
+.pet-hatch-panel, .pet-memory-panel, .pet-animation-panel { min-width: 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding: 12px 2px 2px; }
+.pet-animation-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; padding: 3px 3px 10px; border-bottom: 1px solid var(--line); color: #0878d1; }
+.pet-animation-heading > div { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.pet-animation-heading strong { color: var(--text); font-size: var(--font-small); }
+.pet-animation-heading small { color: var(--muted); font-size: var(--font-compact); }
+.pet-animation-options { display: flex; flex-direction: column; gap: 5px; }
+.pet-animation-option { min-width: 0; height: 32px; display: grid; grid-template-columns: 20px minmax(0, 1fr) 20px; align-items: center; gap: 7px; padding: 0 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--muted); text-align: left; cursor: pointer; }
+.pet-animation-option:hover { border-color: rgba(10,132,255,.28); background: rgba(10,132,255,.06); color: var(--text); }
+.pet-animation-option.active { border-color: rgba(10,132,255,.36); background: rgba(10,132,255,.12); color: #0878d1; box-shadow: inset 0 0 0 .5px rgba(10,132,255,.12); }
+.pet-animation-option span { overflow: hidden; color: inherit; font-size: var(--font-caption); font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.pet-animation-option small { color: var(--faint); font-size: var(--font-compact); font-variant-numeric: tabular-nums; text-align: right; }
+.pet-animation-live-button { min-height: 32px; display: flex; align-items: center; justify-content: center; gap: 6px; padding: 0 8px; border: 1px dashed var(--line-strong); border-radius: 7px; background: transparent; color: var(--muted); font-size: var(--font-caption); cursor: pointer; }
+.pet-animation-live-button:hover:not(:disabled) { border-color: rgba(10,132,255,.32); background: rgba(10,132,255,.06); color: #0878d1; }
+.pet-animation-live-button:disabled { cursor: default; opacity: .55; }
 .pet-hatch-status { min-width: 0; display: grid; grid-template-columns: 34px minmax(0, 1fr); align-items: center; gap: 8px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
 .pet-hatch-status > span { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 8px; }
 .pet-hatch-status > span.ready { background: #d1fae5; color: #047857; }
@@ -147,7 +160,7 @@
   .pet-studio-mark, .pet-roster-row.active, .pet-import-row:hover { background: rgba(10,132,255,.12); }
   .pet-stage-section { background-color: var(--canvas); background-image: linear-gradient(rgba(148,163,184,.07) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,.07) 1px, transparent 1px); }
   .pet-activity-bubble { border-color: rgba(255,255,255,.1); background: rgba(28,28,30,.84); box-shadow: 0 12px 30px rgba(0,0,0,.26), inset 0 0 0 .5px rgba(255,255,255,.06); }
-  .pet-live-status, .pet-field input, .pet-field textarea, .pet-reference-list > span, .pet-control-tabs button.active, .pet-memory-list article { background: rgba(30,41,59,.92); }
+  .pet-live-status, .pet-field input, .pet-field textarea, .pet-reference-list > span, .pet-control-tabs button.active, .pet-memory-list article, .pet-animation-option { background: rgba(30,41,59,.92); }
   .pet-hatch-missing p { background: rgba(245,158,11,.09); }
   .pet-xp-track { background: #334155; }
 }

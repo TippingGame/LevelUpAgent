@@ -17,7 +17,7 @@ mod theme;
 mod tools;
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -28,12 +28,13 @@ use models::{
     AgentTurnResponse, AttachmentPreview, ConfigWritePreview, ConfigWriteResult,
     ExternalConfigCandidate, ExternalConfigTarget, GatewayDiagnostics, GitDiff, GitRollbackPreview,
     GitRollbackResult, GitStatus, GoalCreateRequest, GoalState, ImageAttachment, McpSecretValues,
-    McpServerConfig, McpServerSnapshot, McpServerUpsert, MediaAsset, MediaBatchResult,
-    MediaCatalog, MediaGenerationRequest, MediaKind, MediaStatus, ModelInfo, ProviderHealth,
-    ProviderProfile, ProviderRequestLog, ProviderSettings, SkillInfo, StoredThread,
+    McpServerConfig, McpServerSnapshot, McpServerUpsert, MediaAsset, MediaAssetPage,
+    MediaBatchResult, MediaCatalog, MediaGenerationRequest, MediaKind, MediaStatus, ModelInfo,
+    ProviderHealth, ProviderProfile, ProviderRequestLog, ProviderSettings, SkillInfo, StoredThread,
     ToolExecutionRequest, ToolExecutionResponse,
 };
 use reqwest::Client;
+use serde::Deserialize;
 use tauri::ipc::Channel;
 use tauri::{Emitter, Manager};
 use tokio_util::sync::CancellationToken;
@@ -258,6 +259,9 @@ fn attach_skills(
     let enabled: Vec<_> = discover_skills(app, database, request.workspace.as_deref())?
         .into_iter()
         .filter(|skill| skill.enabled && skill.valid)
+        .filter(|skill| {
+            !request.hatch || skill.source == "LevelUpAgent built-in" && skill.name == "hatch-pet"
+        })
         .take(64)
         .collect();
     request.available_skills = enabled
@@ -268,7 +272,21 @@ fn attach_skills(
             description: skill.description.chars().take(500).collect(),
         })
         .collect();
-    if !enabled.is_empty() {
+    // Keep this phase explicit as well as history-derived. The frontend sends
+    // the phase on every continuation because context compaction can omit the
+    // original successful manifest exchange from the provider request.
+    let hatch_skill_loaded = request.hatch
+        && (request.hatch_skill_loaded || agent::hatch_skill_was_read(&request.messages));
+    request.hatch_skill_loaded = hatch_skill_loaded;
+    if request.hatch && !hatch_skill_loaded {
+        return Err(
+            "Hatch bootstrap has not completed; the application must load the bundled legacy hatch-pet Skill before starting a provider turn".to_owned(),
+        );
+    }
+    // Hatch bootstrap is owned by the application. Never expose the generic
+    // read_skill tool to a provider turn: models that see it can emit several
+    // identical reads in one response and restart the workflow indefinitely.
+    if !enabled.is_empty() && !request.hatch {
         request.available_tools.push(AgentToolDefinition {
             name: "read_skill".to_owned(),
             description: "Read an enabled Skill's SKILL.md or a referenced UTF-8 file inside that Skill directory.".to_owned(),
@@ -312,29 +330,47 @@ fn attach_goal(
     ) {
         return Err("Goal is not active; resume it before continuing".to_owned());
     }
+    // Hatch conversations were created by older clients without a durable
+    // hatch flag. Infer the workflow from the generated objective before the
+    // skill/tool catalogs are attached so a resumed legacy thread cannot
+    // expose read_skill/get_goal and fall back into an observation loop.
+    if is_hatch_goal_objective(&goal.objective) {
+        request.hatch = true;
+    }
     request.goal = Some(goal);
-    request.available_tools.extend([
-        AgentToolDefinition {
+    if !request.hatch {
+        request.available_tools.push(AgentToolDefinition {
             name: "get_goal".to_owned(),
-            description: "Read the current persistent Goal, status, usage, and audit state.".to_owned(),
+            description: "Read the current persistent Goal, status, usage, and audit state."
+                .to_owned(),
             input_schema: serde_json::json!({ "type": "object", "properties": {} }),
             read_only: true,
-        },
-        AgentToolDefinition {
-            name: "update_goal".to_owned(),
-            description: "Request Goal completion or report a repeated blocker with concrete evidence. The first completion request starts an audit; a second evidence-backed request during auditing completes it.".to_owned(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "status": { "type": "string", "enum": ["complete", "blocked"] },
-                    "evidence": { "type": "string" }
-                },
-                "required": ["status", "evidence"]
-            }),
-            read_only: true,
-        },
-    ]);
+        });
+    }
+    request.available_tools.push(AgentToolDefinition {
+        name: "update_goal".to_owned(),
+        description: "Request Goal completion or report a repeated blocker with concrete evidence. The first completion request starts an audit; a second evidence-backed request during auditing completes it.".to_owned(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "status": { "type": "string", "enum": ["complete", "blocked"] },
+                "evidence": { "type": "string" }
+            },
+            "required": ["status", "evidence"]
+        }),
+        read_only: true,
+    });
     Ok(())
+}
+
+fn is_hatch_goal_objective(objective: &str) -> bool {
+    let normalized = objective.trim().to_ascii_lowercase();
+    normalized.contains("孵化摇光残影")
+        || (normalized.contains("hatch")
+            && (normalized.contains("starlight echo")
+                || normalized.contains("hatch-pet")
+                || normalized.contains("pet")))
+        || (normalized.contains("残影") && normalized.contains("孵化"))
 }
 
 fn attach_custom_instructions(
@@ -387,7 +423,7 @@ fn attach_media_tools(request: &mut AgentTurnRequest) {
     request.available_tools.extend([
         AgentToolDefinition {
             name: "generate_images".to_owned(),
-            description: "Generate or edit raster images using the newest suitable image model from configured connections by default. When the user asks for an image, call this tool instead of writing an SVG, HTML, or other code-drawn substitute unless they explicitly request vector or code-native output. Multiple generate_images calls in one response run concurrently. This may incur provider charges and requires approval unless full access is enabled.".to_owned(),
+            description: "Generate or edit raster images using the newest suitable image model from configured connections by default. When the user asks for an image, call this tool instead of writing an SVG, HTML, or other code-drawn substitute unless they explicitly request vector or code-native output. Multiple generate_images calls in one response run concurrently for ordinary tasks and may incur provider charges. During a hatch-pet run, the adapter also exports unchanged completed image bytes to a standard generated_images/ig_* source and returns hatchSourcePaths for record_imagegen_result.py; use that returned path instead of the media storage path.".to_owned(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -399,7 +435,9 @@ fn attach_media_tools(request: &mut AgentTurnRequest) {
                     "quality": { "type": "string", "description": "Provider-specific quality such as auto, high, medium, 2K, or 4K" },
                     "outputFormat": { "type": "string", "enum": ["png", "jpeg", "webp"] },
                     "background": { "type": "string", "enum": ["auto", "transparent", "opaque"], "description": "Set transparent only when the user explicitly requests a transparent background; omit it otherwise. Model compatibility is enforced by the media backend." },
-                    "referenceAttachmentIds": { "type": "array", "items": { "type": "string" }, "maxItems": 8, "description": "Managed image attachment IDs for edits or visual references" }
+                    "referenceAttachmentIds": { "type": "array", "items": { "type": "string" }, "maxItems": 8, "description": "Managed image attachment IDs for edits or visual references" },
+                    "hatchRunDir": { "type": "string", "description": "Hatch-pet run directory returned by prepare_pet_run.py; only used by the bundled hatch adapter" },
+                    "hatchJobId": { "type": "string", "description": "Pending imagegen-jobs.json job ID for a hatch-pet row; the adapter loads that job's grounding images" }
                 },
                 "required": ["prompt"]
             }),
@@ -764,13 +802,17 @@ fn enable_pet_hatch_skills(
     database: &database::Database,
     environment: &pet::HatchEnvironment,
 ) -> Result<(), String> {
-    if let Some(directory) = environment.hatch_skill_path.as_deref() {
-        let path = Path::new(directory).join("SKILL.md");
-        database.set_skill_enabled("hatch-pet", &path.to_string_lossy(), true)?;
-    }
-    if let Some(directory) = environment.imagegen_skill_path.as_deref() {
-        let path = Path::new(directory).join("SKILL.md");
-        database.set_skill_enabled("imagegen", &path.to_string_lossy(), true)?;
+    for directory in [
+        environment.hatch_skill_path.as_deref(),
+        environment.imagegen_skill_path.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let path = std::fs::canonicalize(Path::new(directory).join("SKILL.md"))
+            .map_err(|error| format!("Could not resolve bundled Skill manifest: {error}"))?;
+        let id = skill::id_for_path(&path);
+        database.set_skill_enabled(&id, &path.to_string_lossy(), true)?;
     }
     Ok(())
 }
@@ -1130,15 +1172,185 @@ async fn get_media_catalog(
 fn read_media_references(
     app: &tauri::AppHandle,
     request: &MediaGenerationRequest,
-) -> Result<Vec<attachment::ManagedImage>, String> {
+) -> Result<Vec<attachment::ManagedReference>, String> {
     let storage = attachment_storage(app)?;
     let mut seen = HashSet::new();
     request
         .reference_attachment_ids
         .iter()
         .filter(|id| seen.insert((*id).clone()))
-        .map(|id| attachment::read_managed_image(&storage, id))
+        .map(|id| attachment::read_managed_reference(&storage, id))
         .collect()
+}
+
+#[derive(Debug, Deserialize)]
+struct HatchJobManifest {
+    #[serde(default)]
+    jobs: Vec<HatchJobEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HatchJobEntry {
+    id: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    input_images: Vec<HatchJobInput>,
+    #[serde(default)]
+    output_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HatchJobInput {
+    path: String,
+}
+
+fn hatch_run_directory(request: &ToolExecutionRequest) -> Result<Option<PathBuf>, String> {
+    let workspace = std::fs::canonicalize(&request.workspace)
+        .map_err(|error| format!("Hatch workspace is unavailable: {error}"))?;
+    let requested = request
+        .arguments
+        .get("hatchRunDir")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(raw) = requested {
+        let raw_path = Path::new(raw);
+        let candidate = if raw_path.is_absolute() {
+            raw_path.to_path_buf()
+        } else {
+            workspace.join(raw_path)
+        };
+        let run_dir = std::fs::canonicalize(&candidate)
+            .map_err(|error| format!("Hatch run directory is unavailable: {error}"))?;
+        if !run_dir.starts_with(&workspace) || !run_dir.join("imagegen-jobs.json").is_file() {
+            return Err("Hatch run directory must stay inside the selected workspace and contain imagegen-jobs.json".to_owned());
+        }
+        return Ok(Some(run_dir));
+    }
+
+    if workspace.join("imagegen-jobs.json").is_file() {
+        return Ok(Some(workspace));
+    }
+    let mut discovered = Vec::new();
+    let entries = std::fs::read_dir(&workspace)
+        .map_err(|error| format!("Could not inspect hatch workspace: {error}"))?;
+    for entry in entries.flatten() {
+        let candidate = entry.path();
+        if candidate.is_dir() && candidate.join("imagegen-jobs.json").is_file() {
+            discovered.push(
+                std::fs::canonicalize(candidate)
+                    .map_err(|error| format!("Could not resolve hatch run directory: {error}"))?,
+            );
+        }
+    }
+    match discovered.as_slice() {
+        [run_dir] => Ok(Some(run_dir.clone())),
+        [] => Ok(None),
+        _ => {
+            Err("Multiple hatch run directories were found; pass hatchRunDir explicitly".to_owned())
+        }
+    }
+}
+
+fn read_hatch_job_references(
+    request: &ToolExecutionRequest,
+) -> Result<Option<Vec<attachment::ManagedReference>>, String> {
+    if !request.hatch {
+        return Ok(None);
+    }
+    let job_id = request
+        .arguments
+        .get("hatchJobId")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "Hatch image generation requires hatchRunDir and hatchJobId so the adapter can enforce grounded manifest inputs".to_owned()
+        })?;
+    if job_id.len() > 80
+        || !job_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return Err("Hatch job ID is invalid".to_owned());
+    }
+    let Some(run_dir) = hatch_run_directory(request)? else {
+        return Err("Pass hatchRunDir for a prepared hatch-pet job".to_owned());
+    };
+    let manifest_path = run_dir.join("imagegen-jobs.json");
+    let manifest = serde_json::from_str::<HatchJobManifest>(
+        &std::fs::read_to_string(&manifest_path)
+            .map_err(|error| format!("Could not read imagegen-jobs.json: {error}"))?,
+    )
+    .map_err(|error| format!("imagegen-jobs.json is invalid: {error}"))?;
+    let job = manifest
+        .jobs
+        .iter()
+        .find(|job| job.id == job_id)
+        .ok_or_else(|| format!("Hatch job {job_id} is not present in imagegen-jobs.json"))?;
+    if job.status.eq_ignore_ascii_case("complete") {
+        return Err(format!(
+            "Hatch job {job_id} is already complete; do not submit another image generation"
+        ));
+    }
+    let output_exists = job.output_path.as_deref().is_some_and(|path| {
+        let candidate = run_dir.join(path);
+        std::fs::canonicalize(candidate)
+            .map(|resolved| resolved.starts_with(&run_dir) && resolved.is_file())
+            .unwrap_or(false)
+    });
+    if output_exists {
+        return Err(format!(
+            "Hatch job {job_id} already has an output file; record it before generating again"
+        ));
+    }
+    if job.input_images.is_empty() {
+        // The hatch-pet skill permits the base job to be prompt-only when the
+        // user supplied no references. Keep managed attachment IDs available
+        // as a fallback if the caller supplied them.
+        return Ok(None);
+    }
+
+    let mut references = Vec::new();
+    for input in &job.input_images {
+        let candidate = run_dir.join(&input.path);
+        let path = std::fs::canonicalize(&candidate).map_err(|error| {
+            format!(
+                "Hatch grounding image is unavailable ({}): {error}",
+                input.path
+            )
+        })?;
+        if !path.starts_with(&run_dir) {
+            return Err(format!(
+                "Hatch grounding image escapes the run directory: {}",
+                input.path
+            ));
+        }
+        let reference = attachment::read_local_media_reference(&path)?;
+        if !references
+            .iter()
+            .any(|existing: &attachment::ManagedReference| existing.bytes == reference.bytes)
+        {
+            references.push(reference);
+        }
+    }
+    if references.len() > 8 {
+        return Err(format!(
+            "Hatch job {job_id} requires {} distinct grounding images; the selected image model accepts at most 8",
+            references.len()
+        ));
+    }
+    let total = references
+        .iter()
+        .map(|reference| reference.bytes.len())
+        .sum::<usize>();
+    if total > 32 * 1024 * 1024 {
+        return Err(format!(
+            "Hatch job {job_id} grounding images exceed the 32 MiB image reference limit"
+        ));
+    }
+    Ok(Some(references))
 }
 
 async fn generate_media_internal(
@@ -1147,6 +1359,7 @@ async fn generate_media_internal(
     database: &database::Database,
     request: MediaGenerationRequest,
     thread_id: Option<&str>,
+    references_override: Option<Vec<attachment::ManagedReference>>,
 ) -> Result<MediaBatchResult, String> {
     let settings = media_settings(database)?;
     let (providers, credential_errors) = configured_media_providers(&settings);
@@ -1206,7 +1419,10 @@ async fn generate_media_internal(
             format!("{detail} {}", errors.join("; "))
         });
     }
-    let references = read_media_references(app, &request)?;
+    let references = match references_override {
+        Some(references) => references,
+        None => read_media_references(app, &request)?,
+    };
     let storage = media_storage(app)?;
     let mut failures = Vec::new();
     for selection in &selections {
@@ -1272,16 +1488,24 @@ async fn generate_media(
     request: MediaGenerationRequest,
     thread_id: Option<String>,
 ) -> Result<MediaBatchResult, String> {
-    generate_media_internal(&app, &state, &database, request, thread_id.as_deref()).await
+    generate_media_internal(&app, &state, &database, request, thread_id.as_deref(), None).await
 }
 
 #[tauri::command]
 fn list_media_assets(
     app: tauri::AppHandle,
     database: tauri::State<'_, database::Database>,
+    kind: MediaKind,
     limit: Option<usize>,
-) -> Result<Vec<MediaAsset>, String> {
-    media::list_assets(&database, &media_storage(&app)?, limit.unwrap_or(200))
+    offset: Option<usize>,
+) -> Result<MediaAssetPage, String> {
+    media::list_assets_page(
+        &database,
+        &media_storage(&app)?,
+        &kind,
+        limit.unwrap_or(24),
+        offset.unwrap_or(0),
+    )
 }
 
 async fn refresh_media_asset_internal(
@@ -1355,6 +1579,30 @@ fn import_image_attachments(
     let mut imported = Vec::new();
     for path in source_paths {
         match attachment::import(&storage, std::path::Path::new(&path)) {
+            Ok(item) => imported.push(item),
+            Err(error) => {
+                for item in &imported {
+                    let _ = attachment::delete(&storage, &item.id);
+                }
+                return Err(error);
+            }
+        }
+    }
+    Ok(imported)
+}
+
+#[tauri::command]
+fn import_media_references(
+    app: tauri::AppHandle,
+    source_paths: Vec<String>,
+) -> Result<Vec<ImageAttachment>, String> {
+    if source_paths.is_empty() || source_paths.len() > 7 {
+        return Err("Select between 1 and 7 media references at a time".to_owned());
+    }
+    let storage = attachment_storage(&app)?;
+    let mut imported = Vec::new();
+    for path in source_paths {
+        match attachment::import_media_reference(&storage, std::path::Path::new(&path)) {
             Ok(item) => imported.push(item),
             Err(error) => {
                 for item in &imported {
@@ -1747,6 +1995,8 @@ where
             mode: "subagent".to_owned(),
             workspace: Some(worktree.path.to_string_lossy().into_owned()),
             thread_id: Some(child_thread_id.clone()),
+            hatch: false,
+            hatch_skill_loaded: false,
             available_tools: Vec::new(),
             available_skills: Vec::new(),
             goal: None,
@@ -1791,6 +2041,9 @@ where
                     thread_id: Some(child_thread_id.clone()),
                     profile: None,
                     fallback_profiles: Vec::new(),
+                    hatch: false,
+                    hatch_skill_loaded: false,
+                    hatch_bootstrap: false,
                 })
                 .await
             } else {
@@ -1989,26 +2242,84 @@ async fn execute_media_generation_tool(
     request: &ToolExecutionRequest,
 ) -> ToolExecutionResponse {
     let result = match media_request_from_tool(&request.name, &request.arguments) {
-        Ok(generation) => {
-            generate_media_internal(
-                app,
-                state,
-                database,
-                generation,
-                request.thread_id.as_deref(),
-            )
-            .await
+        Ok(mut generation) => {
+            if request.hatch && generation.kind == MediaKind::Image {
+                // A hatch job is one manifest row at a time and the
+                // deterministic pipeline expects a lossless PNG source.
+                generation.count = 1;
+                generation.output_format = Some("png".to_owned());
+            }
+            let hatch_references = if request.hatch && generation.kind == MediaKind::Image {
+                read_hatch_job_references(request)
+            } else {
+                Ok(None)
+            };
+            match hatch_references {
+                Ok(references_override) => {
+                    generate_media_internal(
+                        app,
+                        state,
+                        database,
+                        generation,
+                        request.thread_id.as_deref(),
+                        references_override,
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            }
         }
         Err(error) => Err(error),
     };
     match result {
         Ok(result) => {
+            let source_paths = if request.hatch {
+                match export_hatch_image_sources(app, &result, request.thread_id.as_deref()).await {
+                    Ok(paths) => paths,
+                    Err(error) => {
+                        return ToolExecutionResponse {
+                            output: format!(
+                                "Media generation succeeded, but the hatch-pet source adapter failed: {error}"
+                            ),
+                            is_error: true,
+                        };
+                    }
+                }
+            } else {
+                Vec::new()
+            };
             let is_error = result
                 .assets
                 .iter()
                 .all(|asset| asset.status == MediaStatus::Failed);
+            let mut payload = match serde_json::to_value(&result) {
+                Ok(value) => value,
+                Err(error) => {
+                    return ToolExecutionResponse {
+                        output: format!("Could not encode media result: {error}"),
+                        is_error: true,
+                    };
+                }
+            };
+            if !source_paths.is_empty()
+                && let Some(object) = payload.as_object_mut()
+            {
+                object.insert(
+                    "hatchSourcePaths".to_owned(),
+                    serde_json::Value::Array(
+                        source_paths
+                            .into_iter()
+                            .map(serde_json::Value::String)
+                            .collect(),
+                    ),
+                );
+                object.insert(
+                    "hatchSourceProvenance".to_owned(),
+                    serde_json::Value::String("levelup-agent-imagegen-adapter".to_owned()),
+                );
+            }
             ToolExecutionResponse {
-                output: serde_json::to_string(&result)
+                output: serde_json::to_string(&payload)
                     .unwrap_or_else(|error| format!("Could not encode media result: {error}")),
                 is_error,
             }
@@ -2018,6 +2329,107 @@ async fn execute_media_generation_tool(
             is_error: true,
         },
     }
+}
+
+fn hatch_generated_images_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let home = app
+        .path()
+        .home_dir()
+        .map_err(|error| format!("Could not locate the home directory: {error}"))?;
+    let codex_home = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".codex"));
+    let root = codex_home.join("generated_images").join("levelup-agent");
+    std::fs::create_dir_all(&root)
+        .map_err(|error| format!("Could not create hatch image source directory: {error}"))?;
+    filesystem::restrict_directory(&root)?;
+    Ok(root)
+}
+
+fn hatch_safe_component(value: &str) -> String {
+    let normalized = value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+        .take(80)
+        .collect::<String>();
+    if normalized.is_empty() {
+        "run".to_owned()
+    } else {
+        normalized
+    }
+}
+
+fn hatch_source_extension(asset: &MediaAsset) -> String {
+    asset
+        .file_name
+        .as_deref()
+        .and_then(|name| Path::new(name).extension())
+        .and_then(|extension| extension.to_str())
+        .filter(|extension| {
+            !extension.is_empty()
+                && extension.len() <= 8
+                && extension
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric())
+        })
+        .map(|extension| extension.to_ascii_lowercase())
+        .unwrap_or_else(|| match asset.mime_type.as_deref() {
+            Some("image/jpeg") => "jpg".to_owned(),
+            Some("image/webp") => "webp".to_owned(),
+            Some("image/gif") => "gif".to_owned(),
+            _ => "png".to_owned(),
+        })
+}
+
+/// Export the unchanged provider bytes to the path convention enforced by
+/// hatch-pet's `record_imagegen_result.py`. This is the LevelUpAgent imagegen
+/// adapter boundary; it does not alter, synthesize, or claim a different image.
+async fn export_hatch_image_sources(
+    app: &tauri::AppHandle,
+    result: &MediaBatchResult,
+    thread_id: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let source_root = hatch_generated_images_root(app)?;
+    let run_root = source_root.join(format!(
+        "thread-{}",
+        hatch_safe_component(thread_id.unwrap_or("standalone"))
+    ));
+    tokio::fs::create_dir_all(&run_root)
+        .await
+        .map_err(|error| format!("Could not create hatch image source run: {error}"))?;
+    filesystem::restrict_directory(&run_root)?;
+
+    let media_root = std::fs::canonicalize(media_storage(app)?)
+        .map_err(|error| format!("Could not resolve media storage: {error}"))?;
+    let mut paths = Vec::new();
+    for asset in &result.assets {
+        if asset.kind != MediaKind::Image || asset.status != MediaStatus::Completed {
+            continue;
+        }
+        let raw_path = asset
+            .file_path
+            .as_deref()
+            .ok_or_else(|| format!("Hatch image asset {} has no local source path", asset.id))?;
+        let source = std::fs::canonicalize(raw_path)
+            .map_err(|error| format!("Could not resolve hatch image source: {error}"))?;
+        if !source.starts_with(&media_root) || !source.is_file() {
+            return Err(format!(
+                "Hatch image source is outside managed media storage: {}",
+                source.display()
+            ));
+        }
+        let destination = run_root.join(format!(
+            "ig_{}.{}",
+            hatch_safe_component(&asset.id),
+            hatch_source_extension(asset)
+        ));
+        tokio::fs::copy(&source, &destination)
+            .await
+            .map_err(|error| format!("Could not export hatch image source: {error}"))?;
+        filesystem::restrict_file(&destination)?;
+        paths.push(destination.to_string_lossy().into_owned());
+    }
+    Ok(paths)
 }
 
 async fn execute_media_job_check(
@@ -2106,6 +2518,62 @@ async fn execute_media_job_check(
     }
 }
 
+fn hatch_command_is_observation(arguments: &serde_json::Value) -> bool {
+    let Some(command) = arguments.get("command").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let normalized = command.to_ascii_lowercase();
+    normalized.contains("levelup-pet-hatch.json")
+        || [
+            "get-childitem",
+            " gci",
+            " get-content",
+            " gc ",
+            " type ",
+            " cat ",
+            " more ",
+            "select-string",
+            "findstr",
+            " rg ",
+            " grep ",
+            "get-location",
+            " pwd",
+        ]
+        .iter()
+        .any(|marker| normalized.starts_with(marker.trim()) || normalized.contains(marker))
+}
+
+fn hatch_tool_policy_error(request: &ToolExecutionRequest) -> Option<&'static str> {
+    if !request.hatch {
+        return None;
+    }
+    if matches!(
+        request.name.as_str(),
+        "get_goal" | "list_files" | "read_file" | "search_files"
+    ) {
+        return Some(
+            "This observation tool is unavailable during pet hatching. The Goal and pet target are already attached; run prepare_pet_run.py or the next concrete hatch command.",
+        );
+    }
+    if request.name == "run_command" && hatch_command_is_observation(&request.arguments) {
+        return Some(
+            "This workspace observation command is unavailable during pet hatching. The Goal and pet target are already attached; run prepare_pet_run.py or the next concrete hatch command.",
+        );
+    }
+    if request.name != "read_skill" || request.hatch_bootstrap {
+        return None;
+    }
+    if request.hatch_skill_loaded {
+        Some(
+            "The bundled hatch-pet Skill is already loaded; read_skill is closed for this provider turn. Run prepare_pet_run.py or the next concrete hatch command.",
+        )
+    } else {
+        Some(
+            "read_skill is application-owned during pet hatching and is unavailable to provider turns. Run prepare_pet_run.py or the next concrete hatch command.",
+        )
+    }
+}
+
 #[tauri::command]
 async fn execute_tool(
     app: tauri::AppHandle,
@@ -2115,6 +2583,23 @@ async fn execute_tool(
     subagents: tauri::State<'_, subagent::SubagentManager>,
     mut request: ToolExecutionRequest,
 ) -> Result<ToolExecutionResponse, String> {
+    // Older clients did not persist the hatch flag on every tool request.
+    // Recover it from the durable Goal before applying the tool policy so a
+    // resumed legacy thread cannot re-expose read_skill/get_goal or bypass
+    // grounded media generation merely because its frontend flag was lost.
+    if !request.hatch
+        && let Some(thread_id) = request.thread_id.as_deref()
+        && let Some(goal) = database.get_goal(thread_id)?
+        && is_hatch_goal_objective(&goal.objective)
+    {
+        request.hatch = true;
+    }
+    if let Some(output) = hatch_tool_policy_error(&request) {
+        return Ok(ToolExecutionResponse {
+            output: output.to_owned(),
+            is_error: true,
+        });
+    }
     if request.workspace.trim().is_empty() {
         request.workspace = ensure_default_workspace(&app)?
             .to_string_lossy()
@@ -2710,7 +3195,17 @@ pub fn run() {
         })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_process::init());
+        .plugin(tauri_plugin_process::init())
+        // The app stores conversations, Goals, and hatch state in one shared
+        // SQLite database. A second process would race the first process's
+        // pause/resume and hydration logic, so bring the existing window to
+        // the foreground instead of starting another state machine.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }));
     let builder = if option_env!("LEVELUP_ENABLE_UPDATER").is_some() {
         builder.plugin(tauri_plugin_updater::Builder::new().build())
     } else {
@@ -2730,6 +3225,7 @@ pub fn run() {
             export_media_asset,
             delete_media_asset,
             import_image_attachments,
+            import_media_references,
             import_clipboard_images,
             import_clipboard_attachments,
             delete_image_attachment,
@@ -2818,6 +3314,117 @@ mod tests {
     }
 
     #[test]
+    fn hatch_manifest_references_are_grounded_and_completed_jobs_are_rejected() {
+        let root =
+            std::env::temp_dir().join(format!("levelup-hatch-manifest-{}", uuid::Uuid::new_v4()));
+        let run = root.join("noct-run");
+        let references = run.join("references");
+        std::fs::create_dir_all(&references).unwrap();
+        std::fs::write(references.join("base.png"), b"\x89PNG\r\n\x1a\nbase").unwrap();
+        let manifest = serde_json::json!({
+            "jobs": [{
+                "id": "idle",
+                "status": "pending",
+                "input_images": [{ "path": "references/base.png" }],
+                "output_path": "decoded/idle.png"
+            }]
+        });
+        std::fs::write(
+            run.join("imagegen-jobs.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let request = ToolExecutionRequest {
+            name: "generate_images".to_owned(),
+            arguments: serde_json::json!({
+                "hatchRunDir": run.to_string_lossy(),
+                "hatchJobId": "idle"
+            }),
+            workspace: root.to_string_lossy().into_owned(),
+            thread_id: Some("hatch-thread".to_owned()),
+            profile: None,
+            fallback_profiles: Vec::new(),
+            hatch: true,
+            hatch_skill_loaded: false,
+            hatch_bootstrap: false,
+        };
+        let references = read_hatch_job_references(&request).unwrap().unwrap();
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].mime_type, "image/png");
+
+        let completed = serde_json::json!({
+            "jobs": [{
+                "id": "idle",
+                "status": "complete",
+                "input_images": [{ "path": "references/base.png" }],
+                "output_path": "decoded/idle.png"
+            }]
+        });
+        std::fs::write(
+            run.join("imagegen-jobs.json"),
+            serde_json::to_vec(&completed).unwrap(),
+        )
+        .unwrap();
+        let error = match read_hatch_job_references(&request) {
+            Ok(_) => panic!("completed hatch job unexpectedly accepted"),
+            Err(error) => error,
+        };
+        assert!(error.contains("already complete"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn hatch_tool_policy_rejects_state_refreshes_and_loaded_manifest_rereads() {
+        let mut request = ToolExecutionRequest {
+            name: "get_goal".to_owned(),
+            arguments: serde_json::json!({}),
+            workspace: "C:/hatch".to_owned(),
+            thread_id: Some("hatch-thread".to_owned()),
+            profile: None,
+            fallback_profiles: Vec::new(),
+            hatch: true,
+            hatch_skill_loaded: true,
+            hatch_bootstrap: false,
+        };
+        assert!(hatch_tool_policy_error(&request).is_some());
+
+        request.name = "read_skill".to_owned();
+        assert!(hatch_tool_policy_error(&request).is_some());
+        request.arguments = serde_json::json!({ "path": "./SKILL.md" });
+        assert!(hatch_tool_policy_error(&request).is_some());
+        request.arguments = serde_json::json!({ "path": "references/animation-rows.md" });
+        assert!(hatch_tool_policy_error(&request).is_some());
+
+        request.name = "run_command".to_owned();
+        request.arguments =
+            serde_json::json!({ "command": "Get-Content .\\levelup-pet-hatch.json" });
+        assert!(hatch_tool_policy_error(&request).is_some());
+        request.arguments =
+            serde_json::json!({ "command": "python prepare_pet_run.py --output-dir C:/run" });
+        assert!(hatch_tool_policy_error(&request).is_none());
+
+        request.hatch_bootstrap = true;
+        assert!(hatch_tool_policy_error(&request).is_none());
+
+        request.hatch = false;
+        request.name = "get_goal".to_owned();
+        assert!(hatch_tool_policy_error(&request).is_none());
+    }
+
+    #[test]
+    fn hatch_goal_objective_detection_covers_legacy_and_english_requests() {
+        assert!(is_hatch_goal_objective(
+            "孵化摇光残影“Noct”：黑发蓝眼，黑色披风"
+        ));
+        assert!(is_hatch_goal_objective(
+            "Hatch the Starlight Echo \"Noct\" using the hatch-pet workflow"
+        ));
+        assert!(is_hatch_goal_objective("Hatch a custom pet named Noct"));
+        assert!(is_hatch_goal_objective("孵化残影 Noct"));
+        assert!(!is_hatch_goal_objective("分析当前项目并修复测试失败"));
+    }
+
+    #[test]
     fn provider_candidates_keep_primary_first_and_sort_enabled_fallbacks() {
         let request = AgentTurnRequest {
             profile: profile("primary", 999, false),
@@ -2825,6 +3432,8 @@ mod tests {
             mode: "chat".to_owned(),
             workspace: None,
             thread_id: None,
+            hatch: false,
+            hatch_skill_loaded: false,
             available_tools: Vec::new(),
             available_skills: Vec::new(),
             goal: None,
@@ -2851,6 +3460,8 @@ mod tests {
             mode: "agent".to_owned(),
             workspace: None,
             thread_id: Some("thread-media".to_owned()),
+            hatch: false,
+            hatch_skill_loaded: false,
             available_tools: Vec::new(),
             available_skills: Vec::new(),
             goal: None,
@@ -2864,6 +3475,96 @@ mod tests {
                 .iter()
                 .any(|tool| tool.name == "generate_images")
         );
+    }
+
+    #[test]
+    fn hatch_goal_keeps_updates_but_does_not_expose_goal_refresh() {
+        let root =
+            std::env::temp_dir().join(format!("levelup-hatch-goal-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let database = database::Database::open(&root.join("test.sqlite3")).unwrap();
+        let thread_id = "hatch-thread".to_owned();
+        database
+            .create_goal(&GoalCreateRequest {
+                thread_id: thread_id.clone(),
+                objective: "Hatch the requested pet".to_owned(),
+            })
+            .unwrap();
+        let mut request = AgentTurnRequest {
+            profile: profile("primary", 10, true),
+            messages: Vec::new(),
+            mode: "goal".to_owned(),
+            workspace: Some(root.to_string_lossy().into_owned()),
+            thread_id: Some(thread_id),
+            hatch: true,
+            hatch_skill_loaded: false,
+            available_tools: Vec::new(),
+            available_skills: Vec::new(),
+            goal: None,
+            fallback_profiles: Vec::new(),
+            custom_instructions: None,
+        };
+
+        attach_goal(&database, &mut request).unwrap();
+
+        assert!(request.goal.is_some());
+        assert!(
+            request
+                .available_tools
+                .iter()
+                .any(|tool| tool.name == "update_goal")
+        );
+        assert!(
+            request
+                .available_tools
+                .iter()
+                .all(|tool| tool.name != "get_goal")
+        );
+        drop(database);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_hatch_goal_forces_hatch_mode_before_catalog_attachment() {
+        let root = std::env::temp_dir().join(format!(
+            "levelup-legacy-hatch-goal-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let database = database::Database::open(&root.join("test.sqlite3")).unwrap();
+        let thread_id = "legacy-hatch-thread".to_owned();
+        database
+            .create_goal(&GoalCreateRequest {
+                thread_id: thread_id.clone(),
+                objective: "孵化摇光残影“Noct”：黑发蓝眼，黑色披风".to_owned(),
+            })
+            .unwrap();
+        let mut request = AgentTurnRequest {
+            profile: profile("primary", 10, true),
+            messages: Vec::new(),
+            mode: "goal".to_owned(),
+            workspace: Some(root.to_string_lossy().into_owned()),
+            thread_id: Some(thread_id),
+            hatch: false,
+            hatch_skill_loaded: true,
+            available_tools: Vec::new(),
+            available_skills: Vec::new(),
+            goal: None,
+            fallback_profiles: Vec::new(),
+            custom_instructions: None,
+        };
+
+        attach_goal(&database, &mut request).unwrap();
+
+        assert!(request.hatch);
+        assert!(
+            request
+                .available_tools
+                .iter()
+                .all(|tool| tool.name != "get_goal")
+        );
+        drop(database);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -3012,6 +3713,8 @@ mod tests {
             mode: "chat".to_owned(),
             workspace: None,
             thread_id: Some("thread-failover".to_owned()),
+            hatch: false,
+            hatch_skill_loaded: false,
             available_tools: Vec::new(),
             available_skills: Vec::new(),
             goal: None,
@@ -3071,6 +3774,8 @@ mod tests {
             mode: "chat".to_owned(),
             workspace: None,
             thread_id: Some("thread-local".to_owned()),
+            hatch: false,
+            hatch_skill_loaded: false,
             available_tools: Vec::new(),
             available_skills: Vec::new(),
             goal: None,
@@ -3135,18 +3840,23 @@ mod tests {
             "the recommended image model is not the highest-ranked available model"
         );
         println!(
-            "discovered_image_models={} recommended_image_model={}",
+            "discovered_image_models={} recommended_image_model={} ids={:?}",
             image_models.len(),
-            recommended.id
+            recommended.id,
+            image_models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>()
         );
 
         if std::env::var("LEVELUP_REAL_MEDIA_GENERATE").as_deref() != Ok("1") {
             return;
         }
+        let requested_model = std::env::var("LEVELUP_REAL_MEDIA_MODEL").ok();
         let request = MediaGenerationRequest {
             profile_id: None,
             kind: MediaKind::Image,
-            model: None,
+            model: requested_model.clone(),
             prompt: "A minimal verification image: one coral circle centered on a clean warm-white background, no text".to_owned(),
             count: 1,
             size: Some("1024x1024".to_owned()),
@@ -3156,13 +3866,18 @@ mod tests {
             voice: None,
             instructions: None,
             seconds: None,
+            video_mode: models::VideoGenerationMode::Text,
+            video_resolution: None,
+            video_aspect_ratio: None,
             reference_attachment_ids: Vec::new(),
         };
         let selections = media::selection_candidates(&providers, &catalog, &request);
         let selection = selections
             .first()
             .expect("automatic image selection returned no candidate");
-        assert_eq!(selection.model, recommended.id);
+        if requested_model.is_none() {
+            assert_eq!(selection.model, recommended.id);
+        }
         let storage = app_data.join("media");
         let result = media::generate_batch(
             &client,
@@ -3237,6 +3952,9 @@ mod tests {
             thread_id: Some("parent-thread".to_owned()),
             profile: Some(child_profile),
             fallback_profiles: Vec::new(),
+            hatch: false,
+            hatch_skill_loaded: false,
+            hatch_bootstrap: false,
         };
         let summary = run_isolated_subagent(
             &Client::new(),

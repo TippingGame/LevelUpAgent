@@ -1,6 +1,6 @@
 [package]
 name = "levelup-agent"
-version = "1.0.8"
+version = "1.0.12"
 description = "A local-first, multi-model AI agent for LevelUpAPI"
 authors = ["LevelUpAgent contributors"]
 license = "LGPL-3.0-only"
@@ -23,6 +23,7 @@ tauri = { version = "2", features = ["protocol-asset", "macos-private-api"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-process = "2"
+tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

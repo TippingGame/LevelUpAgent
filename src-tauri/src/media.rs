@@ -10,11 +10,12 @@ use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 
 use crate::agent;
-use crate::attachment::ManagedImage;
+use crate::attachment::ManagedReference;
 use crate::database::Database;
 use crate::models::{
-    MediaAsset, MediaBatchResult, MediaCatalog, MediaGenerationRequest, MediaKind, MediaModelInfo,
-    MediaStatus, ProviderProfile, ProviderProtocol,
+    AttachmentKind, MediaAsset, MediaAssetPage, MediaBatchResult, MediaCatalog,
+    MediaGenerationRequest, MediaKind, MediaModelInfo, MediaStatus, ProviderProfile,
+    ProviderProtocol, VideoGenerationMode,
 };
 
 const MAX_PROMPT_CHARS: usize = 32_000;
@@ -217,10 +218,10 @@ pub async fn generate_batch(
     selection: &MediaSelection,
     request: &MediaGenerationRequest,
     thread_id: Option<&str>,
-    references: &[ManagedImage],
+    references: &[ManagedReference],
 ) -> Result<MediaBatchResult, String> {
     validate_request(request, references)?;
-    validate_model_request(&selection.model, request)?;
+    validate_model_request(&selection.model, request, references)?;
     let batch_id = uuid::Uuid::new_v4().simple().to_string();
     match request.kind {
         MediaKind::Image => {
@@ -236,7 +237,10 @@ pub async fn generate_batch(
             .await
         }
         MediaKind::Video => {
-            generate_videos(database, client, selection, request, thread_id, batch_id).await
+            generate_videos(
+                database, client, selection, request, thread_id, references, batch_id,
+            )
+            .await
         }
     }
 }
@@ -251,6 +255,24 @@ pub fn list_assets(
         .into_iter()
         .map(|asset| enrich_asset(storage, asset))
         .collect()
+}
+
+pub fn list_assets_page(
+    database: &Database,
+    storage: &Path,
+    kind: &MediaKind,
+    limit: usize,
+    offset: usize,
+) -> Result<MediaAssetPage, String> {
+    let limit = limit.clamp(1, 100);
+    let mut assets = database.list_media_assets_page(kind, limit.saturating_add(1), offset)?;
+    let has_more = assets.len() > limit;
+    assets.truncate(limit);
+    let assets = assets
+        .into_iter()
+        .map(|asset| enrich_asset(storage, asset))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(MediaAssetPage { assets, has_more })
 }
 
 pub fn get_asset(
@@ -513,7 +535,7 @@ fn media_kind_order(kind: &MediaKind) -> u8 {
 
 fn validate_request(
     request: &MediaGenerationRequest,
-    references: &[ManagedImage],
+    references: &[ManagedReference],
 ) -> Result<(), String> {
     let prompt = request.prompt.trim();
     if prompt.is_empty() || prompt.chars().count() > MAX_PROMPT_CHARS {
@@ -527,20 +549,85 @@ fn validate_request(
     if request.count == 0 || request.count > maximum {
         return Err(format!("This media request supports 1-{maximum} outputs"));
     }
-    if request.kind != MediaKind::Image && !references.is_empty() {
-        return Err("Reference attachments are currently supported only for images".to_owned());
-    }
-    let total = references
-        .iter()
-        .map(|item| item.bytes.len())
-        .sum::<usize>();
-    if references.len() > 8 || total > 32 * 1024 * 1024 {
-        return Err("Reference images are limited to 8 files and 32 MiB total".to_owned());
+    match request.kind {
+        MediaKind::Image => {
+            if references
+                .iter()
+                .any(|reference| reference.kind != AttachmentKind::Image)
+            {
+                return Err("Image generation accepts image references only".to_owned());
+            }
+            let total = references
+                .iter()
+                .map(|item| item.bytes.len())
+                .sum::<usize>();
+            if references.len() > 8 || total > 32 * 1024 * 1024 {
+                return Err("Reference images are limited to 8 files and 32 MiB total".to_owned());
+            }
+        }
+        MediaKind::Audio => {
+            if !references.is_empty() {
+                return Err("Audio generation does not accept reference attachments".to_owned());
+            }
+        }
+        MediaKind::Video => validate_video_references(request, references)?,
     }
     Ok(())
 }
 
-fn validate_model_request(model: &str, request: &MediaGenerationRequest) -> Result<(), String> {
+fn validate_video_references(
+    request: &MediaGenerationRequest,
+    references: &[ManagedReference],
+) -> Result<(), String> {
+    let total = references
+        .iter()
+        .map(|reference| reference.bytes.len())
+        .sum::<usize>();
+    if total > 64 * 1024 * 1024 {
+        return Err("Video reference attachments may total at most 64 MiB".to_owned());
+    }
+    match request.video_mode {
+        VideoGenerationMode::Text => {
+            if !references.is_empty() {
+                return Err(
+                    "Text-to-video cannot be combined with reference attachments".to_owned(),
+                );
+            }
+        }
+        VideoGenerationMode::Image => {
+            if references.len() != 1 || references[0].kind != AttachmentKind::Image {
+                return Err("Image-to-video requires exactly one source image".to_owned());
+            }
+        }
+        VideoGenerationMode::Reference => {
+            if references.is_empty()
+                || references.len() > 7
+                || references
+                    .iter()
+                    .any(|reference| reference.kind != AttachmentKind::Image)
+            {
+                return Err("Reference-to-video requires between 1 and 7 images".to_owned());
+            }
+            if request.seconds.is_some_and(|seconds| seconds > 10) {
+                return Err(
+                    "Reference-to-video supports a maximum duration of 10 seconds".to_owned(),
+                );
+            }
+        }
+        VideoGenerationMode::Video => {
+            if references.len() != 1 || references[0].kind != AttachmentKind::Video {
+                return Err("Video editing requires exactly one MP4 source video".to_owned());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_model_request(
+    model: &str,
+    request: &MediaGenerationRequest,
+    references: &[ManagedReference],
+) -> Result<(), String> {
     if request.kind == MediaKind::Image
         && request
             .background
@@ -552,6 +639,50 @@ fn validate_model_request(model: &str, request: &MediaGenerationRequest) -> Resu
             "gpt-image-2 does not support a transparent background. Use background=auto/opaque, or select a transparency-capable image model such as gpt-image-1.5."
                 .to_owned(),
         );
+    }
+    if request.kind == MediaKind::Video {
+        let normalized = model.trim_start_matches("models/").to_ascii_lowercase();
+        if !is_grok_video_model(model) {
+            if request.video_mode != VideoGenerationMode::Text || !references.is_empty() {
+                return Err(
+                    "Reference images and videos are currently supported only by Grok Imagine video models"
+                        .to_owned(),
+                );
+            }
+            return Ok(());
+        }
+        let is_15 = normalized.contains("grok-imagine-video-1.5");
+        if is_15 && request.video_mode != VideoGenerationMode::Image {
+            return Err(
+                "grok-imagine-video-1.5 currently requires image-to-video mode with one source image"
+                    .to_owned(),
+            );
+        }
+        if let Some(resolution) = request
+            .video_resolution
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let supported = matches!(resolution.to_ascii_lowercase().as_str(), "480p" | "720p")
+                || (is_15 && resolution.eq_ignore_ascii_case("1080p"));
+            if !supported {
+                return Err(if is_15 {
+                    "Grok Imagine Video 1.5 resolution must be 480p, 720p, or 1080p".to_owned()
+                } else {
+                    "Grok Imagine Video resolution must be 480p or 720p".to_owned()
+                });
+            }
+        }
+        if request
+            .video_aspect_ratio
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_some_and(|ratio| !matches!(ratio, "16:9" | "9:16"))
+        {
+            return Err("Grok video aspect ratio must be 16:9 or 9:16".to_owned());
+        }
     }
     Ok(())
 }
@@ -590,7 +721,7 @@ async fn generate_images(
     selection: &MediaSelection,
     request: &MediaGenerationRequest,
     thread_id: Option<&str>,
-    references: &[ManagedImage],
+    references: &[ManagedReference],
     batch_id: String,
 ) -> Result<MediaBatchResult, String> {
     let native_gemini = matches!(
@@ -663,7 +794,7 @@ async fn call_openai_images(
     provider: &MediaProvider,
     model: &str,
     request: &MediaGenerationRequest,
-    references: &[ManagedImage],
+    references: &[ManagedReference],
 ) -> Result<Vec<GeneratedBlob>, String> {
     let prompt = effective_image_prompt(request);
     let grok = is_grok_image_model(model);
@@ -784,7 +915,7 @@ async fn call_gemini_image(
     provider: &MediaProvider,
     model: &str,
     request: &MediaGenerationRequest,
-    references: &[ManagedImage],
+    references: &[ManagedReference],
 ) -> Result<Vec<GeneratedBlob>, String> {
     let model = validate_model_segment(model)?;
     let url = agent::endpoint(
@@ -1129,6 +1260,7 @@ async fn generate_videos(
     selection: &MediaSelection,
     request: &MediaGenerationRequest,
     thread_id: Option<&str>,
+    references: &[ManagedReference],
     batch_id: String,
 ) -> Result<MediaBatchResult, String> {
     let calls = (0..request.count).map(|_| async {
@@ -1139,7 +1271,14 @@ async fn generate_videos(
         {
             create_gemini_video(client, &selection.provider, &selection.model, request).await
         } else if is_grok_video_model(&selection.model) {
-            create_grok_video(client, &selection.provider, &selection.model, request).await
+            create_grok_video(
+                client,
+                &selection.provider,
+                &selection.model,
+                request,
+                references,
+            )
+            .await
         } else {
             create_openai_video(client, &selection.provider, &selection.model, request).await
         }
@@ -1168,7 +1307,7 @@ async fn generate_videos(
                     revised_prompt: None,
                     error: None,
                     progress: job.progress,
-                    size: request.size.clone(),
+                    size: video_size_label(request),
                     quality: request.quality.clone(),
                     output_format: Some("mp4".to_owned()),
                     voice: None,
@@ -1231,21 +1370,10 @@ async fn create_grok_video(
     provider: &MediaProvider,
     model: &str,
     request: &MediaGenerationRequest,
+    references: &[ManagedReference],
 ) -> Result<RemoteVideoJob, String> {
-    let url = agent::endpoint(&provider.profile.base_url, "/v1/videos/generations")?;
-    let mut body = json!({
-        "model": model,
-        "prompt": request.prompt.trim(),
-    });
-    if let Some(aspect_ratio) = grok_video_aspect_ratio(request.size.as_deref()) {
-        body["aspect_ratio"] = Value::String(aspect_ratio.to_owned());
-    }
-    if let Some(resolution) = grok_video_resolution(request.size.as_deref()) {
-        body["resolution"] = Value::String(resolution.to_owned());
-    }
-    if let Some(seconds) = request.seconds {
-        body["duration"] = Value::from(seconds);
-    }
+    let (path, body) = grok_video_request(model, request, references)?;
+    let url = agent::endpoint(&provider.profile.base_url, path)?;
     let value = send_json(bearer_auth_if_present(client.post(url), provider).json(&body)).await?;
     let id = find_string_by_keys(&value, &["id", "request_id", "requestId"])
         .filter(|value| !value.trim().is_empty())
@@ -1255,6 +1383,77 @@ async fn create_grok_video(
         status: parse_video_status(value.get("status").and_then(Value::as_str)),
         progress: parse_progress(&value),
     })
+}
+
+fn grok_video_request(
+    model: &str,
+    request: &MediaGenerationRequest,
+    references: &[ManagedReference],
+) -> Result<(&'static str, Value), String> {
+    let path = if request.video_mode == VideoGenerationMode::Video {
+        "/v1/videos/edits"
+    } else {
+        "/v1/videos/generations"
+    };
+    let mut body = json!({
+        "model": model,
+        "prompt": request.prompt.trim(),
+    });
+    match request.video_mode {
+        VideoGenerationMode::Text => {}
+        VideoGenerationMode::Image => {
+            let reference = references
+                .first()
+                .ok_or_else(|| "Image-to-video requires one source image".to_owned())?;
+            body["image"] = json!({ "url": reference_data_url(reference) });
+        }
+        VideoGenerationMode::Reference => {
+            body["reference_images"] = Value::Array(
+                references
+                    .iter()
+                    .map(|reference| json!({ "url": reference_data_url(reference) }))
+                    .collect(),
+            );
+        }
+        VideoGenerationMode::Video => {
+            let reference = references
+                .first()
+                .ok_or_else(|| "Video editing requires one MP4 source video".to_owned())?;
+            body["video"] = json!({ "url": reference_data_url(reference) });
+        }
+    }
+    if request.video_mode != VideoGenerationMode::Video {
+        if let Some(aspect_ratio) = request
+            .video_aspect_ratio
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| grok_video_aspect_ratio(request.size.as_deref()))
+        {
+            body["aspect_ratio"] = Value::String(aspect_ratio.to_owned());
+        }
+        if let Some(resolution) = request
+            .video_resolution
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| grok_video_resolution(request.size.as_deref()))
+        {
+            body["resolution"] = Value::String(resolution.to_ascii_lowercase());
+        }
+        if let Some(seconds) = request.seconds {
+            body["duration"] = Value::from(seconds);
+        }
+    }
+    Ok((path, body))
+}
+
+fn reference_data_url(reference: &ManagedReference) -> String {
+    format!(
+        "data:{};base64,{}",
+        reference.mime_type,
+        base64::engine::general_purpose::STANDARD.encode(&reference.bytes)
+    )
 }
 
 async fn create_gemini_video(
@@ -1935,16 +2134,38 @@ fn grok_video_resolution(size: Option<&str>) -> Option<&'static str> {
         "1080p" => Some("1080p"),
         // Media Studio's generic video controls are dimensions/aspect ratios;
         // Grok's gateway accepts a resolution tier and chooses the aspect ratio.
+        "854x480" | "480x854" => Some("480p"),
         "1280x720" | "720x1280" | "16:9" | "9:16" => Some("720p"),
+        "1920x1080" | "1080x1920" => Some("1080p"),
         _ => None,
     }
 }
 
 fn grok_video_aspect_ratio(size: Option<&str>) -> Option<&'static str> {
     match size?.trim().to_ascii_lowercase().as_str() {
-        "1280x720" | "16:9" => Some("16:9"),
-        "720x1280" | "9:16" => Some("9:16"),
+        "854x480" | "1280x720" | "1920x1080" | "16:9" => Some("16:9"),
+        "480x854" | "720x1280" | "1080x1920" | "9:16" => Some("9:16"),
         _ => None,
+    }
+}
+
+fn video_size_label(request: &MediaGenerationRequest) -> Option<String> {
+    match (
+        request
+            .video_resolution
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        request
+            .video_aspect_ratio
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+    ) {
+        (Some(resolution), Some(ratio)) => Some(format!("{resolution} · {ratio}")),
+        (Some(resolution), None) => Some(resolution.to_owned()),
+        (None, Some(ratio)) => Some(ratio.to_owned()),
+        (None, None) => request.size.clone(),
     }
 }
 
@@ -2139,6 +2360,9 @@ mod tests {
             voice: None,
             instructions: None,
             seconds: Some(4),
+            video_mode: VideoGenerationMode::Text,
+            video_resolution: None,
+            video_aspect_ratio: None,
             reference_attachment_ids: Vec::new(),
         }
     }
@@ -2232,6 +2456,9 @@ mod tests {
             voice: None,
             instructions: None,
             seconds: None,
+            video_mode: VideoGenerationMode::Text,
+            video_resolution: None,
+            video_aspect_ratio: None,
             reference_attachment_ids: Vec::new(),
         };
         let selected = selection_candidates(&providers, &catalog, &request);
@@ -2265,8 +2492,8 @@ mod tests {
         ));
         let mut request = request(MediaKind::Image, 1);
         request.background = Some("transparent".to_owned());
-        assert!(validate_model_request("gpt-image-2", &request).is_err());
-        assert!(validate_model_request("gpt-image-1.5", &request).is_ok());
+        assert!(validate_model_request("gpt-image-2", &request, &[]).is_err());
+        assert!(validate_model_request("gpt-image-1.5", &request, &[]).is_ok());
     }
 
     #[test]
@@ -2302,6 +2529,87 @@ mod tests {
         assert_eq!(effective_image_prompt(&request), "A cinematic city");
         request.size = None;
         assert_eq!(effective_image_prompt(&request), "A cinematic city");
+    }
+
+    #[test]
+    fn builds_grok_video_payloads_for_each_supported_reference_mode() {
+        let image = ManagedReference {
+            file_name: "reference.png".to_owned(),
+            mime_type: "image/png".to_owned(),
+            bytes: b"\x89PNG\r\n\x1a\nreference".to_vec(),
+            kind: AttachmentKind::Image,
+        };
+        let mut request = request(MediaKind::Video, 1);
+        request.video_mode = VideoGenerationMode::Image;
+        request.video_resolution = Some("1080p".to_owned());
+        request.video_aspect_ratio = Some("9:16".to_owned());
+        request.seconds = Some(12);
+        assert!(
+            validate_model_request(
+                "grok-imagine-video-1.5",
+                &request,
+                std::slice::from_ref(&image),
+            )
+            .is_ok()
+        );
+        let (path, body) = grok_video_request(
+            "grok-imagine-video-1.5",
+            &request,
+            std::slice::from_ref(&image),
+        )
+        .unwrap();
+        assert_eq!(path, "/v1/videos/generations");
+        assert!(
+            body.pointer("/image/url")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.starts_with("data:image/png;base64,"))
+        );
+        assert_eq!(
+            body.get("resolution").and_then(Value::as_str),
+            Some("1080p")
+        );
+        assert_eq!(
+            body.get("aspect_ratio").and_then(Value::as_str),
+            Some("9:16")
+        );
+
+        request.video_mode = VideoGenerationMode::Reference;
+        request.video_resolution = Some("720p".to_owned());
+        request.seconds = Some(10);
+        let references = vec![image.clone(), image.clone()];
+        assert!(validate_model_request("grok-imagine-video", &request, &references).is_ok());
+        let (_, body) = grok_video_request("grok-imagine-video", &request, &references).unwrap();
+        assert_eq!(
+            body.get("reference_images")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(2)
+        );
+        assert!(body.get("image").is_none());
+
+        let video = ManagedReference {
+            file_name: "source.mp4".to_owned(),
+            mime_type: "video/mp4".to_owned(),
+            bytes: b"\0\0\0\x18ftypisom".to_vec(),
+            kind: AttachmentKind::Video,
+        };
+        request.video_mode = VideoGenerationMode::Video;
+        request.seconds = Some(8);
+        let (path, body) =
+            grok_video_request("grok-imagine-video", &request, std::slice::from_ref(&video))
+                .unwrap();
+        assert_eq!(path, "/v1/videos/edits");
+        assert!(
+            body.pointer("/video/url")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.starts_with("data:video/mp4;base64,"))
+        );
+        assert!(body.get("duration").is_none());
+        assert!(body.get("resolution").is_none());
+        assert!(body.get("aspect_ratio").is_none());
+
+        request.video_mode = VideoGenerationMode::Text;
+        assert!(validate_model_request("grok-imagine-video-1.5", &request, &[]).is_err());
     }
 
     #[test]
@@ -2506,10 +2814,11 @@ mod tests {
             provider,
             model: "gpt-image-2".to_owned(),
         };
-        let references = vec![ManagedImage {
+        let references = vec![ManagedReference {
             file_name: "reference.png".to_owned(),
             mime_type: "image/png".to_owned(),
             bytes: b"\x89PNG\r\n\x1a\nmock-reference".to_vec(),
+            kind: AttachmentKind::Image,
         }];
         let (root, database) = temp_storage("openai-edit-multiple");
         let result = generate_batch(

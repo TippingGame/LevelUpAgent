@@ -12,6 +12,31 @@ from pathlib import Path
 from PIL import Image, ImageOps
 
 
+RUNNING_FRAME_COUNT = 8
+
+
+def mirror_frames_in_place(image: Image.Image, frame_count: int = RUNNING_FRAME_COUNT) -> Image.Image:
+    """Mirror each animation frame while preserving the strip's frame order."""
+
+    rgba = image.convert("RGBA")
+    if frame_count <= 0 or rgba.width < frame_count:
+        raise ValueError(
+            f"running-right strip width {rgba.width} cannot contain {frame_count} frames"
+        )
+
+    mirrored_strip = Image.new("RGBA", rgba.size)
+    for index in range(frame_count):
+        # Image generators can return a strip whose width is not an integer
+        # multiple of the requested frame count (for example 2172px / 8).
+        # Fractional slot boundaries keep every source pixel in its original
+        # frame while avoiding a one-pixel drift between later frames.
+        left = round(index * rgba.width / frame_count)
+        right = round((index + 1) * rgba.width / frame_count)
+        frame = rgba.crop((left, 0, right, rgba.height))
+        mirrored_strip.paste(ImageOps.mirror(frame), (left, 0))
+    return mirrored_strip
+
+
 def load_manifest(run_dir: Path) -> dict[str, object]:
     path = run_dir / "imagegen-jobs.json"
     if not path.exists():
@@ -99,7 +124,10 @@ def main() -> None:
 
     output.parent.mkdir(parents=True, exist_ok=True)
     with Image.open(source) as image:
-        mirrored = ImageOps.mirror(image.convert("RGBA"))
+        try:
+            mirrored = mirror_frames_in_place(image)
+        except ValueError as error:
+            raise SystemExit(str(error)) from error
         mirrored.save(output)
 
     left_job["status"] = "complete"

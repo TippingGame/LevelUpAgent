@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import tempfile
@@ -24,6 +25,44 @@ STATES = {
     "running": (7, [120, 120, 120, 120, 120, 220]),
     "review": (8, [150, 150, 150, 150, 150, 280]),
 }
+
+
+def resolve_ffmpeg(requested: str) -> str:
+    """Resolve an explicit ffmpeg path or a small set of Windows installs."""
+    value = requested.strip()
+    if value:
+        expanded = Path(os.path.expandvars(value)).expanduser()
+        if expanded.is_file():
+            return str(expanded)
+        if Path(value).name.lower() == value.lower() or shutil.which(value):
+            return value
+        raise SystemExit(f"ffmpeg executable was not found: {value}")
+
+    on_path = shutil.which("ffmpeg")
+    if on_path:
+        return on_path
+
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    program_files = os.environ.get("ProgramFiles")
+    program_files_x86 = os.environ.get("ProgramFiles(x86)")
+    candidates = []
+    if local_app_data:
+        candidates.extend(
+            [
+                Path(local_app_data) / "Programs" / "ffmpeg" / "bin" / "ffmpeg.exe",
+                Path(local_app_data)
+                / "Programs"
+                / "Ultimate Vocal Remover"
+                / "ffmpeg.exe",
+            ]
+        )
+    for root in (program_files, program_files_x86):
+        if root:
+            candidates.append(Path(root) / "ffmpeg" / "bin" / "ffmpeg.exe")
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return "ffmpeg"
 
 
 def checker(size: tuple[int, int], square: int = 16) -> Image.Image:
@@ -107,8 +146,13 @@ def main() -> None:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--loops", type=int, default=4)
     parser.add_argument("--scale", type=int, default=2)
-    parser.add_argument("--ffmpeg", default=shutil.which("ffmpeg") or "ffmpeg")
+    parser.add_argument(
+        "--ffmpeg",
+        default="",
+        help="Optional ffmpeg executable; otherwise PATH and common Windows installs are checked.",
+    )
     args = parser.parse_args()
+    ffmpeg = resolve_ffmpeg(args.ffmpeg)
 
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -125,7 +169,7 @@ def main() -> None:
             output_dir,
             args.loops,
             args.scale,
-            args.ffmpeg,
+            ffmpeg,
         )
     print(f"wrote videos to {output_dir}")
 

@@ -9,7 +9,9 @@ import {
   LoaderCircle,
   MessageCircle,
   PawPrint,
+  Play,
   Plus,
+  RotateCcw,
   Sparkles,
   Trash2,
   Upload,
@@ -63,6 +65,22 @@ interface PetStudioProps {
 
 type PetStageStyle = CSSProperties & Record<`--${string}`, string | number>;
 
+const PET_PREVIEW_OPTIONS: readonly {
+  state: PetSpriteState;
+  zh: string;
+  en: string;
+}[] = [
+  { state: "idle", zh: "空闲", en: "Idle" },
+  { state: "running-right", zh: "向右移动", en: "Running right" },
+  { state: "running-left", zh: "向左移动", en: "Running left" },
+  { state: "waving", zh: "挥手", en: "Waving" },
+  { state: "jumping", zh: "跳跃", en: "Jumping" },
+  { state: "failed", zh: "失败", en: "Failed" },
+  { state: "waiting", zh: "等待批准", en: "Waiting" },
+  { state: "running", zh: "工作中", en: "Working" },
+  { state: "review", zh: "审查", en: "Reviewing" },
+];
+
 export function PetStudio({
   active,
   locale,
@@ -78,7 +96,8 @@ export function PetStudio({
   const [environment, setEnvironment] = useState<HatchEnvironment | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
-  const [panel, setPanel] = useState<"hatch" | "memory">("hatch");
+  const [panel, setPanel] = useState<"hatch" | "memory" | "preview">("hatch");
+  const [previewState, setPreviewState] = useState<PetSpriteState | null>(null);
   const [petName, setPetName] = useState("");
   const [description, setDescription] = useState("");
   const [references, setReferences] = useState<ImageAttachment[]>([]);
@@ -116,6 +135,7 @@ export function PetStudio({
     if (activities.length > 0) return "review";
     return "idle";
   }, [activities]);
+  const displayedSpriteState = previewState ?? spriteState;
   const missing = [
     ...(environment?.missing ?? []),
     ...(!connectionReady ? [{ id: "connection", detail: text("模型连接", "Model connection") }] : []),
@@ -306,7 +326,7 @@ export function PetStudio({
         <section className="pet-stage-section">
           <div className="pet-stage-toolbar">
             <div><strong>{activePet.displayName}</strong><small>{activePet.description}</small></div>
-            <span className={`pet-live-status${activities.length ? " busy" : ""}`}><i />{activities.length ? text("工作中", "Working") : text("空闲", "Idle")}</span>
+            <span className={`pet-live-status${activities.length ? " busy" : ""}`}><i />{previewState ? text("动画预览", "Animation preview") : activities.length ? text("工作中", "Working") : text("空闲", "Idle")}</span>
           </div>
           <div className="pet-stage" style={stageStyle} onDoubleClick={() => onOpenConversation(activePet.id)}>
             <div className="pet-activity-stack" aria-live="polite">
@@ -318,7 +338,7 @@ export function PetStudio({
               ))}
               {activities.length > 4 && <div className="pet-activity-more">+{activities.length - 4}</div>}
             </div>
-            <div className="pet-sprite-stage"><PetSprite profile={activePet} state={spriteState} scale={previewScale} /></div>
+            <div className="pet-sprite-stage"><PetSprite profile={activePet} state={displayedSpriteState} scale={previewScale} /></div>
           </div>
           <div className="pet-progress-band">
             <div><strong>Lv.{dashboard.progress.level}</strong><span>{dashboard.progress.currentXp} / {dashboard.progress.requiredXp} XP</span></div>
@@ -347,6 +367,7 @@ export function PetStudio({
           <div className="pet-control-tabs" role="tablist">
             <button type="button" role="tab" aria-selected={panel === "hatch"} className={panel === "hatch" ? "active" : ""} onClick={() => setPanel("hatch")}><Sparkles size={14} />{text("孵化", "Hatch")}</button>
             <button type="button" role="tab" aria-selected={panel === "memory"} className={panel === "memory" ? "active" : ""} onClick={() => setPanel("memory")}><BrainCircuit size={14} />{text("记忆", "Memory")}</button>
+            <button type="button" role="tab" aria-selected={panel === "preview"} className={panel === "preview" ? "active" : ""} onClick={() => setPanel("preview")}><Play size={14} />{text("动画", "Animations")}</button>
           </div>
 
           {panel === "hatch" ? (
@@ -372,7 +393,7 @@ export function PetStudio({
                 {busy === "generate" ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />}{text("孵化并自动导入", "Hatch and auto-import")}
               </button>
             </div>
-          ) : (
+          ) : panel === "memory" ? (
             <div className="pet-memory-panel">
               <div className="pet-memory-summary"><BrainCircuit size={18} /><div><strong>{text(`${activePet.displayName} 的独立长期记忆`, `${activePet.displayName}'s independent memory`)}</strong><small>{text("只属于当前残影，可单独审查和删除", "Stored only for this echo; reviewable and removable")}</small></div></div>
               {dashboard.memories.length === 0 ? (
@@ -382,6 +403,31 @@ export function PetStudio({
                   <article key={memory.id}><span>{memory.kind}</span><p>{memory.text}</p><IconButton label={text("删除记忆", "Remove memory")} onClick={() => void forget(memory.id)}><Trash2 size={12} /></IconButton></article>
                 ))}</div>
               )}
+            </div>
+          ) : (
+            <div className="pet-animation-panel">
+              <div className="pet-animation-heading">
+                <div><strong>{text("动画预览", "Animation preview")}</strong><small>{text("选择一个状态查看完整循环", "Choose a state to preview its full loop")}</small></div>
+                <Play size={16} />
+              </div>
+              <div className="pet-animation-options">
+                {PET_PREVIEW_OPTIONS.map((option, index) => (
+                  <button
+                    className={`pet-animation-option${previewState === option.state ? " active" : ""}`}
+                    type="button"
+                    aria-pressed={previewState === option.state}
+                    onClick={() => setPreviewState(option.state)}
+                    key={option.state}
+                  >
+                    <Play size={12} fill="currentColor" />
+                    <span>{text(option.zh, option.en)}</span>
+                    <small>{index}</small>
+                  </button>
+                ))}
+              </div>
+              <button className="pet-animation-live-button" type="button" onClick={() => setPreviewState(null)} disabled={previewState === null}>
+                <RotateCcw size={13} />{text("跟随实时状态", "Follow live state")}
+              </button>
             </div>
           )}
         </aside>

@@ -80,6 +80,7 @@ import {
   checkAppUpdate,
   checkAppUpdateOnStartup,
   changeGoalStatus,
+  configurePetHatch,
   createGoal,
   deletePersistedThread,
   deleteApiKey,
@@ -161,6 +162,20 @@ import {
 } from "./lib/storage";
 import { getAppLocale, setAppLocale, tr, type AppLocale } from "./lib/i18n";
 import { executeCallsWithParallelMedia } from "./lib/mediaConcurrency";
+import { preferredDetectedModel } from "./lib/modelSelection";
+import {
+  createHatchExecutionState,
+  gateHatchToolCall,
+  hatchPrepareCommandFromHistory,
+  hatchStatusCommand,
+  hatchCommandIsObservation,
+  normalizeHatchCommandCall,
+  HATCH_BOOTSTRAP_MARKER,
+  HATCH_DEFAULT_CHROMA_KEY,
+  sanitizeHatchHistory,
+  hatchSkillManifestWasRead,
+  hatchToolPolicyViolation,
+} from "./lib/hatchProgress";
 import { copyText } from "./lib/clipboard";
 import type {
   AgentMessage,
@@ -177,6 +192,7 @@ import type {
   GitStatus,
   GoalState,
   GatewayDiagnostics,
+  HatchEnvironment,
   ImageAttachment,
   McpSecretValues,
   McpServerConfig,
@@ -215,7 +231,6 @@ const RISKY_COMMAND_PATTERNS = [
   /\b(docker|podman)\s+(system\s+prune|rm\b|rmi\b|volume\s+rm)\b/i,
   /(?:^|\s)(?:[a-z]:\\|\\\\|\/(?:etc|usr|var|home|root)\/|~\/)/i,
 ];
-const MAX_TOOL_ROUNDS = 12;
 const LEVELUP_WEBSITE = "https://levelup.mom/";
 const DEFAULT_LAYOUT: ResolvedLayout = {
   source: "default",
@@ -233,6 +248,102 @@ interface PetHatchJob {
 }
 
 type WorkspaceView = "chat" | "media";
+
+function isPetHatchThread(thread: AgentThread) {
+  // Do not depend on `internal` surviving an older database/export. The
+  // durable title, workspace, and generated objective are enough to identify
+  // a hatch thread and keep its stricter tool policy active after restart.
+  const hasHatchPrompt = thread.messages.some((item) =>
+    item.role === "user"
+      && /Run a complete hatch-pet Goal for a LevelUpAgent Starlight Echo|孵化摇光残影|Hatch (?:the )?Starlight Echo/i.test(item.content),
+  );
+  return hasHatchPrompt || (
+    /^(?:孵化(?:\s|·|$)|hatch(?:\s|·|$))/iu.test(thread.title)
+      && thread.workspace?.toLocaleLowerCase().includes("pet-hatch") === true
+  );
+}
+
+function hatchViolationMessage(
+  violation: "workspace" | "observation" | "manifest" | "command",
+  toolName?: string,
+) {
+  if (violation === "workspace") {
+    return tr(
+      "桌宠孵化已暂停：模型尝试浏览工作区而不是执行孵化命令。恢复后应直接运行提示中提供的完整命令。",
+      "Pet hatching was paused because the model browsed the workspace instead of running the hatch command. After resuming, run the complete command supplied in the request.",
+    );
+  }
+  if (violation === "manifest") {
+    return tr(
+      "桌宠孵化已暂停：模型尝试自行读取旧版 hatch-pet Skill；该步骤由应用启动阶段独占完成。恢复后应直接运行 prepare_pet_run.py 或下一个具体孵化命令。",
+      "Pet hatching was paused because the model tried to read the legacy hatch-pet Skill itself; the application owns that bootstrap step. After resuming, run prepare_pet_run.py or the next concrete hatch command.",
+    );
+  }
+  if (violation === "command") {
+    return tr(
+      "桌宠孵化已暂停：模型连续重复同一孵化命令而没有推进 manifest。请检查最后一条命令结果后再继续。",
+      "Pet hatching was paused because the model repeated the same hatch command without advancing the manifest. Inspect the last command result before resuming.",
+    );
+  }
+  if (toolName) {
+    return tr(
+      `桌宠孵化已暂停：模型在没有执行脚本、生图或写入的情况下反复调用“${toolName}”。请检查最后一条工具结果；恢复后应直接运行下一个具体孵化命令。`,
+      `Pet hatching was paused because the model repeatedly called "${toolName}" without running a script, generating an image, or writing progress. Inspect the last tool result; after resuming, run the next concrete hatch command.`,
+    );
+  }
+  return tr(
+    "桌宠孵化已暂停：模型尝试重新读取 Goal 或工作区状态。目标和孵化目标已附加；恢复后应直接运行下一个具体孵化命令。",
+    "Pet hatching was paused because the model tried to refresh Goal or workspace state. The target is already attached; after resuming, run the next concrete hatch command.",
+  );
+}
+
+function hatchPolicyViolationFromToolOutput(output: string) {
+  if (/source image not found:|hatchSourcePaths.*(?:missing|invalid)|source path.*(?:not found|does not exist)/i.test(output)) {
+    return tr(
+      "桌宠孵化已暂停：录入脚本收到不存在的生成源路径。该路径必须直接使用 adapter 返回的 hatchSourcePaths；请从最近一次生成结果恢复后再继续，避免重复消耗同一 job。",
+      "Pet hatching was paused because record_imagegen_result.py received a missing source path. The source must come directly from the adapter's hatchSourcePaths; recover it from the latest generation result before continuing.",
+    );
+  }
+  const slotFallbacks = output.match(/(?:slots(?: extraction)? fallback|used extraction method slots|\"method\"\s*:\s*\"slots\")/gi)?.length ?? 0;
+  if (slotFallbacks >= 3 || /all\s+\d+\s+(?:rows|jobs).*slots/i.test(output)) {
+    return tr(
+      "桌宠孵化已暂停：多个动画行同时退回 slots 提取，通常表示运行目录记录的 chroma key 与生成图片背景颜色不一致。请重新准备一个使用同一纯色背景的 run，再继续生成。",
+      "Pet hatching was paused because multiple animation rows fell back to slot extraction. This indicates a mismatch between the run's recorded chroma key and the generated background; prepare a fresh run with one shared solid color before continuing.",
+    );
+  }
+  if (/observation tool is unavailable during pet hatching|workspace observation command is unavailable during pet hatching|read_skill is application-owned during pet hatching|bundled hatch-pet Skill is already loaded/i.test(output)) {
+    return hatchViolationMessage("observation");
+  }
+  return null;
+}
+
+function hatchStatusContinuation(output: string) {
+  if (!/"ready_jobs"\s*:/i.test(output) || !/"run_dir"\s*:/i.test(output)) return null;
+  const readyJob = output.match(/"id"\s*:\s*"([^"]+)"/i)?.[1] ?? "the first ready job";
+  return tr(
+    `canonical 状态结果已经返回。现在立即处理 ready job “${readyJob}”：读取它列出的 prompt/input，执行下一步具体孵化动作并调用 generate_images（或该 job 明确要求的确定性脚本）。不要再次调用 pet_job_status.py、Get-ChildItem、read_skill 或 get_goal；不要把状态查询当成进度。`,
+    `The canonical status result is authoritative. Immediately process ready job "${readyJob}": read its listed prompt and inputs, then take the next concrete hatch action and call generate_images (or the deterministic script explicitly required by that job). Do not call pet_job_status.py, Get-ChildItem, read_skill, or get_goal again; a status query is not progress.`,
+  );
+}
+
+/**
+ * Providers occasionally return several stale observation calls in one
+ * response. Keep only the first policy-violating call so the conversation
+ * does not display or execute a whole batch of repeated reads before the
+ * hatch guard pauses the run.
+ */
+function normalizeHatchProviderToolCalls(
+  calls: ToolCall[],
+  history: AgentMessage[],
+) {
+  const loaded = hatchSkillManifestWasRead(history);
+  const normalized = calls.map((call) => normalizeHatchCommandCall(call, history));
+  const invalidIndex = normalized.findIndex((call) => (
+    hatchToolPolicyViolation(call, loaded) !== null
+      || (call.name === "run_command" && hatchCommandIsObservation(call.arguments?.command))
+  ));
+  return invalidIndex < 0 ? normalized : normalized.slice(0, invalidIndex + 1);
+}
 
 function commandNeedsAgentApproval(call: ToolCall) {
   const command = typeof call.arguments.command === "string" ? call.arguments.command.trim() : "";
@@ -370,6 +481,10 @@ function App() {
   const themeImportingRef = useRef<string | null>(null);
   const attachmentPasteRef = useRef(false);
   const runModesRef = useRef<Map<string, AgentMode>>(new Map());
+  // Bootstrap uses local Tauri tools before an agent operation ID exists.
+  // Keep a generation token so pause/cancel can invalidate that async work
+  // and a late completion cannot resurrect a paused hatch Goal.
+  const hatchRunTokensRef = useRef<Map<string, number>>(new Map());
   const activeThreadIdRef = useRef(activeThreadId);
   const workspaceViewRef = useRef(workspaceView);
   const activePetIdRef = useRef(activePetId);
@@ -654,12 +769,55 @@ function App() {
     if (!isDesktop()) throw new Error(tr("孵化摇光残影需要桌面应用", "Hatching a Starlight Echo requires the desktop app"));
     if (!connectionReady) throw new Error(tr("请先配置可用的模型连接", "Configure an available model connection first"));
     if (!request.environment.configured) throw new Error(tr("包内孵化工具仍缺少运行条件", "The bundled hatch tools still have a missing runtime requirement"));
-    if (petHatchJob) throw new Error(tr("已有残影孵化任务正在进行", "An echo hatch task is already running"));
+    const trackedHatchIds = new Set(
+      threadsRef.current.filter(isPetHatchThread).map((thread) => thread.id),
+    );
+    if (petHatchJob) trackedHatchIds.add(petHatchJob.threadId);
+    const hatchGoalSnapshots = await Promise.all(
+      [...trackedHatchIds].map(async (threadId) => ({
+        threadId,
+        goal: await getGoal(threadId).catch(() => null),
+      })),
+    );
+    for (const snapshot of hatchGoalSnapshots) {
+      const locallyRunning = runningThreadIdsRef.current.has(snapshot.threadId)
+        || Boolean(pendingApprovalsRef.current[snapshot.threadId])
+        || operationIdsRef.current.has(snapshot.threadId);
+      // No in-memory operation survives an app restart. An active durable
+      // hatch Goal without a local operation is therefore recoverable state,
+      // not a live lock; pause it before allowing a new hatch to start.
+      if (!locallyRunning && snapshot.goal
+        && (snapshot.goal.status === "active" || snapshot.goal.status === "auditing")) {
+        snapshot.goal = await changeGoalStatus(snapshot.threadId, "pause").catch(() => snapshot.goal);
+      }
+    }
+    const activeHatch = hatchGoalSnapshots
+      .filter(({ goal }) => goal?.status === "active" || goal?.status === "auditing")
+      .sort((left, right) => (right.goal?.updatedAt ?? 0) - (left.goal?.updatedAt ?? 0))[0];
+    const locallyRunningHatch = hatchGoalSnapshots.find(({ threadId }) =>
+      runningThreadIdsRef.current.has(threadId)
+        || Boolean(pendingApprovalsRef.current[threadId])
+        || operationIdsRef.current.has(threadId),
+    );
+    if (activeHatch || locallyRunningHatch) {
+      const locked = activeHatch || locallyRunningHatch;
+      if (locked) {
+        setPetHatchJob({
+          threadId: locked.threadId,
+          startedAt: locked.goal?.createdAt ?? Date.now(),
+        });
+      }
+      throw new Error(tr("已有残影孵化任务正在进行，请先暂停、取消或继续该任务", "An echo hatch task is already running; pause, cancel, or resume it first"));
+    }
+    // Paused, blocked, cancelled, and completed jobs do not hold the global
+    // hatch lock. Their conversations remain available for an explicit resume.
+    setPetHatchJob(null);
 
     const runStartedAt = Date.now();
     const titleName = request.name || request.description.slice(0, 18);
     const created = createThread(request.environment.workDirectory);
-    const instructions = petHatchGenerationPrompt(request, locale);
+    const hatchRunDirectory = hatchRunDirectoryFor(request);
+    const instructions = petHatchGenerationPrompt(request, locale, hatchRunDirectory);
     const summary = locale === "zh-CN"
       ? `孵化摇光残影${request.name ? `“${request.name}”` : ""}：${request.description}`
       : `Hatch ${request.name ? `the Starlight Echo “${request.name}”` : "a Starlight Echo"}: ${request.description}`;
@@ -683,18 +841,77 @@ function App() {
     setWorkspaceView("chat");
     setPetOpen(false);
     setPetHatchJob({ threadId: nextThread.id, startedAt: runStartedAt });
-    setNotice(tr("残影孵化任务已启动，完成后会自动导入", "Echo hatching started and will auto-import when complete"));
-    void runAgent(
-      nextThread,
-      nextThread.messages,
-      0,
-      "goal",
-      permissionLevel,
-      runStartedAt,
-      runProfile,
-      runFallbackProfiles,
-      activePetIdRef.current,
-    ).catch((error) => setNotice(`${tr("残影孵化失败", "Echo hatching failed")}: ${errorText(error)}`));
+    // Mark the asynchronous bootstrap as running before its first await. This
+    // closes the double-click/restart race where a second hatch could pause
+    // the just-created Goal while it was still preparing its manifest.
+    setThreadRunning(nextThread.id, true);
+    const hatchRunToken = beginHatchRun(nextThread.id);
+    setNotice(tr("正在准备残影孵化工具链", "Preparing the echo hatch toolchain"));
+    void (async () => {
+      let handedOffToAgent = false;
+      try {
+        const bootstrappedHistory = await bootstrapHatchHistory(
+          nextThread.messages,
+          request.environment,
+          nextThread.workspace || request.environment.workDirectory,
+          nextThread.id,
+          runProfile,
+          runFallbackProfiles,
+          () => hatchRunIsCurrent(nextThread.id, hatchRunToken),
+        );
+        if (!hatchRunIsCurrent(nextThread.id, hatchRunToken)) return;
+        const bootstrappedThread = {
+          ...nextThread,
+          messages: bootstrappedHistory,
+          updatedAt: Date.now(),
+        };
+        commitThread(bootstrappedThread);
+        setNotice(tr("残影孵化任务已启动，正在处理首个待生成任务", "Echo hatching started; processing the first pending job"));
+        if (!hatchRunIsCurrent(nextThread.id, hatchRunToken)) return;
+        handedOffToAgent = true;
+        await runAgent(
+          bootstrappedThread,
+          bootstrappedHistory,
+          0,
+          "goal",
+          permissionLevel,
+          runStartedAt,
+          runProfile,
+          runFallbackProfiles,
+          activePetIdRef.current,
+          hatchRunToken,
+        );
+      } catch (error) {
+        if (!hatchRunIsCurrent(nextThread.id, hatchRunToken)) return;
+        const bootstrapHistory = error instanceof HatchBootstrapFailure
+          ? error.history
+          : nextThread.messages;
+        const reason = errorText(error);
+        const failedHistory = finalizeConversationMessages([
+          ...bootstrapHistory,
+          message("assistant", `${tr("残影孵化启动失败", "Echo hatch bootstrap failed")}: ${reason}`, {
+            isError: true,
+            internal: true,
+            ...assistantMessageIdentity(runProfile),
+          }),
+        ], runStartedAt);
+        commitThread({ ...nextThread, messages: failedHistory, updatedAt: Date.now() });
+        try {
+          const paused = await changeGoalStatus(nextThread.id, "pause");
+          if (activeThreadIdRef.current === nextThread.id) setGoalState(paused);
+        } catch {
+          // The Goal may already have been paused or cancelled by the user.
+        }
+        releasePetHatchJob(nextThread.id);
+        setNotice(`${tr("残影孵化启动失败", "Echo hatch bootstrap failed")}: ${reason}`);
+      } finally {
+        if (!handedOffToAgent && hatchRunIsCurrent(nextThread.id, hatchRunToken)) {
+          finishThreadRun(nextThread.id);
+        } else if (!handedOffToAgent && hatchRunWasCancelled(nextThread.id, hatchRunToken)) {
+          finishThreadRun(nextThread.id);
+        }
+      }
+    })();
   };
 
   useEffect(() => {
@@ -829,6 +1046,25 @@ function App() {
         clearLegacyProfiles();
         clearLegacyThreads();
         databaseReadyRef.current = true;
+        // No in-memory agent operation survives a process restart. Mark any
+        // durable active hatch Goal as paused during hydration so an old crash
+        // cannot leave a permanent global lock or restart a stale tool loop.
+        const hatchGoals = await Promise.all(
+          hydratedThreads.filter(isPetHatchThread).map(async (thread) => ({
+            threadId: thread.id,
+            goal: await getGoal(thread.id).catch(() => null),
+          })),
+        );
+        if (disposed) return;
+        for (const snapshot of hatchGoals) {
+          if (snapshot.goal
+            && (snapshot.goal.status === "active" || snapshot.goal.status === "auditing")) {
+            snapshot.goal = await changeGoalStatus(snapshot.threadId, "pause").catch(() => snapshot.goal);
+          }
+        }
+        const selectedHatchGoal = hatchGoals.find(({ threadId }) => threadId === activeThreadIdRef.current)?.goal;
+        if (selectedHatchGoal) setGoalState(selectedHatchGoal);
+        setPetHatchJob(null);
         setMediaCatalogRevision((current) => current + 1);
       } catch (error) {
         if (!disposed) {
@@ -1038,10 +1274,69 @@ function App() {
     setPendingApprovals(next);
   };
 
-  const finishThreadRun = (threadId: string) => {
+  const beginHatchRun = (threadId: string) => {
+    const token = (hatchRunTokensRef.current.get(threadId) ?? 0) + 1;
+    hatchRunTokensRef.current.set(threadId, token);
+    return token;
+  };
+
+  const hatchRunIsCurrent = (threadId: string, token: number) =>
+    hatchRunTokensRef.current.get(threadId) === token;
+
+  const hatchRunWasCancelled = (threadId: string, token: number) =>
+    hatchRunTokensRef.current.get(threadId) === token + 1;
+
+  const cancelHatchRun = (threadId: string) => {
+    // Keep a tombstone so the in-flight bootstrap can clear its local running
+    // state without invalidating a newer resumed run.
+    hatchRunTokensRef.current.set(threadId, (hatchRunTokensRef.current.get(threadId) ?? 0) + 1);
+  };
+
+  /**
+   * Release a run only when the caller still owns it. A cancelled provider
+   * request can finish after a resumed hatch run has already replaced it;
+   * an unconditional cleanup there would clear the new run's lock and let
+   * two hatch state machines mutate the same thread concurrently. Conversely,
+   * when the expected operation is still current, this always clears the
+   * local running flag so a cancelled run cannot leave a permanent lock.
+   */
+  const finishThreadRun = (threadId: string, expectedOperationId?: string) => {
+    if (expectedOperationId
+      && operationIdsRef.current.get(threadId) !== expectedOperationId) return;
     operationIdsRef.current.delete(threadId);
     runModesRef.current.delete(threadId);
     setThreadRunning(threadId, false);
+  };
+
+  const finishCancelledHatchLocalRun = (threadId: string, token: number) => {
+    const currentToken = hatchRunTokensRef.current.get(threadId);
+    // A token may be followed by exactly one cancellation tombstone. If a
+    // second increment happened, a newer hatch run owns the thread and the
+    // old resolver must leave its running state untouched.
+    if (currentToken !== token + 1 || operationIdsRef.current.has(threadId)) return;
+    finishThreadRun(threadId);
+  };
+
+  const releasePetHatchJob = (threadId: string) => {
+    setPetHatchJob((current) => current?.threadId === threadId ? null : current);
+  };
+
+  const pausePetHatchGoal = async (threadId: string) => {
+    if (!isDesktop()) {
+      releasePetHatchJob(threadId);
+      return;
+    }
+    try {
+      const current = await getGoal(threadId);
+      const paused = current && (current.status === "active" || current.status === "auditing")
+        ? await changeGoalStatus(threadId, "pause")
+        : current;
+      if (paused && activeThreadIdRef.current === threadId) setGoalState(paused);
+    } catch {
+      // A terminal or concurrently changed Goal still must not hold the hatch UI lock.
+    } finally {
+      releasePetHatchJob(threadId);
+    }
   };
 
   const beginThreadRename = () => {
@@ -1265,21 +1560,21 @@ function App() {
     runProfile: ProviderProfile = activeProfile,
     runFallbackProfiles: ProviderProfile[] = profiles.filter((profile) => profile.id !== activeProfile.id),
     rewardPetId: string = activePetIdRef.current,
+    hatchToken: number | null = null,
   ): Promise<void> => {
     const threadId = thread.id;
-    if (runMode !== "goal" && round >= MAX_TOOL_ROUNDS) {
-      const stopped = finalizeConversationMessages([
-        ...history,
-        message("assistant", tr("已达到本轮工具调用上限，请确认结果后继续。", "The tool-call limit was reached. Review the result before continuing."), {
-          isError: true,
-          ...assistantMessageIdentity(runProfile),
-        }),
-      ], runStartedAt);
-      commitThread({ ...thread, messages: stopped, updatedAt: Date.now() });
-      finishThreadRun(threadId);
-      return;
-    }
-
+    const hatchRun = isPetHatchThread(thread);
+    const hatchRunStillCurrent = () => !hatchRun
+      || hatchToken === null
+      || hatchRunIsCurrent(threadId, hatchToken);
+    // A pause/cancel may win the race before a queued continuation starts.
+    // Do not create a fresh operation (or re-acquire the running lock) for a
+    // token that has already been superseded.
+    if (!hatchRunStillCurrent()) return;
+    // This phase is sent explicitly to the backend. Deriving it only from the
+    // provider's compacted context lets a long run fall back to bootstrap and
+    // invite another manifest read.
+    const hatchSkillLoaded = hatchRun && hatchSkillManifestWasRead(history);
     setThreadRunning(threadId, true);
     runModesRef.current.set(threadId, runMode);
     const operationId = crypto.randomUUID();
@@ -1316,16 +1611,23 @@ function App() {
         },
         thread.id,
         runFallbackProfiles,
+        hatchRun,
+        hatchSkillLoaded,
       );
       if (frameId !== null) window.cancelAnimationFrame(frameId);
-      if (operationIdsRef.current.get(threadId) === operationId) operationIdsRef.current.delete(threadId);
+      if (!hatchRunStillCurrent()) {
+        finishThreadRun(threadId, operationId);
+        return;
+      }
       const respondingProfile = result.providerId
         ? [runProfile, ...runFallbackProfiles].find((profile) => profile.id === result.providerId) ?? runProfile
         : runProfile;
       const assistant: AgentMessage = {
         ...streamingAssistant,
         content: result.content || streamedContent,
-        toolCalls: result.toolCalls,
+        toolCalls: hatchRun
+          ? normalizeHatchProviderToolCalls(result.toolCalls, history)
+          : result.toolCalls,
         requestId: result.requestId,
         ...assistantMessageIdentity(respondingProfile),
       };
@@ -1354,12 +1656,35 @@ function App() {
       };
       commitThread(nextThread);
 
-      const automatic = result.toolCalls.filter((call) => !toolNeedsApproval(call, runPermission));
-      const approvalRequired = result.toolCalls.filter((call) => toolNeedsApproval(call, runPermission));
+      const providerToolCalls = assistant.toolCalls;
+      const automatic = providerToolCalls.filter((call) => !toolNeedsApproval(call, runPermission));
+      const approvalRequired = providerToolCalls.filter((call) => toolNeedsApproval(call, runPermission));
 
-      const automaticResults = await executeCallsWithParallelMedia(automatic, async (call) => (
-        executeTool(call, thread.workspace ?? "", thread.id, runProfile, runFallbackProfiles)
-      ));
+      const hatchExecution = hatchRun ? createHatchExecutionState(history, hatchSkillLoaded) : null;
+      let hatchGuardReason: string | null = null;
+      const automaticResults = await executeCallsWithParallelMedia(automatic, async (call) => {
+        if (hatchGuardReason) return { output: hatchGuardReason, isError: true };
+        const decision = hatchRun && hatchExecution
+          ? gateHatchToolCall(hatchExecution, call, history)
+          : { call, skillLoadedForCall: false, violation: null };
+        if (decision.violation) {
+          hatchGuardReason = hatchViolationMessage(decision.violation, decision.observationGuard?.toolName);
+          return { output: hatchGuardReason, isError: true };
+        }
+        return executeTool(
+          decision.call,
+          thread.workspace ?? "",
+          thread.id,
+          runProfile,
+          runFallbackProfiles,
+          hatchRun,
+          decision.skillLoadedForCall,
+        );
+      }, !hatchRun);
+      if (!hatchRunStillCurrent()) {
+        finishThreadRun(threadId, operationId);
+        return;
+      }
       for (const { call, result: toolResult } of automaticResults) {
         nextHistory = [
           ...nextHistory,
@@ -1368,9 +1693,24 @@ function App() {
             isError: toolResult.isError,
           }),
         ];
+        if (!hatchGuardReason) hatchGuardReason = hatchPolicyViolationFromToolOutput(toolResult.output);
       }
       nextThread = { ...nextThread, messages: nextHistory, updatedAt: Date.now() };
       commitThread(nextThread);
+
+      if (hatchGuardReason) {
+        if (runMode === "goal" && hatchRunStillCurrent()) await pausePetHatchGoal(threadId);
+        const stopped = finalizeConversationMessages([
+          ...nextHistory,
+          message("assistant", hatchGuardReason, {
+            isError: true,
+            ...assistantMessageIdentity(runProfile),
+          }),
+        ], runStartedAt);
+        commitThread({ ...nextThread, messages: stopped, updatedAt: Date.now() });
+        finishThreadRun(threadId, operationId);
+        return;
+      }
 
       if (approvalRequired.length > 0) {
         setThreadPending(threadId, {
@@ -1383,44 +1723,71 @@ function App() {
           profileId: runProfile.id,
           rewardPetId,
         });
-        finishThreadRun(threadId);
+        finishThreadRun(threadId, operationId);
         return;
+      }
+      const hatchContinuationText = hatchRun
+        ? automaticResults
+            .map(({ result }) => !result.isError ? hatchStatusContinuation(result.output) : null)
+            .find((text): text is string => Boolean(text))
+        : null;
+      if (hatchContinuationText) {
+        nextHistory = [...nextHistory, message("user", hatchContinuationText, { internal: true })];
+        nextThread = { ...nextThread, messages: nextHistory, updatedAt: Date.now() };
+        commitThread(nextThread);
       }
       const currentGoal = runMode === "goal" && isDesktop()
         ? await getGoal(thread.id)
         : null;
+      if (!hatchRunStillCurrent()) {
+        finishThreadRun(threadId, operationId);
+        return;
+      }
       if (runMode === "goal" && activeThreadIdRef.current === threadId) setGoalState(currentGoal);
       const goalContinues = currentGoal?.status === "active" || currentGoal?.status === "auditing";
       if (automatic.length > 0) {
         if (runMode !== "goal" || goalContinues) {
-          await runAgent(nextThread, nextHistory, round + 1, runMode, runPermission, runStartedAt, runProfile, runFallbackProfiles, rewardPetId);
+          await runAgent(nextThread, nextHistory, round + 1, runMode, runPermission, runStartedAt, runProfile, runFallbackProfiles, rewardPetId, hatchToken);
+          if (!hatchRunStillCurrent()) finishThreadRun(threadId, operationId);
         } else {
           const completedHistory = finalizeConversationMessages(nextHistory, runStartedAt);
           commitThread({ ...nextThread, messages: completedHistory, updatedAt: Date.now() });
-          finishThreadRun(threadId);
+          finishThreadRun(threadId, operationId);
         }
       } else if (runMode === "goal" && goalContinues) {
         const continuation = message(
           "user",
-          currentGoal?.status === "auditing"
-            ? "Continue the completion audit. Verify every requirement against authoritative current-state evidence."
-            : "Continue working toward the active Goal. Inspect current state and take the next concrete action.",
+          hatchRun
+            ? currentGoal?.status === "auditing"
+              ? "Continue the hatch completion audit using the existing run outputs. Do not reread the Skill manifest, Goal, or workspace metadata. Run the final validation or packaging command needed to prove completion."
+              : "Continue the active hatch Goal with a concrete action. The bundled Skill, Goal, and requested pet target are already in context. Do not call read_skill, get_goal, list_files, read_file, or search_files. Run prepare_pet_run.py if no run exists; otherwise run pet_job_status.py and complete the next pending job."
+            : currentGoal?.status === "auditing"
+              ? "Continue the completion audit. Verify every requirement against authoritative current-state evidence."
+              : "Continue working toward the active Goal. Inspect current state and take the next concrete action.",
           { internal: true },
         );
         nextHistory = [...nextHistory, continuation];
         nextThread = { ...nextThread, messages: nextHistory, updatedAt: Date.now() };
         commitThread(nextThread);
-        await runAgent(nextThread, nextHistory, round + 1, runMode, runPermission, runStartedAt, runProfile, runFallbackProfiles, rewardPetId);
+        await runAgent(nextThread, nextHistory, round + 1, runMode, runPermission, runStartedAt, runProfile, runFallbackProfiles, rewardPetId, hatchToken);
+        if (!hatchRunStillCurrent()) finishThreadRun(threadId, operationId);
       } else {
         const completedHistory = finalizeConversationMessages(nextHistory, runStartedAt);
         commitThread({ ...nextThread, messages: completedHistory, updatedAt: Date.now() });
-        finishThreadRun(threadId);
+        finishThreadRun(threadId, operationId);
       }
     } catch (error) {
       if (frameId !== null) window.cancelAnimationFrame(frameId);
-      if (operationIdsRef.current.get(threadId) === operationId) operationIdsRef.current.delete(threadId);
+      // Keep the operation ownership check in the final cleanup below. The
+      // provider may return a late cancellation/error after a newer hatch run
+      // has taken over this thread.
+      if (!hatchRunStillCurrent()) {
+        finishThreadRun(threadId, operationId);
+        return;
+      }
       const reason = error instanceof Error ? error.message : String(error);
       if (reason.includes("REQUEST_CANCELLED")) {
+        if (hatchRun && runMode === "goal" && hatchRunStillCurrent()) await pausePetHatchGoal(threadId);
         const cancelledHistory = finalizeConversationMessages(streamedContent
           ? [...history, { ...streamingAssistant, content: streamedContent }]
           : history, runStartedAt);
@@ -1429,9 +1796,10 @@ function App() {
           messages: cancelledHistory,
           updatedAt: Date.now(),
         });
-        finishThreadRun(threadId);
+        finishThreadRun(threadId, operationId);
         return;
       }
+      if (hatchRun && runMode === "goal" && hatchRunStillCurrent()) await pausePetHatchGoal(threadId);
       const failure = message(
         "assistant",
         friendlyAgentError(reason),
@@ -1443,21 +1811,36 @@ function App() {
         messages: failedHistory,
         updatedAt: Date.now(),
       });
-      finishThreadRun(threadId);
+      finishThreadRun(threadId, operationId);
     }
   };
 
   const stopAgent = async (pauseGoal = true) => {
     const threadId = activeThread.id;
     const operationId = operationIdsRef.current.get(threadId);
+    if (isPetHatchThread(activeThread)) cancelHatchRun(threadId);
     if (!operationId) {
+      if (pauseGoal && isPetHatchThread(activeThread)) {
+        await pausePetHatchGoal(threadId);
+      } else if (pauseGoal && runModesRef.current.get(threadId) === "goal"
+        && goalState && (goalState.status === "active" || goalState.status === "auditing")) {
+          try {
+            setGoalState(await changeGoalStatus(threadId, "pause"));
+          } catch {
+            // The Goal may have transitioned while a local tool was finishing.
+          }
+      }
       setNotice(tr("正在完成本地工具操作", "Finishing a local tool operation"));
       return;
     }
     await cancelAgentTurn(operationId);
-    if (pauseGoal && runModesRef.current.get(threadId) === "goal" && goalState && (goalState.status === "active" || goalState.status === "auditing")) {
+    if (pauseGoal && runModesRef.current.get(threadId) === "goal") {
       try {
-        setGoalState(await changeGoalStatus(threadId, "pause"));
+        if (isPetHatchThread(activeThread)) {
+          await pausePetHatchGoal(threadId);
+        } else if (goalState && (goalState.status === "active" || goalState.status === "auditing")) {
+          setGoalState(await changeGoalStatus(threadId, "pause"));
+        }
       } catch {
         // The Goal may have transitioned while cancellation was in flight.
       }
@@ -1682,14 +2065,37 @@ function App() {
     if (!approval) return;
     const runProfile = profilesRef.current.find((profile) => profile.id === approval.profileId) ?? activeProfile;
     const runFallbackProfiles = profilesRef.current.filter((profile) => profile.id !== runProfile.id);
+    const hatchRun = isPetHatchThread(thread);
+    const hatchToken = hatchRun
+      ? hatchRunTokensRef.current.get(thread.id) ?? beginHatchRun(thread.id)
+      : null;
     setThreadRunning(thread.id, true);
     setThreadPending(thread.id, null);
     try {
       let history = approval.history;
+      const hatchSkillLoaded = hatchRun && hatchSkillManifestWasRead(history);
+      const hatchExecution = hatchRun ? createHatchExecutionState(history, hatchSkillLoaded) : null;
+      let hatchGuardReason: string | null = null;
       const resolved = approved
-        ? await executeCallsWithParallelMedia(approval.calls, async (call) => (
-            executeTool(call, thread.workspace ?? "", thread.id, runProfile, runFallbackProfiles)
-          ))
+        ? await executeCallsWithParallelMedia(approval.calls, async (call) => {
+            if (hatchGuardReason) return { output: hatchGuardReason, isError: true };
+            const decision = hatchRun && hatchExecution
+              ? gateHatchToolCall(hatchExecution, call, history)
+              : { call, skillLoadedForCall: false, violation: null };
+            if (decision.violation) {
+              hatchGuardReason = hatchViolationMessage(decision.violation, decision.observationGuard?.toolName);
+              return { output: hatchGuardReason, isError: true };
+            }
+            return executeTool(
+              decision.call,
+              thread.workspace ?? "",
+              thread.id,
+              runProfile,
+              runFallbackProfiles,
+              hatchRun,
+              decision.skillLoadedForCall,
+            );
+          }, !hatchRun)
         : approval.calls.map((call) => ({ call, result: { output: "User denied this tool call", isError: true } }));
       for (const { call, result } of resolved) {
         history = [
@@ -1699,9 +2105,34 @@ function App() {
             isError: result.isError,
           }),
         ];
+        if (!hatchGuardReason) hatchGuardReason = hatchPolicyViolationFromToolOutput(result.output);
       }
       const next = { ...thread, messages: history, updatedAt: Date.now() };
       commitThread(next);
+      if (hatchGuardReason) {
+        if (hatchRun && hatchToken !== null && !hatchRunIsCurrent(thread.id, hatchToken)) {
+          finishCancelledHatchLocalRun(thread.id, hatchToken);
+          return;
+        }
+        if (approval.mode === "goal"
+          && (!hatchRun || hatchToken === null || hatchRunIsCurrent(thread.id, hatchToken))) {
+          await pausePetHatchGoal(thread.id);
+        }
+        const stopped = finalizeConversationMessages([
+          ...history,
+          message("assistant", hatchGuardReason, {
+            isError: true,
+            ...assistantMessageIdentity(runProfile),
+          }),
+        ], approval.startedAt);
+        commitThread({ ...next, messages: stopped, updatedAt: Date.now() });
+        finishThreadRun(thread.id);
+        return;
+      }
+      if (hatchRun && hatchToken !== null && !hatchRunIsCurrent(thread.id, hatchToken)) {
+        finishCancelledHatchLocalRun(thread.id, hatchToken);
+        return;
+      }
       await runAgent(
         next,
         history,
@@ -1712,8 +2143,16 @@ function App() {
         runProfile,
         runFallbackProfiles,
         approval.rewardPetId ?? activePetIdRef.current,
+        hatchToken,
       );
+      if (hatchRun && hatchToken !== null && !hatchRunIsCurrent(thread.id, hatchToken)) {
+        finishCancelledHatchLocalRun(thread.id, hatchToken);
+      }
     } catch (error) {
+      if (hatchRun && hatchToken !== null && !hatchRunIsCurrent(thread.id, hatchToken)) {
+        finishCancelledHatchLocalRun(thread.id, hatchToken);
+        return;
+      }
       const failure = message("assistant", errorText(error), {
         isError: true,
         ...assistantMessageIdentity(runProfile),
@@ -1820,25 +2259,90 @@ function App() {
 
   const controlGoal = async (action: "pause" | "resume" | "cancel") => {
     if (!goalState || !isDesktop()) return;
+    const hatchThread = isPetHatchThread(activeThread);
+    let hatchRunToken: number | null = null;
     try {
-      if ((action === "pause" || action === "cancel") && running) {
+      if (action === "pause" || action === "cancel") {
+        if (pendingApprovalsRef.current[activeThread.id]) setThreadPending(activeThread.id, null);
+        if (hatchThread
+          && !running
+          && !operationIdsRef.current.has(activeThread.id)) cancelHatchRun(activeThread.id);
+      }
+      if ((action === "pause" || action === "cancel")
+        && (running || operationIdsRef.current.has(activeThread.id))) {
         await stopAgent(false);
       }
       const nextGoal = await changeGoalStatus(activeThread.id, action);
       setGoalState(nextGoal);
+      if (hatchThread) {
+        if (action === "resume") {
+          setPetHatchJob({ threadId: activeThread.id, startedAt: nextGoal.createdAt });
+        } else {
+          releasePetHatchJob(activeThread.id);
+        }
+      }
       if (action === "resume") {
         setMode("goal");
-        const continuation = message("user", "Resume the active Goal from persisted state and take the next concrete action.", { internal: true });
+        hatchRunToken = hatchThread ? beginHatchRun(activeThread.id) : null;
+        if (hatchThread) setThreadRunning(activeThread.id, true);
+        let nextHistory: AgentMessage[];
+        if (hatchThread) {
+          const environment = await configurePetHatch();
+          nextHistory = await bootstrapHatchHistory(
+            activeThread.messages,
+            environment,
+            activeThread.workspace || environment.workDirectory,
+            activeThread.id,
+            activeProfile,
+            profiles.filter((profile) => profile.id !== activeProfile.id),
+            () => hatchRunToken === null || hatchRunIsCurrent(activeThread.id, hatchRunToken),
+          );
+          if (hatchRunToken !== null && !hatchRunIsCurrent(activeThread.id, hatchRunToken)) return;
+        } else {
+          nextHistory = [
+            ...activeThread.messages,
+            message("user", "Resume the active Goal from persisted state and take the next concrete action.", { internal: true }),
+          ];
+        }
         const nextThread = {
           ...activeThread,
-          messages: [...activeThread.messages, continuation],
+          messages: nextHistory,
           updatedAt: Date.now(),
         };
         commitThread(nextThread);
-        await runAgent(nextThread, nextThread.messages, 0, "goal", permissionLevel);
+        if (hatchRunToken !== null && !hatchRunIsCurrent(activeThread.id, hatchRunToken)) return;
+        await runAgent(
+          nextThread,
+          nextHistory,
+          0,
+          "goal",
+          permissionLevel,
+          Date.now(),
+          activeProfile,
+          profiles.filter((profile) => profile.id !== activeProfile.id),
+          activePetIdRef.current,
+          hatchRunToken,
+        );
       }
     } catch (error) {
+      const resumeStillCurrent = !hatchThread
+        || hatchRunToken === null
+        || hatchRunIsCurrent(activeThread.id, hatchRunToken);
+      if (hatchThread && action === "resume" && resumeStillCurrent) {
+        try {
+          const paused = await changeGoalStatus(activeThread.id, "pause");
+          if (activeThreadIdRef.current === activeThread.id) setGoalState(paused);
+        } catch {
+          // The Goal may already be terminal or paused.
+        }
+        releasePetHatchJob(activeThread.id);
+        finishThreadRun(activeThread.id);
+      }
       setNotice(`${tr("Goal 操作失败", "Goal action failed")}: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      if (hatchThread && (action === "pause" || action === "cancel")) {
+        releasePetHatchJob(activeThread.id);
+      }
     }
   };
 
@@ -3696,9 +4200,8 @@ function ConnectionDialog({
     try {
       const result = await fetchModels(draftProfile, apiKey);
       setModels(result);
-      if (result.length > 0 && !result.some((item) => item.id === draftProfile.model)) {
-        update("model", result[0].id);
-      }
+      const preferredModel = preferredDetectedModel(draftProfile, result);
+      if (preferredModel) update("model", preferredModel.id);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -5088,23 +5591,316 @@ function petConversationPrompt(profile: PetProfile, memories: PetMemory[], local
   ].join("\n\n");
 }
 
-function petHatchGenerationPrompt(request: PetGenerationRequest, locale: AppLocale) {
+function hatchPathForCommand(value: string) {
+  let path = value.trim();
+  if (path.length >= 4 && path[0] === "\\" && path[1] === "\\" && path[2] === "?" && path[3] === "\\") {
+    path = path.slice(4);
+  } else if (path.length >= 3 && path[0] === "\\" && path[1] === "?" && path[2] === "\\") {
+    path = path.slice(3);
+  }
+  return path;
+}
+
+function powershellLiteral(value: string) {
+  return `'${hatchPathForCommand(value).replace(/'/g, "''")}'`;
+}
+
+function petSlugForHatch(value: string) {
+  const slug = value
+    .normalize("NFKD")
+    .replace(/[^\p{Letter}\p{Number}]+/gu, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLocaleLowerCase();
+  return slug || "starlight-echo";
+}
+
+function hatchRunDirectoryFor(request: PetGenerationRequest) {
+  const name = request.name.trim() || request.description.slice(0, 24);
+  return `${request.environment.workDirectory.replace(/[\\/]+$/, "")}\\${petSlugForHatch(name)}-run-${Date.now()}`;
+}
+
+function petHatchGenerationPrompt(
+  request: PetGenerationRequest,
+  locale: AppLocale,
+  hatchRunDirectory: string,
+) {
   const name = request.name || "Infer a short friendly name from the concept";
+  const referenceIds = request.references.map((reference) => reference.id);
+  const pythonCommand = request.environment.pythonCommand?.trim() || "python";
+  const pythonInvocation = /^[A-Za-z0-9_.-]+$/.test(pythonCommand)
+    ? pythonCommand
+    : `& ${powershellLiteral(pythonCommand)}`;
+  const skillDirectory = hatchPathForCommand(request.environment.hatchSkillPath || "");
+  const prepareCommand = [
+    pythonInvocation,
+    powershellLiteral(`${skillDirectory}\\scripts\\prepare_pet_run.py`),
+    "--pet-name", powershellLiteral(name),
+    "--description", powershellLiteral(request.description),
+    "--output-dir", powershellLiteral(hatchRunDirectory),
+    "--pet-notes", powershellLiteral(request.description),
+    "--style-notes", powershellLiteral("Bundled Codex digital-pet style: compact pixel-art-adjacent chibi sprite, thick dark outline, flat cel shading, clean chroma-key background, no text or detached effects."),
+    "--chroma-key", powershellLiteral(HATCH_DEFAULT_CHROMA_KEY),
+    "--force",
+  ].join(" ");
+  const statusCommand = `${pythonInvocation} ${powershellLiteral(`${skillDirectory}\\scripts\\pet_job_status.py`)} --run-dir ${powershellLiteral(hatchRunDirectory)}`;
   return [
     "Run a complete hatch-pet Goal for a LevelUpAgent Starlight Echo using the bundled toolchain. Do not stop at a plan or a prompt draft.",
     `Pet name: ${name}`,
     `Pet concept: ${request.description}`,
-    `User reference images attached to this request: ${request.references.length}. Treat every attached image as an identity reference.`,
+    `User reference images attached to this request: ${request.references.length}. Managed reference attachment IDs: ${referenceIds.length > 0 ? referenceIds.join(", ") : "none"}. Treat every attached image as an identity reference and pass all listed IDs in the base generate_images.referenceAttachmentIds.`,
     `Bundled Hatch Pet skill directory: ${request.environment.hatchSkillPath}`,
     `Bundled image generation skill directory: ${request.environment.imagegenSkillPath}`,
     `Python command: ${request.environment.pythonCommand}`,
     `Use this working directory for run artifacts: ${request.environment.workDirectory}`,
+    `Use this unique hatch run directory: ${hatchRunDirectory}`,
     `The final package must be written under: ${request.environment.packageDirectory}/<pet-slug>/pet.json and spritesheet.webp`,
-    "Before acting, read the bundled hatch-pet SKILL.md completely, then read every directly required reference it names. Keep its atlas geometry, nine animation rows, grounding-image, transparency, provenance, subagent, QA, repair, and packaging rules authoritative. Do not ask the user to choose or install Skill paths; the paths above come from the LevelUpAgent package.",
-    "Use LevelUpAgent's generate_images tool as the visual generation layer for the base and every non-derived row. Never draw, tile, mirror, or synthesize missing visual rows with local scripts, except the hatch-pet skill's explicitly approved running-left mirror path. Use the skill's deterministic Python scripts only for prompts, recording selected generated outputs, extraction, atlas assembly, validation, previews, repair queues, and packaging. Use image-capable subagents for row jobs when the runtime exposes them. If delegated agents cannot access generate_images, this one-click workflow explicitly authorizes the LevelUpAgent adapter to issue the grounded row calls from the parent, preferably as parallel tool calls; disclose that adapter path in the checklist and final summary.",
+    "Skill bootstrap is application-owned: before the first provider turn, LevelUpAgent loads the bundled legacy hatch-pet SKILL.md and its directly required references. The provider must never call read_skill (for the manifest or references), and must keep the loaded old Skill's atlas geometry, nine animation rows, grounding-image, transparency, provenance, QA, repair, and packaging rules authoritative. Do not read any system Codex Skill.",
+    `After the application bootstrap completes, immediately call run_command with this exact PowerShell command (copy it verbatim; do not shorten it to python prepare_pet_run.py):\n${prepareCommand}\nThe run deliberately uses the exact chroma key ${HATCH_DEFAULT_CHROMA_KEY}; every generated base/row image must use that same flat pure green background, never magenta or an unspecified substitute. Do not use Get-ChildItem, ls, or a relative script path to inspect the workspace. Do not call read_skill, get_goal, list_files, read_file, or search_files: the Skill, Goal, and this exact pet target are already attached, and levelup-pet-hatch.json is runtime metadata rather than a plan. Managed LevelUpAgent reference attachments do not expose arbitrary filesystem paths to the model, so prepare the run without --reference and use the listed attachment IDs on the base generate_images call; the recorded canonical base then grounds every row. If the exact command returns a real blocker, report that exact stderr through update_goal instead of trying alternate browsing commands.`,
+    `After prepare_pet_run.py succeeds, use this exact PowerShell command for every manifest status check (copy it verbatim):\n${statusCommand}\nNever reconstruct the path from APPDATA, the current directory, or a guessed Skill installation.`,
+    "Use LevelUpAgent's generate_images tool as the visual generation layer for the base and every non-derived row. No external Codex installation is required: the LevelUpAgent adapter exports each completed hatch image unchanged to a standard generated_images/ig_* source and returns it in hatchSourcePaths. Pass that exact returned hatchSourcePaths path to record_imagegen_result.py; never pass the media/*.png path, manually copy or rename a source, or edit imagegen-jobs.json. After prepare_pet_run.py reports the concrete run directory, every generation call must include hatchRunDir=<that directory> and hatchJobId=<the exact pending manifest job id>; the adapter then loads that job's input_images (including canonical-base and layout guides) as provider references. Do not submit a job whose manifest status is already complete. Never draw, tile, mirror, or synthesize missing visual rows with local scripts, except the hatch-pet skill's explicitly approved running-left mirror path. Use the skill's deterministic Python scripts only for prompts, recording selected generated outputs, extraction, atlas assembly, validation, previews, repair queues, and packaging. Generate exactly one visual job at a time and inspect pet_job_status.py before the next job. Use image-capable subagents for row jobs when the runtime exposes them. If delegated agents cannot access generate_images, this one-click workflow explicitly authorizes the LevelUpAgent adapter to issue the grounded row calls from the parent; disclose that adapter path in the checklist and final summary.",
     "Keep a visible progress checklist in the conversation. Run final validation and inspect the contact sheet before completing the Goal. If a real prerequisite is unavailable, report the precise missing item through the Goal workflow; do not fabricate images or completion records.",
     `Write pet.json metadata using the final pet name and description. ${locale === "zh-CN" ? "最终摘要使用中文。" : "Write the final summary in English."} End the final summary with PET_PACKAGE_DIR=<absolute package directory>. LevelUpAgent will import the package automatically after the Goal completes.`,
   ].join("\n\n");
+}
+
+class HatchBootstrapFailure extends Error {
+  constructor(
+    messageText: string,
+    readonly history: AgentMessage[],
+  ) {
+    super(messageText);
+    this.name = "HatchBootstrapFailure";
+  }
+}
+
+class HatchBootstrapCancelled extends Error {
+  constructor() {
+    super("Hatch bootstrap was cancelled");
+    this.name = "HatchBootstrapCancelled";
+  }
+}
+
+function hatchManifestRoot(value: string) {
+  let normalized = value.trim().replace(/\\/g, "/");
+  if (normalized.startsWith("//?/") || normalized.startsWith("/?/")) {
+    normalized = normalized.replace(/^\/?\/?\?\//, "");
+  }
+  return normalized.replace(/\/skill\.md$/i, "").replace(/\/$/, "").toLocaleLowerCase();
+}
+
+function findBundledHatchSkill(skills: SkillInfo[], environment: HatchEnvironment) {
+  const expectedRoot = hatchManifestRoot(environment.hatchSkillPath || "");
+  const candidates = skills.filter((skill) => skill.valid && skill.name.toLocaleLowerCase() === "hatch-pet");
+  const exact = candidates.find((skill) => hatchManifestRoot(skill.path) === expectedRoot);
+  return exact || candidates.find((skill) => skill.source === "LevelUpAgent built-in");
+}
+
+function appendHatchToolExchange(
+  history: AgentMessage[],
+  call: ToolCall,
+  result: { output: string; isError: boolean },
+) {
+  return [
+    ...history,
+    message("assistant", "", { toolCalls: [call], internal: true }),
+    message("tool", result.output, {
+      toolCallId: call.id,
+      isError: result.isError,
+      internal: true,
+    }),
+  ];
+}
+
+function hatchReferenceWasRead(history: AgentMessage[], referencePath: string) {
+  const normalizedPath = referencePath.replace(/\\/g, "/").toLocaleLowerCase();
+  const pending = new Set<string>();
+  for (const item of history) {
+    if (item.role === "assistant") {
+      for (const call of item.toolCalls) {
+        const path = typeof call.arguments?.path === "string"
+          ? call.arguments.path.replace(/\\/g, "/").toLocaleLowerCase()
+          : "";
+        if (call.name === "read_skill" && path === normalizedPath && call.id) pending.add(call.id);
+      }
+      continue;
+    }
+    if (item.role !== "tool" || !item.toolCallId || !pending.has(item.toolCallId)) continue;
+    pending.delete(item.toolCallId);
+    if (!item.isError && new RegExp(`^\\s*Skill:\\s*hatch-pet\\b`, "i").test(item.content)) return true;
+  }
+  return false;
+}
+
+function hatchBootstrapCall(name: string, argumentsValue: Record<string, unknown>): ToolCall {
+  return {
+    id: `hatch-bootstrap-${crypto.randomUUID()}`,
+    name,
+    arguments: argumentsValue,
+  };
+}
+
+/**
+ * Own the deterministic hatch bootstrap in the app. The provider receives a
+ * real Skill exchange, prepare result, and first manifest status, so it can
+ * start at a concrete image job instead of deciding whether to reread state.
+ */
+async function bootstrapHatchHistory(
+  history: AgentMessage[],
+  environment: HatchEnvironment,
+  workspace: string,
+  threadId: string,
+  profile: ProviderProfile,
+  fallbackProfiles: ProviderProfile[],
+  isCurrent?: () => boolean,
+): Promise<AgentMessage[]> {
+  const ensureCurrent = () => {
+    if (isCurrent && !isCurrent()) throw new HatchBootstrapCancelled();
+  };
+  ensureCurrent();
+  // A resumed thread may contain provider-owned observation calls from an
+  // older release. Strip those stale protocol groups before rebuilding the
+  // application-owned bootstrap; otherwise the model can replay them even
+  // though the current tool catalog no longer exposes those tools.
+  let nextHistory = sanitizeHatchHistory(history);
+  const skills = await scanSkills(workspace);
+  ensureCurrent();
+  let hatchSkill = findBundledHatchSkill(skills, environment);
+  if (hatchSkill && !hatchSkill.enabled) {
+    hatchSkill = await setSkillEnabled(hatchSkill.id, true, workspace);
+    ensureCurrent();
+  }
+  if (!hatchSkill || !hatchSkill.enabled) {
+    throw new HatchBootstrapFailure(
+      "The bundled legacy hatch-pet Skill is not enabled or could not be discovered.",
+      nextHistory,
+    );
+  }
+
+  if (!hatchSkillManifestWasRead(nextHistory)) {
+    ensureCurrent();
+    const readCall = hatchBootstrapCall("read_skill", { skillId: hatchSkill.id });
+    const readResult = await executeTool(
+      readCall,
+      workspace,
+      threadId,
+      profile,
+      fallbackProfiles,
+      true,
+      false,
+      true,
+    );
+    ensureCurrent();
+    nextHistory = appendHatchToolExchange(nextHistory, readCall, readResult);
+    if (readResult.isError || !/^Skill:\s*hatch-pet\b/im.test(readResult.output.trimStart())) {
+      throw new HatchBootstrapFailure(
+        `The bundled hatch-pet Skill could not be loaded: ${readResult.output}`,
+        nextHistory,
+      );
+    }
+  }
+
+  // The legacy Skill's directly required references are loaded by the
+  // application once, alongside the manifest. Keeping them in the internal
+  // history gives the provider the full old workflow without exposing a
+  // read_skill tool that it could call repeatedly.
+  for (const referencePath of [
+    "references/animation-rows.md",
+    "references/codex-pet-contract.md",
+    "references/qa-rubric.md",
+  ]) {
+    ensureCurrent();
+    if (hatchReferenceWasRead(nextHistory, referencePath)) continue;
+    const referenceCall = hatchBootstrapCall("read_skill", {
+      skillId: hatchSkill.id,
+      path: referencePath,
+    });
+    const referenceResult = await executeTool(
+      referenceCall,
+      workspace,
+      threadId,
+      profile,
+      fallbackProfiles,
+      true,
+      true,
+      true,
+    );
+    ensureCurrent();
+    nextHistory = appendHatchToolExchange(nextHistory, referenceCall, referenceResult);
+    if (referenceResult.isError || !/^Skill:\s*hatch-pet\b/im.test(referenceResult.output.trimStart())) {
+      throw new HatchBootstrapFailure(
+        `The bundled hatch-pet reference ${referencePath} could not be loaded: ${referenceResult.output}`,
+        nextHistory,
+      );
+    }
+  }
+
+  const prepareCommand = hatchPrepareCommandFromHistory(nextHistory);
+  if (!prepareCommand) {
+    throw new HatchBootstrapFailure(
+      "The hatch request does not contain a canonical prepare_pet_run.py command.",
+      nextHistory,
+    );
+  }
+  if (!nextHistory.some((item) => item.role === "tool" && !item.isError
+    && /[\"']?ok[\"']?\s*:\s*true\b/i.test(item.content)
+    && /[\"']?run_dir[\"']?\s*:/i.test(item.content))) {
+    ensureCurrent();
+    const prepareCall = hatchBootstrapCall("run_command", { command: prepareCommand });
+    const prepareResult = await executeTool(
+      prepareCall,
+      workspace,
+      threadId,
+      profile,
+      fallbackProfiles,
+      true,
+      true,
+    );
+    ensureCurrent();
+    nextHistory = appendHatchToolExchange(nextHistory, prepareCall, prepareResult);
+    if (prepareResult.isError
+      || !/[\"']?ok[\"']?\s*:\s*true\b/i.test(prepareResult.output)
+      || !/[\"']?run_dir[\"']?\s*:/i.test(prepareResult.output)) {
+      throw new HatchBootstrapFailure(
+        `prepare_pet_run.py did not complete: ${prepareResult.output}`,
+        nextHistory,
+      );
+    }
+  }
+
+  ensureCurrent();
+  const statusCommand = hatchStatusCommand(nextHistory);
+  if (!statusCommand) {
+    throw new HatchBootstrapFailure(
+      "The hatch run directory could not be recovered after preparation.",
+      nextHistory,
+    );
+  }
+  const statusCall = hatchBootstrapCall("run_command", { command: statusCommand });
+  const statusResult = await executeTool(
+    statusCall,
+    workspace,
+    threadId,
+    profile,
+    fallbackProfiles,
+    true,
+    true,
+  );
+  ensureCurrent();
+  nextHistory = appendHatchToolExchange(nextHistory, statusCall, statusResult);
+  if (statusResult.isError || !/run_dir/i.test(statusResult.output)) {
+    throw new HatchBootstrapFailure(
+      `pet_job_status.py did not return a usable manifest: ${statusResult.output}`,
+      nextHistory,
+    );
+  }
+  return [
+    ...nextHistory,
+    message(
+      "user",
+      `${HATCH_BOOTSTRAP_MARKER}\nApplication bootstrap completed successfully. Start with the first ready job in the status result and perform one concrete hatch action now. Do not call read_skill, get_goal, list_files, read_file, search_files, or pet_job_status.py again until a concrete generation or recording action has completed.`,
+      { internal: true },
+    ),
+  ];
 }
 
 function modelProviderBrand(profile: ProviderProfile): ModelProviderBrand {

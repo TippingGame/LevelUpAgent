@@ -263,6 +263,8 @@ impl Database {
                    ON provider_requests(profile_id, model, started_at DESC);
                  CREATE INDEX IF NOT EXISTS idx_media_assets_created_at
                    ON media_assets(created_at DESC);
+                 CREATE INDEX IF NOT EXISTS idx_media_assets_kind_created_at
+                   ON media_assets(kind, created_at DESC, id DESC);
                  CREATE INDEX IF NOT EXISTS idx_media_assets_thread
                    ON media_assets(thread_id, created_at DESC);",
             )
@@ -798,6 +800,41 @@ impl Database {
             .map_err(database_error)?;
         statement
             .query_map([limit.clamp(1, 500) as i64], media_asset_from_row)
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)
+    }
+
+    pub fn list_media_assets_page(
+        &self,
+        kind: &MediaKind,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<MediaAsset>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, batch_id, thread_id, provider_id, provider_name, kind, status,
+                        prompt, model, mime_type, file_name, remote_id, revised_prompt, error,
+                        progress, size, quality, output_format, voice, seconds, created_at, updated_at
+                 FROM media_assets
+                 WHERE kind = ?1
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT ?2 OFFSET ?3",
+            )
+            .map_err(database_error)?;
+        statement
+            .query_map(
+                params![
+                    media_kind_value(kind),
+                    limit.clamp(1, 500) as i64,
+                    i64::try_from(offset).unwrap_or(i64::MAX),
+                ],
+                media_asset_from_row,
+            )
             .map_err(database_error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)
@@ -1788,5 +1825,64 @@ mod tests {
         assert_eq!(database.list_media_assets(10).unwrap(), vec![asset.clone()]);
         assert_eq!(database.delete_media_asset("media-1").unwrap(), Some(asset));
         assert!(database.list_media_assets(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn pages_media_assets_by_kind_without_reading_other_history() {
+        let database = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        let asset = |id: &str, kind: MediaKind, created_at: i64| MediaAsset {
+            id: id.to_owned(),
+            batch_id: format!("batch-{id}"),
+            thread_id: None,
+            provider_id: "provider-1".to_owned(),
+            provider_name: "Provider".to_owned(),
+            kind,
+            status: MediaStatus::Completed,
+            prompt: format!("Prompt {id}"),
+            model: "media-model".to_owned(),
+            mime_type: None,
+            file_name: None,
+            file_path: None,
+            remote_id: None,
+            revised_prompt: None,
+            error: None,
+            progress: Some(100),
+            size: None,
+            quality: None,
+            output_format: None,
+            voice: None,
+            seconds: None,
+            created_at,
+            updated_at: created_at,
+        };
+        for item in [
+            asset("video-old", MediaKind::Video, 100),
+            asset("video-middle", MediaKind::Video, 200),
+            asset("video-new", MediaKind::Video, 300),
+            asset("image-newest", MediaKind::Image, 400),
+        ] {
+            database.save_media_asset(&item).unwrap();
+        }
+
+        let first_page = database
+            .list_media_assets_page(&MediaKind::Video, 2, 0)
+            .unwrap();
+        assert_eq!(
+            first_page
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["video-new", "video-middle"]
+        );
+        let second_page = database
+            .list_media_assets_page(&MediaKind::Video, 2, 2)
+            .unwrap();
+        assert_eq!(
+            second_page
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["video-old"]
+        );
     }
 }

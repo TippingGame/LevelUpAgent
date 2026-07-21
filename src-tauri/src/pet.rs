@@ -529,42 +529,25 @@ impl PetManager {
     }
 
     pub fn hatch_environment(&self) -> HatchEnvironment {
-        let bundled_hatch = self
+        let hatch_skill_path = self
             .built_in_skills
             .as_ref()
-            .map(|root| root.join("hatch-pet"));
-        let bundled_imagegen = self
+            .map(|root| root.join("hatch-pet"))
+            .filter(|path| path.join("SKILL.md").is_file());
+        let imagegen_skill_path = self
             .built_in_skills
             .as_ref()
-            .map(|root| root.join("imagegen"));
-        let fallback_hatch = self.codex_home.join("skills").join("hatch-pet");
-        let fallback_imagegen = self
-            .codex_home
-            .join("skills")
-            .join(".system")
-            .join("imagegen");
-        let hatch_skill = bundled_hatch
-            .filter(|path| path.join("SKILL.md").is_file())
-            .unwrap_or(fallback_hatch);
-        let imagegen_skill = bundled_imagegen
-            .filter(|path| path.join("SKILL.md").is_file())
-            .unwrap_or(fallback_imagegen);
-        let hatch_skill_path = hatch_skill
-            .join("SKILL.md")
-            .is_file()
-            .then_some(hatch_skill);
-        let imagegen_skill_path = imagegen_skill
-            .join("SKILL.md")
-            .is_file()
-            .then_some(imagegen_skill);
+            .map(|root| root.join("imagegen"))
+            .filter(|path| path.join("SKILL.md").is_file());
         let python_command = detect_python();
         let mut missing = Vec::new();
         if hatch_skill_path.is_none() {
             missing.push(HatchRequirement {
                 id: "hatch_skill".to_owned(),
                 detail: self
-                    .codex_home
-                    .join("skills")
+                    .built_in_skills
+                    .as_deref()
+                    .unwrap_or_else(|| Path::new("resources/skills"))
                     .join("hatch-pet")
                     .display()
                     .to_string(),
@@ -574,9 +557,9 @@ impl PetManager {
             missing.push(HatchRequirement {
                 id: "imagegen_skill".to_owned(),
                 detail: self
-                    .codex_home
-                    .join("skills")
-                    .join(".system")
+                    .built_in_skills
+                    .as_deref()
+                    .unwrap_or_else(|| Path::new("resources/skills"))
                     .join("imagegen")
                     .display()
                     .to_string(),
@@ -1305,6 +1288,52 @@ mod tests {
                 .missing
                 .iter()
                 .all(|item| !matches!(item.id.as_str(), "hatch_skill" | "imagegen_skill"))
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn hatch_environment_never_falls_back_to_user_codex_skills() {
+        let root = std::env::temp_dir().join(format!(
+            "levelup-pet-no-user-skill-fallback-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let app_data = root.join("app");
+        let home = root.join("home");
+        let mut manager = PetManager::open_with_skills(&app_data, &home, None).unwrap();
+        manager.codex_home = root.join("user-codex");
+        for skill in [
+            manager.codex_home.join("skills").join("hatch-pet"),
+            manager
+                .codex_home
+                .join("skills")
+                .join(".system")
+                .join("imagegen"),
+        ] {
+            std::fs::create_dir_all(&skill).unwrap();
+            std::fs::write(
+                skill.join("SKILL.md"),
+                "---\nname: ignored\ndescription: user skill\n---\n\n# Ignore\n",
+            )
+            .unwrap();
+        }
+
+        let environment = manager.hatch_environment();
+        assert!(!environment.configured);
+        assert!(!environment.bundled);
+        assert!(environment.hatch_skill_path.is_none());
+        assert!(environment.imagegen_skill_path.is_none());
+        assert!(
+            environment
+                .missing
+                .iter()
+                .any(|item| item.id == "hatch_skill")
+        );
+        assert!(
+            environment
+                .missing
+                .iter()
+                .any(|item| item.id == "imagegen_skill")
         );
         let _ = std::fs::remove_dir_all(root);
     }

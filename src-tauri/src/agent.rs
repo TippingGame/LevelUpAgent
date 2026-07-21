@@ -19,8 +19,13 @@ const CONTEXT_MAX_MESSAGES: usize = 160;
 const USER_MESSAGE_MAX_CHARS: usize = 64_000;
 const ASSISTANT_MESSAGE_MAX_CHARS: usize = 32_000;
 const TOOL_RESULT_MAX_CHARS: usize = 12_000;
+// Bundled Skill manifests are authoritative instructions, not expendable
+// command output. Keep the current manifest intact so the model does not
+// reread the same Skill merely because its middle was trimmed.
+const SKILL_TOOL_RESULT_MAX_CHARS: usize = 48_000;
 const TOOL_ARGUMENTS_MAX_CHARS: usize = 8_000;
 pub const TOOL_CALLING_UNSUPPORTED_MARKER: &str = "[LEVELUP_TOOL_CALLING_UNSUPPORTED]";
+const HATCH_BOOTSTRAP_MARKER: &str = "[LEVELUP_HATCH_BOOTSTRAP_COMPLETE]";
 
 fn bearer_auth_if_present(request: RequestBuilder, api_key: &str) -> RequestBuilder {
     if api_key.is_empty() {
@@ -1176,6 +1181,7 @@ fn prepare_message(message: &AgentMessage, omission: &mut ContextOmission) -> Ag
     let mut prepared = message.clone();
     let content_limit = match message.role.as_str() {
         "user" => USER_MESSAGE_MAX_CHARS,
+        "tool" if message.content.starts_with("Skill: ") => SKILL_TOOL_RESULT_MAX_CHARS,
         "tool" => TOOL_RESULT_MAX_CHARS,
         _ => ASSISTANT_MESSAGE_MAX_CHARS,
     };
@@ -1321,6 +1327,60 @@ fn request_has_workspace(request: &AgentTurnRequest) -> bool {
         .is_some_and(|workspace| !workspace.trim().is_empty())
 }
 
+/// Return whether a hatch run has already received the bundled hatch-pet
+/// manifest. The frontend sends the complete tool exchange back on every
+/// continuation, so this is intentionally derived from history rather than
+/// transient request state. Reading another enabled Skill must not complete
+/// this one-time bootstrap phase.
+pub(crate) fn hatch_skill_was_read(messages: &[AgentMessage]) -> bool {
+    if messages.iter().any(|message| {
+        message.role == "user"
+            && message.internal
+            && message.content.contains(HATCH_BOOTSTRAP_MARKER)
+    }) {
+        return true;
+    }
+    let mut pending = BTreeMap::new();
+    for message in messages {
+        if message.role == "assistant" {
+            for call in &message.tool_calls {
+                if call.name == "read_skill" && !call.id.is_empty() {
+                    let manifest = call
+                        .arguments
+                        .get("path")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|path| !path.is_empty())
+                        .is_none_or(|path| {
+                            path.trim_start_matches("./")
+                                .trim_start_matches(".\\")
+                                .eq_ignore_ascii_case("SKILL.md")
+                        });
+                    pending.insert(call.id.clone(), manifest);
+                }
+            }
+            continue;
+        }
+        if message.role != "tool" {
+            continue;
+        }
+        let Some(call_id) = message.tool_call_id.as_deref() else {
+            continue;
+        };
+        if pending.remove(call_id).is_some_and(|manifest| manifest)
+            && message
+                .content
+                .trim_start()
+                .lines()
+                .next()
+                .is_some_and(|line| line.trim().eq_ignore_ascii_case("Skill: hatch-pet"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn system_prompt_with_omission(request: &AgentTurnRequest, omission: &ContextOmission) -> String {
     let mut prompt = match request
         .workspace
@@ -1361,8 +1421,16 @@ fn system_prompt_with_omission(request: &AgentTurnRequest, omission: &ContextOmi
             omission.incomplete_tool_groups,
         ));
     }
+    let hatch_skill_read =
+        request.hatch && (request.hatch_skill_loaded || hatch_skill_was_read(&request.messages));
     if !request.available_skills.is_empty() {
-        prompt.push_str("\n\nEnabled Skills are listed below. When a Skill clearly matches the task, call read_skill before acting and follow its instructions. Read referenced files with the same tool and Skill ID.\n");
+        if request.hatch && hatch_skill_read {
+            prompt.push_str("\n\nEnabled Skills are listed below. The bundled legacy hatch-pet SKILL.md has already been read successfully in this run. Its one-time bootstrap is closed: do not call read_skill again. Take the next concrete hatch action now.\n");
+        } else if request.hatch {
+            prompt.push_str("\n\nEnabled Skills are listed below. The application has not completed the bundled legacy hatch-pet bootstrap, so this provider turn must not proceed. The client must load the manifest and prepare the run before asking the model for a concrete action.\n");
+        } else {
+            prompt.push_str("\n\nEnabled Skills are listed below. When a Skill clearly matches the task, call read_skill before acting and follow its instructions. Read referenced files with the same tool and Skill ID.\n");
+        }
         for skill in &request.available_skills {
             prompt.push_str(&format!(
                 "- {} [{}]: {}\n",
@@ -1390,6 +1458,17 @@ fn system_prompt_with_omission(request: &AgentTurnRequest, omission: &ContextOmi
             prompt.push_str("\nA completion claim is pending audit. Derive every requirement from the objective, inspect authoritative current-state evidence, and call update_goal with complete only if every requirement is proven. Otherwise continue working.");
         } else if status == "active" {
             prompt.push_str("\nContinue until the objective is genuinely achieved. Before claiming completion, call update_goal with complete and concrete evidence; this starts a separate completion audit. Report blocked only after exhausting safe in-scope alternatives.");
+        }
+    }
+    if request.hatch {
+        if hatch_skill_read {
+            prompt.push_str(
+                "\n\nHatch execution mode\nThe active Goal state and the user's requested pet target are already attached above. The bundled legacy hatch-pet Skill is loaded and its read_skill bootstrap is closed. Do not call read_skill, get_goal, list_files, read_file, or search_files; those observation tools are intentionally unavailable. Run prepare_pet_run.py if no run exists, or run pet_job_status.py and perform the next pending script, image generation, ingest, QA, or packaging action now.",
+            );
+        } else {
+            prompt.push_str(
+                "\n\nHatch execution mode\nThe application has not completed the bundled legacy hatch-pet bootstrap, so this provider turn must not proceed. The client must load the manifest and prepare the run before asking the model for a concrete action.",
+            );
         }
     }
     prompt
@@ -1693,12 +1772,16 @@ fn tool_specs() -> Vec<(&'static str, &'static str, Value)> {
 fn allowed_tool_specs(
     mode: &str,
     has_workspace: bool,
+    hatch: bool,
     additional: &[AgentToolDefinition],
 ) -> Vec<(String, String, Value)> {
     let mut tools: Vec<_> = if has_workspace {
         tool_specs()
             .into_iter()
             .filter(|(name, _, _)| {
+                if hatch && matches!(*name, "list_files" | "read_file" | "search_files") {
+                    return false;
+                }
                 if mode == "plan" {
                     matches!(*name, "list_files" | "read_file" | "search_files")
                 } else if mode == "subagent" {
@@ -1719,7 +1802,10 @@ fn allowed_tool_specs(
         tools.extend(
             additional
                 .iter()
-                .filter(|tool| mode != "plan" || tool.read_only)
+                .filter(|tool| {
+                    (mode != "plan" || tool.read_only)
+                        && !(hatch && matches!(tool.name.as_str(), "get_goal" | "read_skill"))
+                })
                 .map(|tool| {
                     (
                         tool.name.clone(),
@@ -1736,6 +1822,7 @@ fn chat_tools(request: &AgentTurnRequest) -> Vec<Value> {
     allowed_tool_specs(
         &request.mode,
         request_has_workspace(request),
+        request.hatch,
         &request.available_tools,
     )
         .into_iter()
@@ -1749,6 +1836,7 @@ fn responses_tools(request: &AgentTurnRequest) -> Vec<Value> {
     allowed_tool_specs(
         &request.mode,
         request_has_workspace(request),
+        request.hatch,
         &request.available_tools,
     )
         .into_iter()
@@ -1762,6 +1850,7 @@ fn anthropic_tools(request: &AgentTurnRequest) -> Vec<Value> {
     allowed_tool_specs(
         &request.mode,
         request_has_workspace(request),
+        request.hatch,
         &request.available_tools,
     )
         .into_iter()
@@ -1775,6 +1864,7 @@ fn gemini_tools(request: &AgentTurnRequest) -> Vec<Value> {
     allowed_tool_specs(
         &request.mode,
         request_has_workspace(request),
+        request.hatch,
         &request.available_tools,
     )
         .into_iter()
@@ -2089,7 +2179,7 @@ mod tests {
 
     #[test]
     fn plan_mode_only_exposes_read_tools() {
-        let tools = allowed_tool_specs("plan", true, &[]);
+        let tools = allowed_tool_specs("plan", true, false, &[]);
         assert_eq!(tools.len(), 3);
         assert!(
             tools
@@ -2100,7 +2190,7 @@ mod tests {
 
     #[test]
     fn subagent_mode_can_edit_isolated_files_but_cannot_run_commands() {
-        let tools = allowed_tool_specs("subagent", true, &[])
+        let tools = allowed_tool_specs("subagent", true, false, &[])
             .into_iter()
             .map(|item| item.0)
             .collect::<Vec<_>>();
@@ -2125,9 +2215,34 @@ mod tests {
                 read_only: false,
             },
         ];
-        let allowed = allowed_tool_specs("plan", true, &tools);
+        let allowed = allowed_tool_specs("plan", true, false, &tools);
         assert!(allowed.iter().any(|(name, _, _)| name == "read_skill"));
         assert!(!allowed.iter().any(|(name, _, _)| name == "mcp_write"));
+    }
+
+    #[test]
+    fn hatch_mode_does_not_expose_directory_listing_or_goal_refresh() {
+        let tools = vec![
+            AgentToolDefinition {
+                name: "get_goal".to_owned(),
+                description: "Read Goal".to_owned(),
+                input_schema: json!({ "type": "object" }),
+                read_only: true,
+            },
+            AgentToolDefinition {
+                name: "read_skill".to_owned(),
+                description: "Read Skill".to_owned(),
+                input_schema: json!({ "type": "object" }),
+                read_only: true,
+            },
+        ];
+        let allowed = allowed_tool_specs("goal", true, true, &tools);
+        assert!(!allowed.iter().any(|(name, _, _)| name == "list_files"));
+        assert!(!allowed.iter().any(|(name, _, _)| name == "read_file"));
+        assert!(!allowed.iter().any(|(name, _, _)| name == "search_files"));
+        assert!(!allowed.iter().any(|(name, _, _)| name == "get_goal"));
+        assert!(!allowed.iter().any(|(name, _, _)| name == "read_skill"));
+        assert!(allowed.iter().any(|(name, _, _)| name == "run_command"));
     }
 
     #[test]
@@ -2146,6 +2261,191 @@ mod tests {
         let prompt = system_prompt(&request);
         assert!(prompt.contains("review [skill-review]"));
         assert!(prompt.contains("call read_skill before acting"));
+    }
+
+    #[test]
+    fn hatch_skill_read_detection_requires_a_successful_tool_result() {
+        let mut request = test_request(
+            "https://levelup.example".to_owned(),
+            ProviderProtocol::OpenaiResponses,
+        );
+        request.hatch = true;
+        request.messages = vec![
+            AgentMessage {
+                role: "assistant".to_owned(),
+                content: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "read-1".to_owned(),
+                    name: "read_skill".to_owned(),
+                    arguments: json!({ "skillId": "skill-hatch" }),
+                }],
+                tool_call_id: None,
+                internal: false,
+                attachments: Vec::new(),
+            },
+            AgentMessage {
+                role: "tool".to_owned(),
+                content: "The requested Skill is not enabled".to_owned(),
+                tool_calls: Vec::new(),
+                tool_call_id: Some("read-1".to_owned()),
+                internal: false,
+                attachments: Vec::new(),
+            },
+        ];
+        assert!(!hatch_skill_was_read(&request.messages));
+
+        request.messages[1].content =
+            "Skill: hatch-pet\nSkill root: bundled\nFile: SKILL.md\n\n---".to_owned();
+        assert!(hatch_skill_was_read(&request.messages));
+
+        request.messages[1].content =
+            "Skill: imagegen\nSkill root: bundled\nFile: SKILL.md\n\n---".to_owned();
+        assert!(!hatch_skill_was_read(&request.messages));
+    }
+
+    #[test]
+    fn hatch_skill_read_detection_handles_multiple_calls_in_one_exchange() {
+        let messages = vec![
+            AgentMessage {
+                role: "assistant".to_owned(),
+                content: String::new(),
+                tool_calls: vec![
+                    ToolCall {
+                        id: "read-failed".to_owned(),
+                        name: "read_skill".to_owned(),
+                        arguments: json!({ "skillId": "skill-hatch" }),
+                    },
+                    ToolCall {
+                        id: "read-success".to_owned(),
+                        name: "read_skill".to_owned(),
+                        arguments: json!({ "skillId": "skill-hatch", "path": "references/animation-rows.md" }),
+                    },
+                ],
+                tool_call_id: None,
+                internal: false,
+                attachments: Vec::new(),
+            },
+            AgentMessage {
+                role: "tool".to_owned(),
+                content: "Skill file is unavailable".to_owned(),
+                tool_calls: Vec::new(),
+                tool_call_id: Some("read-failed".to_owned()),
+                internal: false,
+                attachments: Vec::new(),
+            },
+            AgentMessage {
+                role: "tool".to_owned(),
+                content: "Skill: hatch-pet\nFile: references/animation-rows.md\n\n# rows"
+                    .to_owned(),
+                tool_calls: Vec::new(),
+                tool_call_id: Some("read-success".to_owned()),
+                internal: false,
+                attachments: Vec::new(),
+            },
+        ];
+        assert!(!hatch_skill_was_read(&messages));
+
+        let mut with_manifest = messages;
+        with_manifest.extend([
+            AgentMessage {
+                role: "assistant".to_owned(),
+                content: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "read-manifest".to_owned(),
+                    name: "read_skill".to_owned(),
+                    arguments: json!({ "skillId": "skill-hatch", "path": "SKILL.md" }),
+                }],
+                tool_call_id: None,
+                internal: false,
+                attachments: Vec::new(),
+            },
+            AgentMessage {
+                role: "tool".to_owned(),
+                content: "Skill: hatch-pet\nFile: SKILL.md\n\n# Hatch Pet".to_owned(),
+                tool_calls: Vec::new(),
+                tool_call_id: Some("read-manifest".to_owned()),
+                internal: false,
+                attachments: Vec::new(),
+            },
+        ]);
+        assert!(hatch_skill_was_read(&with_manifest));
+    }
+
+    #[test]
+    fn hatch_system_prompt_switches_to_concrete_execution_after_skill_read() {
+        let mut request = test_request(
+            "https://levelup.example".to_owned(),
+            ProviderProtocol::OpenaiResponses,
+        );
+        request.hatch = true;
+        request
+            .available_skills
+            .push(crate::models::AgentSkillSummary {
+                id: "skill-hatch".to_owned(),
+                name: "hatch-pet".to_owned(),
+                description: "Create a pet".to_owned(),
+            });
+        request.messages = vec![
+            AgentMessage {
+                role: "assistant".to_owned(),
+                content: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "read-1".to_owned(),
+                    name: "read_skill".to_owned(),
+                    arguments: json!({ "skillId": "skill-hatch" }),
+                }],
+                tool_call_id: None,
+                internal: false,
+                attachments: Vec::new(),
+            },
+            AgentMessage {
+                role: "tool".to_owned(),
+                content: "Skill: hatch-pet\nFile: SKILL.md\n\n# Hatch Pet".to_owned(),
+                tool_calls: Vec::new(),
+                tool_call_id: Some("read-1".to_owned()),
+                internal: false,
+                attachments: Vec::new(),
+            },
+        ];
+        let prompt = system_prompt(&request);
+        assert!(prompt.contains("already been read successfully"));
+        assert!(prompt.contains("read_skill bootstrap is closed"));
+        assert!(prompt.contains("Run prepare_pet_run.py"));
+        assert!(!prompt.contains("call read_skill before acting"));
+    }
+
+    #[test]
+    fn explicit_hatch_skill_phase_survives_compacted_history() {
+        let mut request = test_request(
+            "https://levelup.example".to_owned(),
+            ProviderProtocol::OpenaiResponses,
+        );
+        request.hatch = true;
+        request.hatch_skill_loaded = true;
+        request
+            .available_skills
+            .push(crate::models::AgentSkillSummary {
+                id: "skill-hatch".to_owned(),
+                name: "hatch-pet".to_owned(),
+                description: "Create a pet".to_owned(),
+            });
+        let prompt = system_prompt(&request);
+        assert!(prompt.contains("already been read successfully"));
+        assert!(prompt.contains("Run prepare_pet_run.py"));
+        assert!(!prompt.contains("call read_skill before acting"));
+    }
+
+    #[test]
+    fn hatch_bootstrap_marker_survives_without_the_original_tool_exchange() {
+        let messages = vec![AgentMessage {
+            role: "user".to_owned(),
+            content: "[LEVELUP_HATCH_BOOTSTRAP_COMPLETE]\nready_jobs: [base]".to_owned(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            internal: true,
+            attachments: Vec::new(),
+        }];
+        assert!(hatch_skill_was_read(&messages));
     }
 
     #[test]
@@ -2585,6 +2885,8 @@ mod tests {
             available_tools: Vec::new(),
             available_skills: Vec::new(),
             thread_id: Some("thread-test".to_owned()),
+            hatch: false,
+            hatch_skill_loaded: false,
             goal: None,
             fallback_profiles: Vec::new(),
             custom_instructions: None,

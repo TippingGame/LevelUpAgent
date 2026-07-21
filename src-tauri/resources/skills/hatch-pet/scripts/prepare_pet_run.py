@@ -356,11 +356,17 @@ def choose_chroma_key(reference_paths: list[Path], requested: str) -> dict[str, 
 
     pixels = sampled_reference_pixels(reference_paths)
     if not pixels:
-        rgb = parse_hex_color("#FF00FF")
+        # LevelUpAgent-managed references are intentionally not copied into
+        # the prepare command, so a normal app hatch has no sample pixels.
+        # Keep the fallback aligned with the image-generation prompts and the
+        # long-standing digital-pet convention: pure green. A magenta
+        # fallback made providers emit green while extraction looked for
+        # magenta, turning every row into a false component-QA failure.
+        rgb = parse_hex_color("#00FF00")
         return {
-            "hex": "#FF00FF",
+            "hex": "#00FF00",
             "rgb": list(rgb),
-            "name": "magenta",
+            "name": "green",
             "selection": "fallback",
         }
 

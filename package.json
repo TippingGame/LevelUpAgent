@@ -1,14 +1,14 @@
 {
   "name": "levelup-agent",
   "private": true,
-  "version": "1.0.8",
+  "version": "1.0.12",
   "license": "LGPL-3.0-only",
   "type": "module",
   "packageManager": "pnpm@11.7.0",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "check": "tsc --noEmit && node --test scripts/test-media-concurrency.mjs && node scripts/test-release-config.mjs",
+    "check": "tsc --noEmit && node --test scripts/test-media-concurrency.mjs scripts/test-hatch-progress.mjs && node scripts/test-release-config.mjs",
     "build:macos": "bash scripts/build-macos.sh",
     "verify:levelupapi": "node scripts/verify-levelupapi.mjs",
     "preview": "vite preview",

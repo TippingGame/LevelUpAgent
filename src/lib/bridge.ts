@@ -24,9 +24,11 @@ import type {
   McpServerConfig,
   McpServerSnapshot,
   MediaAsset,
+  MediaAssetPage,
   MediaBatchResult,
   MediaCatalog,
   MediaGenerationRequest,
+  MediaKind,
   HatchEnvironment,
   PetActivity,
   PetDashboard,
@@ -271,6 +273,11 @@ export async function importClipboardImages(files: File[]): Promise<ImageAttachm
   return invoke<ImageAttachment[]>("import_clipboard_images", { images: payloads });
 }
 
+export async function importMediaReferences(sourcePaths: string[]): Promise<ImageAttachment[]> {
+  if (!isDesktop() || sourcePaths.length === 0) return [];
+  return invoke<ImageAttachment[]>("import_media_references", { sourcePaths: sourcePaths.slice(0, 7) });
+}
+
 export async function importClipboardAttachments(files: File[]): Promise<ImageAttachment[]> {
   const selected = files.slice(0, 12);
   if (!isDesktop() || selected.length === 0) return [];
@@ -307,6 +314,17 @@ export async function selectImageReferences(): Promise<ImageAttachment[]> {
   return importAttachments(paths.slice(0, 8));
 }
 
+export async function selectVideoReference(): Promise<ImageAttachment[]> {
+  if (!isDesktop()) return [];
+  const selected = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: "MP4 video", extensions: ["mp4"] }],
+  });
+  const paths = typeof selected === "string" ? [selected] : Array.isArray(selected) ? selected : [];
+  return importMediaReferences(paths.slice(0, 1));
+}
+
 export async function getMediaCatalog(): Promise<MediaCatalog> {
   if (!isDesktop()) return { models: [], errors: [] };
   return invoke<MediaCatalog>("get_media_catalog");
@@ -319,9 +337,9 @@ export async function generateMedia(
   return invoke<MediaBatchResult>("generate_media", { request, threadId: threadId || null });
 }
 
-export async function listMediaAssets(limit = 200): Promise<MediaAsset[]> {
-  if (!isDesktop()) return [];
-  return invoke<MediaAsset[]>("list_media_assets", { limit });
+export async function listMediaAssets(kind: MediaKind, limit = 24, offset = 0): Promise<MediaAssetPage> {
+  if (!isDesktop()) return { assets: [], hasMore: false };
+  return invoke<MediaAssetPage>("list_media_assets", { kind, limit, offset });
 }
 
 export async function refreshMediaAsset(assetId: string): Promise<MediaAsset> {
@@ -429,6 +447,8 @@ export async function agentTurn(
   workspace?: string,
   threadId?: string,
   fallbackProfiles: ProviderProfile[] = [],
+  hatch = false,
+  hatchSkillLoaded = false,
 ): Promise<AgentTurnResponse> {
   const cleanMessages = messages.map(({ role, content, toolCalls, toolCallId, internal, attachments }) => ({
     role,
@@ -439,7 +459,7 @@ export async function agentTurn(
     attachments,
   }));
   return invoke<AgentTurnResponse>("agent_turn", {
-    request: { profile, messages: cleanMessages, mode, workspace, threadId, fallbackProfiles },
+    request: { profile, messages: cleanMessages, mode, workspace, threadId, fallbackProfiles, hatch, hatchSkillLoaded },
   });
 }
 
@@ -452,6 +472,8 @@ export async function agentTurnStream(
   onDelta: (delta: string) => void,
   threadId?: string,
   fallbackProfiles: ProviderProfile[] = [],
+  hatch = false,
+  hatchSkillLoaded = false,
 ): Promise<AgentTurnResponse> {
   const cleanMessages = messages.map(({ role, content, toolCalls, toolCallId, internal, attachments }) => ({
     role,
@@ -466,7 +488,7 @@ export async function agentTurnStream(
     if (event.kind === "content_delta" && event.delta) onDelta(event.delta);
   };
   return invoke<AgentTurnResponse>("agent_turn_stream", {
-    request: { profile, messages: cleanMessages, mode, workspace, threadId, fallbackProfiles },
+    request: { profile, messages: cleanMessages, mode, workspace, threadId, fallbackProfiles, hatch, hatchSkillLoaded },
     operationId,
     onEvent,
   });
@@ -593,9 +615,22 @@ export async function executeTool(
   threadId?: string,
   profile?: ProviderProfile,
   fallbackProfiles: ProviderProfile[] = [],
+  hatch = false,
+  hatchSkillLoaded = false,
+  hatchBootstrap = false,
 ): Promise<ToolExecutionResponse> {
   return invoke<ToolExecutionResponse>("execute_tool", {
-    request: { name: call.name, arguments: call.arguments, workspace, threadId, profile, fallbackProfiles },
+    request: {
+      name: call.name,
+      arguments: call.arguments,
+      workspace,
+      threadId,
+      profile,
+      fallbackProfiles,
+      hatch,
+      hatchSkillLoaded,
+      hatchBootstrap,
+    },
   });
 }
 

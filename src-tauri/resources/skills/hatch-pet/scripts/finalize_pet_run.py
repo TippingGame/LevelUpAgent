@@ -14,6 +14,29 @@ from pathlib import Path
 from PIL import Image, ImageOps
 
 
+RUNNING_FRAME_COUNT = 8
+
+
+def mirror_frames_in_place(image: Image.Image, frame_count: int = RUNNING_FRAME_COUNT) -> Image.Image:
+    """Build the expected running-left strip without changing animation phase order."""
+
+    rgba = image.convert("RGBA")
+    if frame_count <= 0 or rgba.width < frame_count:
+        raise ValueError(
+            f"running-right strip width {rgba.width} cannot contain {frame_count} frames"
+        )
+
+    mirrored_strip = Image.new("RGBA", rgba.size)
+    for index in range(frame_count):
+        # Keep the same fractional slot boundaries used by the derivation
+        # script when a provider returns a non-divisible strip width.
+        left = round(index * rgba.width / frame_count)
+        right = round((index + 1) * rgba.width / frame_count)
+        frame = rgba.crop((left, 0, right, rgba.height))
+        mirrored_strip.paste(ImageOps.mirror(frame), (left, 0))
+    return mirrored_strip
+
+
 def run(command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
     print("+ " + " ".join(command))
     return subprocess.run(command, check=check, text=True)
@@ -112,11 +135,14 @@ def validate_mirror_hash(job: dict[str, object], *, source: Path, output: Path, 
             "rerun derive_running_left_from_running_right.py"
         )
     with Image.open(source) as source_image, Image.open(output) as output_image:
-        expected = ImageOps.mirror(source_image.convert("RGBA"))
+        try:
+            expected = mirror_frames_in_place(source_image)
+        except ValueError as error:
+            raise SystemExit(str(error)) from error
         actual = output_image.convert("RGBA")
         if expected.size != actual.size or expected.tobytes() != actual.tobytes():
             raise SystemExit(
-                "running-left mirrored output is not an exact horizontal mirror of running-right"
+                "running-left output is not an exact per-frame horizontal mirror of running-right"
             )
 
 

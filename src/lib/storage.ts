@@ -16,7 +16,7 @@ export const defaultProfile: ProviderProfile = {
   id: "levelup-api",
   name: "LevelUpAPI",
   baseUrl: DEFAULT_LEVELUP_BASE_URL,
-  model: "gpt-5.5",
+  model: "gpt-5.6-sol",
   protocol: "openai_responses",
   allowUnauthenticated: false,
   priority: 10,

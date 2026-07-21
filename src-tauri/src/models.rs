@@ -92,6 +92,7 @@ pub struct AttachmentPreview {
 pub enum AttachmentKind {
     #[default]
     Image,
+    Video,
     Text,
     Document,
 }
@@ -104,6 +105,13 @@ pub struct AgentTurnRequest {
     pub mode: String,
     pub workspace: Option<String>,
     pub thread_id: Option<String>,
+    #[serde(default)]
+    pub hatch: bool,
+    /// True after the frontend has observed a successful bundled hatch-pet
+    /// manifest result. This is explicit state because long conversations may
+    /// omit old tool exchanges from the provider context.
+    #[serde(default)]
+    pub hatch_skill_loaded: bool,
     #[serde(default)]
     pub available_tools: Vec<AgentToolDefinition>,
     #[serde(default)]
@@ -229,6 +237,21 @@ pub struct ToolExecutionRequest {
     pub profile: Option<ProviderProfile>,
     #[serde(default)]
     pub fallback_profiles: Vec<ProviderProfile>,
+    /// True when the call belongs to the bundled hatch-pet workflow.
+    /// Hatch media needs an adapter source path that the deterministic
+    /// hatch scripts can validate; ordinary media calls keep the old path.
+    #[serde(default)]
+    pub hatch: bool,
+    /// True after the current hatch conversation received the bundled
+    /// hatch-pet SKILL.md successfully. The tool executor uses this to reject
+    /// stale manifest rereads from providers that ignore an updated schema.
+    #[serde(default)]
+    pub hatch_skill_loaded: bool,
+    /// Internal application bootstrap calls may read the bundled legacy
+    /// manifest once before the provider receives a hatch turn. Provider
+    /// tool calls never set this flag.
+    #[serde(default)]
+    pub hatch_bootstrap: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -338,6 +361,16 @@ pub enum MediaKind {
     Audio,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoGenerationMode {
+    #[default]
+    Text,
+    Image,
+    Reference,
+    Video,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MediaStatus {
@@ -382,6 +415,10 @@ pub struct MediaGenerationRequest {
     pub instructions: Option<String>,
     pub seconds: Option<u32>,
     #[serde(default)]
+    pub video_mode: VideoGenerationMode,
+    pub video_resolution: Option<String>,
+    pub video_aspect_ratio: Option<String>,
+    #[serde(default)]
     pub reference_attachment_ids: Vec<String>,
 }
 
@@ -415,6 +452,13 @@ pub struct MediaAsset {
     pub seconds: Option<u32>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaAssetPage {
+    pub assets: Vec<MediaAsset>,
+    pub has_more: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
