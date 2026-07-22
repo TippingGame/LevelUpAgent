@@ -254,15 +254,15 @@ fn write_atomic(
             return Err(error);
         }
     }
-    if bundled {
-        if let Err(error) = stage_file(
+    if bundled
+        && let Err(error) = stage_file(
             &temporary.join(BUNDLED_THEME_MARKER),
             b"bundled\n",
             "bundled theme marker",
-        ) {
-            let _ = std::fs::remove_dir_all(&temporary);
-            return Err(error);
-        }
+        )
+    {
+        let _ = std::fs::remove_dir_all(&temporary);
+        return Err(error);
     }
     let backup = storage.join(format!(".{}.{}.backup", package.manifest.id, transaction));
     let had_previous = match std::fs::symlink_metadata(&destination) {
@@ -410,11 +410,11 @@ pub fn list(storage: &Path) -> Result<Vec<ThemeManifest>, String> {
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
             continue;
         }
-        if let Ok(mut package) = read_package(&path.join(MANAGED_THEME_FILE)) {
-            if path.file_name().and_then(|value| value.to_str()) == Some(&package.manifest.id) {
-                package.manifest.bundled = is_bundled(storage, &package.manifest.id)?;
-                themes.push(package.manifest);
-            }
+        if let Ok(mut package) = read_package(&path.join(MANAGED_THEME_FILE))
+            && path.file_name().and_then(|value| value.to_str()) == Some(&package.manifest.id)
+        {
+            package.manifest.bundled = is_bundled(storage, &package.manifest.id)?;
+            themes.push(package.manifest);
         }
     }
     themes.sort_by_key(|theme| theme.name.to_lowercase());
