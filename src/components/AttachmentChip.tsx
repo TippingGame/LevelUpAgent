@@ -5,6 +5,7 @@ import {
   FileCode2,
   FileSpreadsheet,
   FileText,
+  FileVideo2,
   ImagePlus,
   LoaderCircle,
   Presentation,
@@ -41,6 +42,10 @@ export function AttachmentChip({ attachment, detailed = false, onRemove }: Attac
     }
     setOpen(true);
     if (preview || error) return;
+    if (attachment.kind === "video") {
+      setPreview({ kind: "video", mimeType: attachment.mimeType });
+      return;
+    }
     const request = previewCache.get(attachment.id) ?? previewAttachment(attachment);
     previewCache.set(attachment.id, request);
     void request
@@ -83,7 +88,10 @@ export function AttachmentChip({ attachment, detailed = false, onRemove }: Attac
           {preview?.kind === "image" && preview.dataBase64 && (
             <img src={`data:${preview.mimeType};base64,${preview.dataBase64}`} alt={attachment.name} />
           )}
-          {preview && preview.kind !== "image" && (
+          {preview?.kind === "video" && (
+            <div className="attachment-video-preview"><FileVideo2 size={28} /><span>{tr("MP4 视频参考素材", "MP4 video reference")}</span></div>
+          )}
+          {preview && preview.kind !== "image" && preview.kind !== "video" && (
             <pre>{preview.text || tr("没有可预览的文本内容", "No text preview is available")}</pre>
           )}
         </div>,
@@ -95,6 +103,7 @@ export function AttachmentChip({ attachment, detailed = false, onRemove }: Attac
 
 function AttachmentGlyph({ attachment }: { attachment: ImageAttachment }) {
   if (attachment.kind === "image") return <ImagePlus size={14} />;
+  if (attachment.kind === "video") return <FileVideo2 size={14} />;
   if (attachment.kind === "text") return <FileCode2 size={14} />;
   if (attachment.mimeType.includes("spreadsheetml")) return <FileSpreadsheet size={14} />;
   if (attachment.mimeType.includes("presentationml")) return <Presentation size={14} />;
@@ -103,6 +112,7 @@ function AttachmentGlyph({ attachment }: { attachment: ImageAttachment }) {
 
 function attachmentFormatLabel(attachment: ImageAttachment) {
   if (attachment.kind === "image") return tr("图片", "Image");
+  if (attachment.kind === "video") return tr("视频", "Video");
   if (attachment.kind === "text") return tr("文本", "Text");
   if (attachment.mimeType === "application/pdf") return "PDF";
   if (attachment.mimeType.includes("wordprocessingml")) return "Word";

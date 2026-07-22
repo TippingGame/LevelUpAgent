@@ -10,6 +10,9 @@ import {
 import { createPortal } from "react-dom";
 import {
   AudioLines,
+  ArrowLeft,
+  ArrowRight,
+  BookOpen,
   Check,
   CircleAlert,
   Clock3,
@@ -39,10 +42,12 @@ import {
   getMediaCatalog,
   importAttachments,
   importClipboardImages,
+  importMediaReferences,
   listMediaAssets,
   mediaAssetUrl,
   refreshMediaAsset,
   selectImageReferences,
+  selectVideoReference,
 } from "../lib/bridge";
 import { tr } from "../lib/i18n";
 import { copyText } from "../lib/clipboard";
@@ -52,12 +57,20 @@ import type {
   MediaGenerationRequest,
   MediaKind,
   MediaModelInfo,
+  VideoGenerationMode,
 } from "../lib/types";
 import { AttachmentChip } from "./AttachmentChip";
 
 interface PromptDraft {
   id: string;
   prompt: string;
+}
+
+interface MediaHistoryLoadState {
+  loaded: boolean;
+  loading: boolean;
+  loadingMore: boolean;
+  hasMore: boolean;
 }
 
 type StudioMediaAsset = MediaAsset & {
@@ -76,15 +89,18 @@ interface PreviewTransform extends PreviewPoint {
 const MIN_PREVIEW_ZOOM = 0.05;
 const MAX_PREVIEW_ZOOM = 4;
 const PREVIEW_ZOOM_STEP = 1.2;
+const MEDIA_HISTORY_PAGE_SIZE = 24;
 
 interface MediaStudioProps {
   active: boolean;
   locale: string;
+  mediaCatalogRevision: number;
   dropActive: boolean;
   referenceDrop: { id: string; paths: string[] } | null;
   onReferenceDropHandled: (id: string) => void;
   onConfigureConnection: () => void;
   onPendingCountChange: (count: number) => void;
+  onWriting: () => void;
 }
 
 const KIND_TABS: Array<{ kind: MediaKind; icon: typeof Image }> = [
@@ -111,8 +127,11 @@ const IMAGE_DIMENSION_OPTIONS: ImageDimensionOption[] = [
 const IMAGE_RATIO_OPTIONS = ["16:9", "9:16", "21:9", "9:21"];
 const IMAGE_SIZE_OPTIONS = ["auto", ...IMAGE_DIMENSION_OPTIONS.map((option) => option.value), ...IMAGE_RATIO_OPTIONS];
 const VIDEO_SIZE_OPTIONS = ["1280x720", "720x1280", "16:9", "9:16"];
+const GROK_VIDEO_ASPECT_OPTIONS = ["16:9", "9:16"];
+const GROK_VIDEO_RESOLUTION_OPTIONS = ["480p", "720p"];
+const GROK_VIDEO_MODES: VideoGenerationMode[] = ["text", "image", "reference", "video"];
 
-export function MediaStudio({ active, locale, dropActive, referenceDrop, onReferenceDropHandled, onConfigureConnection, onPendingCountChange }: MediaStudioProps) {
+export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, referenceDrop, onReferenceDropHandled, onConfigureConnection, onPendingCountChange, onWriting }: MediaStudioProps) {
   const rootRef = useRef<HTMLElement>(null);
   const [kind, setKind] = useState<MediaKind>("image");
   const [catalog, setCatalog] = useState<Awaited<ReturnType<typeof getMediaCatalog>> | null>(null);
@@ -122,7 +141,11 @@ export function MediaStudio({ active, locale, dropActive, referenceDrop, onRefer
   const [prompts, setPrompts] = useState<PromptDraft[]>([
     { id: crypto.randomUUID(), prompt: "" },
   ]);
-  const [references, setReferences] = useState<ImageAttachment[]>([]);
+  const [imageReferences, setImageReferences] = useState<ImageAttachment[]>([]);
+  const [videoReferences, setVideoReferences] = useState<ImageAttachment[]>([]);
+  const [videoMode, setVideoMode] = useState<VideoGenerationMode>("text");
+  const [videoResolution, setVideoResolution] = useState("720p");
+  const [videoAspectRatio, setVideoAspectRatio] = useState("16:9");
   const [count, setCount] = useState(1);
   const [size, setSize] = useState("auto");
   const [quality, setQuality] = useState("auto");
@@ -137,6 +160,14 @@ export function MediaStudio({ active, locale, dropActive, referenceDrop, onRefer
   const [refreshing, setRefreshing] = useState(false);
   const [pastingReferences, setPastingReferences] = useState(false);
   const [previewAsset, setPreviewAsset] = useState<MediaAsset | null>(null);
+  const [historyState, setHistoryState] = useState<Record<MediaKind, MediaHistoryLoadState>>({
+    image: { loaded: false, loading: false, loadingMore: false, hasMore: false },
+    video: { loaded: false, loading: false, loadingMore: false, hasMore: false },
+    audio: { loaded: false, loading: false, loadingMore: false, hasMore: false },
+  });
+  const catalogRequestRef = useRef(0);
+  const catalogRevisionRef = useRef<number | null>(null);
+  const historyRequestRef = useRef<Record<MediaKind, number>>({ image: 0, video: 0, audio: 0 });
 
   const models = useMemo(
     () => (catalog?.models ?? []).filter((model) => model.kind === kind),
@@ -147,33 +178,97 @@ export function MediaStudio({ active, locale, dropActive, referenceDrop, onRefer
     ?? models.find((model) => model.recommended)
     ?? models[0];
   const transparentBackgroundSupported = !selected?.id.toLocaleLowerCase().includes("gpt-image-2");
+  const selectedModelId = selected?.id.toLocaleLowerCase() ?? "";
+  const isGrokVideo = kind === "video" && selectedModelId.startsWith("grok-imagine-video");
+  const isGrokVideo15 = isGrokVideo && selectedModelId.includes("grok-imagine-video-1.5");
+  const activeVideoMode: VideoGenerationMode = isGrokVideo15 ? "image" : isGrokVideo ? videoMode : "text";
+  const videoResolutionOptions = isGrokVideo15
+    ? [...GROK_VIDEO_RESOLUTION_OPTIONS, "1080p"]
+    : GROK_VIDEO_RESOLUTION_OPTIONS;
+  const videoDurationOptions = activeVideoMode === "reference" ? [4, 8, 10] : [4, 8, 12];
+  const videoReferenceReady = !isGrokVideo || activeVideoMode === "text" || (
+    activeVideoMode === "reference"
+      ? videoReferences.length > 0 && videoReferences.length <= 7 && videoReferences.every((item) => item.kind === "image")
+      : videoReferences.length === 1 && videoReferences[0]?.kind === (activeVideoMode === "video" ? "video" : "image")
+  );
   const visibleAssets = assets.filter((asset) => asset.kind === kind);
   const visiblePendingAssets = pendingAssets.filter((asset) => asset.kind === kind);
   const displayedAssets: StudioMediaAsset[] = [...visiblePendingAssets, ...visibleAssets];
+  const currentHistoryState = historyState[kind];
+  const previewableAssets = displayedAssets.filter(
+    (asset) => asset.kind === "image" && asset.status === "completed" && Boolean(mediaAssetUrl(asset)),
+  );
   const pendingVideoIds = assets
     .filter((asset) => asset.kind === "video" && (asset.status === "queued" || asset.status === "in_progress"))
     .map((asset) => asset.id);
 
-  const load = async (showSpinner = true) => {
+  const loadCatalog = async (showSpinner = true) => {
+    const requestId = ++catalogRequestRef.current;
     if (showSpinner) setLoading(true);
     setError(null);
     try {
-      const [nextCatalog, nextAssets] = await Promise.all([
-        getMediaCatalog(),
-        listMediaAssets(),
-      ]);
+      const nextCatalog = await getMediaCatalog();
+      if (requestId !== catalogRequestRef.current) return;
       setCatalog(nextCatalog);
-      setAssets(nextAssets);
+      catalogRevisionRef.current = mediaCatalogRevision;
     } catch (reason) {
-      setError(errorText(reason));
+      if (requestId === catalogRequestRef.current) setError(errorText(reason));
     } finally {
-      setLoading(false);
+      if (requestId === catalogRequestRef.current) setLoading(false);
+    }
+  };
+
+  const loadHistory = async (targetKind: MediaKind, reset = false) => {
+    const requestId = ++historyRequestRef.current[targetKind];
+    const offset = reset ? 0 : assets.filter((asset) => asset.kind === targetKind).length;
+    setHistoryState((current) => ({
+      ...current,
+      [targetKind]: {
+        ...current[targetKind],
+        loading: reset,
+        loadingMore: !reset,
+      },
+    }));
+    try {
+      const page = await listMediaAssets(targetKind, MEDIA_HISTORY_PAGE_SIZE, offset);
+      if (requestId !== historyRequestRef.current[targetKind]) return;
+      setAssets((current) => mergeAssets(
+        reset ? current.filter((asset) => asset.kind !== targetKind) : current,
+        page.assets,
+      ));
+      setHistoryState((current) => ({
+        ...current,
+        [targetKind]: {
+          ...current[targetKind],
+          loaded: true,
+          hasMore: page.hasMore,
+        },
+      }));
+    } catch (reason) {
+      if (requestId === historyRequestRef.current[targetKind]) setError(errorText(reason));
+    } finally {
+      if (requestId === historyRequestRef.current[targetKind]) {
+        setHistoryState((current) => ({
+          ...current,
+          [targetKind]: {
+            ...current[targetKind],
+            loading: false,
+            loadingMore: false,
+          },
+        }));
+      }
     }
   };
 
   useEffect(() => {
-    void load();
-  }, []);
+    if (!active || catalogRevisionRef.current === mediaCatalogRevision) return;
+    void loadCatalog();
+  }, [active, mediaCatalogRevision]);
+
+  useEffect(() => {
+    if (!active || historyState[kind].loaded || historyState[kind].loading) return;
+    void loadHistory(kind, true);
+  }, [active, kind]);
 
   useEffect(() => {
     if (!selected) return;
@@ -186,6 +281,32 @@ export function MediaStudio({ active, locale, dropActive, referenceDrop, onRefer
   useEffect(() => {
     if (!transparentBackgroundSupported && background === "transparent") setBackground("auto");
   }, [transparentBackgroundSupported]);
+
+  useEffect(() => {
+    if (kind !== "video") return;
+    if (isGrokVideo15 && videoMode !== "image") setVideoMode("image");
+    else if (!isGrokVideo && videoMode !== "text") setVideoMode("text");
+    if (!videoResolutionOptions.includes(videoResolution)) setVideoResolution("720p");
+  }, [kind, isGrokVideo, isGrokVideo15, selectedModelId]);
+
+  useEffect(() => {
+    if (kind === "video" && activeVideoMode === "reference" && !videoDurationOptions.includes(seconds)) {
+      setSeconds(8);
+    }
+  }, [kind, activeVideoMode]);
+
+  useEffect(() => {
+    if (kind !== "video") return;
+    const expectedKind = activeVideoMode === "video" ? "video" : "image";
+    const maximum = activeVideoMode === "reference" ? 7 : activeVideoMode === "text" ? 0 : 1;
+    setVideoReferences((current) => {
+      const retained = current.filter((item) => item.kind === expectedKind).slice(0, maximum);
+      const retainedIds = new Set(retained.map((item) => item.id));
+      const discarded = current.filter((item) => !retainedIds.has(item.id));
+      void Promise.all(discarded.map((item) => deleteImageAttachment(item.id).catch(() => false)));
+      return retained;
+    });
+  }, [kind, activeVideoMode]);
 
   useEffect(() => {
     onPendingCountChange(pendingAssets.length);
@@ -231,24 +352,24 @@ export function MediaStudio({ active, locale, dropActive, referenceDrop, onRefer
     setPrompts((current) => current.length === 1 ? current : current.filter((item) => item.id !== id));
   };
 
-  const addReferences = async () => {
+  const addImageReferences = async () => {
     try {
       const selectedImages = await selectImageReferences();
-      await acceptReferences(selectedImages);
+      await acceptImageReferences(selectedImages);
     } catch (reason) {
       setError(errorText(reason));
     }
   };
 
-  const acceptReferences = async (incoming: ImageAttachment[]) => {
-    const ids = new Set(references.map((item) => item.id));
-    const available = Math.max(0, 8 - references.length);
+  const acceptImageReferences = async (incoming: ImageAttachment[]) => {
+    const ids = new Set(imageReferences.map((item) => item.id));
+    const available = Math.max(0, 8 - imageReferences.length);
     const accepted = incoming
       .filter((item) => item.kind === "image" && !ids.has(item.id))
       .slice(0, available);
     const acceptedIds = new Set(accepted.map((item) => item.id));
     const discarded = incoming.filter((item) => !acceptedIds.has(item.id));
-    setReferences((current) => [...current, ...accepted].slice(0, 8));
+    setImageReferences((current) => [...current, ...accepted].slice(0, 8));
     await Promise.all(discarded.map((item) => deleteImageAttachment(item.id).catch(() => false)));
     if (incoming.some((item) => item.kind !== "image")) {
       setError(tr("创作空间的拖拽区域只接受图片参考", "The Media Studio drop zone accepts image references only"));
@@ -257,30 +378,100 @@ export function MediaStudio({ active, locale, dropActive, referenceDrop, onRefer
     }
   };
 
+  const changeVideoMode = (nextMode: VideoGenerationMode) => {
+    if (isGrokVideo15 && nextMode !== "image") return;
+    setVideoMode(nextMode);
+    setError(null);
+  };
+
+  const addVideoReferences = async () => {
+    try {
+      const incoming = activeVideoMode === "video"
+        ? await selectVideoReference()
+        : await selectImageReferences();
+      await acceptVideoReferences(incoming, activeVideoMode);
+    } catch (reason) {
+      setError(errorText(reason));
+    }
+  };
+
+  const acceptVideoReferences = async (incoming: ImageAttachment[], targetMode: VideoGenerationMode) => {
+    const expectedKind = targetMode === "video" ? "video" : "image";
+    const maximum = targetMode === "reference" ? 7 : targetMode === "text" ? 0 : 1;
+    const compatibleCurrent = videoReferences.filter((item) => item.kind === expectedKind).slice(0, maximum);
+    const ids = new Set(compatibleCurrent.map((item) => item.id));
+    const available = Math.max(0, maximum - compatibleCurrent.length);
+    const accepted = incoming
+      .filter((item) => item.kind === expectedKind && !ids.has(item.id))
+      .slice(0, available);
+    const retainedIds = new Set([...compatibleCurrent, ...accepted].map((item) => item.id));
+    const discarded = [...videoReferences, ...incoming].filter((item) => !retainedIds.has(item.id));
+    setVideoMode(targetMode);
+    setVideoReferences([...compatibleCurrent, ...accepted]);
+    await Promise.all(discarded.map((item) => deleteImageAttachment(item.id).catch(() => false)));
+    if (incoming.some((item) => item.kind !== expectedKind)) {
+      setError(targetMode === "video"
+        ? tr("视频编辑只接受一个 MP4 视频", "Video editing accepts one MP4 video only")
+        : tr("当前视频模式只接受图片", "The current video mode accepts images only"));
+    } else if (accepted.length < incoming.length) {
+      setError(targetMode === "reference"
+        ? tr("最多添加 7 张视频参考图", "You can add up to 7 video reference images")
+        : tr("当前模式只能添加一个参考素材", "The current mode accepts one reference only"));
+    }
+  };
+
   const importReferencePaths = async (paths: string[]) => {
-    const available = Math.max(0, 8 - references.length);
+    if (kind === "video") {
+      if (!isGrokVideo) {
+        setError(tr("当前视频模型不支持本地参考素材", "The selected video model does not support local references"));
+        return;
+      }
+      const imported = await importMediaReferences(paths.slice(0, 7));
+      const containsVideo = imported.some((item) => item.kind === "video");
+      const targetMode: VideoGenerationMode = containsVideo
+        ? "video"
+        : isGrokVideo15 || activeVideoMode === "image"
+          ? "image"
+          : activeVideoMode === "reference" || imported.length > 1
+            ? "reference"
+            : "image";
+      if (isGrokVideo15 && targetMode !== "image") {
+        await Promise.all(imported.map((item) => deleteImageAttachment(item.id).catch(() => false)));
+        setError(tr("Grok 1.5 只支持单张首帧图", "Grok 1.5 supports one first-frame image only"));
+        return;
+      }
+      await acceptVideoReferences(imported, targetMode);
+      return;
+    }
+    const available = Math.max(0, 8 - imageReferences.length);
     if (available === 0) {
       setError(tr("最多添加 8 张参考图", "You can add up to 8 reference images"));
       return;
     }
     const imported = await importAttachments(paths.slice(0, 12));
-    await acceptReferences(imported);
+    await acceptImageReferences(imported);
   };
 
   const importPastedReferences = async (files: File[]) => {
-    const available = Math.max(0, 8 - references.length);
+    const targetVideoMode = kind === "video" && isGrokVideo
+      ? isGrokVideo15 || !matchesImageVideoMode(activeVideoMode) ? "image" : activeVideoMode
+      : null;
+    const maximum = targetVideoMode === "reference" ? 7 : targetVideoMode ? 1 : 8;
+    const existing = targetVideoMode ? videoReferences.length : imageReferences.length;
+    const available = Math.max(0, maximum - existing);
     if (available === 0) {
-      setError(tr("最多添加 8 张参考图", "You can add up to 8 reference images"));
+      setError(tr("当前参考素材数量已达上限", "The reference limit has been reached"));
       return;
     }
-    const selected = files.slice(0, available);
+    const selectedFiles = files.slice(0, available);
     setPastingReferences(true);
     setError(null);
     try {
-      const imported = await importClipboardImages(selected);
-      await acceptReferences(imported);
-      if (selected.length < files.length) {
-        setError(tr("最多添加 8 张参考图，超出的图片未粘贴", "You can add up to 8 reference images; extra images were not pasted"));
+      const imported = await importClipboardImages(selectedFiles);
+      if (targetVideoMode) await acceptVideoReferences(imported, targetVideoMode);
+      else await acceptImageReferences(imported);
+      if (selectedFiles.length < files.length) {
+        setError(tr("超出数量上限的图片未粘贴", "Images beyond the reference limit were not pasted"));
       }
     } catch (reason) {
       setError(errorText(reason));
@@ -291,7 +482,6 @@ export function MediaStudio({ active, locale, dropActive, referenceDrop, onRefer
 
   useEffect(() => {
     if (!active || !referenceDrop) return;
-    setKind("image");
     setError(null);
     void importReferencePaths(referenceDrop.paths)
       .catch((reason) => setError(errorText(reason)))
@@ -309,7 +499,7 @@ export function MediaStudio({ active, locale, dropActive, referenceDrop, onRefer
       const files = clipboardImageFiles(event.clipboardData);
       if (files.length === 0) return;
       event.preventDefault();
-      setKind("image");
+      if (kind !== "video" || !isGrokVideo) setKind("image");
       if (pastingReferences) {
         setError(tr("正在处理上一批粘贴图片", "The previous pasted images are still being processed"));
         return;
@@ -318,31 +508,49 @@ export function MediaStudio({ active, locale, dropActive, referenceDrop, onRefer
     };
     window.addEventListener("paste", handlePaste);
     return () => window.removeEventListener("paste", handlePaste);
-  }, [active, pastingReferences, references]);
+  }, [active, pastingReferences, kind, isGrokVideo, isGrokVideo15, activeVideoMode, imageReferences, videoReferences]);
 
-  const removeReference = async (attachment: ImageAttachment) => {
-    setReferences((current) => current.filter((item) => item.id !== attachment.id));
+  const removeImageReference = async (attachment: ImageAttachment) => {
+    setImageReferences((current) => current.filter((item) => item.id !== attachment.id));
+    await deleteImageAttachment(attachment.id).catch(() => undefined);
+  };
+
+  const removeVideoReference = async (attachment: ImageAttachment) => {
+    setVideoReferences((current) => current.filter((item) => item.id !== attachment.id));
     await deleteImageAttachment(attachment.id).catch(() => undefined);
   };
 
   const generate = async () => {
     const activePrompts = prompts.map((item) => item.prompt.trim()).filter(Boolean);
     if (!selected || activePrompts.length === 0 || busy) return;
+    if (!videoReferenceReady) {
+      setError(videoReferenceRequirement(activeVideoMode));
+      return;
+    }
     setBusy(true);
     setError(null);
+    const grokVideoHasOutputControls = isGrokVideo && activeVideoMode !== "video";
+    const videoSizeLabel = grokVideoHasOutputControls ? `${videoResolution} · ${videoAspectRatio}` : undefined;
     const base: Omit<MediaGenerationRequest, "prompt"> = {
       kind,
       profileId: selected.profileId,
       model: selected.id,
       count,
-      size: kind === "audio" ? undefined : size,
+      size: kind === "image" || (kind === "video" && !isGrokVideo) ? size : undefined,
       quality: kind === "image" && quality !== "auto" ? quality : undefined,
       outputFormat: kind === "video" ? undefined : outputFormat,
       background: kind === "image" && background !== "auto" ? background : undefined,
       voice: kind === "audio" && voice.trim() ? voice.trim() : undefined,
       instructions: kind === "audio" && instructions.trim() ? instructions.trim() : undefined,
-      seconds: kind === "video" ? seconds : undefined,
-      referenceAttachmentIds: kind === "image" ? references.map((item) => item.id) : [],
+      seconds: kind === "video" && activeVideoMode !== "video" ? seconds : undefined,
+      videoMode: kind === "video" && isGrokVideo ? activeVideoMode : "text",
+      videoResolution: grokVideoHasOutputControls ? videoResolution : undefined,
+      videoAspectRatio: grokVideoHasOutputControls ? videoAspectRatio : undefined,
+      referenceAttachmentIds: kind === "image"
+        ? imageReferences.map((item) => item.id)
+        : kind === "video" && isGrokVideo && activeVideoMode !== "text"
+          ? videoReferences.map((item) => item.id)
+          : [],
     };
     const tasks = activePrompts.map((prompt) => {
       const pendingBatchId = `pending-${crypto.randomUUID()}`;
@@ -356,7 +564,7 @@ export function MediaStudio({ active, locale, dropActive, referenceDrop, onRefer
         status: "in_progress",
         prompt,
         model: selected.id,
-        size: base.size,
+        size: videoSizeLabel ?? base.size,
         quality: base.quality,
         outputFormat: base.outputFormat,
         voice: base.voice,
@@ -388,7 +596,7 @@ export function MediaStudio({ active, locale, dropActive, referenceDrop, onRefer
 
   const refreshAll = async () => {
     setRefreshing(true);
-    await load(false);
+    await Promise.all([loadCatalog(false), loadHistory(kind, true)]);
     setRefreshing(false);
   };
 
@@ -412,17 +620,21 @@ export function MediaStudio({ active, locale, dropActive, referenceDrop, onRefer
     >
       {dropActive && (
         <div className="media-drop-overlay" role="status" aria-live="polite">
-          <span><ImagePlus size={28} /></span>
-          <strong>{tr("拖入即可作为参考图", "Drop to add image references")}</strong>
-          <small>{tr("图片会添加到当前创作任务，不会进入会话附件", "Images are added to Media Studio, not to the conversation")}</small>
+          <span>{kind === "video" && activeVideoMode === "video" ? <Video size={28} /> : <ImagePlus size={28} />}</span>
+          <strong>{mediaDropTitle(kind, activeVideoMode)}</strong>
+          <small>{tr("素材会添加到当前创作任务，不会进入会话附件", "References are added to Media Studio, not to the conversation")}</small>
         </div>
       )}
       <header className="media-topbar" data-tauri-drag-region>
-        <div>
+        <div className="media-topbar-brand">
           <span className="media-title-icon"><WandSparkles size={17} /></span>
           <span><strong>{tr("创作空间", "Media Studio")}</strong><small>{tr("独立于会话，所有生成结果全局保存", "Independent from conversations, with global history")}</small></span>
         </div>
-        <div>
+        <div className="creation-mode-switch" role="tablist" aria-label={tr("创作类型", "Creation mode")}>
+          <button type="button" role="tab" aria-selected="true" className="active"><ImagePlus size={14} />{tr("图片 · 视频 · 语音", "Image · Video · Speech")}</button>
+          <button type="button" role="tab" aria-selected="false" onClick={onWriting}><BookOpen size={14} />{tr("写作", "Writing")}</button>
+        </div>
+        <div className="media-topbar-actions">
           <button className="media-icon-button" disabled={refreshing} onClick={() => void refreshAll()} title={tr("刷新模型和历史", "Refresh models and history")}>
             <RefreshCw className={refreshing ? "spin" : ""} size={16} />
           </button>
@@ -459,6 +671,32 @@ export function MediaStudio({ active, locale, dropActive, referenceDrop, onRefer
             {selected?.recommended && <span className="recommended-model"><Sparkles size={12} />{tr("已自动选择最新模型", "Newest model selected automatically")}</span>}
           </div>
 
+          {isGrokVideo && (
+            <div className="media-video-mode-control">
+              <span>{tr("生成方式", "Video mode")}</span>
+              <div role="radiogroup" aria-label={tr("视频生成方式", "Video generation mode")}>
+                {GROK_VIDEO_MODES.map((mode) => {
+                  const unsupported = isGrokVideo15 && mode !== "image";
+                  return (
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked={activeVideoMode === mode}
+                      className={activeVideoMode === mode ? "active" : ""}
+                      disabled={unsupported}
+                      title={unsupported ? tr("Grok 1.5 仅支持首帧图生成", "Grok 1.5 supports first-frame generation only") : videoModeDescription(mode)}
+                      onClick={() => changeVideoMode(mode)}
+                      key={mode}
+                    >
+                      {videoModeLabel(mode)}
+                    </button>
+                  );
+                })}
+              </div>
+              <small>{videoModeDescription(activeVideoMode)}</small>
+            </div>
+          )}
+
           <div className="media-prompt-list">
             {prompts.map((item, index) => (
               <article className="media-prompt-card" key={item.id}>
@@ -475,25 +713,27 @@ export function MediaStudio({ active, locale, dropActive, referenceDrop, onRefer
           <button className="add-media-prompt" disabled={prompts.length >= 8} onClick={addPrompt}><Plus size={14} />{tr("添加并行提示词", "Add parallel prompt")}</button>
 
           <div className="media-options-grid">
-            {kind !== "audio" && (
+            {kind === "image" && (
               <label><span>{tr("尺寸 / 比例", "Size / ratio")}</span><select value={size} onChange={(event) => setSize(event.target.value)}>
-                {kind === "image" ? (
-                  <>
-                    <option value="auto">{tr("auto（模型自动，推荐）", "auto (model decides, recommended)")}</option>
-                    <optgroup label={tr("像素尺寸", "Pixel dimensions")}>
-                      {IMAGE_DIMENSION_OPTIONS.map((option) => (
-                        <option value={option.value} key={option.value}>
-                          {option.value.replace("x", " × ")} · {option.ratio}{option.experimental ? tr(" · 实验性", " · Experimental") : ""}
-                        </option>
-                      ))}
-                    </optgroup>
-                    <optgroup label={tr("仅指定构图比例", "Aspect ratio only")}>
-                      {IMAGE_RATIO_OPTIONS.map((value) => <option value={value} key={value}>{value}</option>)}
-                    </optgroup>
-                  </>
-                ) : VIDEO_SIZE_OPTIONS.map((value) => <option value={value} key={value}>{value}</option>)}
+                <option value="auto">{tr("auto（模型自动，推荐）", "auto (model decides, recommended)")}</option>
+                <optgroup label={tr("像素尺寸", "Pixel dimensions")}>
+                  {IMAGE_DIMENSION_OPTIONS.map((option) => (
+                    <option value={option.value} key={option.value}>
+                      {option.value.replace("x", " × ")} · {option.ratio}{option.experimental ? tr(" · 实验性", " · Experimental") : ""}
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label={tr("仅指定构图比例", "Aspect ratio only")}>
+                  {IMAGE_RATIO_OPTIONS.map((value) => <option value={value} key={value}>{value}</option>)}
+                </optgroup>
               </select></label>
             )}
+            {kind === "video" && !isGrokVideo && <label><span>{tr("尺寸 / 比例", "Size / ratio")}</span><select value={size} onChange={(event) => setSize(event.target.value)}>{VIDEO_SIZE_OPTIONS.map((value) => <option value={value} key={value}>{value}</option>)}</select></label>}
+            {kind === "video" && isGrokVideo && activeVideoMode !== "video" && <>
+              <label><span>{tr("画面比例", "Aspect ratio")}</span><select value={videoAspectRatio} onChange={(event) => setVideoAspectRatio(event.target.value)}>{GROK_VIDEO_ASPECT_OPTIONS.map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
+              <label><span>{tr("清晰度", "Resolution")}</span><select value={videoResolution} onChange={(event) => setVideoResolution(event.target.value)}>{videoResolutionOptions.map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
+            </>}
+            {kind === "video" && isGrokVideo && activeVideoMode === "video" && <div className="media-inherited-video-size"><span>{tr("尺寸与时长", "Size and duration")}</span><strong>{tr("继承源视频 · 最高 720p", "Inherited from source · up to 720p")}</strong></div>}
             {kind === "image" && <label><span>{tr("质量", "Quality")}</span><select value={quality} onChange={(event) => setQuality(event.target.value)}>{["auto", "high", "medium", "2K", "4K"].map((value) => <option key={value}>{value}</option>)}</select></label>}
             {kind === "image" && <label><span>{tr("背景", "Background")}</span><select value={background} onChange={(event) => setBackground(event.target.value)}>
               <option value="auto">auto</option>
@@ -501,7 +741,7 @@ export function MediaStudio({ active, locale, dropActive, referenceDrop, onRefer
               <option value="opaque">opaque</option>
             </select></label>}
             {kind !== "video" && <label><span>{tr("格式", "Format")}</span><select value={outputFormat} onChange={(event) => setOutputFormat(event.target.value)}>{(kind === "image" ? ["png", "webp", "jpeg"] : ["mp3", "wav", "aac", "flac", "opus"]).map((value) => <option key={value}>{value}</option>)}</select></label>}
-            {kind === "video" && <label><span>{tr("时长", "Duration")}</span><select value={seconds} onChange={(event) => setSeconds(Number(event.target.value))}>{[4, 8, 12].map((value) => <option value={value} key={value}>{value}s</option>)}</select></label>}
+            {kind === "video" && activeVideoMode !== "video" && <label><span>{tr("时长", "Duration")}</span><select value={seconds} onChange={(event) => setSeconds(Number(event.target.value))}>{videoDurationOptions.map((value) => <option value={value} key={value}>{value}s</option>)}</select></label>}
             <label><span>{tr("每条数量", "Outputs each")}</span><select value={count} onChange={(event) => setCount(Number(event.target.value))}>{Array.from({ length: kind === "image" ? 8 : 4 }, (_, index) => index + 1).map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
             {kind === "audio" && <label><span>{tr("声音", "Voice")}</span><input value={voice} placeholder={tr("留空自动选择", "Automatic when empty")} onChange={(event) => setVoice(event.target.value)} /></label>}
           </div>
@@ -512,9 +752,22 @@ export function MediaStudio({ active, locale, dropActive, referenceDrop, onRefer
             <div className="media-reference-row">
               <div className="media-reference-heading">
                 <span>{tr("参考图", "References")}<small>{pastingReferences ? tr("正在粘贴图片…", "Pasting images…") : tr("可拖拽、选择，或按 Ctrl+V 粘贴外部图片", "Drop, choose, or press Ctrl+V to paste images")}</small></span>
-                <button disabled={pastingReferences || references.length >= 8} onClick={() => void addReferences()}>{pastingReferences ? <LoaderCircle className="spin" size={14} /> : <ImagePlus size={14} />}{tr("选择图片", "Choose images")}</button>
+                <button disabled={pastingReferences || imageReferences.length >= 8} onClick={() => void addImageReferences()}>{pastingReferences ? <LoaderCircle className="spin" size={14} /> : <ImagePlus size={14} />}{tr("选择图片", "Choose images")}</button>
               </div>
-              <div>{references.map((attachment) => <AttachmentChip attachment={attachment} onRemove={() => void removeReference(attachment)} key={attachment.id} />)}</div>
+              <div>{imageReferences.map((attachment) => <AttachmentChip attachment={attachment} onRemove={() => void removeImageReference(attachment)} key={attachment.id} />)}</div>
+            </div>
+          )}
+
+          {kind === "video" && isGrokVideo && activeVideoMode !== "text" && (
+            <div className="media-reference-row media-video-reference-row">
+              <div className="media-reference-heading">
+                <span>{videoReferenceTitle(activeVideoMode)}<small>{videoReferenceHint(activeVideoMode, pastingReferences)}</small></span>
+                <button disabled={pastingReferences || videoReferences.length >= (activeVideoMode === "reference" ? 7 : 1)} onClick={() => void addVideoReferences()}>
+                  {pastingReferences ? <LoaderCircle className="spin" size={14} /> : activeVideoMode === "video" ? <Video size={14} /> : <ImagePlus size={14} />}
+                  {activeVideoMode === "video" ? tr("选择视频", "Choose video") : tr("选择图片", "Choose images")}
+                </button>
+              </div>
+              <div>{videoReferences.map((attachment) => <AttachmentChip attachment={attachment} onRemove={() => void removeVideoReference(attachment)} key={attachment.id} />)}</div>
             </div>
           )}
 
@@ -524,9 +777,9 @@ export function MediaStudio({ active, locale, dropActive, referenceDrop, onRefer
           {models.length === 0 && !loading ? (
             <button className="media-configure-button" onClick={onConfigureConnection}><Settings2 size={15} />{tr("配置支持生成能力的模型连接", "Configure a media-capable model connection")}</button>
           ) : (
-            <button className="media-generate-button" disabled={busy || pastingReferences || loading || !selected || !prompts.some((item) => item.prompt.trim())} onClick={() => void generate()}>
+            <button className="media-generate-button" disabled={busy || pastingReferences || loading || !selected || !videoReferenceReady || !prompts.some((item) => item.prompt.trim())} onClick={() => void generate()}>
               {busy || pastingReferences ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}
-              {pastingReferences ? tr("正在添加参考图", "Adding references") : busy ? tr(`正在并行生成 ${pendingAssets.length} 个结果`, `Generating ${pendingAssets.length} outputs in parallel`) : tr("开始生成", "Generate")}
+              {pastingReferences ? tr("正在添加参考素材", "Adding references") : busy ? tr(`正在并行生成 ${pendingAssets.length} 个结果`, `Generating ${pendingAssets.length} outputs in parallel`) : tr("开始生成", "Generate")}
             </button>
           )}
         </section>
@@ -534,17 +787,31 @@ export function MediaStudio({ active, locale, dropActive, referenceDrop, onRefer
         <section className="media-gallery-panel">
           <div className="media-gallery-heading">
             <div>
-              <strong>{tr("创作历史", "Creation history")}</strong><span>{visibleAssets.length}</span>
+              <strong>{tr("创作历史", "Creation history")}</strong><span title={currentHistoryState.hasMore ? tr("还有更多历史未读取", "More history is available") : undefined}>{visibleAssets.length}{currentHistoryState.hasMore ? "+" : ""}</span>
               {visiblePendingAssets.length > 0 && <em><LoaderCircle className="spin" size={12} />{tr(`${visiblePendingAssets.length} 个生成中`, `${visiblePendingAssets.length} generating`)}</em>}
             </div>
             <small>{tr("结果保存在本机应用数据目录", "Outputs are stored in local app data")}</small>
           </div>
-          {loading ? <div className="media-empty"><LoaderCircle className="spin" size={24} /><span>{tr("正在读取模型和历史", "Loading models and history")}</span></div>
+          {currentHistoryState.loading && !currentHistoryState.loaded ? <div className="media-empty"><LoaderCircle className="spin" size={24} /><span>{tr("正在读取首段历史", "Loading recent history")}</span></div>
             : displayedAssets.length === 0 ? <div className="media-empty"><KindIcon kind={kind} /><strong>{tr("还没有作品", "No creations yet")}</strong><span>{tr("输入提示词后，结果会自动出现在这里", "Generated outputs will appear here automatically")}</span></div>
-              : <div className="media-gallery-grid">{displayedAssets.map((asset) => <MediaAssetCard asset={asset} locale={locale} onDelete={asset.pendingOutput ? undefined : () => void removeAsset(asset)} onPreview={asset.kind === "image" && asset.status === "completed" ? () => setPreviewAsset(asset) : undefined} key={asset.id} />)}</div>}
+              : <>
+                <div className="media-gallery-grid">{displayedAssets.map((asset) => <MediaAssetCard asset={asset} locale={locale} onDelete={asset.pendingOutput ? undefined : () => void removeAsset(asset)} onPreview={asset.kind === "image" && asset.status === "completed" ? () => setPreviewAsset(asset) : undefined} key={asset.id} />)}</div>
+                {currentHistoryState.hasMore && <div className="media-history-pagination">
+                  <button type="button" disabled={currentHistoryState.loadingMore} onClick={() => void loadHistory(kind)}>
+                    {currentHistoryState.loadingMore && <LoaderCircle className="spin" size={14} />}
+                    {currentHistoryState.loadingMore ? tr("正在读取下一段", "Loading next page") : tr(`继续读取 ${MEDIA_HISTORY_PAGE_SIZE} 条`, `Load ${MEDIA_HISTORY_PAGE_SIZE} more`)}
+                  </button>
+                </div>}
+              </>}
         </section>
       </div>
-      {active && previewAsset && <MediaImagePreview asset={previewAsset} locale={locale} onClose={() => setPreviewAsset(null)} />}
+      {active && previewAsset && <MediaImagePreview
+        asset={previewAsset}
+        locale={locale}
+        previewAssets={previewableAssets}
+        onNavigate={(nextAsset) => setPreviewAsset(nextAsset)}
+        onClose={() => setPreviewAsset(null)}
+      />}
     </main>
   );
 }
@@ -555,9 +822,13 @@ export function MediaAssetCard({ asset, locale, onDelete, onPreview }: { asset: 
   const [promptExpanded, setPromptExpanded] = useState(false);
   const [promptCopyStatus, setPromptCopyStatus] = useState<"idle" | "copied" | "error">("idle");
   const [exportFeedback, setExportFeedback] = useState<{ error: boolean; text: string } | null>(null);
+  const [videoRatio, setVideoRatio] = useState<number | null>(null);
   const canExport = asset.status === "completed" && Boolean(asset.filePath && asset.fileName);
   const canPreview = asset.status === "completed" && asset.kind === "image" && Boolean(url && onPreview);
   const canExpandPrompt = asset.prompt.trim().length > 42;
+  const previewRatio = asset.kind === "video" ? videoRatio ?? mediaAssetAspectRatio(asset) ?? 16 / 9 : 4 / 3;
+
+  useEffect(() => setVideoRatio(null), [asset.id]);
 
   const exportAsset = async () => {
     if (!canExport || exporting) return;
@@ -586,15 +857,18 @@ export function MediaAssetCard({ asset, locale, onDelete, onPreview }: { asset: 
   };
 
   return (
-    <article className={`media-asset-card status-${asset.status} ${canExport || onDelete ? "has-actions" : ""}`}>
-      <div className="media-preview">
+    <article className={`media-asset-card kind-${asset.kind} status-${asset.status} ${canExport || onDelete ? "has-actions" : ""}`}>
+      <div className="media-preview" style={{ aspectRatio: previewRatio }}>
         {asset.status === "completed" && url && asset.kind === "image" && (canPreview ? (
           <button className="media-preview-trigger" type="button" onClick={onPreview} aria-label={tr("打开大图预览", "Open large image preview")}>
             <img src={url} alt={asset.revisedPrompt || asset.prompt} />
             <span><Maximize2 size={14} />{tr("查看大图", "View large")}</span>
           </button>
         ) : <img src={url} alt={asset.revisedPrompt || asset.prompt} />)}
-        {asset.status === "completed" && url && asset.kind === "video" && <video src={url} controls preload="metadata" />}
+        {asset.status === "completed" && url && asset.kind === "video" && <video src={url} controls preload="metadata" onLoadedMetadata={(event) => {
+          const { videoWidth, videoHeight } = event.currentTarget;
+          if (videoWidth > 0 && videoHeight > 0) setVideoRatio(videoWidth / videoHeight);
+        }} />}
         {asset.status === "completed" && url && asset.kind === "audio" && <div className="audio-preview"><AudioLines size={28} /><audio src={url} controls preload="metadata" /></div>}
         {(asset.status === "queued" || asset.status === "in_progress") && <div className="pending-preview"><LoaderCircle className="spin" size={24} /><strong>{statusLabel(asset.status)}</strong><span>{pendingAssetDetail(asset)}</span></div>}
         {asset.status === "failed" && <div className="failed-preview"><CircleAlert size={24} /><strong>{tr("生成失败", "Generation failed")}</strong></div>}
@@ -615,6 +889,7 @@ export function MediaAssetCard({ asset, locale, onDelete, onPreview }: { asset: 
           </div>}
         </div>
         <div className="media-asset-meta"><span>{asset.model}</span><span>{asset.providerName}</span></div>
+        {asset.kind === "video" && (asset.size || asset.seconds) && <div className="media-asset-specs">{asset.size && <span>{asset.size}</span>}{asset.seconds && <span>{asset.seconds}s</span>}</div>}
         <small><Clock3 size={11} />{new Intl.DateTimeFormat(locale, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(asset.createdAt)}</small>
         {asset.error && <em title={asset.error}>{mediaErrorSummary(asset.error)}</em>}
         {exportFeedback && <em className={exportFeedback.error ? "media-export-error" : "media-export-success"} title={exportFeedback.text}>{exportFeedback.error ? <CircleAlert size={11} /> : <Check size={11} />}{exportFeedback.text}</em>}
@@ -627,7 +902,19 @@ export function MediaAssetCard({ asset, locale, onDelete, onPreview }: { asset: 
   );
 }
 
-function MediaImagePreview({ asset, locale, onClose }: { asset: MediaAsset; locale: string; onClose: () => void }) {
+function MediaImagePreview({
+  asset,
+  locale,
+  previewAssets,
+  onNavigate,
+  onClose,
+}: {
+  asset: MediaAsset;
+  locale: string;
+  previewAssets: MediaAsset[];
+  onNavigate: (asset: MediaAsset) => void;
+  onClose: () => void;
+}) {
   const url = mediaAssetUrl(asset);
   const canvasRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{
@@ -640,7 +927,23 @@ function MediaImagePreview({ asset, locale, onClose }: { asset: MediaAsset; loca
   const [imageSize, setImageSize] = useState({ width: 0, height: 0 });
   const [view, setView] = useState<PreviewTransform>({ zoom: 1, x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState(false);
   const imageReady = imageSize.width > 0 && imageSize.height > 0;
+  const currentIndex = previewAssets.findIndex((item) => item.id === asset.id);
+  const previousAsset = currentIndex > 0 ? previewAssets[currentIndex - 1] : undefined;
+  const nextAsset = currentIndex >= 0 && currentIndex < previewAssets.length - 1
+    ? previewAssets[currentIndex + 1]
+    : undefined;
+
+  useEffect(() => {
+    dragRef.current = null;
+    setDragging(false);
+    setImageSize({ width: 0, height: 0 });
+    setView({ zoom: 1, x: 0, y: 0 });
+    setExporting(false);
+    setExportError(false);
+  }, [asset.id]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -705,7 +1008,7 @@ function MediaImagePreview({ asset, locale, onClose }: { asset: MediaAsset; loca
 
   const beginDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 || !imageReady) return;
-    if ((event.target as Element).closest(".media-image-lightbox-toolbar")) return;
+    if ((event.target as Element).closest(".media-image-lightbox-toolbar, .media-image-lightbox-nav")) return;
     event.preventDefault();
     event.currentTarget.focus();
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -747,7 +1050,7 @@ function MediaImagePreview({ asset, locale, onClose }: { asset: MediaAsset; loca
   };
 
   const handleWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
-    if (!imageReady || (event.target as Element).closest(".media-image-lightbox-toolbar")) return;
+    if (!imageReady || (event.target as Element).closest(".media-image-lightbox-toolbar, .media-image-lightbox-nav")) return;
     event.preventDefault();
     const bounds = event.currentTarget.getBoundingClientRect();
     const anchor = {
@@ -786,6 +1089,22 @@ function MediaImagePreview({ asset, locale, onClose }: { asset: MediaAsset; loca
   };
 
   if (!url) return null;
+  const navigateTo = (next: MediaAsset | undefined) => {
+    if (!next) return;
+    onNavigate(next);
+  };
+  const downloadImage = async () => {
+    if (exporting || asset.status !== "completed" || !asset.fileName) return;
+    setExporting(true);
+    setExportError(false);
+    try {
+      await exportMediaAsset(asset);
+    } catch {
+      setExportError(true);
+    } finally {
+      setExporting(false);
+    }
+  };
   const createdAt = new Intl.DateTimeFormat(locale, {
     year: "numeric",
     month: "short",
@@ -804,7 +1123,19 @@ function MediaImagePreview({ asset, locale, onClose }: { asset: MediaAsset; loca
             <strong id="media-image-preview-title">{tr("图片预览", "Image preview")}</strong>
             <p title={asset.prompt}>{asset.prompt}</p>
           </div>
-          <button type="button" autoFocus onClick={onClose} aria-label={tr("关闭预览", "Close preview")} title={`${tr("关闭预览", "Close preview")} (Esc)`}><X size={19} /></button>
+          <div className="media-image-lightbox-actions">
+            <button
+              className={`media-image-lightbox-download${exportError ? " error" : ""}`}
+              type="button"
+              disabled={exporting || !asset.fileName}
+              onClick={() => void downloadImage()}
+              aria-label={tr("下载图片", "Download image")}
+              title={exportError ? tr("下载失败，点击重试", "Download failed, click to retry") : tr("下载图片", "Download image")}
+            >
+              {exporting ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}
+            </button>
+            <button className="media-image-lightbox-close" type="button" autoFocus onClick={onClose} aria-label={tr("关闭预览", "Close preview")} title={`${tr("关闭预览", "Close preview")} (Esc)`}><X size={19} /></button>
+          </div>
         </header>
         <div
           ref={canvasRef}
@@ -820,12 +1151,23 @@ function MediaImagePreview({ asset, locale, onClose }: { asset: MediaAsset; loca
           onWheel={handleWheel}
           onKeyDown={handleCanvasKeyDown}
           onDoubleClick={(event) => {
-            if ((event.target as Element).closest(".media-image-lightbox-toolbar")) return;
+            if ((event.target as Element).closest(".media-image-lightbox-toolbar, .media-image-lightbox-nav")) return;
             if (Math.abs(view.zoom - 1) < 0.01) fitImage();
             else showActualSize();
           }}
         >
+          <button
+            className="media-image-lightbox-nav previous"
+            type="button"
+            disabled={!previousAsset}
+            onClick={() => navigateTo(previousAsset)}
+            aria-label={tr("上一张图片", "Previous image")}
+            title={tr("上一张图片", "Previous image")}
+          >
+            <ArrowLeft size={21} />
+          </button>
           <img
+            key={asset.id}
             src={url}
             alt={asset.revisedPrompt || asset.prompt}
             draggable={false}
@@ -840,6 +1182,16 @@ function MediaImagePreview({ asset, locale, onClose }: { asset: MediaAsset; loca
               top: `calc(50% + ${view.y}px)`,
             } : undefined}
           />
+          <button
+            className="media-image-lightbox-nav next"
+            type="button"
+            disabled={!nextAsset}
+            onClick={() => navigateTo(nextAsset)}
+            aria-label={tr("下一张图片", "Next image")}
+            title={tr("下一张图片", "Next image")}
+          >
+            <ArrowRight size={21} />
+          </button>
           <div className="media-image-lightbox-toolbar" role="toolbar" aria-label={tr("图片缩放控制", "Image zoom controls")}>
             <button type="button" disabled={!imageReady} onClick={fitImage} title={`${tr("适应窗口", "Fit to window")} (F)`}><Maximize2 size={14} /><span>{tr("适应窗口", "Fit")}</span></button>
             <button type="button" disabled={!imageReady} onClick={() => showActualSize()} title={`${tr("原始大小", "Actual size")} (0)`}>1:1</button>
@@ -882,6 +1234,61 @@ function constrainPreviewOffset(
 
 function modelKey(model: MediaModelInfo) {
   return `${model.profileId}::${model.id}`;
+}
+
+function matchesImageVideoMode(mode: VideoGenerationMode): mode is "image" | "reference" {
+  return mode === "image" || mode === "reference";
+}
+
+function videoModeLabel(mode: VideoGenerationMode) {
+  if (mode === "image") return tr("首帧图", "First frame");
+  if (mode === "reference") return tr("参考图", "References");
+  if (mode === "video") return tr("视频编辑", "Edit video");
+  return tr("纯文本", "Text");
+}
+
+function videoModeDescription(mode: VideoGenerationMode) {
+  if (mode === "image") return tr("以一张图片作为视频起始画面", "Animate one image as the starting frame");
+  if (mode === "reference") return tr("用 1–7 张图片引导人物、物体或服装一致性", "Guide people, objects, or clothing with 1–7 images");
+  if (mode === "video") return tr("根据提示词编辑一个不超过 8.7 秒的 MP4 视频", "Edit one MP4 video up to 8.7 seconds");
+  return tr("仅根据提示词生成视频", "Generate a video from the prompt only");
+}
+
+function videoReferenceTitle(mode: VideoGenerationMode) {
+  if (mode === "video") return tr("源视频", "Source video");
+  if (mode === "reference") return tr("视频参考图", "Video references");
+  return tr("首帧图", "First-frame image");
+}
+
+function videoReferenceHint(mode: VideoGenerationMode, busy: boolean) {
+  if (busy) return tr("正在添加参考素材…", "Adding references…");
+  if (mode === "video") return tr("选择或拖入一个 MP4，最大 64 MiB", "Choose or drop one MP4, up to 64 MiB");
+  if (mode === "reference") return tr("选择、拖入或粘贴 1–7 张图片", "Choose, drop, or paste 1–7 images");
+  return tr("选择、拖入或粘贴一张图片", "Choose, drop, or paste one image");
+}
+
+function videoReferenceRequirement(mode: VideoGenerationMode) {
+  if (mode === "video") return tr("请先添加一个 MP4 源视频", "Add one MP4 source video first");
+  if (mode === "reference") return tr("请先添加 1–7 张视频参考图", "Add 1–7 video reference images first");
+  return tr("请先添加一张首帧图", "Add one first-frame image first");
+}
+
+function mediaDropTitle(kind: MediaKind, videoMode: VideoGenerationMode) {
+  if (kind !== "video") return tr("拖入即可作为参考图", "Drop to add image references");
+  if (videoMode === "video") return tr("拖入 MP4 作为源视频", "Drop an MP4 source video");
+  if (videoMode === "reference") return tr("拖入图片作为视频参考", "Drop image references for the video");
+  return tr("拖入图片作为首帧", "Drop an image as the first frame");
+}
+
+function mediaAssetAspectRatio(asset: MediaAsset) {
+  const size = asset.size?.toLocaleLowerCase() ?? "";
+  if (size.includes("9:16")) return 9 / 16;
+  if (size.includes("16:9")) return 16 / 9;
+  const dimensions = size.match(/(\d+)\s*x\s*(\d+)/);
+  if (!dimensions) return null;
+  const width = Number(dimensions[1]);
+  const height = Number(dimensions[2]);
+  return width > 0 && height > 0 ? width / height : null;
 }
 
 function mergeAssets(current: MediaAsset[], incoming: MediaAsset[]) {

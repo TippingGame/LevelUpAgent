@@ -195,8 +195,12 @@ async fn run_command(root: &Path, command: &str) -> Result<String, String> {
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            command,
+            &format!(
+                "$OutputEncoding = [System.Text.UTF8Encoding]::new(); [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); {}",
+                command
+            ),
         ]);
+        process.env("PYTHONIOENCODING", "utf-8");
         process
     } else {
         let mut process = Command::new("sh");

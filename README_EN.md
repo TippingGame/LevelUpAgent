@@ -18,7 +18,7 @@
   </p>
 
   <p>
-<img alt="Version" src="https://img.shields.io/badge/version-1.0.7-ff5a4f?style=flat-square" />
+<img alt="Version" src="https://img.shields.io/badge/version-1.0.13-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-stable-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -88,12 +88,30 @@ Choose a project directory, create a conversation, and describe the outcome you 
 - Persistent Instructions with reviewable synchronization to popular CLI instruction files
 - Long-running Goals with pause/resume, completion audits, and blocked audits
 
+### AI writing and game narrative
+
+- Creative Studio opens with image, video, and speech tools first, followed by the writing workspace; novel, screenplay, and game narrative projects autosave to local SQLite independently of conversations
+- Manuscripts support pause-triggered autocomplete, continue, rewrite, polish, expand, shorten, dialogue, and description; streamed completions appear as gray inline text after the caret, like a code editor, with Tab to accept and Escape to reject, plus an automatic snapshot before acceptance
+- Characters, locations, factions, items, world lore, plots, rules, and quests form a linked codex; explicit picks, document/node bindings, nearby mentions, relations, and global rules are ranked into AI context
+- The game narrative graph supports scene, dialogue, choice, condition, and ending nodes, plus variables, conditions, effects, path validation, and built-in playtesting
+- Full projects import/export as JSON and can export to Markdown or Yarn Spinner; writing and image, video, and speech creation remain one switch apart
+
 ### Multimodal creation
 
 - Automatically discovers and recommends the newest available image, video, and TTS model on configured connections
 - A standalone Media Studio with image references, parallel prompts, local history, previews, and Save As export
 - Conversations can call `generate_images`, `generate_videos`, and `generate_speech`; consecutive generation calls run concurrently, preserve result order, and return to the model for one summary
 - OpenAI-compatible image, speech, and Sora flows plus native Gemini image, speech, and Veo flows, with persistent video jobs and automatic polling
+
+### Starlight Echoes
+
+- A separate transparent, always-on-top echo window with built-in Yui; names and avatars come directly from Codex-compatible pet packages
+- A frame-timed state machine plays all nine atlas actions; drag the character anywhere and resize each echo independently
+- Persistent per-echo XP and levels driven by real model input and output tokens
+- Separate game-style bubbles for concurrent conversations, approvals, and background media generation
+- Double-click opens an echo-specific temporary conversation that stays out of the normal conversation database; every echo has isolated, reviewable long-term memory
+- Import, switch, and remove multiple echoes, with automatic discovery from `${CODEX_HOME}/pets`
+- `hatch-pet` and `imagegen` ship inside the app and enable automatically; with Python and a model connection available, one click starts a Goal and imports the validated result
 
 ### Composable extensions
 
@@ -170,6 +188,7 @@ Validate all four protocol contracts against a local LevelUpAPI checkout:
 - [Architecture and security boundaries](docs/ARCHITECTURE.md)
 - [Security audit](docs/SECURITY_AUDIT.md)
 - [LevelUpAPI compatibility evidence](docs/LEVELUPAPI_COMPATIBILITY.md)
+- [Starlight Echo packages, XP, memory, and hatching](docs/DESKTOP_PETS.md)
 - [Roadmap](docs/ROADMAP.md)
 - [Replacement audit](docs/REPLACEMENT_AUDIT.md)
 - [Signed releases and updates](docs/RELEASE.md)

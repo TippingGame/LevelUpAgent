@@ -20,6 +20,15 @@ export interface ProviderSettings {
   activeProfileId: string;
 }
 
+export interface WritingProjectRecord {
+  id: string;
+  title: string;
+  projectType: "novel" | "screenplay" | "game";
+  payload: unknown;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface ThemeManifest {
   schemaVersion: 1 | 2;
   id: string;
@@ -183,11 +192,11 @@ export interface ImageAttachment {
   name: string;
   mimeType: string;
   sizeBytes: number;
-  kind: "image" | "text" | "document";
+  kind: "image" | "video" | "text" | "document";
 }
 
 export interface AttachmentPreview {
-  kind: "image" | "text" | "document";
+  kind: "image" | "video" | "text" | "document";
   mimeType: string;
   dataBase64?: string;
   text?: string;
@@ -323,6 +332,7 @@ export interface ModelInfo {
 
 export type MediaKind = "image" | "video" | "audio";
 export type MediaStatus = "queued" | "in_progress" | "completed" | "failed";
+export type VideoGenerationMode = "text" | "image" | "reference" | "video";
 
 export interface MediaModelInfo {
   id: string;
@@ -351,6 +361,9 @@ export interface MediaGenerationRequest {
   voice?: string;
   instructions?: string;
   seconds?: number;
+  videoMode?: VideoGenerationMode;
+  videoResolution?: string;
+  videoAspectRatio?: string;
   referenceAttachmentIds: string[];
 }
 
@@ -378,6 +391,11 @@ export interface MediaAsset {
   seconds?: number;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface MediaAssetPage {
+  assets: MediaAsset[];
+  hasMore: boolean;
 }
 
 export interface MediaBatchResult {
@@ -434,6 +452,8 @@ export interface AgentThread {
   id: string;
   title: string;
   workspace?: string;
+  kind?: "standard" | "pet";
+  petId?: string;
   messages: AgentMessage[];
   updatedAt: number;
   inputTokens: number;
@@ -448,6 +468,77 @@ export interface PendingApproval {
   startedAt: number;
   nextRound: number;
   profileId: string;
+  rewardPetId?: string;
+}
+
+export interface PetProfile {
+  id: string;
+  displayName: string;
+  description: string;
+  spritesheetPath: string;
+  personality?: string;
+  removable: boolean;
+}
+
+export interface PetProgress {
+  petId: string;
+  level: number;
+  totalXp: number;
+  currentXp: number;
+  requiredXp: number;
+  progress: number;
+  totalTokens: number;
+  requests: number;
+}
+
+export interface PetMemory {
+  id: string;
+  text: string;
+  kind: string;
+  confidence: number;
+  evidenceCount: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface PetDashboard {
+  pets: PetProfile[];
+  activePetId: string;
+  progress: PetProgress;
+  memories: PetMemory[];
+  overlayVisible: boolean;
+  scale: number;
+}
+
+export type PetActivityState = "working" | "generating" | "waiting";
+
+export interface PetActivity {
+  id: string;
+  title: string;
+  detail: string;
+  state: PetActivityState;
+}
+
+export interface PetRuntimeSnapshot {
+  dashboard: PetDashboard;
+  activities: PetActivity[];
+}
+
+export interface HatchRequirement {
+  id: "hatch_skill" | "imagegen_skill" | "python" | string;
+  detail: string;
+}
+
+export interface HatchEnvironment {
+  configured: boolean;
+  bundled: boolean;
+  codexHome: string;
+  hatchSkillPath?: string;
+  imagegenSkillPath?: string;
+  pythonCommand?: string;
+  workDirectory: string;
+  packageDirectory: string;
+  missing: HatchRequirement[];
 }
 
 export type AgentMode = "agent" | "plan" | "goal" | "chat";

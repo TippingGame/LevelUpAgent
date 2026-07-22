@@ -1,6 +1,6 @@
 [package]
 name = "levelup-agent"
-version = "1.0.7"
+version = "1.0.13"
 description = "A local-first, multi-model AI agent for LevelUpAPI"
 authors = ["LevelUpAgent contributors"]
 license = "LGPL-3.0-only"
@@ -19,10 +19,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset"] }
+tauri = { version = "2", features = ["protocol-asset", "macos-private-api"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-process = "2"
+tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -42,7 +43,11 @@ toml = "0.8"
 json5 = "0.4"
 base64 = "0.22"
 http = "1"
+imagesize = "0.14"
 rmcp = { version = "2.2.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 lopdf = "0.36"
 quick-xml = "0.37"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

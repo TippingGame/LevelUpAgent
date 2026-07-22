@@ -24,9 +24,18 @@ import type {
   McpServerConfig,
   McpServerSnapshot,
   MediaAsset,
+  MediaAssetPage,
   MediaBatchResult,
   MediaCatalog,
   MediaGenerationRequest,
+  MediaKind,
+  HatchEnvironment,
+  PetActivity,
+  PetDashboard,
+  PetMemory,
+  PetProfile,
+  PetProgress,
+  PetRuntimeSnapshot,
   ProviderProfile,
   ProviderSettings,
   ProviderHealth,
@@ -37,9 +46,138 @@ import type {
   ThemeManifest,
   ThemePackage,
   ResolvedLayout,
+  WritingProjectRecord,
 } from "./types";
 
 export const isDesktop = () => "__TAURI_INTERNALS__" in window;
+
+const browserPetDashboard: PetDashboard = {
+  pets: [{
+    id: "yui",
+    displayName: "Yui",
+    description: "A tiny Codex digital pet inspired by Yui from Sword Art Online.",
+    spritesheetPath: "/pets/yui/spritesheet.webp",
+    removable: false,
+  }],
+  activePetId: "yui",
+  progress: {
+    petId: "yui",
+    level: 1,
+    totalXp: 0,
+    currentXp: 0,
+    requiredXp: 100,
+    progress: 0,
+    totalTokens: 0,
+    requests: 0,
+  },
+  memories: [],
+  overlayVisible: true,
+  scale: 0.75,
+};
+
+export async function getPetRuntime(): Promise<PetRuntimeSnapshot> {
+  if (!isDesktop()) return { dashboard: browserPetDashboard, activities: [] };
+  return invoke<PetRuntimeSnapshot>("get_pet_runtime");
+}
+
+export async function selectPet(petId: string): Promise<PetDashboard> {
+  if (!isDesktop()) return { ...browserPetDashboard, activePetId: petId };
+  return invoke<PetDashboard>("select_pet", { petId });
+}
+
+export async function setPetOverlayVisible(visible: boolean): Promise<PetDashboard> {
+  if (!isDesktop()) return { ...browserPetDashboard, overlayVisible: visible };
+  return invoke<PetDashboard>("set_pet_overlay_visible", { visible });
+}
+
+export async function setPetScale(petId: string, scale: number): Promise<PetDashboard> {
+  if (!isDesktop()) return { ...browserPetDashboard, activePetId: petId, scale };
+  return invoke<PetDashboard>("set_pet_scale", { petId, scale });
+}
+
+export async function selectAndInstallPet(): Promise<PetProfile | null> {
+  if (!isDesktop()) return null;
+  const sourcePath = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: "Codex pet package", extensions: ["json"] }],
+  });
+  if (typeof sourcePath !== "string") return null;
+  return installPet(sourcePath);
+}
+
+export async function installPet(sourcePath: string): Promise<PetProfile> {
+  return invoke<PetProfile>("install_pet", { sourcePath });
+}
+
+export async function removePet(petId: string): Promise<boolean> {
+  if (!isDesktop()) return false;
+  return invoke<boolean>("remove_pet", { petId });
+}
+
+export async function recordPetUsage(
+  petId: string,
+  usageId: string,
+  inputTokens: number,
+  outputTokens: number,
+): Promise<PetProgress> {
+  if (!isDesktop()) return browserPetDashboard.progress;
+  return invoke<PetProgress>("record_pet_usage", {
+    petId,
+    usageId,
+    inputTokens: Math.max(0, Math.floor(inputTokens)),
+    outputTokens: Math.max(0, Math.floor(outputTokens)),
+  });
+}
+
+export async function learnPetMemory(petId: string, text: string): Promise<PetMemory[]> {
+  if (!isDesktop()) return [];
+  return invoke<PetMemory[]>("learn_pet_memory", { petId, text });
+}
+
+export async function deletePetMemory(petId: string, memoryId: string): Promise<boolean> {
+  if (!isDesktop()) return false;
+  return invoke<boolean>("delete_pet_memory", { petId, memoryId });
+}
+
+export async function getPetHatchEnvironment(): Promise<HatchEnvironment> {
+  if (!isDesktop()) {
+    return {
+      configured: false,
+      bundled: true,
+      codexHome: "",
+      workDirectory: "",
+      packageDirectory: "",
+      missing: [{ id: "desktop", detail: "LevelUpAgent desktop app" }],
+    };
+  }
+  return invoke<HatchEnvironment>("get_pet_hatch_environment");
+}
+
+export async function configurePetHatch(): Promise<HatchEnvironment> {
+  if (!isDesktop()) return getPetHatchEnvironment();
+  return invoke<HatchEnvironment>("configure_pet_hatch");
+}
+
+export async function importHatchedPets(afterMs = 0): Promise<PetProfile[]> {
+  if (!isDesktop()) return [];
+  return invoke<PetProfile[]>("import_hatched_pets", { afterMs });
+}
+
+export async function updatePetActivities(activities: PetActivity[]): Promise<PetActivity[]> {
+  if (!isDesktop()) return activities;
+  return invoke<PetActivity[]>("update_pet_activities", { activities });
+}
+
+export async function openPetChat(petId: string): Promise<void> {
+  if (!isDesktop()) return;
+  await invoke("open_pet_chat", { petId });
+}
+
+export function petAssetUrl(path: string): string {
+  if (!path || path.startsWith("/") || /^(?:https?:|data:|blob:|asset:)/i.test(path)) return path;
+  return isDesktop() ? convertFileSrc(path) : "/pets/yui/spritesheet.webp";
+}
 
 export async function listThemes(): Promise<ThemeManifest[]> {
   if (!isDesktop()) return [];
@@ -62,7 +200,33 @@ export async function selectAndInstallTheme(): Promise<ThemeManifest | null> {
     filters: [{ name: "LevelUpAgent theme", extensions: ["levelup-theme"] }],
   });
   if (typeof sourcePath !== "string") return null;
+  return installTheme(sourcePath);
+}
+
+export async function installTheme(sourcePath: string): Promise<ThemeManifest> {
+  if (!isDesktop()) throw new Error("Theme installation is available only in the desktop app");
   return invoke<ThemeManifest>("install_theme", { sourcePath });
+}
+
+export async function installThemeFile(file: File, companion?: File): Promise<ThemeManifest> {
+  if (!isDesktop()) throw new Error("Theme installation is available only in the desktop app");
+  const sourcePath = (file as File & { path?: string }).path;
+  if (sourcePath?.trim() && /\.levelup-theme$/i.test(sourcePath.trim())) return installTheme(sourcePath);
+  const dataBase64 = await readFileAsBase64(file);
+  const layoutDataBase64 = companion ? await readFileAsBase64(companion) : undefined;
+  return invoke<ThemeManifest>("install_theme_data", {
+    payload: {
+      name: clipboardThemePackageName(file.name),
+      dataBase64,
+      layoutName: companion?.name,
+      layoutDataBase64,
+    },
+  });
+}
+
+export async function installThemeText(text: string): Promise<ThemeManifest> {
+  const file = new File([text], "pasted.levelup-theme", { type: "application/json" });
+  return installThemeFile(file);
 }
 
 export async function uninstallTheme(themeId: string): Promise<boolean> {
@@ -110,6 +274,24 @@ export async function importClipboardImages(files: File[]): Promise<ImageAttachm
   return invoke<ImageAttachment[]>("import_clipboard_images", { images: payloads });
 }
 
+export async function importMediaReferences(sourcePaths: string[]): Promise<ImageAttachment[]> {
+  if (!isDesktop() || sourcePaths.length === 0) return [];
+  return invoke<ImageAttachment[]>("import_media_references", { sourcePaths: sourcePaths.slice(0, 7) });
+}
+
+export async function importClipboardAttachments(files: File[]): Promise<ImageAttachment[]> {
+  const selected = files.slice(0, 12);
+  if (!isDesktop() || selected.length === 0) return [];
+  const sourcePaths = selected.map((file) => (file as File & { path?: string }).path?.trim() ?? "");
+  if (sourcePaths.every(Boolean)) return importAttachments(sourcePaths);
+  const timestamp = new Date().toISOString().replace(/[-:.TZ]/g, "");
+  const attachments = await Promise.all(selected.map(async (file, index) => ({
+    name: clipboardAttachmentName(file, timestamp, index),
+    dataBase64: await readFileAsBase64(file),
+  })));
+  return invoke<ImageAttachment[]>("import_clipboard_attachments", { attachments });
+}
+
 export async function deleteImageAttachment(attachmentId: string): Promise<boolean> {
   if (!isDesktop()) return false;
   return invoke<boolean>("delete_image_attachment", { attachmentId });
@@ -133,6 +315,17 @@ export async function selectImageReferences(): Promise<ImageAttachment[]> {
   return importAttachments(paths.slice(0, 8));
 }
 
+export async function selectVideoReference(): Promise<ImageAttachment[]> {
+  if (!isDesktop()) return [];
+  const selected = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: "MP4 video", extensions: ["mp4"] }],
+  });
+  const paths = typeof selected === "string" ? [selected] : Array.isArray(selected) ? selected : [];
+  return importMediaReferences(paths.slice(0, 1));
+}
+
 export async function getMediaCatalog(): Promise<MediaCatalog> {
   if (!isDesktop()) return { models: [], errors: [] };
   return invoke<MediaCatalog>("get_media_catalog");
@@ -145,9 +338,9 @@ export async function generateMedia(
   return invoke<MediaBatchResult>("generate_media", { request, threadId: threadId || null });
 }
 
-export async function listMediaAssets(limit = 200): Promise<MediaAsset[]> {
-  if (!isDesktop()) return [];
-  return invoke<MediaAsset[]>("list_media_assets", { limit });
+export async function listMediaAssets(kind: MediaKind, limit = 24, offset = 0): Promise<MediaAssetPage> {
+  if (!isDesktop()) return { assets: [], hasMore: false };
+  return invoke<MediaAssetPage>("list_media_assets", { kind, limit, offset });
 }
 
 export async function refreshMediaAsset(assetId: string): Promise<MediaAsset> {
@@ -179,21 +372,40 @@ export function mediaAssetUrl(asset: MediaAsset): string | undefined {
 function readFileAsBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onerror = () => reject(reader.error ?? new Error("Could not read the pasted image"));
+    reader.onerror = () => reject(reader.error ?? new Error("Could not read the pasted file"));
     reader.onload = () => {
       if (typeof reader.result !== "string") {
-        reject(new Error("Could not read the pasted image"));
+        reject(new Error("Could not read the pasted file"));
         return;
       }
       const separator = reader.result.indexOf(",");
       if (separator < 0) {
-        reject(new Error("The pasted image data is invalid"));
+        reject(new Error("The pasted file data is invalid"));
         return;
       }
       resolve(reader.result.slice(separator + 1));
     };
     reader.readAsDataURL(file);
   });
+}
+
+function clipboardAttachmentName(file: File, timestamp: string, index: number) {
+  if (file.name.trim()) return file.name;
+  const extension = file.type.startsWith("image/")
+    ? imageExtension(file.type)
+    : file.type === "application/pdf"
+      ? "pdf"
+      : file.type === "application/json"
+        ? "json"
+        : "txt";
+  return `clipboard-${timestamp}-${index + 1}.${extension}`;
+}
+
+function clipboardThemePackageName(name: string) {
+  const trimmed = name.trim();
+  if (/\.levelup-theme$/i.test(trimmed)) return trimmed;
+  const stem = trimmed.replace(/\.[^.\\/]*$/, "").trim() || "pasted";
+  return `${stem}.levelup-theme`;
 }
 
 function imageExtension(mimeType: string) {
@@ -225,6 +437,69 @@ export async function saveProviderSettings(settings: ProviderSettings): Promise<
   await invoke("save_provider_settings", { settings });
 }
 
+const BROWSER_WRITING_PROJECTS_KEY = "levelup-agent.writing-projects.v1";
+const MAX_WRITING_BYTES = 16 * 1024 * 1024;
+
+export async function listWritingProjects(): Promise<WritingProjectRecord[]> {
+  if (isDesktop()) return invoke<WritingProjectRecord[]>("list_writing_projects");
+  try {
+    const value = localStorage.getItem(BROWSER_WRITING_PROJECTS_KEY);
+    if (!value) return [];
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is WritingProjectRecord => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function saveWritingProject(project: WritingProjectRecord): Promise<void> {
+  if (isDesktop()) {
+    await invoke("save_writing_project", { project });
+    return;
+  }
+  const payload = JSON.stringify(project.payload);
+  if (new TextEncoder().encode(payload).byteLength > MAX_WRITING_BYTES) throw new Error("Writing project data may not exceed 16 MiB");
+  const current = await listWritingProjects();
+  const next = [project, ...current.filter((item) => item.id !== project.id)]
+    .sort((left, right) => right.updatedAt - left.updatedAt)
+    .slice(0, 100);
+  localStorage.setItem(BROWSER_WRITING_PROJECTS_KEY, JSON.stringify(next));
+}
+
+export async function deleteWritingProject(projectId: string): Promise<boolean> {
+  if (isDesktop()) return invoke<boolean>("delete_writing_project", { projectId });
+  const current = await listWritingProjects();
+  const next = current.filter((item) => item.id !== projectId);
+  localStorage.setItem(BROWSER_WRITING_PROJECTS_KEY, JSON.stringify(next));
+  return next.length !== current.length;
+}
+
+export async function exportWritingFile(
+  suggestedName: string,
+  content: string,
+  extension: "json" | "md" | "yarn" | "txt",
+): Promise<string | null> {
+  if (new TextEncoder().encode(content).byteLength > MAX_WRITING_BYTES) throw new Error("Writing export may not exceed 16 MiB");
+  if (!isDesktop()) {
+    const blob = new Blob([content], { type: extension === "json" ? "application/json" : "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = suggestedName;
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+    return suggestedName;
+  }
+  const destination = await save({
+    defaultPath: suggestedName,
+    filters: [{ name: "Writing export", extensions: [extension] }],
+  });
+  if (typeof destination !== "string") return null;
+  return invoke<string>("export_writing_file", { destination, content });
+}
+
 export async function fetchModels(profile: ProviderProfile, apiKey?: string): Promise<ModelInfo[]> {
   return invoke<ModelInfo[]>("fetch_models", { profile, apiKey: apiKey || null });
 }
@@ -236,6 +511,8 @@ export async function agentTurn(
   workspace?: string,
   threadId?: string,
   fallbackProfiles: ProviderProfile[] = [],
+  hatch = false,
+  hatchSkillLoaded = false,
 ): Promise<AgentTurnResponse> {
   const cleanMessages = messages.map(({ role, content, toolCalls, toolCallId, internal, attachments }) => ({
     role,
@@ -246,7 +523,7 @@ export async function agentTurn(
     attachments,
   }));
   return invoke<AgentTurnResponse>("agent_turn", {
-    request: { profile, messages: cleanMessages, mode, workspace, threadId, fallbackProfiles },
+    request: { profile, messages: cleanMessages, mode, workspace, threadId, fallbackProfiles, hatch, hatchSkillLoaded },
   });
 }
 
@@ -259,6 +536,8 @@ export async function agentTurnStream(
   onDelta: (delta: string) => void,
   threadId?: string,
   fallbackProfiles: ProviderProfile[] = [],
+  hatch = false,
+  hatchSkillLoaded = false,
 ): Promise<AgentTurnResponse> {
   const cleanMessages = messages.map(({ role, content, toolCalls, toolCallId, internal, attachments }) => ({
     role,
@@ -273,7 +552,7 @@ export async function agentTurnStream(
     if (event.kind === "content_delta" && event.delta) onDelta(event.delta);
   };
   return invoke<AgentTurnResponse>("agent_turn_stream", {
-    request: { profile, messages: cleanMessages, mode, workspace, threadId, fallbackProfiles },
+    request: { profile, messages: cleanMessages, mode, workspace, threadId, fallbackProfiles, hatch, hatchSkillLoaded },
     operationId,
     onEvent,
   });
@@ -355,11 +634,13 @@ export async function cancelAgentTurn(operationId: string): Promise<boolean> {
 
 type PendingAppUpdate = Awaited<ReturnType<(typeof import("@tauri-apps/plugin-updater"))["check"]>>;
 let pendingAppUpdate: PendingAppUpdate = null;
+let startupAppUpdateCheck: Promise<AppUpdateInfo | null> | null = null;
+const STARTUP_APP_UPDATE_TIMEOUT_MS = 8_000;
 
-export async function checkAppUpdate(): Promise<AppUpdateInfo | null> {
+async function performAppUpdateCheck(timeout?: number): Promise<AppUpdateInfo | null> {
   if (!isDesktop()) throw new Error("Updates are available only in the desktop app");
   const { check } = await import("@tauri-apps/plugin-updater");
-  pendingAppUpdate = await check();
+  pendingAppUpdate = await check(timeout === undefined ? undefined : { timeout });
   if (!pendingAppUpdate) return null;
   return {
     currentVersion: pendingAppUpdate.currentVersion,
@@ -367,6 +648,17 @@ export async function checkAppUpdate(): Promise<AppUpdateInfo | null> {
     date: pendingAppUpdate.date,
     body: pendingAppUpdate.body,
   };
+}
+
+export async function checkAppUpdate(): Promise<AppUpdateInfo | null> {
+  return performAppUpdateCheck();
+}
+
+export function checkAppUpdateOnStartup(): Promise<AppUpdateInfo | null> {
+  if (!startupAppUpdateCheck) {
+    startupAppUpdateCheck = performAppUpdateCheck(STARTUP_APP_UPDATE_TIMEOUT_MS);
+  }
+  return startupAppUpdateCheck;
 }
 
 export async function installAppUpdate(): Promise<void> {
@@ -387,9 +679,22 @@ export async function executeTool(
   threadId?: string,
   profile?: ProviderProfile,
   fallbackProfiles: ProviderProfile[] = [],
+  hatch = false,
+  hatchSkillLoaded = false,
+  hatchBootstrap = false,
 ): Promise<ToolExecutionResponse> {
   return invoke<ToolExecutionResponse>("execute_tool", {
-    request: { name: call.name, arguments: call.arguments, workspace, threadId, profile, fallbackProfiles },
+    request: {
+      name: call.name,
+      arguments: call.arguments,
+      workspace,
+      threadId,
+      profile,
+      fallbackProfiles,
+      hatch,
+      hatchSkillLoaded,
+      hatchBootstrap,
+    },
   });
 }
 
