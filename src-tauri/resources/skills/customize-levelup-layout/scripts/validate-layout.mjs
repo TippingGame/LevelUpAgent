@@ -80,7 +80,12 @@ if (layout.window?.decorations === false && !slots.has("qq2007Titlebar") && !["w
 if (themePath) {
   const theme = JSON.parse(fs.readFileSync(themePath, "utf8"));
   if (theme.schemaVersion !== 2) fail("custom-layout theme schemaVersion must be 2");
-  if (theme.layoutFile !== path.basename(layoutPath)) fail(`theme layoutFile must equal ${path.basename(layoutPath)}`);
+  if (theme.layout && theme.layoutFile) fail("theme cannot define both layout and layoutFile");
+  if (theme.layoutFile) {
+    if (theme.layoutFile !== path.basename(layoutPath)) fail(`theme layoutFile must equal ${path.basename(layoutPath)}`);
+  } else if (!theme.layout || JSON.stringify(theme.layout) !== JSON.stringify(layout)) {
+    fail("theme layout must embed the exact layout definition");
+  }
   if (typeof theme.css !== "string" || !theme.css.includes(`[data-levelup-theme="${theme.id}"]`)) fail("theme CSS is not scoped to its id");
 }
 

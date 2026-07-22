@@ -2841,12 +2841,12 @@ function ThemeDialog({
               <span className="theme-copy">
                 <strong>{theme.name}<em>v{theme.version}</em></strong>
                 <small>{theme.description}</small>
-                <small>{theme.author}{theme.license ? ` · ${theme.license}` : ""}</small>
+                <small>{theme.author}{theme.license ? ` · ${theme.license}` : ""}{theme.bundled ? ` · ${tr("内置", "Bundled")}` : ""}</small>
               </span>
               <button className={activeThemeId === theme.id ? "theme-active-button" : "secondary-button"} disabled={busy || activeThemeId === theme.id} onClick={() => void act(() => onActivate(theme.id))}>
                 {activeThemeId === theme.id ? tr("使用中", "Active") : tr("启用", "Activate")}
               </button>
-              <IconButton className="theme-remove-button" label={`${tr("卸载", "Uninstall")} ${theme.name}`} disabled={busy} onClick={() => void act(() => onUninstall(theme.id))}><Trash2 size={16} /></IconButton>
+              <IconButton className="theme-remove-button" label={theme.bundled ? tr("内置主题不可卸载", "Bundled themes cannot be uninstalled") : `${tr("卸载", "Uninstall")} ${theme.name}`} disabled={busy || theme.bundled} onClick={() => void act(() => onUninstall(theme.id))}><Trash2 size={16} /></IconButton>
             </div>
           ))}
           {themes.length === 0 && <p className="theme-empty">{tr("尚未安装第三方主题。请选择一个 .levelup-theme 文件。", "No third-party themes are installed. Select a .levelup-theme file to begin.")}</p>}

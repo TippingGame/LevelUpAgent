@@ -2,7 +2,7 @@
 
 ## Package contract
 
-Use a schema version 2 theme package. Give the theme its own release directory and keep the referenced layout beside it:
+Use a schema version 2 theme package. Embed the parsed contents of `layout.json` in the package:
 
 ```json
 {
@@ -12,12 +12,17 @@ Use a schema version 2 theme package. Give the theme its own release directory a
   "version": "1.0.0",
   "author": "Author",
   "description": "Example custom layout",
-  "layoutFile": "layout.json",
+  "layout": {
+    "schemaVersion": 1,
+    "id": "example-layout",
+    "name": "Example layout",
+    "root": { "type": "container", "children": [{ "type": "slot", "slot": "workspace" }] }
+  },
   "css": "html[data-levelup-theme=\"example-theme\"] { --accent: #2878d0; }"
 }
 ```
 
-Installing the theme stores both files under `themes/{id}/`; updates replace that directory and uninstall removes it. Flat files directly under `themes/` are ignored. Omitting `layoutFile` selects the built-in default layout. Legacy schema version 1 package fields remain supported when installed through the directory-based installer.
+Installing the theme stores the complete package under `themes/{id}/theme.levelup-theme`; updates replace that directory and uninstall removes it. Omitting `layout` selects the built-in default layout. Legacy schema version 1 package fields and older schema version 2 `layoutFile` companion packages remain supported.
 
 ## Layout envelope
 
