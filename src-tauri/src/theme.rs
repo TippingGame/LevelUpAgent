@@ -305,6 +305,17 @@ fn companion_layout_bytes(
         .parent()
         .ok_or_else(|| "Theme package has no parent directory".to_owned())?
         .join(layout_file);
+    match std::fs::symlink_metadata(&source_layout) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!(
+                "Theme package is missing companion layout file: {layout_file}"
+            ));
+        }
+        Err(error) => {
+            return Err(format!("Could not inspect companion layout file: {error}"));
+        }
+    }
     let definition = crate::layout::read_and_validate(&source_layout)?;
     serde_json::to_vec(&definition)
         .map(Some)
