@@ -20,6 +20,15 @@ export interface ProviderSettings {
   activeProfileId: string;
 }
 
+export interface WritingProjectRecord {
+  id: string;
+  title: string;
+  projectType: "novel" | "screenplay" | "game";
+  payload: unknown;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface ThemeManifest {
   schemaVersion: 1 | 2;
   id: string;

@@ -18,7 +18,7 @@
   </p>
 
   <p>
-<img alt="Version" src="https://img.shields.io/badge/version-1.0.12-ff5a4f?style=flat-square" />
+<img alt="Version" src="https://img.shields.io/badge/version-1.0.13-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-stable-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -87,6 +87,14 @@ Base URL 既可以是服务根地址，例如 `https://api.example.com`，也可
 - 图片、文本、代码、PDF、DOCX、XLSX、PPTX 托管上下文
 - 可持久化 Instructions，并可安全同步到主流 CLI 指令文件
 - Goal 持续执行、暂停/恢复、完成审计和阻塞审计
+
+### AI 写作与游戏叙事
+
+- 创作空间默认进入图片、视频与语音工作台，写作工作台排在媒体创作之后；小说、剧本和游戏剧情项目自动保存到本地 SQLite，不依赖会话生命周期
+- 正文支持停笔自动补全、续写、改写、润色、扩写、精简、对白与描写；流式补全会像代码编辑器一样在光标后显示灰色待选文字，可按 Tab 接受、Esc 拒绝，接受前自动创建版本快照
+- 人物、地点、阵营、物品、世界观、剧情、规则和任务组成可关联的设定集；显式选择、文稿/节点绑定、正文提及、关系和全局规则按相关度进入 AI 上下文
+- 游戏剧情图支持场景、对白、选择、条件和结局节点，以及变量、条件、效果、路径校验和内置试玩
+- 完整项目可导入/导出 JSON，并可导出 Markdown 或 Yarn Spinner 脚本；写作与图片、视频、语音创作可在同一空间切换
 
 ### 多媒体创作
 

@@ -33,6 +33,17 @@ pub struct ProviderSettings {
     pub active_profile_id: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WritingProjectRecord {
+    pub id: String,
+    pub title: String,
+    pub project_type: String,
+    pub payload: serde_json::Value,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 fn default_provider_priority() -> i32 {
     100
 }

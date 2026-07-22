@@ -18,7 +18,7 @@
   </p>
 
   <p>
-<img alt="Version" src="https://img.shields.io/badge/version-1.0.12-ff5a4f?style=flat-square" />
+<img alt="Version" src="https://img.shields.io/badge/version-1.0.13-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-stable-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -87,6 +87,14 @@ Choose a project directory, create a conversation, and describe the outcome you 
 - Managed image, text, source code, PDF, DOCX, XLSX, and PPTX context
 - Persistent Instructions with reviewable synchronization to popular CLI instruction files
 - Long-running Goals with pause/resume, completion audits, and blocked audits
+
+### AI writing and game narrative
+
+- Creative Studio opens with image, video, and speech tools first, followed by the writing workspace; novel, screenplay, and game narrative projects autosave to local SQLite independently of conversations
+- Manuscripts support pause-triggered autocomplete, continue, rewrite, polish, expand, shorten, dialogue, and description; streamed completions appear as gray inline text after the caret, like a code editor, with Tab to accept and Escape to reject, plus an automatic snapshot before acceptance
+- Characters, locations, factions, items, world lore, plots, rules, and quests form a linked codex; explicit picks, document/node bindings, nearby mentions, relations, and global rules are ranked into AI context
+- The game narrative graph supports scene, dialogue, choice, condition, and ending nodes, plus variables, conditions, effects, path validation, and built-in playtesting
+- Full projects import/export as JSON and can export to Markdown or Yarn Spinner; writing and image, video, and speech creation remain one switch apart
 
 ### Multimodal creation
 

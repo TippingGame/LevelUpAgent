@@ -7,6 +7,32 @@ export const HATCH_MAX_OBSERVATIONS_WITHOUT_ACTION = 16;
 export const HATCH_MAX_IDENTICAL_COMMANDS = 3;
 export const HATCH_DEFAULT_CHROMA_KEY = "#00FF00";
 
+const HATCH_PET_ID_MAX_LENGTH = 64;
+
+function hatchPetIdHash(value: string) {
+  let hash = 0x811c9dc5;
+  for (const byte of new TextEncoder().encode(value.normalize("NFKC"))) {
+    hash ^= byte;
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36).padStart(7, "0");
+}
+
+/** Build a stable package-safe ASCII ID while preserving the display name. */
+export function hatchPetId(value: string) {
+  const source = value.trim() || "starlight-echo";
+  const slug = source
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  const suffix = hatchPetIdHash(source);
+  if (!slug) return `pet-${suffix}`;
+  if (slug.length <= HATCH_PET_ID_MAX_LENGTH) return slug;
+  return `${slug.slice(0, HATCH_PET_ID_MAX_LENGTH - suffix.length - 1).replace(/-+$/g, "")}-${suffix}`;
+}
+
 // The application owns the hatch bootstrap. Persisting a small internal
 // marker in the conversation lets resumed/compacted runs retain that phase
 // without asking the provider to infer it from an old tool exchange.
@@ -223,6 +249,7 @@ export function hatchPrepareCommandFromHistory(history: AgentMessage[]) {
   if (!skillDirectory || !runDirectory) return null;
   const python = hatchPromptValue(history, "Python command") || "python";
   const name = hatchPromptValue(history, "Pet name") || "Starlight Echo";
+  const petId = hatchPromptValue(history, "Pet ID") || hatchPetId(name);
   const description = hatchPromptValue(history, "Pet concept") || "a compact digital pet";
   const pythonInvocation = /^[A-Za-z0-9_.-]+$/.test(python)
     ? python
@@ -231,6 +258,7 @@ export function hatchPrepareCommandFromHistory(history: AgentMessage[]) {
     pythonInvocation,
     powershellLiteral(`${skillDirectory}\\scripts\\prepare_pet_run.py`),
     "--pet-name", powershellLiteral(name),
+    "--pet-id", powershellLiteral(petId),
     "--description", powershellLiteral(description),
     "--output-dir", powershellLiteral(runDirectory),
     "--pet-notes", powershellLiteral(description),

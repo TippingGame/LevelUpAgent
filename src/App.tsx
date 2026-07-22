@@ -66,6 +66,7 @@ import {
 import { IconButton } from "./components/IconButton";
 import { AttachmentChip } from "./components/AttachmentChip";
 import { MediaAssetCard, MediaStudio } from "./components/MediaStudio";
+import { WritingStudio } from "./components/WritingStudio";
 import { PetStudio, type PetGenerationRequest } from "./components/PetStudio";
 import { PetAvatar } from "./components/PetSprite";
 import { DeclarativeLayout, type LayoutActions, type LayoutData } from "./components/DeclarativeLayout";
@@ -167,6 +168,7 @@ import {
   createHatchExecutionState,
   gateHatchToolCall,
   hatchPrepareCommandFromHistory,
+  hatchPetId,
   hatchStatusCommand,
   hatchCommandIsObservation,
   normalizeHatchCommandCall,
@@ -247,7 +249,7 @@ interface PetHatchJob {
   startedAt: number;
 }
 
-type WorkspaceView = "chat" | "media";
+type WorkspaceView = "chat" | "writing" | "media";
 
 function isPetHatchThread(thread: AgentThread) {
   // Do not depend on `internal` surviving an older database/export. The
@@ -2427,9 +2429,9 @@ function App() {
         </div>
 
         <button
-          className={`media-nav-button${workspaceView === "media" ? " active" : ""}`}
+          className={`media-nav-button${workspaceView === "writing" || workspaceView === "media" ? " active" : ""}`}
           type="button"
-          aria-current={workspaceView === "media" ? "page" : undefined}
+          aria-current={workspaceView === "writing" || workspaceView === "media" ? "page" : undefined}
           onClick={() => {
             setWorkspaceView("media");
             setProfileMenuOpen(false);
@@ -2437,7 +2439,7 @@ function App() {
           }}
         >
           <ImagePlus size={16} />
-          <span><strong>{tr("创作空间", "Media Studio")}</strong><small>{mediaPendingCount > 0 ? tr(`${mediaPendingCount} 个结果正在后台生成`, `${mediaPendingCount} outputs generating`) : tr("图片 · 视频 · 语音", "Images · Video · Speech")}</small></span>
+          <span><strong>{tr("创作空间", "Creative Studio")}</strong><small>{mediaPendingCount > 0 ? tr(`${mediaPendingCount} 个结果正在后台生成`, `${mediaPendingCount} outputs generating`) : tr("图片 · 视频 · 语音 · 写作", "Image · Video · Speech · Writing")}</small></span>
           {mediaPendingCount > 0 ? <span className="media-nav-progress" title={tr(`${mediaPendingCount} 个结果正在生成`, `${mediaPendingCount} outputs generating`)}><LoaderCircle className="spin" size={12} /><b>{mediaPendingCount}</b></span> : <Sparkles size={14} />}
         </button>
 
@@ -2575,7 +2577,8 @@ function App() {
   );
 
   const mediaStudioSlot = (
-    <MediaStudio
+    <>
+      <MediaStudio
         active={workspaceView === "media"}
         locale={locale}
         mediaCatalogRevision={mediaCatalogRevision}
@@ -2584,7 +2587,19 @@ function App() {
         onReferenceDropHandled={(id) => setMediaReferenceDrop((current) => current?.id === id ? null : current)}
         onConfigureConnection={() => setSettingsOpen(true)}
         onPendingCountChange={setMediaPendingCount}
-    />
+        onWriting={() => setWorkspaceView("writing")}
+      />
+      <WritingStudio
+        active={workspaceView === "writing"}
+        locale={locale}
+        activeProfile={activeProfile}
+        profiles={profiles}
+        workspace={activeThread.workspace}
+        connectionReady={connectionReady}
+        onConfigureConnection={() => setSettingsOpen(true)}
+        onMedia={() => setWorkspaceView("media")}
+      />
+    </>
   );
 
   const workspaceSlot = workspaceView === "chat" ? (
@@ -2954,6 +2969,7 @@ function App() {
     "project.open": () => { void openProject(); },
     "view.chat": () => setWorkspaceView("chat"),
     "view.media": () => setWorkspaceView("media"),
+    "view.writing": () => setWorkspaceView("writing"),
     "panel.toggle": () => setRightPanelOpen((value) => !value),
     "dialog.settings": () => setSettingsOpen(true),
     "dialog.themes": () => setThemesOpen(true),
@@ -3098,7 +3114,7 @@ function QQ2007Toolbar({
 }) {
   const items = [
     ["new-task", tr("新建任务", "New task"), onNewThread, false],
-    ["scheduled", tr("创作空间", "Studio"), onMedia, workspaceView === "media"],
+    ["scheduled", tr("创作空间", "Studio"), onMedia, workspaceView === "writing" || workspaceView === "media"],
     ["groups", tr("摇光残影", "Echo"), onPet, petOpen],
     ["plugins", tr("插件", "Extensions"), onExtensions, false],
     ["sites", tr("站点", "Website"), onWebsite, false],
@@ -5605,18 +5621,9 @@ function powershellLiteral(value: string) {
   return `'${hatchPathForCommand(value).replace(/'/g, "''")}'`;
 }
 
-function petSlugForHatch(value: string) {
-  const slug = value
-    .normalize("NFKD")
-    .replace(/[^\p{Letter}\p{Number}]+/gu, "-")
-    .replace(/^-+|-+$/g, "")
-    .toLocaleLowerCase();
-  return slug || "starlight-echo";
-}
-
 function hatchRunDirectoryFor(request: PetGenerationRequest) {
   const name = request.name.trim() || request.description.slice(0, 24);
-  return `${request.environment.workDirectory.replace(/[\\/]+$/, "")}\\${petSlugForHatch(name)}-run-${Date.now()}`;
+  return `${request.environment.workDirectory.replace(/[\\/]+$/, "")}\\${hatchPetId(name)}-run-${Date.now()}`;
 }
 
 function petHatchGenerationPrompt(
@@ -5625,6 +5632,7 @@ function petHatchGenerationPrompt(
   hatchRunDirectory: string,
 ) {
   const name = request.name || "Infer a short friendly name from the concept";
+  const petId = hatchPetId(request.name || request.description);
   const referenceIds = request.references.map((reference) => reference.id);
   const pythonCommand = request.environment.pythonCommand?.trim() || "python";
   const pythonInvocation = /^[A-Za-z0-9_.-]+$/.test(pythonCommand)
@@ -5635,6 +5643,7 @@ function petHatchGenerationPrompt(
     pythonInvocation,
     powershellLiteral(`${skillDirectory}\\scripts\\prepare_pet_run.py`),
     "--pet-name", powershellLiteral(name),
+    "--pet-id", powershellLiteral(petId),
     "--description", powershellLiteral(request.description),
     "--output-dir", powershellLiteral(hatchRunDirectory),
     "--pet-notes", powershellLiteral(request.description),
@@ -5646,6 +5655,7 @@ function petHatchGenerationPrompt(
   return [
     "Run a complete hatch-pet Goal for a LevelUpAgent Starlight Echo using the bundled toolchain. Do not stop at a plan or a prompt draft.",
     `Pet name: ${name}`,
+    `Pet ID: ${petId}`,
     `Pet concept: ${request.description}`,
     `User reference images attached to this request: ${request.references.length}. Managed reference attachment IDs: ${referenceIds.length > 0 ? referenceIds.join(", ") : "none"}. Treat every attached image as an identity reference and pass all listed IDs in the base generate_images.referenceAttachmentIds.`,
     `Bundled Hatch Pet skill directory: ${request.environment.hatchSkillPath}`,

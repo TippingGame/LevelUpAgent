@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import re
 import shutil
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -110,10 +112,23 @@ LAYOUT_GUIDE_SAFE_MARGIN_Y = 16
 
 
 def slugify(value: str) -> str:
-    value = value.strip().lower()
-    value = re.sub(r"[^a-z0-9]+", "-", value)
-    value = re.sub(r"-{2,}", "-", value)
-    return value.strip("-")
+    source = unicodedata.normalize("NFKC", value.strip())
+    if not source:
+        return ""
+    ascii_value = (
+        unicodedata.normalize("NFKD", source)
+        .encode("ascii", "ignore")
+        .decode("ascii")
+        .lower()
+    )
+    slug = re.sub(r"[^a-z0-9]+", "-", ascii_value)
+    slug = re.sub(r"-{2,}", "-", slug).strip("-")
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:12]
+    if not slug:
+        return f"pet-{digest}"
+    if len(slug) <= 64:
+        return slug
+    return f"{slug[:51].rstrip('-')}-{digest}"
 
 
 def display_from_slug(value: str) -> str:

@@ -6,10 +6,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::models::{
     GoalCreateRequest, GoalState, GoalStatus, ImageAttachment, McpServerConfig, McpTransport,
     MediaAsset, MediaKind, MediaStatus, ProviderHealth, ProviderRequestLog, ProviderSettings,
-    StoredMessage, StoredThread, ToolCall,
+    StoredMessage, StoredThread, ToolCall, WritingProjectRecord,
 };
 
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 
 pub struct Database {
     connection: Mutex<Connection>,
@@ -142,6 +142,15 @@ impl Database {
                     updated_at INTEGER NOT NULL
                  );
 
+                 CREATE TABLE IF NOT EXISTS writing_projects (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    title TEXT NOT NULL,
+                    project_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                 );
+
                  CREATE TABLE IF NOT EXISTS provider_health (
                     profile_id TEXT PRIMARY KEY NOT NULL,
                     consecutive_failures INTEGER NOT NULL DEFAULT 0,
@@ -266,7 +275,9 @@ impl Database {
                  CREATE INDEX IF NOT EXISTS idx_media_assets_kind_created_at
                    ON media_assets(kind, created_at DESC, id DESC);
                  CREATE INDEX IF NOT EXISTS idx_media_assets_thread
-                   ON media_assets(thread_id, created_at DESC);",
+                   ON media_assets(thread_id, created_at DESC);
+                 CREATE INDEX IF NOT EXISTS idx_writing_projects_updated_at
+                   ON writing_projects(updated_at DESC);",
             )
             .map_err(database_error)?;
         connection
@@ -873,6 +884,70 @@ impl Database {
         Ok(current)
     }
 
+    pub fn list_writing_projects(&self) -> Result<Vec<WritingProjectRecord>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, title, project_type, payload_json, created_at, updated_at
+                 FROM writing_projects ORDER BY updated_at DESC LIMIT 100",
+            )
+            .map_err(database_error)?;
+        statement
+            .query_map([], writing_project_from_row)
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)
+    }
+
+    pub fn save_writing_project(&self, project: &WritingProjectRecord) -> Result<(), String> {
+        validate_writing_project(project)?;
+        let payload = serde_json::to_string(&project.payload)
+            .map_err(|error| format!("Could not encode writing project: {error}"))?;
+        if payload.len() > 16 * 1024 * 1024 {
+            return Err("Writing project data may not exceed 16 MiB".to_owned());
+        }
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        connection
+            .execute(
+                "INSERT INTO writing_projects
+                 (id, title, project_type, payload_json, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(id) DO UPDATE SET
+                    title = excluded.title,
+                    project_type = excluded.project_type,
+                    payload_json = excluded.payload_json,
+                    created_at = excluded.created_at,
+                    updated_at = excluded.updated_at",
+                params![
+                    project.id,
+                    project.title.trim(),
+                    project.project_type,
+                    payload,
+                    project.created_at,
+                    project.updated_at,
+                ],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+
+    pub fn delete_writing_project(&self, id: &str) -> Result<bool, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        connection
+            .execute("DELETE FROM writing_projects WHERE id = ?1", [id])
+            .map(|changed| changed > 0)
+            .map_err(database_error)
+    }
+
     pub fn update_goal_from_agent(
         &self,
         thread_id: &str,
@@ -1316,6 +1391,49 @@ fn media_asset_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MediaAsset>
         created_at: row.get(20)?,
         updated_at: row.get(21)?,
     })
+}
+
+fn writing_project_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WritingProjectRecord> {
+    let payload: String = row.get(3)?;
+    Ok(WritingProjectRecord {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        project_type: row.get(2)?,
+        payload: serde_json::from_str(&payload).map_err(json_column_error)?,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+    })
+}
+
+fn validate_writing_project(project: &WritingProjectRecord) -> Result<(), String> {
+    if project.id.is_empty()
+        || project.id.len() > 128
+        || !project
+            .id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return Err(
+            "Writing project ID must be 1-128 letters, numbers, dashes, or underscores".to_owned(),
+        );
+    }
+    let title_length = project.title.trim().chars().count();
+    if title_length == 0 || title_length > 200 {
+        return Err("Writing project title must be 1-200 characters".to_owned());
+    }
+    if !matches!(
+        project.project_type.as_str(),
+        "novel" | "screenplay" | "game"
+    ) {
+        return Err("Writing project type must be novel, screenplay, or game".to_owned());
+    }
+    if project.created_at < 0 || project.updated_at < project.created_at {
+        return Err("Writing project timestamps are invalid".to_owned());
+    }
+    if !project.payload.is_object() {
+        return Err("Writing project payload must be a JSON object".to_owned());
+    }
+    Ok(())
 }
 
 fn now_millis() -> i64 {
@@ -1884,5 +2002,29 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["video-old"]
         );
+    }
+
+    #[test]
+    fn round_trips_writing_projects() {
+        let database = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        let mut project = WritingProjectRecord {
+            id: "story-1".to_owned(),
+            title: "The Long Night".to_owned(),
+            project_type: "game".to_owned(),
+            payload: serde_json::json!({ "schemaVersion": 1, "documents": [] }),
+            created_at: 100,
+            updated_at: 100,
+        };
+        database.save_writing_project(&project).unwrap();
+        assert_eq!(
+            database.list_writing_projects().unwrap(),
+            vec![project.clone()]
+        );
+        project.title = "The Longer Night".to_owned();
+        project.updated_at = 200;
+        database.save_writing_project(&project).unwrap();
+        assert_eq!(database.list_writing_projects().unwrap(), vec![project]);
+        assert!(database.delete_writing_project("story-1").unwrap());
+        assert!(!database.delete_writing_project("story-1").unwrap());
     }
 }

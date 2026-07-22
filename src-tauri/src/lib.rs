@@ -31,7 +31,7 @@ use models::{
     McpServerConfig, McpServerSnapshot, McpServerUpsert, MediaAsset, MediaAssetPage,
     MediaBatchResult, MediaCatalog, MediaGenerationRequest, MediaKind, MediaStatus, ModelInfo,
     ProviderHealth, ProviderProfile, ProviderRequestLog, ProviderSettings, SkillInfo, StoredThread,
-    ToolExecutionRequest, ToolExecutionResponse,
+    ToolExecutionRequest, ToolExecutionResponse, WritingProjectRecord,
 };
 use reqwest::Client;
 use serde::Deserialize;
@@ -2873,6 +2873,54 @@ fn save_thread(
 }
 
 #[tauri::command]
+fn list_writing_projects(
+    database: tauri::State<'_, database::Database>,
+) -> Result<Vec<WritingProjectRecord>, String> {
+    database.list_writing_projects()
+}
+
+#[tauri::command]
+fn save_writing_project(
+    database: tauri::State<'_, database::Database>,
+    project: WritingProjectRecord,
+) -> Result<(), String> {
+    database.save_writing_project(&project)
+}
+
+#[tauri::command]
+fn delete_writing_project(
+    database: tauri::State<'_, database::Database>,
+    project_id: String,
+) -> Result<bool, String> {
+    database.delete_writing_project(&project_id)
+}
+
+#[tauri::command]
+fn export_writing_file(destination: String, content: String) -> Result<String, String> {
+    if content.len() > 16 * 1024 * 1024 {
+        return Err("Writing export may not exceed 16 MiB".to_owned());
+    }
+    let path = PathBuf::from(destination);
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !matches!(extension.as_str(), "json" | "md" | "yarn" | "txt") {
+        return Err("Writing exports must use .json, .md, .yarn, or .txt".to_owned());
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Writing export destination has no parent directory".to_owned())?;
+    if !parent.is_dir() {
+        return Err("Writing export destination directory does not exist".to_owned());
+    }
+    std::fs::write(&path, content)
+        .map_err(|error| format!("Could not export writing project: {error}"))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
 fn delete_thread(
     app: tauri::AppHandle,
     database: tauri::State<'_, database::Database>,
@@ -3255,6 +3303,10 @@ pub fn run() {
             list_threads,
             save_thread,
             delete_thread,
+            list_writing_projects,
+            save_writing_project,
+            delete_writing_project,
+            export_writing_file,
             scan_external_configs,
             import_external_config,
             get_git_status,

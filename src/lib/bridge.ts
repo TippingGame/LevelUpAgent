@@ -46,6 +46,7 @@ import type {
   ThemeManifest,
   ThemePackage,
   ResolvedLayout,
+  WritingProjectRecord,
 } from "./types";
 
 export const isDesktop = () => "__TAURI_INTERNALS__" in window;
@@ -434,6 +435,69 @@ export async function getProviderSettings(): Promise<ProviderSettings | null> {
 
 export async function saveProviderSettings(settings: ProviderSettings): Promise<void> {
   await invoke("save_provider_settings", { settings });
+}
+
+const BROWSER_WRITING_PROJECTS_KEY = "levelup-agent.writing-projects.v1";
+const MAX_WRITING_BYTES = 16 * 1024 * 1024;
+
+export async function listWritingProjects(): Promise<WritingProjectRecord[]> {
+  if (isDesktop()) return invoke<WritingProjectRecord[]>("list_writing_projects");
+  try {
+    const value = localStorage.getItem(BROWSER_WRITING_PROJECTS_KEY);
+    if (!value) return [];
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is WritingProjectRecord => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function saveWritingProject(project: WritingProjectRecord): Promise<void> {
+  if (isDesktop()) {
+    await invoke("save_writing_project", { project });
+    return;
+  }
+  const payload = JSON.stringify(project.payload);
+  if (new TextEncoder().encode(payload).byteLength > MAX_WRITING_BYTES) throw new Error("Writing project data may not exceed 16 MiB");
+  const current = await listWritingProjects();
+  const next = [project, ...current.filter((item) => item.id !== project.id)]
+    .sort((left, right) => right.updatedAt - left.updatedAt)
+    .slice(0, 100);
+  localStorage.setItem(BROWSER_WRITING_PROJECTS_KEY, JSON.stringify(next));
+}
+
+export async function deleteWritingProject(projectId: string): Promise<boolean> {
+  if (isDesktop()) return invoke<boolean>("delete_writing_project", { projectId });
+  const current = await listWritingProjects();
+  const next = current.filter((item) => item.id !== projectId);
+  localStorage.setItem(BROWSER_WRITING_PROJECTS_KEY, JSON.stringify(next));
+  return next.length !== current.length;
+}
+
+export async function exportWritingFile(
+  suggestedName: string,
+  content: string,
+  extension: "json" | "md" | "yarn" | "txt",
+): Promise<string | null> {
+  if (new TextEncoder().encode(content).byteLength > MAX_WRITING_BYTES) throw new Error("Writing export may not exceed 16 MiB");
+  if (!isDesktop()) {
+    const blob = new Blob([content], { type: extension === "json" ? "application/json" : "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = suggestedName;
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+    return suggestedName;
+  }
+  const destination = await save({
+    defaultPath: suggestedName,
+    filters: [{ name: "Writing export", extensions: [extension] }],
+  });
+  if (typeof destination !== "string") return null;
+  return invoke<string>("export_writing_file", { destination, content });
 }
 
 export async function fetchModels(profile: ProviderProfile, apiKey?: string): Promise<ModelInfo[]> {

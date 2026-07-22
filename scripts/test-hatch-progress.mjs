@@ -14,6 +14,7 @@ import {
   hatchCommandIsObservation,
   hatchRepeatedCommandCount,
   HATCH_MAX_IDENTICAL_COMMANDS,
+  hatchPetId,
   normalizeHatchCommandCall,
   hatchToolPolicyViolation,
   createHatchExecutionState,
@@ -26,6 +27,14 @@ import {
 const call = (id, name, args = {}) => ({ id, name, arguments: args });
 const state = () => ({ count: 0, fingerprints: new Map() });
 const assistant = (toolCalls) => ({ role: "assistant", toolCalls });
+
+test("hatch pet IDs remain package-safe for localized display names", () => {
+  assert.match(hatchPetId("Noct Prime"), /^[a-z0-9_-]+$/);
+  assert.equal(hatchPetId("Noct Prime"), "noct-prime");
+  assert.match(hatchPetId("奶龙"), /^pet-[a-z0-9]{7}$/);
+  assert.equal(hatchPetId("奶龙"), hatchPetId("奶龙"));
+  assert.ok(hatchPetId("x".repeat(200)).length <= 64);
+});
 
 test("hatch observation fingerprints ignore argument key order", () => {
   assert.equal(
@@ -204,6 +213,19 @@ test("generated fallback prepare commands pin the shared green chroma key", () =
   }];
   const command = hatchPrepareCommandFromHistory(history);
   assert.match(command, /--chroma-key '#00FF00'/);
+  assert.match(command, /--pet-id 'noct'/);
+});
+
+test("generated fallback prepare commands use an explicit localized pet ID", () => {
+  const history = [{
+    role: "user",
+    internal: true,
+    content: "Bundled Hatch Pet skill directory: C:/skill\nPython command: python\nUse this unique hatch run directory: C:/run\nPet name: 奶龙\nPet ID: pet-fixed123\nPet concept: 可爱的黄色小龙",
+    toolCalls: [],
+  }];
+  const command = hatchPrepareCommandFromHistory(history);
+  assert.match(command, /--pet-name '奶龙'/);
+  assert.match(command, /--pet-id 'pet-fixed123'/);
 });
 
 test("record commands use the adapter provenance path instead of a retyped thread path", () => {

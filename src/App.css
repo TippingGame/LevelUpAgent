@@ -99,7 +99,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .layout-input { display: flex; min-width: 0; flex-direction: column; }
 .app-shell.qq2007-layout.details-collapsed { grid-template-columns: 266px minmax(0, 1fr) 0; }
 .qq2007-layout > .sidebar { grid-area: qq-sidebar; }
-.qq2007-layout > .workspace-shell, .qq2007-layout > .media-studio { grid-area: qq-main; }
+.qq2007-layout > .workspace-shell, .qq2007-layout > .writing-studio, .qq2007-layout > .media-studio { grid-area: qq-main; }
 .qq2007-titlebar { grid-area: qq-title; }
 .qq2007-toolbar { grid-area: qq-toolbar; }
 .qq2007-right-panel { grid-area: qq-right; min-width: 0; min-height: 0; overflow: hidden; }
@@ -1129,9 +1129,11 @@ button.detail-row { padding: 0; border: 0; background: transparent; text-align: 
 .media-drop-overlay > span { width: 56px; height: 56px; display: grid; place-items: center; border-radius: 16px; background: linear-gradient(135deg, #e0f2fe, #fce7f3); box-shadow: 0 9px 24px rgba(14,165,233,.14); }
 .media-drop-overlay strong { font-size: var(--font-heading); }
 .media-drop-overlay small { max-width: 480px; color: var(--muted); font-size: var(--font-caption); text-align: center; }
-.media-topbar { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 20px; border-bottom: 1px solid rgba(255,255,255,.82); background: rgba(248,250,252,.74); box-shadow: 0 8px 26px rgba(15,23,42,.035); backdrop-filter: blur(22px) saturate(140%); }
+.media-topbar { min-width: 0; display: grid; grid-template-columns: minmax(190px, 1fr) auto minmax(90px, 1fr); align-items: center; gap: 16px; padding: 0 20px; border-bottom: 1px solid rgba(255,255,255,.82); background: rgba(248,250,252,.74); box-shadow: 0 8px 26px rgba(15,23,42,.035); backdrop-filter: blur(22px) saturate(140%); }
 .media-topbar > div { display: flex; align-items: center; gap: 9px; }
 .media-topbar > div:first-child > span:last-child { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.media-topbar-actions { justify-self: end; }
+.media-topbar .creation-mode-switch button.active { color: #e11d48; }
 .media-topbar strong { color: var(--text); font-size: var(--font-control); font-weight: 760; }
 .media-topbar small { color: var(--muted); font-size: var(--font-caption); }
 .media-title-icon { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 10px; background: linear-gradient(135deg, #f43f5e, #fbbf24); color: #fff; box-shadow: 0 7px 18px rgba(244,63,94,.18); }
@@ -1468,7 +1470,8 @@ button.detail-row { padding: 0; border: 0; background: transparent; text-align: 
 }
 
 @media (max-width: 680px) {
-  .media-topbar { padding-inline: 12px 8px; }
+  .media-topbar { grid-template-columns: auto auto minmax(68px, 1fr); gap: 6px; padding-inline: 12px 8px; }
+  .media-topbar-brand > span:last-child { display: none !important; }
   .media-topbar small { display: none; }
   .media-studio-body { display: block; overflow-y: auto; }
   .media-compose-panel, .media-gallery-panel { overflow: visible; }

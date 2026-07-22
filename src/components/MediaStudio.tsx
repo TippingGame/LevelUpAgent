@@ -12,6 +12,7 @@ import {
   AudioLines,
   ArrowLeft,
   ArrowRight,
+  BookOpen,
   Check,
   CircleAlert,
   Clock3,
@@ -99,6 +100,7 @@ interface MediaStudioProps {
   onReferenceDropHandled: (id: string) => void;
   onConfigureConnection: () => void;
   onPendingCountChange: (count: number) => void;
+  onWriting: () => void;
 }
 
 const KIND_TABS: Array<{ kind: MediaKind; icon: typeof Image }> = [
@@ -129,7 +131,7 @@ const GROK_VIDEO_ASPECT_OPTIONS = ["16:9", "9:16"];
 const GROK_VIDEO_RESOLUTION_OPTIONS = ["480p", "720p"];
 const GROK_VIDEO_MODES: VideoGenerationMode[] = ["text", "image", "reference", "video"];
 
-export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, referenceDrop, onReferenceDropHandled, onConfigureConnection, onPendingCountChange }: MediaStudioProps) {
+export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, referenceDrop, onReferenceDropHandled, onConfigureConnection, onPendingCountChange, onWriting }: MediaStudioProps) {
   const rootRef = useRef<HTMLElement>(null);
   const [kind, setKind] = useState<MediaKind>("image");
   const [catalog, setCatalog] = useState<Awaited<ReturnType<typeof getMediaCatalog>> | null>(null);
@@ -624,11 +626,15 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
         </div>
       )}
       <header className="media-topbar" data-tauri-drag-region>
-        <div>
+        <div className="media-topbar-brand">
           <span className="media-title-icon"><WandSparkles size={17} /></span>
           <span><strong>{tr("创作空间", "Media Studio")}</strong><small>{tr("独立于会话，所有生成结果全局保存", "Independent from conversations, with global history")}</small></span>
         </div>
-        <div>
+        <div className="creation-mode-switch" role="tablist" aria-label={tr("创作类型", "Creation mode")}>
+          <button type="button" role="tab" aria-selected="true" className="active"><ImagePlus size={14} />{tr("图片 · 视频 · 语音", "Image · Video · Speech")}</button>
+          <button type="button" role="tab" aria-selected="false" onClick={onWriting}><BookOpen size={14} />{tr("写作", "Writing")}</button>
+        </div>
+        <div className="media-topbar-actions">
           <button className="media-icon-button" disabled={refreshing} onClick={() => void refreshAll()} title={tr("刷新模型和历史", "Refresh models and history")}>
             <RefreshCw className={refreshing ? "spin" : ""} size={16} />
           </button>
