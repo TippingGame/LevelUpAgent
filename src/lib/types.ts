@@ -36,10 +36,11 @@ export interface ThemeManifest {
   version: string;
   author: string;
   description: string;
-  layout?: "standard" | "qq2007";
+  layout?: "standard" | "qq2007" | LayoutDefinition;
   layoutFile?: string;
   homepage?: string;
   license?: string;
+  bundled?: boolean;
 }
 
 export interface ThemePackage extends ThemeManifest {

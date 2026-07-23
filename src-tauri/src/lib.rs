@@ -554,6 +554,21 @@ fn theme_storage(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
         .join("themes"))
 }
 
+fn bundled_theme_source(app: &tauri::AppHandle) -> Result<Option<std::path::PathBuf>, String> {
+    let bundled = app
+        .path()
+        .resource_dir()
+        .map_err(|error| format!("Could not locate the application resource directory: {error}"))?
+        .join("themes");
+    if bundled.is_dir() {
+        return Ok(Some(bundled));
+    }
+    let source = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(|path| path.join("themes"));
+    Ok(source.filter(|path| path.is_dir()))
+}
+
 #[tauri::command]
 fn list_themes(app: tauri::AppHandle) -> Result<Vec<theme::ThemeManifest>, String> {
     theme::list(&theme_storage(&app)?)
@@ -3211,6 +3226,14 @@ pub fn run() {
         .setup(|app| {
             ensure_default_workspace(app.handle())
                 .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+            if let Some(source) = bundled_theme_source(app.handle())
+                .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?
+            {
+                let storage = theme_storage(app.handle())
+                    .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+                theme::sync_bundled(&storage, &source)
+                    .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+            }
             let app_data = app.path().app_data_dir()?;
             let media_directory = app_data.join("media");
             std::fs::create_dir_all(&media_directory)?;

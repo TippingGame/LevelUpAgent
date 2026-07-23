@@ -1,20 +1,20 @@
 # Declarative layouts
 
-LevelUpAgent renders its client structure from a validated `layout.json`. The built-in default layout is [default.layout.json](../layouts/default.layout.json). A schema version 2 theme may reference a separate companion layout file through `layoutFile`; if the field is absent or an installed custom layout becomes unreadable, the host uses the default layout.
+LevelUpAgent renders its client structure from a validated `layout.json` definition. The built-in default layout is [default.layout.json](../layouts/default.layout.json). Schema version 2 themes embed that definition in the `layout` package field; if it is absent or an installed custom layout becomes unreadable, the host uses the default layout. `layoutFile` remains supported for older companion-file packages.
 
 The layout runtime is declarative. It supports component composition, visible application data, conditions, repeated data, local state, and registered host actions. It never evaluates JavaScript, arbitrary HTML, expressions, shell commands, or unregistered Tauri calls.
 
 ## Theme and layout files
 
-Give every theme its own directory and keep both files inside it:
+New theme packages are single files. A source project may still keep a standalone `layout.json` during development and put its parsed contents into the package:
 
 ```text
 example-theme/
 ├─ example.levelup-theme
-└─ layout.json
+└─ layout.json            # source input; embedded at build time
 ```
 
-The theme manifest names the companion file:
+The theme package embeds the layout definition:
 
 ```json
 {
@@ -24,12 +24,20 @@ The theme manifest names the companion file:
   "version": "1.0.0",
   "author": "Author",
   "description": "Custom interface",
-  "layoutFile": "layout.json",
+  "layout": {
+    "schemaVersion": 1,
+    "id": "example-layout",
+    "name": "Example layout",
+    "root": {
+      "type": "container",
+      "children": [{ "type": "slot", "slot": "workspace" }]
+    }
+  },
   "css": "html[data-levelup-theme=\"example\"] { --accent: #2878d0; }"
 }
 ```
 
-Selecting `example.levelup-theme` installs the directory contents as `themes/example/`, where the managed theme is stored as `theme.levelup-theme` beside `layout.json`. `layoutFile` must be `layout.json` or a basename ending in `.layout.json`; absolute paths and directory traversal are rejected. The complete directory is replaced on update and removed on uninstall. Flat files directly under `themes/` are not scanned.
+Selecting `example.levelup-theme` installs the complete package as `themes/example/theme.levelup-theme`; no companion layout file is needed. The embedded definition is validated with the same schema and limits as a standalone `layout.json`. Older `layoutFile` packages are still installed into a managed theme directory, with absolute paths and directory traversal rejected.
 
 Schema version 1 themes remain compatible. `layout: "standard"` resolves to the default JSON layout, while `layout: "qq2007"` resolves to the bundled QQ2007 compatibility JSON layout.
 

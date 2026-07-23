@@ -205,6 +205,15 @@ pub fn validate_definition(definition: &Value) -> Result<(), String> {
     Ok(())
 }
 
+pub fn validate_embedded_definition(definition: &Value) -> Result<(), String> {
+    let bytes = serde_json::to_vec(definition)
+        .map_err(|error| format!("Could not serialize embedded layout: {error}"))?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_LAYOUT_BYTES {
+        return Err("Embedded layouts must be between 1 byte and 512 KiB".to_owned());
+    }
+    validate_definition(definition)
+}
+
 fn validate_node(
     node: &Value,
     depth: usize,
@@ -674,6 +683,33 @@ pub fn resolve(
         definition: default_definition()?,
         warning: None,
     })
+}
+
+pub fn resolve_definition(
+    custom_layout: Option<&Value>,
+    legacy_layout: Option<&str>,
+) -> Result<ResolvedLayout, String> {
+    if let Some(custom_layout) = custom_layout {
+        match validate_embedded_definition(custom_layout) {
+            Ok(()) => {
+                return Ok(ResolvedLayout {
+                    source: "theme".to_owned(),
+                    definition: custom_layout.clone(),
+                    warning: None,
+                });
+            }
+            Err(error) => {
+                return Ok(ResolvedLayout {
+                    source: "default".to_owned(),
+                    definition: default_definition()?,
+                    warning: Some(format!(
+                        "Custom layout could not be loaded; using default: {error}"
+                    )),
+                });
+            }
+        }
+    }
+    resolve(None, legacy_layout)
 }
 
 #[cfg(test)]

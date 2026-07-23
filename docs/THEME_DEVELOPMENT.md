@@ -11,7 +11,7 @@ LevelUpAgent 的主题系统遵循以下原则：
 1. 主题可独立安装、切换、更新和卸载。
 2. 默认主题不依赖任何第三方主题文件。
 3. 第三方主题停用后不能残留 CSS、布局或窗口状态。
-4. 主题包不执行 JavaScript；schemaVersion 2 可额外携带一个独立、声明式且经过校验的 `layout.json`。
+4. 主题包不执行 JavaScript；schemaVersion 2 可在 `layout` 字段内携带一个声明式且经过校验的 `layout.json` 定义。
 5. 优先修改主题项目；只有 CSS 无法表达缺失的语义结构时，才扩展 LevelUpAgent。
 6. 宿主扩展应是受控、可复用的布局能力，不能为某个主题散落硬编码补丁。
 
@@ -23,10 +23,10 @@ LevelUpAgent 的主题系统遵循以下原则：
 单个 UTF-8 JSON .levelup-theme 文件
         ↓ 安装与 Rust 校验
 应用数据目录/themes/{id}/theme.levelup-theme
-                    └─ layout.json（可选）
+                    （布局已内嵌在主题包中；旧版 layoutFile 主题可能另有 layout.json）
         ↓ 激活
 <html data-levelup-theme="{id}"> + 专用 <style>
-        ↓ 可选独立 layout.json
+        ↓ 可选内嵌 layout 定义
 自定义声明式布局；缺失时读取内置 default.layout.json
 ```
 
@@ -53,7 +53,7 @@ LevelUpAgent 的主题系统遵循以下原则：
 | 等级 | 适用情况 | 主题项目改动 | LevelUpAgent 改动 |
 | --- | --- | --- | --- |
 | A：视觉主题 | 颜色、字体、圆角、阴影、背景、现有控件外观 | manifest、CSS、素材、构建器、测试 | 无 |
-| B：声明式结构主题 | 需要重排区域、添加声明式组件或绑定宿主已公开数据/动作 | schemaVersion 2、CSS、独立 `layout.json` | 无 |
+| B：声明式结构主题 | 需要重排区域、添加声明式组件或绑定宿主已公开数据/动作 | schemaVersion 2、CSS、内嵌 `layout` 定义 | 无 |
 | C：宿主能力扩展 | 需要布局运行时尚未公开的数据、动作或真实功能组件 | 完整主题包与布局 | 增加可复用的数据、动作或插槽契约 |
 
 必须先尝试 A，再检查 B。只有下面情况才进入 C：
@@ -93,8 +93,10 @@ LevelUpAgent 的主题系统遵循以下原则：
 - `author` 最多 100 个可打印字符。
 - `description` 最多 500 个可打印字符。
 - schemaVersion 1 的 `layout` 可省略，仅用于兼容 `standard` 与 `qq2007`。
-- schemaVersion 2 使用可选 `layoutFile`；它必须是同目录下的 `layout.json` 或以 `.layout.json` 结尾的普通文件名。
-- schemaVersion 2 未声明 `layoutFile` 时读取内置默认布局文件。
+- schemaVersion 2 使用可选 `layout` 对象，将 `layout.json` 的内容直接内嵌到主题包。
+- schemaVersion 2 未声明 `layout` 时读取内置默认布局文件。
+- `layout` 与 `layoutFile` 不能同时声明；`layoutFile` 仅用于兼容旧版 companion 包。
+- 旧版 schemaVersion 2 的 `layoutFile` companion 文件仍可读取，但新主题不应依赖它。
 - `homepage` 最多 300 个可打印字符，可省略。
 - `license` 最多 80 个可打印字符，可省略。
 - 包文件必须是普通文件，大小为 1 字节到 12 MiB。
@@ -127,7 +129,7 @@ theme-project/
    └─ dist/
       └─ example-theme/
          ├─ example-theme.levelup-theme
-         └─ layout.json
+         └─ layout.json（构建输入，内容嵌入包内）
 ```
 
 主题源仓库不应混入旧平台注入器、无关运行时、私有截图、应用凭据或无法说明来源的素材。
@@ -224,11 +226,12 @@ css = css.replaceAll("__ASSET_ICON__", dataUrl);
 推荐构建器执行以下工作：
 
 1. 读取 `manifest.json`。
-2. 读取 `theme.css`。
-3. 将本地素材替换为 `data:` URL。
-4. 检查没有遗留素材占位符。
-5. 检查 CSS 包含与 manifest ID 完全一致的作用域。
-6. 输出 `{ ...manifest, css }` 到 `dist/{id}.levelup-theme`。
+2. 读取 `layout.json`（如果主题有自定义结构）并将解析后的对象写入 `layout` 字段。
+3. 读取 `theme.css`。
+4. 将本地素材替换为 `data:` URL。
+5. 检查没有遗留素材占位符。
+6. 检查 CSS 包含与 manifest ID 完全一致的作用域。
+7. 输出 `{ ...manifest, layout, css }` 到 `dist/{id}.levelup-theme`。
 
 构建命令建议统一为：
 
@@ -265,9 +268,9 @@ npm test
 
 新布局必须有稳定、通用的布局 ID，例如 `compact-console`，不能使用临时项目名。通常不修改宿主，按以下顺序实施：
 
-1. 将主题 manifest 升级到 schemaVersion 2 并声明 `layoutFile`。
+1. 将主题 manifest 升级到 schemaVersion 2 并将 `layout.json` 解析后写入 `layout` 字段。
 2. 按 [LAYOUTS.md](./LAYOUTS.md) 使用容器、插槽、数据绑定、条件、列表、局部状态与受控动作。
-3. 为每个主题创建独占发布目录，将 `.layout.json` 与 `.levelup-theme` 一起放入其中交付。
+3. 发布时只需交付包含 `layout` 定义的单个 `.levelup-theme` 文件。
 4. 在主题 CSS 中完成全部视觉样式，并保持主题 ID 作用域。
 5. 验证缺失布局时回退默认布局，卸载时删除布局并恢复默认状态。
 
@@ -291,6 +294,8 @@ npm test
 不要为了主题效果永久关闭所有主题的系统标题栏。
 
 ## 8. 安装生命周期验收
+
+LevelUpAgent 仓库根目录 `themes/` 下的主题会作为桌面安装包资源发布。应用启动时校验并同步这些内置主题；同 ID 的用户手动安装版本优先，且不会被启动同步覆盖。内置主题在主题管理器中标记为“内置”，不能卸载。
 
 每个新主题至少执行一次完整生命周期：
 
