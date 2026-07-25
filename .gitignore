@@ -11,6 +11,9 @@ node_modules
 dist
 dist-ssr
 artifacts/
+src-tauri/target*/
+__pycache__/
+*.pyc
 *.local
 src-tauri/tauri.release.conf.json
 

@@ -6,10 +6,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::models::{
     GoalCreateRequest, GoalState, GoalStatus, ImageAttachment, McpServerConfig, McpTransport,
     MediaAsset, MediaKind, MediaStatus, ProviderHealth, ProviderRequestLog, ProviderSettings,
-    StoredMessage, StoredThread, ToolCall,
+    StoredMessage, StoredThread, ToolCall, WritingProjectRecord,
 };
 
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 12;
 
 pub struct Database {
     connection: Mutex<Connection>,
@@ -63,11 +63,13 @@ impl Database {
                     tool_calls_json TEXT NOT NULL DEFAULT '[]',
                     tool_call_id TEXT,
                     created_at INTEGER NOT NULL,
-                    is_error INTEGER NOT NULL DEFAULT 0,
-                    request_id TEXT,
-                    internal INTEGER NOT NULL DEFAULT 0,
-                    attachments_json TEXT NOT NULL DEFAULT '[]',
-                    UNIQUE(thread_id, position)
+                     is_error INTEGER NOT NULL DEFAULT 0,
+                     request_id TEXT,
+                     internal INTEGER NOT NULL DEFAULT 0,
+                     attachments_json TEXT NOT NULL DEFAULT '[]',
+                     model_name TEXT,
+                     provider_brand TEXT,
+                     UNIQUE(thread_id, position)
                  );
 
                  CREATE INDEX IF NOT EXISTS idx_threads_updated_at
@@ -136,6 +138,15 @@ impl Database {
                     output_format TEXT,
                     voice TEXT,
                     seconds INTEGER,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                 );
+
+                 CREATE TABLE IF NOT EXISTS writing_projects (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    title TEXT NOT NULL,
+                    project_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL
                  );
@@ -223,16 +234,50 @@ impl Database {
                 )
                 .map_err(database_error)?;
         }
+        let has_model_name = connection
+            .prepare("PRAGMA table_info(messages)")
+            .and_then(|mut statement| {
+                let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+                columns.collect::<Result<Vec<_>, _>>()
+            })
+            .map_err(database_error)?
+            .iter()
+            .any(|column| column == "model_name");
+        if !has_model_name {
+            connection
+                .execute("ALTER TABLE messages ADD COLUMN model_name TEXT", [])
+                .map_err(database_error)?;
+        }
+        let has_provider_brand = connection
+            .prepare("PRAGMA table_info(messages)")
+            .and_then(|mut statement| {
+                let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+                columns.collect::<Result<Vec<_>, _>>()
+            })
+            .map_err(database_error)?
+            .iter()
+            .any(|column| column == "provider_brand");
+        if !has_provider_brand {
+            connection
+                .execute("ALTER TABLE messages ADD COLUMN provider_brand TEXT", [])
+                .map_err(database_error)?;
+        }
         connection
             .execute_batch(
                 "CREATE INDEX IF NOT EXISTS idx_provider_requests_started_at
                    ON provider_requests(started_at DESC);
+                 CREATE INDEX IF NOT EXISTS idx_provider_requests_request_id
+                   ON provider_requests(request_id);
                  CREATE INDEX IF NOT EXISTS idx_provider_requests_profile_model
                    ON provider_requests(profile_id, model, started_at DESC);
                  CREATE INDEX IF NOT EXISTS idx_media_assets_created_at
                    ON media_assets(created_at DESC);
+                 CREATE INDEX IF NOT EXISTS idx_media_assets_kind_created_at
+                   ON media_assets(kind, created_at DESC, id DESC);
                  CREATE INDEX IF NOT EXISTS idx_media_assets_thread
-                   ON media_assets(thread_id, created_at DESC);",
+                   ON media_assets(thread_id, created_at DESC);
+                 CREATE INDEX IF NOT EXISTS idx_writing_projects_updated_at
+                   ON writing_projects(updated_at DESC);",
             )
             .map_err(database_error)?;
         connection
@@ -274,8 +319,18 @@ impl Database {
         let mut threads = Vec::with_capacity(summaries.len());
         let mut message_statement = connection
             .prepare(
-                "SELECT id, role, content, tool_calls_json, tool_call_id, created_at, is_error, request_id, internal, attachments_json
-                 FROM messages WHERE thread_id = ?1 ORDER BY position ASC",
+                "SELECT m.id, m.role, m.content, m.tool_calls_json, m.tool_call_id, m.created_at, m.is_error, m.request_id, m.internal, m.attachments_json,
+                        COALESCE(m.model_name, (
+                            SELECT provider_request.model
+                            FROM provider_requests AS provider_request
+                            WHERE provider_request.request_id = m.request_id
+                              AND provider_request.status = 'success'
+                            ORDER BY provider_request.started_at DESC
+                            LIMIT 1
+                        )) AS model_name,
+                        m.provider_brand
+                 FROM messages AS m
+                 WHERE m.thread_id = ?1 ORDER BY m.position ASC",
             )
             .map_err(database_error)?;
         for (id, title, workspace, updated_at, input_tokens, output_tokens) in summaries {
@@ -299,6 +354,8 @@ impl Database {
                         request_id: row.get(7)?,
                         internal: row.get::<_, i64>(8)? != 0,
                         attachments,
+                        model_name: row.get(10)?,
+                        provider_brand: row.get(11)?,
                     })
                 })
                 .map_err(database_error)?
@@ -350,8 +407,8 @@ impl Database {
             let mut statement = transaction
                 .prepare(
                     "INSERT INTO messages
-                     (id, thread_id, position, role, content, tool_calls_json, tool_call_id, created_at, is_error, request_id, internal, attachments_json)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                     (id, thread_id, position, role, content, tool_calls_json, tool_call_id, created_at, is_error, request_id, internal, attachments_json, model_name, provider_brand)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 )
                 .map_err(database_error)?;
             for (position, message) in thread.messages.iter().enumerate() {
@@ -373,6 +430,8 @@ impl Database {
                         message.request_id,
                         i64::from(message.internal),
                         attachments,
+                        message.model_name,
+                        message.provider_brand,
                     ])
                     .map_err(database_error)?;
             }
@@ -757,6 +816,41 @@ impl Database {
             .map_err(database_error)
     }
 
+    pub fn list_media_assets_page(
+        &self,
+        kind: &MediaKind,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<MediaAsset>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, batch_id, thread_id, provider_id, provider_name, kind, status,
+                        prompt, model, mime_type, file_name, remote_id, revised_prompt, error,
+                        progress, size, quality, output_format, voice, seconds, created_at, updated_at
+                 FROM media_assets
+                 WHERE kind = ?1
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT ?2 OFFSET ?3",
+            )
+            .map_err(database_error)?;
+        statement
+            .query_map(
+                params![
+                    media_kind_value(kind),
+                    limit.clamp(1, 500) as i64,
+                    i64::try_from(offset).unwrap_or(i64::MAX),
+                ],
+                media_asset_from_row,
+            )
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)
+    }
+
     pub fn get_media_asset(&self, id: &str) -> Result<Option<MediaAsset>, String> {
         let connection = self
             .connection
@@ -788,6 +882,70 @@ impl Database {
             .execute("DELETE FROM media_assets WHERE id = ?1", [id])
             .map_err(database_error)?;
         Ok(current)
+    }
+
+    pub fn list_writing_projects(&self) -> Result<Vec<WritingProjectRecord>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, title, project_type, payload_json, created_at, updated_at
+                 FROM writing_projects ORDER BY updated_at DESC LIMIT 100",
+            )
+            .map_err(database_error)?;
+        statement
+            .query_map([], writing_project_from_row)
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)
+    }
+
+    pub fn save_writing_project(&self, project: &WritingProjectRecord) -> Result<(), String> {
+        validate_writing_project(project)?;
+        let payload = serde_json::to_string(&project.payload)
+            .map_err(|error| format!("Could not encode writing project: {error}"))?;
+        if payload.len() > 16 * 1024 * 1024 {
+            return Err("Writing project data may not exceed 16 MiB".to_owned());
+        }
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        connection
+            .execute(
+                "INSERT INTO writing_projects
+                 (id, title, project_type, payload_json, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(id) DO UPDATE SET
+                    title = excluded.title,
+                    project_type = excluded.project_type,
+                    payload_json = excluded.payload_json,
+                    created_at = excluded.created_at,
+                    updated_at = excluded.updated_at",
+                params![
+                    project.id,
+                    project.title.trim(),
+                    project.project_type,
+                    payload,
+                    project.created_at,
+                    project.updated_at,
+                ],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+
+    pub fn delete_writing_project(&self, id: &str) -> Result<bool, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        connection
+            .execute("DELETE FROM writing_projects WHERE id = ?1", [id])
+            .map(|changed| changed > 0)
+            .map_err(database_error)
     }
 
     pub fn update_goal_from_agent(
@@ -1235,6 +1393,49 @@ fn media_asset_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MediaAsset>
     })
 }
 
+fn writing_project_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WritingProjectRecord> {
+    let payload: String = row.get(3)?;
+    Ok(WritingProjectRecord {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        project_type: row.get(2)?,
+        payload: serde_json::from_str(&payload).map_err(json_column_error)?,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+    })
+}
+
+fn validate_writing_project(project: &WritingProjectRecord) -> Result<(), String> {
+    if project.id.is_empty()
+        || project.id.len() > 128
+        || !project
+            .id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return Err(
+            "Writing project ID must be 1-128 letters, numbers, dashes, or underscores".to_owned(),
+        );
+    }
+    let title_length = project.title.trim().chars().count();
+    if title_length == 0 || title_length > 200 {
+        return Err("Writing project title must be 1-200 characters".to_owned());
+    }
+    if !matches!(
+        project.project_type.as_str(),
+        "novel" | "screenplay" | "game"
+    ) {
+        return Err("Writing project type must be novel, screenplay, or game".to_owned());
+    }
+    if project.created_at < 0 || project.updated_at < project.created_at {
+        return Err("Writing project timestamps are invalid".to_owned());
+    }
+    if !project.payload.is_object() {
+        return Err("Writing project payload must be a JSON object".to_owned());
+    }
+    Ok(())
+}
+
 fn now_millis() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1317,6 +1518,8 @@ mod tests {
                 request_id: Some("request-1".to_owned()),
                 internal: true,
                 attachments: Vec::new(),
+                model_name: Some("gpt-5.5".to_owned()),
+                provider_brand: Some("openai".to_owned()),
             }],
             updated_at: 1_700_000_000_000,
             input_tokens: 120,
@@ -1350,6 +1553,8 @@ mod tests {
                 request_id: None,
                 internal: false,
                 attachments: Vec::new(),
+                model_name: None,
+                provider_brand: None,
             },
         );
         database.save_thread(&thread).unwrap();
@@ -1403,6 +1608,40 @@ mod tests {
         assert!(columns.iter().any(|column| column == "request_id"));
         assert!(columns.iter().any(|column| column == "internal"));
         assert!(columns.iter().any(|column| column == "attachments_json"));
+        assert!(columns.iter().any(|column| column == "model_name"));
+        assert!(columns.iter().any(|column| column == "provider_brand"));
+    }
+
+    #[test]
+    fn restores_legacy_model_name_from_provider_request_log() {
+        let database = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        let mut thread = sample_thread();
+        thread.messages[0].model_name = None;
+        thread.messages[0].provider_brand = None;
+        database
+            .record_provider_request(&ProviderRequestLog {
+                id: "provider-log-1".to_owned(),
+                thread_id: Some(thread.id.clone()),
+                profile_id: "legacy-profile".to_owned(),
+                model: "legacy-model".to_owned(),
+                protocol: "openai_responses".to_owned(),
+                started_at: 1_700_000_000_001,
+                latency_ms: 42,
+                status: "success".to_owned(),
+                input_tokens: None,
+                output_tokens: None,
+                request_id: Some("request-1".to_owned()),
+                failover_index: 0,
+                error: None,
+            })
+            .unwrap();
+        database.save_thread(&thread).unwrap();
+        let restored = database.list_threads().unwrap();
+        assert_eq!(
+            restored[0].messages[0].model_name.as_deref(),
+            Some("legacy-model")
+        );
+        assert_eq!(restored[0].messages[0].provider_brand, None);
     }
 
     #[test]
@@ -1704,5 +1943,88 @@ mod tests {
         assert_eq!(database.list_media_assets(10).unwrap(), vec![asset.clone()]);
         assert_eq!(database.delete_media_asset("media-1").unwrap(), Some(asset));
         assert!(database.list_media_assets(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn pages_media_assets_by_kind_without_reading_other_history() {
+        let database = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        let asset = |id: &str, kind: MediaKind, created_at: i64| MediaAsset {
+            id: id.to_owned(),
+            batch_id: format!("batch-{id}"),
+            thread_id: None,
+            provider_id: "provider-1".to_owned(),
+            provider_name: "Provider".to_owned(),
+            kind,
+            status: MediaStatus::Completed,
+            prompt: format!("Prompt {id}"),
+            model: "media-model".to_owned(),
+            mime_type: None,
+            file_name: None,
+            file_path: None,
+            remote_id: None,
+            revised_prompt: None,
+            error: None,
+            progress: Some(100),
+            size: None,
+            quality: None,
+            output_format: None,
+            voice: None,
+            seconds: None,
+            created_at,
+            updated_at: created_at,
+        };
+        for item in [
+            asset("video-old", MediaKind::Video, 100),
+            asset("video-middle", MediaKind::Video, 200),
+            asset("video-new", MediaKind::Video, 300),
+            asset("image-newest", MediaKind::Image, 400),
+        ] {
+            database.save_media_asset(&item).unwrap();
+        }
+
+        let first_page = database
+            .list_media_assets_page(&MediaKind::Video, 2, 0)
+            .unwrap();
+        assert_eq!(
+            first_page
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["video-new", "video-middle"]
+        );
+        let second_page = database
+            .list_media_assets_page(&MediaKind::Video, 2, 2)
+            .unwrap();
+        assert_eq!(
+            second_page
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["video-old"]
+        );
+    }
+
+    #[test]
+    fn round_trips_writing_projects() {
+        let database = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        let mut project = WritingProjectRecord {
+            id: "story-1".to_owned(),
+            title: "The Long Night".to_owned(),
+            project_type: "game".to_owned(),
+            payload: serde_json::json!({ "schemaVersion": 1, "documents": [] }),
+            created_at: 100,
+            updated_at: 100,
+        };
+        database.save_writing_project(&project).unwrap();
+        assert_eq!(
+            database.list_writing_projects().unwrap(),
+            vec![project.clone()]
+        );
+        project.title = "The Longer Night".to_owned();
+        project.updated_at = 200;
+        database.save_writing_project(&project).unwrap();
+        assert_eq!(database.list_writing_projects().unwrap(), vec![project]);
+        assert!(database.delete_writing_project("story-1").unwrap());
+        assert!(!database.delete_writing_project("story-1").unwrap());
     }
 }

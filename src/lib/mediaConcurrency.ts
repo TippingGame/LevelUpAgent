@@ -20,10 +20,11 @@ export function isMediaTool(name: string) {
 export async function executeCallsWithParallelMedia<T>(
   calls: ToolCall[],
   execute: (call: ToolCall) => Promise<T>,
+  parallelMedia = true,
 ): Promise<Array<{ call: ToolCall; result: T }>> {
   const results: Array<{ call: ToolCall; result: T }> = [];
   for (let index = 0; index < calls.length;) {
-    if (!PARALLEL_MEDIA_TOOL_NAMES.has(calls[index].name)) {
+    if (!parallelMedia || !PARALLEL_MEDIA_TOOL_NAMES.has(calls[index].name)) {
       const call = calls[index];
       results.push({ call, result: await execute(call) });
       index += 1;

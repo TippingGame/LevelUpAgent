@@ -19,17 +19,23 @@ struct SkillFrontmatter {
 pub fn scan(
     app_data: &Path,
     home: &Path,
+    built_in: Option<&Path>,
+    codex_home: Option<&Path>,
     workspace: Option<&Path>,
     preferences: &HashMap<(String, String), bool>,
 ) -> Vec<SkillInfo> {
-    let mut roots = vec![
+    let mut roots = Vec::new();
+    if let Some(built_in) = built_in {
+        roots.push((built_in.to_path_buf(), "LevelUpAgent built-in".to_owned()));
+    }
+    roots.extend([
         (app_data.join("skills"), "LevelUpAgent".to_owned()),
         (home.join(".codex/skills"), "Codex".to_owned()),
         (home.join(".claude/skills"), "Claude".to_owned()),
         (home.join(".agents/skills"), "Agents".to_owned()),
-    ];
-    if let Some(codex_home) = std::env::var_os("CODEX_HOME") {
-        roots.push((PathBuf::from(codex_home).join("skills"), "Codex".to_owned()));
+    ]);
+    if let Some(codex_home) = codex_home {
+        roots.push((codex_home.join("skills"), "Codex".to_owned()));
     }
     if let Some(workspace) = workspace {
         roots.extend([
@@ -117,6 +123,16 @@ pub fn read_enabled(
     }
 }
 
+/// Return the stable preference key used by `scan` for a Skill manifest.
+///
+/// Built-in Skill setup must use the same canonical path normalization as
+/// discovery; otherwise a Skill can be marked enabled under a name that the
+/// scanner will never recognize.
+pub fn id_for_path(path: &Path) -> String {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    skill_id(&canonical.to_string_lossy())
+}
+
 fn scan_root(
     root: &Path,
     source: &str,
@@ -153,7 +169,7 @@ fn inspect_skill(
     preferences: &HashMap<(String, String), bool>,
 ) -> SkillInfo {
     let path_string = path.to_string_lossy().into_owned();
-    let id = skill_id(&path_string);
+    let id = id_for_path(path);
     let fallback_name = path
         .parent()
         .and_then(Path::file_name)
@@ -361,11 +377,11 @@ mod tests {
         .unwrap();
         std::fs::write(invalid_dir.join("SKILL.md"), "# Missing frontmatter").unwrap();
 
-        let first = scan(&root, &root, None, &HashMap::new());
+        let first = scan(&root, &root, None, None, None, &HashMap::new());
         assert_eq!(first.len(), 2);
         let valid = first.iter().find(|skill| skill.valid).unwrap();
         let preferences = [((valid.id.clone(), valid.path.clone()), true)].into();
-        let second = scan(&root, &root, None, &preferences);
+        let second = scan(&root, &root, None, None, None, &preferences);
         assert!(second.iter().find(|skill| skill.valid).unwrap().enabled);
         assert!(
             second
@@ -389,7 +405,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(skill_dir.join("references/checks.md"), "Check boundaries.").unwrap();
-        let mut skills = scan(&root, &root, None, &HashMap::new());
+        let mut skills = scan(&root, &root, None, None, None, &HashMap::new());
         skills[0].enabled = true;
         assert!(
             read_enabled(&skills, &skills[0].id, Some("references/checks.md"))
@@ -397,6 +413,22 @@ mod tests {
                 .contains("Check boundaries.")
         );
         assert!(read_enabled(&skills, &skills[0].id, Some("../secret.txt")).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn id_for_path_matches_discovered_canonical_manifest_id() {
+        let root = temp_root();
+        let manifest = root.join("skills/review/SKILL.md");
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(
+            &manifest,
+            "---\nname: review\ndescription: Review source changes.\n---\n\n# Review\n",
+        )
+        .unwrap();
+        let discovered = scan(&root, &root, None, None, None, &HashMap::new());
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(id_for_path(&manifest), discovered[0].id);
         std::fs::remove_dir_all(root).unwrap();
     }
 

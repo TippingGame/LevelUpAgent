@@ -1,0 +1,6 @@
+{
+  "id": "yui",
+  "displayName": "Yui",
+  "description": "A tiny Codex digital pet inspired by Yui from Sword Art Online.",
+  "spritesheetPath": "spritesheet.webp"
+}

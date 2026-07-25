@@ -18,7 +18,7 @@
   </p>
 
   <p>
-    <img alt="Version" src="https://img.shields.io/badge/version-1.0.6-ff5a4f?style=flat-square" />
+<img alt="Version" src="https://img.shields.io/badge/version-1.0.13-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-stable-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -88,6 +88,14 @@ Base URL 既可以是服务根地址，例如 `https://api.example.com`，也可
 - 可持久化 Instructions，并可安全同步到主流 CLI 指令文件
 - Goal 持续执行、暂停/恢复、完成审计和阻塞审计
 
+### AI 写作与游戏叙事
+
+- 创作空间默认进入图片、视频与语音工作台，写作工作台排在媒体创作之后；小说、剧本和游戏剧情项目自动保存到本地 SQLite，不依赖会话生命周期
+- 正文支持停笔自动补全、续写、改写、润色、扩写、精简、对白与描写；流式补全会像代码编辑器一样在光标后显示灰色待选文字，可按 Tab 接受、Esc 拒绝，接受前自动创建版本快照
+- 人物、地点、阵营、物品、世界观、剧情、规则和任务组成可关联的设定集；显式选择、文稿/节点绑定、正文提及、关系和全局规则按相关度进入 AI 上下文
+- 游戏剧情图支持场景、对白、选择、条件和结局节点，以及变量、条件、效果、路径校验和内置试玩
+- 完整项目可导入/导出 JSON，并可导出 Markdown 或 Yarn Spinner 脚本；写作与图片、视频、语音创作可在同一空间切换
+
 ### 多媒体创作
 
 - 自动发现并推荐当前连接中最新的生图、视频与 TTS 模型
@@ -95,12 +103,23 @@ Base URL 既可以是服务根地址，例如 `https://api.example.com`，也可
 - 会话可直接调用 `generate_images`、`generate_videos`、`generate_speech`；连续生成调用并行执行，结果保持原顺序后交给模型统一汇总
 - OpenAI-compatible 图片/语音/Sora 与 Gemini 原生图片/语音/Veo；视频任务持久化并自动轮询
 
+### 摇光残影
+
+- 独立透明置顶残影窗口，默认使用内置 Yui，名字与头像直接读取 Codex 兼容宠物包
+- 九种动作按图集逐帧时长由状态机播放；可直接拖动角色到任意位置，并为每个残影单独调节大小
+- 按真实模型输入/输出 Token 累积并持久保留每个残影的经验与等级
+- 多个运行中会话、待审批操作和媒体生成任务以独立游戏任务气泡显示
+- 双击残影打开不写入普通会话数据库的专属临时会话；每个残影拥有互相隔离、可审查删除的长期记忆
+- 多残影导入、切换与删除；自动发现 `${CODEX_HOME}/pets`
+- `hatch-pet` 与 `imagegen` 随应用包内置并自动启用；满足 Python 和模型连接后，一键启动 Goal 并在验证完成后自动导入
+
 ### 可组合扩展
 
 - stdio 与 Streamable HTTP MCP 客户端
 - Codex、Claude、Agents、LevelUpAgent 与项目级 Skill 发现
 - Skill 正文和引用按需读取，避免无关上下文膨胀
 - 子 Agent 使用隔离 Git worktree；补丁完整可见，应用前再次批准
+- `.levelup-theme` 第三方主题包安装、切换与卸载
 
 ### 克制的桌面体验
 
@@ -177,10 +196,14 @@ LevelUpAgent/
 - [架构与安全边界](docs/ARCHITECTURE.md)
 - [安全审计](docs/SECURITY_AUDIT.md)
 - [LevelUpAPI 兼容性证据](docs/LEVELUPAPI_COMPATIBILITY.md)
+- [摇光残影包、经验、记忆与孵化契约](docs/DESKTOP_PETS.md)
 - [功能路线图](docs/ROADMAP.md)
 - [替代能力审计](docs/REPLACEMENT_AUDIT.md)
 - [签名发布与自动更新](docs/RELEASE.md)
 - [参考项目研究](docs/REFERENCE_RESEARCH.md)
+- [第三方主题包](docs/THEMES.md)
+- [主题开发、构建与适配规范](docs/THEME_DEVELOPMENT.md)
+- [主题适配 Agent 工作流程](docs/THEME_AGENT_WORKFLOW.md)
 
 ## 项目状态
 
