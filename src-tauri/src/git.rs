@@ -1,11 +1,18 @@
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::{Component, Path};
 use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::process::Command;
 
-use crate::models::{GitDiff, GitFileChange, GitRollbackPreview, GitRollbackResult, GitStatus};
+use crate::models::{
+    GitDiff, GitFileChange, GitRollbackPreview, GitRollbackResult, GitStatus,
+    GitWorkspaceFileSnapshot, GitWorkspaceSnapshot,
+};
 use crate::process::hide_console_window;
 
 const MAX_DIFF_BYTES: usize = 512 * 1024;
+const MAX_SNAPSHOT_FILE_BYTES: usize = 512 * 1024;
+const MAX_SNAPSHOT_TOTAL_BYTES: usize = 2 * 1024 * 1024;
 const MAX_ROLLBACK_PREVIEW_LINES: usize = 4_000;
 const GIT_UNKNOWN: u8 = 0;
 const GIT_AVAILABLE: u8 = 1;
@@ -113,6 +120,128 @@ pub async fn status(workspace: &str) -> Result<GitStatus, String> {
         branch,
         changes,
     })
+}
+
+pub async fn workspace_snapshot(workspace: &str) -> Result<GitWorkspaceSnapshot, String> {
+    let root = canonical_workspace(workspace)?;
+    if git_is_unavailable() {
+        return Ok(GitWorkspaceSnapshot {
+            is_available: false,
+            is_repository: false,
+            files: Vec::new(),
+        });
+    }
+    let current = status(workspace).await?;
+    if !current.is_repository {
+        return Ok(GitWorkspaceSnapshot {
+            is_available: current.is_available,
+            is_repository: false,
+            files: Vec::new(),
+        });
+    }
+    let mut files = Vec::with_capacity(current.changes.len());
+    let mut remaining_content_bytes = MAX_SNAPSHOT_TOTAL_BYTES;
+    for change in current.changes {
+        let (fingerprint, mut content, mut base_content, mut content_truncated, binary) =
+            file_fingerprint(&root, &change).await?;
+        if let Some(text) = &content {
+            if text.len() > remaining_content_bytes {
+                content = None;
+                content_truncated = true;
+            } else {
+                remaining_content_bytes -= text.len();
+            }
+        }
+        if let Some(text) = &base_content {
+            if text.len() > remaining_content_bytes {
+                base_content = None;
+                content_truncated = true;
+            } else {
+                remaining_content_bytes -= text.len();
+            }
+        }
+        files.push(GitWorkspaceFileSnapshot {
+            path: change.path,
+            index_status: change.index_status,
+            worktree_status: change.worktree_status,
+            fingerprint,
+            content,
+            base_content,
+            content_truncated,
+            binary,
+        });
+    }
+    Ok(GitWorkspaceSnapshot {
+        is_available: true,
+        is_repository: true,
+        files,
+    })
+}
+
+async fn file_fingerprint(
+    root: &Path,
+    change: &GitFileChange,
+) -> Result<(String, Option<String>, Option<String>, bool, bool), String> {
+    let mut material = format!(
+        "{}{}{}\n",
+        change.index_status, change.worktree_status, change.path
+    );
+    let diff = git(
+        root,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--binary",
+            "HEAD",
+            "--",
+            &change.path,
+        ],
+    )
+    .await?;
+    if diff.success && !diff.stdout.is_empty() {
+        material.push_str(&diff.stdout);
+    }
+    let path = root.join(&change.path);
+    let (content, content_truncated, binary) = if path.is_file() {
+        let bytes = std::fs::read(&path)
+            .map_err(|error| format!("Could not read workspace file: {error}"))?;
+        let mut content_hasher = DefaultHasher::new();
+        bytes.hash(&mut content_hasher);
+        material.push_str(&format!("content:{:016x}\n", content_hasher.finish()));
+        if bytes.len() > MAX_SNAPSHOT_FILE_BYTES {
+            (None, true, false)
+        } else {
+            match String::from_utf8(bytes) {
+                Ok(text) => (Some(text), false, false),
+                Err(_) => (None, false, true),
+            }
+        }
+    } else {
+        (None, false, false)
+    };
+    let base_content = git(root, &["show", &format!("HEAD:{}", change.path)])
+        .await
+        .ok()
+        .filter(|output| output.success)
+        .and_then(|output| {
+            let bytes = output.stdout.into_bytes();
+            if bytes.len() > MAX_SNAPSHOT_FILE_BYTES {
+                return None;
+            }
+            String::from_utf8(bytes).ok()
+        });
+    if let Some(text) = &content {
+        material.push_str(text);
+    }
+    let mut hasher = DefaultHasher::new();
+    material.hash(&mut hasher);
+    Ok((
+        format!("{:016x}", hasher.finish()),
+        content,
+        base_content,
+        content_truncated,
+        binary,
+    ))
 }
 
 pub async fn diff(workspace: &str, relative_path: &str, staged: bool) -> Result<GitDiff, String> {
@@ -485,12 +614,32 @@ mod tests {
         std::fs::write(root.join("new.txt"), "new file\n").unwrap();
 
         let root_text = root.to_string_lossy().to_string();
+        let first_snapshot = workspace_snapshot(&root_text).await.unwrap();
+        let first_tracked = first_snapshot
+            .files
+            .iter()
+            .find(|file| file.path == "tracked.txt")
+            .unwrap();
+        assert_eq!(first_tracked.content.as_deref(), Some("after\n"));
+        assert!(!first_tracked.content_truncated);
+        assert!(!first_tracked.binary);
+        let first_fingerprint = first_tracked.fingerprint.clone();
+        std::fs::write(root.join("tracked.txt"), "after again\n").unwrap();
+        let second_snapshot = workspace_snapshot(&root_text).await.unwrap();
+        let second_tracked = second_snapshot
+            .files
+            .iter()
+            .find(|file| file.path == "tracked.txt")
+            .unwrap();
+        assert_ne!(first_fingerprint, second_tracked.fingerprint);
+        assert_eq!(second_tracked.content.as_deref(), Some("after again\n"));
+
         let state = status(&root_text).await.unwrap();
         assert!(state.is_repository);
         assert_eq!(state.changes.len(), 2);
         let tracked = diff(&root_text, "tracked.txt", false).await.unwrap();
         assert!(tracked.content.contains("-before"));
-        assert!(tracked.content.contains("+after"));
+        assert!(tracked.content.contains("+after again"));
         let untracked = diff(&root_text, "new.txt", false).await.unwrap();
         assert!(untracked.content.contains("--- /dev/null"));
         assert!(untracked.content.contains("+new file"));

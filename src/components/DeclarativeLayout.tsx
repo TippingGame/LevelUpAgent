@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import {
   Activity,
   Bot,
@@ -114,6 +114,7 @@ export function DeclarativeLayout({
   slots,
   overlays,
   shellClassName,
+  shellStyle,
 }: {
   definition: LayoutDefinition;
   locale: AppLocale;
@@ -122,6 +123,7 @@ export function DeclarativeLayout({
   slots: Record<string, ReactNode>;
   overlays?: ReactNode;
   shellClassName?: string;
+  shellStyle?: CSSProperties;
 }) {
   const [localState, setLocalState] = useState<Record<string, unknown>>(() => ({ ...(definition.initialState ?? {}) }));
 
@@ -229,6 +231,7 @@ export function DeclarativeLayout({
   return (
     <div
       className={["app-shell", "layout-host", ...(root.className ?? []), shellClassName].filter(Boolean).join(" ")}
+      style={shellStyle}
       data-layout-id={definition.id}
       data-layout-node={root.id}
       role={root.role}

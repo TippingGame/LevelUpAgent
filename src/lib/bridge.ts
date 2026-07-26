@@ -12,11 +12,27 @@ import type {
   ExternalConfigCandidate,
   ExternalConfigTarget,
   GitDiff,
+  GitWorkspaceSnapshot,
   GitRollbackPreview,
   GitRollbackResult,
   GitStatus,
   GoalState,
   GatewayDiagnostics,
+  HarnessDraftRequest,
+  HarnessOperationStarted,
+  HarnessOperationState,
+  HarnessPreflightReport,
+  HarnessPolicyDecision,
+  HarnessToolPolicyRequest,
+  HarnessRunRequest,
+  HarnessRuntimeEvent,
+  HarnessApprovalRecord,
+  HarnessPendingApproval,
+  HarnessApprovalResolution,
+  HarnessRecoveryItem,
+  HarnessQueueItem,
+  HarnessSessionNode,
+  HarnessForkSessionRequest,
   ImageAttachment,
   AttachmentPreview,
   ModelInfo,
@@ -47,6 +63,7 @@ import type {
   ThemePackage,
   ResolvedLayout,
   WritingProjectRecord,
+  PermissionLevel,
 } from "./types";
 
 export const isDesktop = () => "__TAURI_INTERNALS__" in window;
@@ -682,10 +699,16 @@ export async function executeTool(
   hatch = false,
   hatchSkillLoaded = false,
   hatchBootstrap = false,
+  mode: AgentMode = "agent",
+  permissionLevel: PermissionLevel = "request",
+  operationId?: string,
+  approvalGranted = false,
 ): Promise<ToolExecutionResponse> {
   return invoke<ToolExecutionResponse>("execute_tool", {
     request: {
       name: call.name,
+      callId: call.id,
+      operationId,
       arguments: call.arguments,
       workspace,
       threadId,
@@ -694,8 +717,122 @@ export async function executeTool(
       hatch,
       hatchSkillLoaded,
       hatchBootstrap,
+      mode,
+      permissionLevel,
+      approvalGranted,
     },
   });
+}
+
+export async function harnessPreflight(
+  request: HarnessDraftRequest,
+): Promise<HarnessPreflightReport> {
+  return invoke<HarnessPreflightReport>("harness_preflight", { request });
+}
+
+export async function harnessStart(
+  request: HarnessDraftRequest,
+): Promise<HarnessOperationStarted> {
+  return invoke<HarnessOperationStarted>("harness_start", { request });
+}
+
+export async function harnessCheckTool(
+  request: HarnessToolPolicyRequest,
+): Promise<HarnessPolicyDecision> {
+  return invoke<HarnessPolicyDecision>("harness_check_tool", { request });
+}
+
+export async function harnessUpdateState(
+  operationId: string,
+  state: HarnessOperationState,
+): Promise<void> {
+  return invoke("harness_update_state", {
+    request: { operationId, state },
+  });
+}
+
+export async function harnessResolveApproval(
+  request: HarnessApprovalResolution,
+): Promise<HarnessApprovalRecord> {
+  return invoke<HarnessApprovalRecord>("harness_resolve_approval", { request });
+}
+
+export async function harnessListPendingApprovals(): Promise<HarnessPendingApproval[]> {
+  return invoke<HarnessPendingApproval[]>("harness_list_pending_approvals");
+}
+
+export async function harnessReissueApproval(approvalId: string): Promise<string> {
+  return invoke<string>("harness_reissue_approval", { approvalId });
+}
+
+export async function harnessListRecovery(): Promise<HarnessRecoveryItem[]> {
+  return invoke<HarnessRecoveryItem[]>("harness_list_recovery");
+}
+
+export async function harnessResolveUnknown(
+  operationId: string,
+  toolExecutionId: string,
+  decision: "mark_completed" | "mark_not_executed" | "cancel",
+): Promise<void> {
+  return invoke("harness_resolve_unknown", {
+    request: { operationId, toolExecutionId, decision },
+  });
+}
+
+export async function harnessEnqueue(
+  operationId: string,
+  kind: HarnessQueueItem["kind"],
+  body: string,
+): Promise<HarnessQueueItem> {
+  return invoke<HarnessQueueItem>("harness_enqueue", {
+    request: { operationId, kind, body },
+  });
+}
+
+export async function harnessListQueue(operationId: string): Promise<HarnessQueueItem[]> {
+  return invoke<HarnessQueueItem[]>("harness_list_queue", { operationId });
+}
+
+export async function harnessConsumeQueue(queueId: string): Promise<HarnessQueueItem | null> {
+  return invoke<HarnessQueueItem | null>("harness_consume_queue", { queueId });
+}
+
+export async function harnessCancelQueue(queueId: string): Promise<void> {
+  return invoke("harness_cancel_queue", { queueId });
+}
+
+export async function harnessSteer(operationId: string, queueId: string): Promise<void> {
+  return invoke("harness_steer", { operationId, queueId });
+}
+
+export async function harnessCreateSessionNode(request: {
+  threadId: string;
+  parentId?: string;
+  branchId: string;
+  kind: string;
+  messageId?: string;
+  operationId?: string;
+}): Promise<HarnessSessionNode> {
+  return invoke<HarnessSessionNode>("harness_create_session_node", { request });
+}
+
+export async function harnessListSessionNodes(threadId: string): Promise<HarnessSessionNode[]> {
+  return invoke<HarnessSessionNode[]>("harness_list_session_nodes", { threadId });
+}
+
+export async function harnessForkSession(
+  request: HarnessForkSessionRequest,
+): Promise<HarnessSessionNode> {
+  return invoke<HarnessSessionNode>("harness_fork_session", { request });
+}
+
+export async function harnessRun(
+  request: HarnessRunRequest,
+  onEvent: (event: HarnessRuntimeEvent) => void,
+): Promise<void> {
+  const channel = new Channel<HarnessRuntimeEvent>();
+  channel.onmessage = onEvent;
+  await invoke("harness_run", { request, onEvent: channel });
 }
 
 export async function createGoal(
@@ -782,6 +919,13 @@ export async function importExternalConfig(candidateId: string): Promise<Provide
 
 export async function getGitStatus(workspace: string): Promise<GitStatus> {
   return invoke<GitStatus>("get_git_status", { workspace });
+}
+
+export async function getGitWorkspaceSnapshot(workspace: string): Promise<GitWorkspaceSnapshot> {
+  if (!isDesktop()) {
+    return { isAvailable: false, isRepository: false, files: [] };
+  }
+  return invoke<GitWorkspaceSnapshot>("get_git_workspace_snapshot", { workspace });
 }
 
 export async function getGitDiff(

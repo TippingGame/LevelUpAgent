@@ -20,6 +20,13 @@ export interface ProviderSettings {
   activeProfileId: string;
 }
 
+export type DiffFontFamily = "monaco" | "system" | "consolas";
+
+export interface DiffViewSettings {
+  fontFamily: DiffFontFamily;
+  fontSize: number;
+}
+
 export interface WritingProjectRecord {
   id: string;
   title: string;
@@ -184,7 +191,49 @@ export interface AgentMessage {
   providerBrand?: ModelProviderBrand;
   durationMs?: number;
   internal?: boolean;
+  changeSet?: ConversationChangeSet;
   attachments: ImageAttachment[];
+}
+
+export type ConversationChangeStatus = "completed" | "failed" | "cancelled" | "interrupted";
+export type ConversationFileChangeKind = "added" | "modified" | "deleted" | "renamed";
+
+export interface ConversationFileChange {
+  path: string;
+  kind: ConversationFileChangeKind;
+  indexStatus: string;
+  worktreeStatus: string;
+  additions?: number;
+  deletions?: number;
+  diffAvailable: boolean;
+  turnDiff?: string;
+  turnDiffTruncated?: boolean;
+}
+
+export interface ConversationChangeSet {
+  operationId: string;
+  workspace: string;
+  status: ConversationChangeStatus;
+  startedAt: number;
+  completedAt: number;
+  files: ConversationFileChange[];
+}
+
+export interface GitWorkspaceFileSnapshot {
+  path: string;
+  indexStatus: string;
+  worktreeStatus: string;
+  fingerprint: string;
+  content?: string;
+  baseContent?: string;
+  contentTruncated: boolean;
+  binary: boolean;
+}
+
+export interface GitWorkspaceSnapshot {
+  isAvailable: boolean;
+  isRepository: boolean;
+  files: GitWorkspaceFileSnapshot[];
 }
 
 export interface ImageAttachment {
@@ -210,6 +259,87 @@ export interface AgentTurnResponse {
   requestId?: string;
   providerId?: string;
   failoverCount: number;
+}
+
+export interface HarnessRunRequest {
+  operationId: string;
+  threadId: string;
+  messages: AgentMessage[];
+  profile: ProviderProfile;
+  mode: AgentMode;
+  permissionLevel: PermissionLevel;
+  workspace?: string;
+  fallbackProfiles?: ProviderProfile[];
+  hatch?: boolean;
+  hatchSkillLoaded?: boolean;
+}
+
+export interface HarnessRuntimeEvent {
+  schemaVersion: number;
+  operationId: string;
+  sequence: number;
+  kind: string;
+  payload: unknown;
+}
+
+export interface HarnessApprovalResolution {
+  operationId: string;
+  token: string;
+  approved: boolean;
+}
+
+export interface HarnessApprovalRecord {
+  approvalId: string;
+  operationId: string;
+  toolExecutionId: string;
+  callId: string;
+  toolName: string;
+  arguments: Record<string, unknown>;
+  approved: boolean;
+}
+
+export interface HarnessPendingApproval {
+  approvalId: string;
+  operationId: string;
+  threadId: string;
+  callId: string;
+  toolName: string;
+  arguments: Record<string, unknown>;
+}
+
+export interface HarnessRecoveryItem {
+  operationId: string;
+  toolExecutionId: string;
+  callId: string;
+  toolName: string;
+  status: string;
+  startedAt: number;
+}
+
+export interface HarnessQueueItem {
+  id: string;
+  operationId: string;
+  kind: "steer" | "follow_up" | "next_turn";
+  body: string;
+  status: string;
+}
+
+export interface HarnessSessionNode {
+  id: string;
+  threadId: string;
+  parentId?: string;
+  branchId: string;
+  kind: string;
+  messageId?: string;
+  operationId?: string;
+  position: number;
+}
+
+export interface HarnessForkSessionRequest {
+  threadId: string;
+  parentId?: string;
+  branchId: string;
+  operationId?: string;
 }
 
 export interface ProviderHealth {
@@ -285,6 +415,53 @@ export interface ToolExecutionResponse {
   output: string;
   isError: boolean;
 }
+
+export interface HarnessDraftRequest {
+  threadId: string;
+  rawUserInput: string;
+  attachmentIds?: string[];
+  mode: AgentMode;
+  permissionLevel?: PermissionLevel;
+  requestedProfileId?: string;
+  workspace?: string;
+}
+
+export interface HarnessPreflightReport {
+  ok: boolean;
+  workspace: string;
+  selectedProfileId?: string;
+  mode: AgentMode;
+  permissionLevel: PermissionLevel;
+  errors: string[];
+  warnings: string[];
+}
+
+export interface HarnessOperationStarted {
+  operationId: string;
+  draftId: string;
+  state: string;
+  eventSequence: number;
+}
+
+export type HarnessOperationState =
+  | "draft_saved"
+  | "compiling"
+  | "running"
+  | "awaiting_approval"
+  | "compacting"
+  | "persisting"
+  | "interrupted"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface HarnessToolPolicyRequest {
+  mode: AgentMode;
+  permissionLevel?: PermissionLevel;
+  call: ToolCall;
+}
+
+export type HarnessPolicyDecision = "allow" | "needs_approval" | "deny";
 
 export type McpTransport = "stdio" | "streamable_http";
 
@@ -469,6 +646,9 @@ export interface PendingApproval {
   nextRound: number;
   profileId: string;
   rewardPetId?: string;
+  operationId?: string;
+  approvalTokens?: string[];
+  approvalId?: string;
 }
 
 export interface PetProfile {

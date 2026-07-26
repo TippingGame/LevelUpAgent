@@ -4,6 +4,7 @@ mod config_writeback;
 mod database;
 mod filesystem;
 mod git;
+mod harness;
 mod layout;
 mod mcp;
 mod media;
@@ -27,11 +28,12 @@ use models::{
     AgentMessage, AgentSkillSummary, AgentStreamEvent, AgentToolDefinition, AgentTurnRequest,
     AgentTurnResponse, AttachmentPreview, ConfigWritePreview, ConfigWriteResult,
     ExternalConfigCandidate, ExternalConfigTarget, GatewayDiagnostics, GitDiff, GitRollbackPreview,
-    GitRollbackResult, GitStatus, GoalCreateRequest, GoalState, ImageAttachment, McpSecretValues,
-    McpServerConfig, McpServerSnapshot, McpServerUpsert, MediaAsset, MediaAssetPage,
-    MediaBatchResult, MediaCatalog, MediaGenerationRequest, MediaKind, MediaStatus, ModelInfo,
-    ProviderHealth, ProviderProfile, ProviderRequestLog, ProviderSettings, SkillInfo, StoredThread,
-    ToolExecutionRequest, ToolExecutionResponse, WritingProjectRecord,
+    GitRollbackResult, GitStatus, GitWorkspaceSnapshot, GoalCreateRequest, GoalState,
+    ImageAttachment, McpSecretValues, McpServerConfig, McpServerSnapshot, McpServerUpsert,
+    MediaAsset, MediaAssetPage, MediaBatchResult, MediaCatalog, MediaGenerationRequest, MediaKind,
+    MediaStatus, ModelInfo, ProviderHealth, ProviderProfile, ProviderRequestLog, ProviderSettings,
+    SkillInfo, StoredThread, ToolCall, ToolExecutionRequest, ToolExecutionResponse,
+    WritingProjectRecord,
 };
 use reqwest::Client;
 use serde::Deserialize;
@@ -47,9 +49,17 @@ const MAX_PENDING_CONFIRMATIONS: usize = 128;
 struct AppState {
     client: Client,
     active_requests: Mutex<HashMap<String, CancellationToken>>,
+    harness_turn_cancellations: Mutex<HashMap<String, CancellationToken>>,
+    harness_phases: Mutex<HashMap<String, HarnessPhase>>,
     pending_config_writes: Mutex<HashMap<String, PendingConfigWrite>>,
     pending_prompt_writes: Mutex<HashMap<String, PendingPromptWrite>>,
     pending_git_rollbacks: Mutex<HashMap<String, PendingGitRollback>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HarnessPhase {
+    Provider,
+    Tool,
 }
 
 struct PendingConfigWrite {
@@ -1936,6 +1946,452 @@ async fn agent_turn_stream(
 }
 
 #[tauri::command]
+async fn harness_run(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    database: tauri::State<'_, database::Database>,
+    manager: tauri::State<'_, mcp::McpManager>,
+    subagents: tauri::State<'_, subagent::SubagentManager>,
+    request: crate::harness::types::HarnessRunRequest,
+    on_event: Channel<crate::harness::types::HarnessRuntimeEvent>,
+) -> Result<(), String> {
+    let operation_id = request.operation_id.clone();
+    let cancellation = CancellationToken::new();
+    {
+        let mut active = state
+            .active_requests
+            .lock()
+            .map_err(|_| "Could not lock active request state".to_owned())?;
+        if let Some(previous) = active.insert(operation_id.clone(), cancellation.clone()) {
+            previous.cancel();
+        }
+    }
+    let result = harness_run_loop(
+        &app,
+        &state,
+        &database,
+        &manager,
+        &subagents,
+        request,
+        on_event,
+        cancellation,
+    )
+    .await;
+    if let Ok(mut active) = state.active_requests.lock() {
+        active.remove(&operation_id);
+    }
+    if let Ok(mut turns) = state.harness_turn_cancellations.lock() {
+        turns.remove(&operation_id);
+    }
+    if let Ok(mut phases) = state.harness_phases.lock() {
+        phases.remove(&operation_id);
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn harness_run_loop(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    database: &database::Database,
+    manager: &mcp::McpManager,
+    subagents: &subagent::SubagentManager,
+    request: crate::harness::types::HarnessRunRequest,
+    on_event: Channel<crate::harness::types::HarnessRuntimeEvent>,
+    cancellation: CancellationToken,
+) -> Result<(), String> {
+    let operation_id = request.operation_id.clone();
+    let mut history = request.messages.clone();
+    let mut round = 0usize;
+    loop {
+        if round >= 64 {
+            database.update_harness_operation_state(
+                &operation_id,
+                &crate::harness::types::RuntimeState::Failed,
+            )?;
+            return Err("Harness tool loop exceeded 64 rounds".to_owned());
+        }
+        round += 1;
+        if cancellation.is_cancelled() {
+            database.update_harness_operation_state(
+                &operation_id,
+                &crate::harness::types::RuntimeState::Cancelled,
+            )?;
+            return Err("REQUEST_CANCELLED".to_owned());
+        }
+        database.update_harness_operation_state(
+            &operation_id,
+            &crate::harness::types::RuntimeState::Running,
+        )?;
+        let queued = database.list_harness_queue(&operation_id)?;
+        for item in queued {
+            if let Some(consumed) = database.consume_harness_queue(&item.id)? {
+                history.push(AgentMessage {
+                    role: "user".to_owned(),
+                    content: format!("[{}] {}", consumed.kind, consumed.body),
+                    tool_calls: Vec::new(),
+                    tool_call_id: None,
+                    internal: true,
+                    attachments: Vec::new(),
+                });
+                let queue_payload = serde_json::json!({
+                    "queueId": consumed.id,
+                    "kind": consumed.kind,
+                    "body": consumed.body,
+                });
+                let sequence = database.append_harness_event(
+                    &operation_id,
+                    "queue_injected",
+                    &queue_payload,
+                )?;
+                let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+                    &operation_id,
+                    sequence,
+                    "queue_injected",
+                    queue_payload,
+                ));
+            }
+        }
+        let snapshot_id = database.current_harness_snapshot(&operation_id)?;
+        let estimated_tokens = history
+            .iter()
+            .map(|message| message.content.chars().count() as u32)
+            .sum::<u32>()
+            .div_ceil(4);
+        let budget = serde_json::json!({
+            "contextWindow": 60_000,
+            "reserveOutputTokens": 4_000,
+            "safetyMarginTokens": 1_000,
+            "messageTokens": estimated_tokens,
+        });
+        let selection = serde_json::json!({
+            "messageCount": history.len(),
+            "selectedMessageIds": history.iter().enumerate().map(|(index, _)| format!("message-{index}")).collect::<Vec<_>>(),
+            "overflow": estimated_tokens > 55_000,
+        });
+        let context_manifest_id = database.record_harness_context_manifest(
+            &operation_id,
+            &snapshot_id,
+            &budget,
+            &selection,
+            "harness-context-v1",
+        )?;
+        let context_payload = serde_json::json!({
+            "contextManifestId": &context_manifest_id,
+            "budget": budget,
+            "selection": selection,
+        });
+        let sequence =
+            database.append_harness_event(&operation_id, "context_prepared", &context_payload)?;
+        let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+            &operation_id,
+            sequence,
+            "context_prepared",
+            context_payload,
+        ));
+
+        let mut turn_request = AgentTurnRequest {
+            profile: request.profile.clone(),
+            messages: history.clone(),
+            mode: serde_json::to_string(&request.mode)
+                .map_err(|error| format!("Could not encode harness mode: {error}"))?
+                .trim_matches('"')
+                .to_owned(),
+            workspace: request.workspace.clone(),
+            thread_id: Some(request.thread_id.clone()),
+            hatch: request.hatch,
+            hatch_skill_loaded: request.hatch_skill_loaded,
+            available_tools: Vec::new(),
+            available_skills: Vec::new(),
+            goal: None,
+            fallback_profiles: request.fallback_profiles.clone(),
+            custom_instructions: None,
+        };
+        attach_default_workspace(app, &mut turn_request)?;
+        attach_images(app, &mut turn_request)?;
+        attach_custom_instructions(database, &mut turn_request)?;
+        attach_goal(database, &mut turn_request)?;
+        attach_subagent_tools(&mut turn_request);
+        attach_media_tools(&mut turn_request);
+        attach_skills(app, database, &mut turn_request)?;
+        attach_mcp_tools(database, manager, &mut turn_request).await?;
+        let attempt_id = database.start_harness_provider_attempt(
+            &operation_id,
+            &snapshot_id,
+            &context_manifest_id,
+            &turn_request.profile,
+            0,
+        )?;
+        let attempt_payload = serde_json::json!({
+            "attemptId": &attempt_id,
+            "profileId": turn_request.profile.id,
+            "model": turn_request.profile.model,
+        });
+        let sequence = database.append_harness_event(
+            &operation_id,
+            "provider_attempt_started",
+            &attempt_payload,
+        )?;
+        let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+            &operation_id,
+            sequence,
+            "provider_attempt_started",
+            attempt_payload,
+        ));
+        let turn_cancellation = CancellationToken::new();
+        state
+            .harness_phases
+            .lock()
+            .map_err(|_| "Could not lock harness phase state".to_owned())?
+            .insert(operation_id.clone(), HarnessPhase::Provider);
+        state
+            .harness_turn_cancellations
+            .lock()
+            .map_err(|_| "Could not lock harness turn state".to_owned())?
+            .insert(operation_id.clone(), turn_cancellation.clone());
+        let provider_future =
+            run_agent_turn_with_failover(&state.client, database, turn_request, load_api_key);
+        let response = tokio::select! {
+            result = provider_future => result,
+            _ = cancellation.cancelled() => Err("REQUEST_CANCELLED".to_owned()),
+            _ = turn_cancellation.cancelled() => Err("REQUEST_STEER".to_owned()),
+        };
+        if let Ok(mut turns) = state.harness_turn_cancellations.lock() {
+            turns.remove(&operation_id);
+        }
+        match response {
+            Ok(response) => {
+                database.finish_harness_provider_attempt(&attempt_id, Some(&response), None)?;
+                let response_payload = serde_json::to_value(&response)
+                    .map_err(|error| format!("Could not encode provider response: {error}"))?;
+                let sequence = database.append_harness_event(
+                    &operation_id,
+                    "assistant_completed",
+                    &response_payload,
+                )?;
+                let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+                    &operation_id,
+                    sequence,
+                    "assistant_completed",
+                    response_payload,
+                ));
+                history.push(AgentMessage {
+                    role: "assistant".to_owned(),
+                    content: response.content.clone(),
+                    tool_calls: response.tool_calls.clone(),
+                    tool_call_id: None,
+                    internal: false,
+                    attachments: Vec::new(),
+                });
+                if response.tool_calls.is_empty() {
+                    database.update_harness_operation_state(
+                        &operation_id,
+                        &crate::harness::types::RuntimeState::Completed,
+                    )?;
+                    let payload = serde_json::json!({ "round": round });
+                    let sequence = database.append_harness_event(
+                        &operation_id,
+                        "operation_completed",
+                        &payload,
+                    )?;
+                    let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+                        &operation_id,
+                        sequence,
+                        "operation_completed",
+                        payload,
+                    ));
+                    return Ok(());
+                }
+                state
+                    .harness_phases
+                    .lock()
+                    .map_err(|_| "Could not lock harness phase state".to_owned())?
+                    .insert(operation_id.clone(), HarnessPhase::Tool);
+                for call in response.tool_calls {
+                    let policy_call = ToolCall {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        arguments: call.arguments.clone(),
+                    };
+                    let decision = crate::harness::evaluate_tool_call(
+                        request.mode,
+                        request.permission_level,
+                        &policy_call,
+                    );
+                    if matches!(decision, crate::harness::types::PolicyDecision::Deny) {
+                        let payload = serde_json::json!({ "call": call, "decision": "deny" });
+                        let sequence = database.append_harness_event(
+                            &operation_id,
+                            "tool_call_denied",
+                            &payload,
+                        )?;
+                        let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+                            &operation_id,
+                            sequence,
+                            "tool_call_denied",
+                            payload,
+                        ));
+                        database.update_harness_operation_state(
+                            &operation_id,
+                            &crate::harness::types::RuntimeState::Failed,
+                        )?;
+                        return Ok(());
+                    }
+                    if matches!(
+                        decision,
+                        crate::harness::types::PolicyDecision::NeedsApproval
+                    ) {
+                        let risk = serde_json::to_string(&crate::harness::policy::classify_tool(
+                            &call.name,
+                        ))
+                        .map_err(|error| format!("Could not encode tool risk: {error}"))?
+                        .trim_matches('"')
+                        .to_owned();
+                        let (approval_id, token, tool_execution_id) = database
+                            .create_harness_approval(
+                                &operation_id,
+                                &call.id,
+                                &call.name,
+                                &risk,
+                                &call.arguments,
+                            )?;
+                        database.update_harness_operation_state(
+                            &operation_id,
+                            &crate::harness::types::RuntimeState::AwaitingApproval,
+                        )?;
+                        let payload = serde_json::json!({
+                            "approvalId": approval_id,
+                            "token": token,
+                            "toolExecutionId": tool_execution_id,
+                            "call": call,
+                        });
+                        let sequence = database.append_harness_event(
+                            &operation_id,
+                            "approval_required",
+                            &payload,
+                        )?;
+                        let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+                            &operation_id,
+                            sequence,
+                            "approval_required",
+                            payload,
+                        ));
+                        return Ok(());
+                    }
+                    let tool_request = ToolExecutionRequest {
+                        call_id: Some(call.id.clone()),
+                        operation_id: Some(operation_id.clone()),
+                        name: call.name.clone(),
+                        arguments: call.arguments.clone(),
+                        workspace: request.workspace.clone().unwrap_or_default(),
+                        thread_id: Some(request.thread_id.clone()),
+                        profile: Some(request.profile.clone()),
+                        fallback_profiles: request.fallback_profiles.clone(),
+                        hatch: request.hatch,
+                        hatch_skill_loaded: request.hatch_skill_loaded,
+                        hatch_bootstrap: false,
+                        mode: Some(
+                            serde_json::to_string(&request.mode)
+                                .map_err(|error| format!("Could not encode harness mode: {error}"))?
+                                .trim_matches('"')
+                                .to_owned(),
+                        ),
+                        permission_level: Some(
+                            serde_json::to_string(&request.permission_level)
+                                .map_err(|error| {
+                                    format!("Could not encode harness permission: {error}")
+                                })?
+                                .trim_matches('"')
+                                .to_owned(),
+                        ),
+                        approval_granted: false,
+                    };
+                    let tool_name = tool_request.name.clone();
+                    let tool_result =
+                        execute_tool_inner(app, state, database, manager, subagents, tool_request)
+                            .await?;
+                    let result_payload = serde_json::json!({
+                        "callId": call.id,
+                        "toolName": tool_name,
+                        "output": tool_result.output,
+                        "isError": tool_result.is_error,
+                    });
+                    let sequence = database.append_harness_event(
+                        &operation_id,
+                        "tool_execution_completed",
+                        &result_payload,
+                    )?;
+                    let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+                        &operation_id,
+                        sequence,
+                        "tool_execution_completed",
+                        result_payload.clone(),
+                    ));
+                    history.push(AgentMessage {
+                        role: "tool".to_owned(),
+                        content: result_payload
+                            .get("output")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        tool_calls: Vec::new(),
+                        tool_call_id: Some(call.id),
+                        internal: false,
+                        attachments: Vec::new(),
+                    });
+                }
+            }
+            Err(error) => {
+                let steered = error == "REQUEST_STEER";
+                let cancelled = error.contains("REQUEST_CANCELLED");
+                database.finish_harness_provider_attempt(&attempt_id, None, Some(&error))?;
+                if steered {
+                    let payload = serde_json::json!({ "reason": "user_steer" });
+                    let sequence = database.append_harness_event(
+                        &operation_id,
+                        "provider_turn_interrupted",
+                        &payload,
+                    )?;
+                    let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+                        &operation_id,
+                        sequence,
+                        "provider_turn_interrupted",
+                        payload,
+                    ));
+                    continue;
+                }
+                database.update_harness_operation_state(
+                    &operation_id,
+                    if cancelled {
+                        &crate::harness::types::RuntimeState::Cancelled
+                    } else {
+                        &crate::harness::types::RuntimeState::Failed
+                    },
+                )?;
+                let kind = if cancelled {
+                    "operation_cancelled"
+                } else {
+                    "operation_failed"
+                };
+                let payload = serde_json::json!({ "error": error });
+                let sequence = database.append_harness_event(&operation_id, kind, &payload)?;
+                let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+                    &operation_id,
+                    sequence,
+                    kind,
+                    payload,
+                ));
+                return Err(if cancelled {
+                    "REQUEST_CANCELLED".to_owned()
+                } else {
+                    error
+                });
+            }
+        }
+    }
+}
+
+#[tauri::command]
 fn cancel_agent_turn(state: tauri::State<'_, AppState>, operation_id: String) -> bool {
     let Ok(active) = state.active_requests.lock() else {
         return false;
@@ -1960,6 +2416,210 @@ async fn fetch_models(
         .map(Ok)
         .unwrap_or_else(|| load_profile_api_key(&profile))?;
     agent::fetch_models(&state.client, profile, &api_key).await
+}
+
+#[tauri::command]
+fn harness_preflight(
+    app: tauri::AppHandle,
+    database: tauri::State<'_, database::Database>,
+    mut request: crate::harness::types::HarnessDraftRequest,
+) -> Result<crate::harness::types::PreflightReport, String> {
+    let workspace = request
+        .workspace
+        .take()
+        .filter(|value| !value.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or(ensure_default_workspace(&app)?);
+    let settings = database.provider_settings()?;
+    let report = crate::harness::preflight(&request, &workspace, settings.as_ref(), |profile| {
+        load_profile_api_key(profile).is_ok()
+    });
+    Ok(report)
+}
+
+#[tauri::command]
+fn harness_start(
+    app: tauri::AppHandle,
+    database: tauri::State<'_, database::Database>,
+    mut request: crate::harness::types::HarnessDraftRequest,
+) -> Result<crate::harness::types::HarnessOperationStarted, String> {
+    let workspace = request
+        .workspace
+        .take()
+        .filter(|value| !value.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or(ensure_default_workspace(&app)?);
+    let settings = database.provider_settings()?;
+    let report = crate::harness::preflight(&request, &workspace, settings.as_ref(), |profile| {
+        load_profile_api_key(profile).is_ok()
+    });
+    if !report.ok {
+        return Err(format!(
+            "Harness preflight blocked: {}",
+            report.errors.join("; ")
+        ));
+    }
+    let profile_id = report
+        .selected_profile_id
+        .as_deref()
+        .ok_or_else(|| "Harness preflight did not select a Provider profile".to_owned())?;
+    database.start_harness_operation(&request, &workspace.to_string_lossy(), profile_id)
+}
+
+#[tauri::command]
+fn harness_check_tool(
+    request: crate::harness::types::HarnessToolPolicyRequest,
+) -> crate::harness::types::PolicyDecision {
+    crate::harness::evaluate_tool_call(request.mode, request.permission_level, &request.call)
+}
+
+#[tauri::command]
+fn harness_update_state(
+    database: tauri::State<'_, database::Database>,
+    request: crate::harness::types::HarnessOperationStateUpdate,
+) -> Result<(), String> {
+    database.update_harness_operation_state(&request.operation_id, &request.state)
+}
+
+#[tauri::command]
+fn harness_resolve_approval(
+    database: tauri::State<'_, database::Database>,
+    request: crate::harness::types::HarnessApprovalResolution,
+) -> Result<crate::harness::types::HarnessApprovalRecord, String> {
+    if database
+        .harness_approval_operation(&request.token)?
+        .as_deref()
+        != Some(request.operation_id.as_str())
+    {
+        return Err("Approval token does not belong to this operation".to_owned());
+    }
+    let record = database.resolve_harness_approval(&request.token, request.approved)?;
+    let state = if request.approved {
+        crate::harness::types::RuntimeState::Running
+    } else {
+        crate::harness::types::RuntimeState::Failed
+    };
+    database.update_harness_operation_state(&request.operation_id, &state)?;
+    Ok(record)
+}
+
+#[tauri::command]
+fn harness_list_pending_approvals(
+    database: tauri::State<'_, database::Database>,
+) -> Result<Vec<crate::harness::types::HarnessPendingApproval>, String> {
+    database.list_harness_pending_approvals()
+}
+
+#[tauri::command]
+fn harness_reissue_approval(
+    database: tauri::State<'_, database::Database>,
+    approval_id: String,
+) -> Result<String, String> {
+    database.reissue_harness_approval(&approval_id)
+}
+
+#[tauri::command]
+fn harness_list_recovery(
+    database: tauri::State<'_, database::Database>,
+) -> Result<Vec<crate::harness::types::HarnessRecoveryItem>, String> {
+    database.list_harness_recovery_items()
+}
+
+#[tauri::command]
+fn harness_resolve_unknown(
+    database: tauri::State<'_, database::Database>,
+    request: crate::harness::types::HarnessRecoveryDecision,
+) -> Result<(), String> {
+    database.resolve_unknown_harness_tool(&request.tool_execution_id, &request.decision)
+}
+
+#[tauri::command]
+fn harness_enqueue(
+    database: tauri::State<'_, database::Database>,
+    request: crate::harness::types::HarnessQueueRequest,
+) -> Result<crate::harness::types::HarnessQueueItem, String> {
+    database.enqueue_harness_item(&request)
+}
+
+#[tauri::command]
+fn harness_list_queue(
+    database: tauri::State<'_, database::Database>,
+    operation_id: String,
+) -> Result<Vec<crate::harness::types::HarnessQueueItem>, String> {
+    database.list_harness_queue(&operation_id)
+}
+
+#[tauri::command]
+fn harness_consume_queue(
+    database: tauri::State<'_, database::Database>,
+    queue_id: String,
+) -> Result<Option<crate::harness::types::HarnessQueueItem>, String> {
+    database.consume_harness_queue(&queue_id)
+}
+
+#[tauri::command]
+fn harness_cancel_queue(
+    database: tauri::State<'_, database::Database>,
+    queue_id: String,
+) -> Result<(), String> {
+    database.cancel_harness_queue(&queue_id)
+}
+
+#[tauri::command]
+fn harness_steer(
+    state: tauri::State<'_, AppState>,
+    database: tauri::State<'_, database::Database>,
+    operation_id: String,
+    queue_id: String,
+) -> Result<(), String> {
+    database.promote_harness_queue_to_steer(&operation_id, &queue_id)?;
+    let phase = state
+        .harness_phases
+        .lock()
+        .map_err(|_| "Could not lock harness phase state".to_owned())?
+        .get(&operation_id)
+        .copied();
+    if phase == Some(HarnessPhase::Provider)
+        && let Some(turn) = state
+            .harness_turn_cancellations
+            .lock()
+            .map_err(|_| "Could not lock harness turn state".to_owned())?
+            .get(&operation_id)
+    {
+        turn.cancel();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn harness_create_session_node(
+    database: tauri::State<'_, database::Database>,
+    request: crate::harness::types::HarnessSessionNodeRequest,
+) -> Result<crate::harness::types::HarnessSessionNode, String> {
+    database.create_harness_session_node(&request)
+}
+
+#[tauri::command]
+fn harness_list_session_nodes(
+    database: tauri::State<'_, database::Database>,
+    thread_id: String,
+) -> Result<Vec<crate::harness::types::HarnessSessionNode>, String> {
+    database.list_harness_session_nodes(&thread_id)
+}
+
+#[tauri::command]
+fn harness_fork_session(
+    database: tauri::State<'_, database::Database>,
+    request: crate::harness::types::HarnessForkSessionRequest,
+) -> Result<crate::harness::types::HarnessSessionNode, String> {
+    database.create_harness_session_node(&crate::harness::types::HarnessSessionNodeRequest {
+        thread_id: request.thread_id,
+        parent_id: request.parent_id,
+        branch_id: request.branch_id,
+        kind: "fork".to_owned(),
+        message_id: None,
+        operation_id: request.operation_id,
+    })
 }
 
 struct IsolatedSubagentTask<'a> {
@@ -2050,6 +2710,8 @@ where
                 "list_files" | "read_file" | "search_files" | "write_file" | "delete_file"
             ) {
                 tools::execute(ToolExecutionRequest {
+                    call_id: Some(call.id.clone()),
+                    operation_id: None,
                     name: call.name,
                     arguments: call.arguments,
                     workspace: worktree.path.to_string_lossy().into_owned(),
@@ -2059,6 +2721,9 @@ where
                     hatch: false,
                     hatch_skill_loaded: false,
                     hatch_bootstrap: false,
+                    mode: Some("agent".to_owned()),
+                    permission_level: Some("full".to_owned()),
+                    approval_granted: true,
                 })
                 .await
             } else {
@@ -2596,6 +3261,17 @@ async fn execute_tool(
     database: tauri::State<'_, database::Database>,
     manager: tauri::State<'_, mcp::McpManager>,
     subagents: tauri::State<'_, subagent::SubagentManager>,
+    request: ToolExecutionRequest,
+) -> Result<ToolExecutionResponse, String> {
+    execute_tool_inner(&app, &state, &database, &manager, &subagents, request).await
+}
+
+async fn execute_tool_inner(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    database: &database::Database,
+    manager: &mcp::McpManager,
+    subagents: &subagent::SubagentManager,
     mut request: ToolExecutionRequest,
 ) -> Result<ToolExecutionResponse, String> {
     // Older clients did not persist the hatch flag on every tool request.
@@ -2615,98 +3291,166 @@ async fn execute_tool(
             is_error: true,
         });
     }
+    let harness_mode =
+        crate::harness::types::HarnessMode::from_wire(request.mode.as_deref().unwrap_or("agent"));
+    let harness_permission = crate::harness::types::PermissionLevel::from_wire(
+        request.permission_level.as_deref().unwrap_or("request"),
+    );
+    let policy_call = ToolCall {
+        id: request
+            .call_id
+            .clone()
+            .unwrap_or_else(|| "legacy-tool-call".to_owned()),
+        name: request.name.clone(),
+        arguments: request.arguments.clone(),
+    };
+    let policy_decision =
+        crate::harness::evaluate_tool_call(harness_mode, harness_permission, &policy_call);
+    let approval_is_consumed = if matches!(
+        policy_decision,
+        crate::harness::types::PolicyDecision::NeedsApproval
+    ) && request.approval_granted
+        && !request.hatch_bootstrap
+        && !request.hatch
+    {
+        match (request.operation_id.as_deref(), request.call_id.as_deref()) {
+            (Some(operation_id), Some(call_id)) => {
+                database.has_consumed_harness_approval(operation_id, call_id)?
+            }
+            _ => false,
+        }
+    } else {
+        request.approval_granted
+    };
+    if matches!(policy_decision, crate::harness::types::PolicyDecision::Deny)
+        || (matches!(
+            policy_decision,
+            crate::harness::types::PolicyDecision::NeedsApproval
+        ) && !approval_is_consumed
+            && !request.hatch_bootstrap)
+    {
+        let output = if matches!(policy_decision, crate::harness::types::PolicyDecision::Deny) {
+            format!(
+                "Harness policy denied tool '{}' in {:?} mode with {:?} permission.",
+                request.name, harness_mode, harness_permission
+            )
+        } else {
+            format!(
+                "Harness approval is required before executing tool '{}'.",
+                request.name
+            )
+        };
+        return Ok(ToolExecutionResponse {
+            output,
+            is_error: true,
+        });
+    }
     if request.workspace.trim().is_empty() {
-        request.workspace = ensure_default_workspace(&app)?
+        request.workspace = ensure_default_workspace(app)?
             .to_string_lossy()
             .into_owned();
     }
-    Ok(
-        if matches!(
-            request.name.as_str(),
-            "generate_images" | "generate_videos" | "generate_speech"
-        ) {
-            execute_media_generation_tool(&app, &state, &database, &request).await
-        } else if request.name == "check_media_jobs" {
-            execute_media_job_check(&app, &state, &database, &request).await
-        } else if request.name == "delegate_task" {
-            tool_execution_result(
-                delegate_task(&app, &state, &database, &subagents, &request).await,
-            )
-        } else if request.name == "apply_subagent_patch" {
-            tool_execution_result(apply_delegated_patch(&subagents, &request).await)
-        } else if request.name == "get_goal" {
-            let thread_id = request
-                .thread_id
-                .as_deref()
-                .ok_or_else(|| "Goal tool requires a task ID".to_owned())?;
-            match database.get_goal(thread_id)? {
-                Some(goal) => ToolExecutionResponse {
-                    output: serde_json::to_string_pretty(&goal)
-                        .map_err(|error| format!("Could not encode Goal: {error}"))?,
-                    is_error: false,
-                },
-                None => ToolExecutionResponse {
-                    output: "This task has no Goal".to_owned(),
-                    is_error: true,
-                },
-            }
-        } else if request.name == "update_goal" {
-            let thread_id = request
-                .thread_id
-                .as_deref()
-                .ok_or_else(|| "Goal tool requires a task ID".to_owned())?;
-            let status = request
-                .arguments
-                .get("status")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "Missing string argument: status".to_owned())?;
-            let evidence = request
-                .arguments
-                .get("evidence")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "Missing string argument: evidence".to_owned())?;
-            match database.update_goal_from_agent(thread_id, status, evidence) {
-                Ok(goal) => ToolExecutionResponse {
-                    output: format!(
-                        "Goal status is now {:?}. Completion requires a separate audit; blocked requires three consecutive identical reports.",
-                        goal.status
-                    ),
-                    is_error: false,
-                },
-                Err(output) => ToolExecutionResponse {
-                    output,
-                    is_error: true,
-                },
-            }
-        } else if request.name == "read_skill" {
-            let skill_id = request
-                .arguments
-                .get("skillId")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "Missing string argument: skillId".to_owned())?;
-            let relative = request
-                .arguments
-                .get("path")
-                .and_then(serde_json::Value::as_str);
-            let workspace =
-                (!request.workspace.trim().is_empty()).then_some(request.workspace.as_str());
-            let skills = discover_skills(&app, &database, workspace)?;
-            match skill::read_enabled(&skills, skill_id, relative) {
-                Ok(output) => ToolExecutionResponse {
-                    output,
-                    is_error: false,
-                },
-                Err(output) => ToolExecutionResponse {
-                    output,
-                    is_error: true,
-                },
-            }
-        } else if request.name.starts_with("mcp_") {
-            manager.execute(&request.name, request.arguments).await
-        } else {
-            tools::execute(request).await
-        },
-    )
+    let ledger_key = request.operation_id.clone().zip(request.call_id.clone());
+    if let Some((operation_id, call_id)) = ledger_key.as_ref() {
+        let risk = serde_json::to_string(&crate::harness::policy::classify_tool(&request.name))
+            .map_err(|error| format!("Could not encode tool risk: {error}"))?
+            .trim_matches('"')
+            .to_owned();
+        database.start_harness_tool_execution(
+            operation_id,
+            call_id,
+            &request.name,
+            &risk,
+            &request.arguments,
+        )?;
+    }
+    let response = if matches!(
+        request.name.as_str(),
+        "generate_images" | "generate_videos" | "generate_speech"
+    ) {
+        execute_media_generation_tool(app, state, database, &request).await
+    } else if request.name == "check_media_jobs" {
+        execute_media_job_check(app, state, database, &request).await
+    } else if request.name == "delegate_task" {
+        tool_execution_result(delegate_task(app, state, database, subagents, &request).await)
+    } else if request.name == "apply_subagent_patch" {
+        tool_execution_result(apply_delegated_patch(subagents, &request).await)
+    } else if request.name == "get_goal" {
+        let thread_id = request
+            .thread_id
+            .as_deref()
+            .ok_or_else(|| "Goal tool requires a task ID".to_owned())?;
+        match database.get_goal(thread_id)? {
+            Some(goal) => ToolExecutionResponse {
+                output: serde_json::to_string_pretty(&goal)
+                    .map_err(|error| format!("Could not encode Goal: {error}"))?,
+                is_error: false,
+            },
+            None => ToolExecutionResponse {
+                output: "This task has no Goal".to_owned(),
+                is_error: true,
+            },
+        }
+    } else if request.name == "update_goal" {
+        let thread_id = request
+            .thread_id
+            .as_deref()
+            .ok_or_else(|| "Goal tool requires a task ID".to_owned())?;
+        let status = request
+            .arguments
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "Missing string argument: status".to_owned())?;
+        let evidence = request
+            .arguments
+            .get("evidence")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "Missing string argument: evidence".to_owned())?;
+        match database.update_goal_from_agent(thread_id, status, evidence) {
+            Ok(goal) => ToolExecutionResponse {
+                output: format!(
+                    "Goal status is now {:?}. Completion requires a separate audit; blocked requires three consecutive identical reports.",
+                    goal.status
+                ),
+                is_error: false,
+            },
+            Err(output) => ToolExecutionResponse {
+                output,
+                is_error: true,
+            },
+        }
+    } else if request.name == "read_skill" {
+        let skill_id = request
+            .arguments
+            .get("skillId")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "Missing string argument: skillId".to_owned())?;
+        let relative = request
+            .arguments
+            .get("path")
+            .and_then(serde_json::Value::as_str);
+        let workspace =
+            (!request.workspace.trim().is_empty()).then_some(request.workspace.as_str());
+        let skills = discover_skills(app, database, workspace)?;
+        match skill::read_enabled(&skills, skill_id, relative) {
+            Ok(output) => ToolExecutionResponse {
+                output,
+                is_error: false,
+            },
+            Err(output) => ToolExecutionResponse {
+                output,
+                is_error: true,
+            },
+        }
+    } else if request.name.starts_with("mcp_") {
+        manager.execute(&request.name, request.arguments).await
+    } else {
+        tools::execute(request).await
+    };
+    if let Some((operation_id, call_id)) = ledger_key.as_ref() {
+        database.finish_harness_tool_execution(operation_id, call_id, &response)?;
+    }
+    Ok(response)
 }
 
 #[tauri::command]
@@ -3004,6 +3748,11 @@ async fn get_git_status(workspace: String) -> Result<GitStatus, String> {
 }
 
 #[tauri::command]
+async fn get_git_workspace_snapshot(workspace: String) -> Result<GitWorkspaceSnapshot, String> {
+    git::workspace_snapshot(&workspace).await
+}
+
+#[tauri::command]
 async fn get_git_diff(workspace: String, path: String, staged: bool) -> Result<GitDiff, String> {
     git::diff(&workspace, &path, staged).await
 }
@@ -3209,6 +3958,8 @@ pub fn run() {
                 .build()
                 .expect("failed to build HTTP client"),
             active_requests: Mutex::new(HashMap::new()),
+            harness_turn_cancellations: Mutex::new(HashMap::new()),
+            harness_phases: Mutex::new(HashMap::new()),
             pending_config_writes: Mutex::new(HashMap::new()),
             pending_prompt_writes: Mutex::new(HashMap::new()),
             pending_git_rollbacks: Mutex::new(HashMap::new()),
@@ -3243,6 +3994,9 @@ pub fn run() {
                 .allow_directory(&media_directory, true)?;
             let database_path = app_data.join("levelup-agent.sqlite3");
             let database = database::Database::open(&database_path)
+                .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+            database
+                .recover_harness_operations()
                 .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
             let home = app.path().home_dir()?;
             let built_in_skills = built_in_skill_root(app.handle());
@@ -3309,6 +4063,24 @@ pub fn run() {
             get_custom_instructions,
             save_custom_instructions,
             fetch_models,
+            harness_preflight,
+            harness_start,
+            harness_check_tool,
+            harness_update_state,
+            harness_run,
+            harness_resolve_approval,
+            harness_list_pending_approvals,
+            harness_reissue_approval,
+            harness_list_recovery,
+            harness_resolve_unknown,
+            harness_enqueue,
+            harness_list_queue,
+            harness_consume_queue,
+            harness_cancel_queue,
+            harness_steer,
+            harness_create_session_node,
+            harness_list_session_nodes,
+            harness_fork_session,
             agent_turn,
             agent_turn_stream,
             cancel_agent_turn,
@@ -3333,6 +4105,7 @@ pub fn run() {
             scan_external_configs,
             import_external_config,
             get_git_status,
+            get_git_workspace_snapshot,
             get_git_diff,
             preview_git_rollback,
             apply_git_rollback,
@@ -3410,6 +4183,8 @@ mod tests {
         )
         .unwrap();
         let request = ToolExecutionRequest {
+            call_id: Some("hatch-media-test".to_owned()),
+            operation_id: None,
             name: "generate_images".to_owned(),
             arguments: serde_json::json!({
                 "hatchRunDir": run.to_string_lossy(),
@@ -3422,6 +4197,9 @@ mod tests {
             hatch: true,
             hatch_skill_loaded: false,
             hatch_bootstrap: false,
+            mode: Some("agent".to_owned()),
+            permission_level: Some("full".to_owned()),
+            approval_granted: true,
         };
         let references = read_hatch_job_references(&request).unwrap().unwrap();
         assert_eq!(references.len(), 1);
@@ -3451,6 +4229,8 @@ mod tests {
     #[test]
     fn hatch_tool_policy_rejects_state_refreshes_and_loaded_manifest_rereads() {
         let mut request = ToolExecutionRequest {
+            call_id: Some("hatch-policy-test".to_owned()),
+            operation_id: None,
             name: "get_goal".to_owned(),
             arguments: serde_json::json!({}),
             workspace: "C:/hatch".to_owned(),
@@ -3460,6 +4240,9 @@ mod tests {
             hatch: true,
             hatch_skill_loaded: true,
             hatch_bootstrap: false,
+            mode: Some("agent".to_owned()),
+            permission_level: Some("request".to_owned()),
+            approval_granted: false,
         };
         assert!(hatch_tool_policy_error(&request).is_some());
 
@@ -4021,6 +4804,8 @@ mod tests {
             r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"Created child.txt in the isolated worktree."}]}],"usage":{"input_tokens":12,"output_tokens":5}}"#,
         ]);
         let request = ToolExecutionRequest {
+            call_id: Some("delegate-test".to_owned()),
+            operation_id: None,
             name: "delegate_task".to_owned(),
             arguments: serde_json::json!({ "task": "Create child.txt" }),
             workspace: repository.to_string_lossy().into_owned(),
@@ -4030,6 +4815,9 @@ mod tests {
             hatch: false,
             hatch_skill_loaded: false,
             hatch_bootstrap: false,
+            mode: Some("agent".to_owned()),
+            permission_level: Some("full".to_owned()),
+            approval_granted: true,
         };
         let summary = run_isolated_subagent(
             &Client::new(),

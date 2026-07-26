@@ -60,7 +60,7 @@ pub struct ToolCall {
     pub arguments: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentMessage {
     pub role: String,
@@ -134,7 +134,7 @@ pub struct AgentTurnRequest {
     pub custom_instructions: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentTurnResponse {
     pub content: String,
@@ -241,6 +241,10 @@ impl AgentStreamEvent {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolExecutionRequest {
+    #[serde(default)]
+    pub call_id: Option<String>,
+    #[serde(default)]
+    pub operation_id: Option<String>,
     pub name: String,
     pub arguments: serde_json::Value,
     pub workspace: String,
@@ -263,6 +267,12 @@ pub struct ToolExecutionRequest {
     /// tool calls never set this flag.
     #[serde(default)]
     pub hatch_bootstrap: bool,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub permission_level: Option<String>,
+    #[serde(default)]
+    pub approval_granted: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -496,6 +506,8 @@ pub struct StoredMessage {
     #[serde(default)]
     pub internal: bool,
     #[serde(default)]
+    pub change_set: Option<serde_json::Value>,
+    #[serde(default)]
     pub attachments: Vec<ImageAttachment>,
     /// The model identity captured when this assistant response was created.
     /// These fields are optional so databases/messages written by older builds
@@ -581,6 +593,27 @@ pub struct GitStatus {
     pub is_repository: bool,
     pub branch: Option<String>,
     pub changes: Vec<GitFileChange>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitWorkspaceFileSnapshot {
+    pub path: String,
+    pub index_status: String,
+    pub worktree_status: String,
+    pub fingerprint: String,
+    pub content: Option<String>,
+    pub base_content: Option<String>,
+    pub content_truncated: bool,
+    pub binary: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitWorkspaceSnapshot {
+    pub is_available: bool,
+    pub is_repository: bool,
+    pub files: Vec<GitWorkspaceFileSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize)]

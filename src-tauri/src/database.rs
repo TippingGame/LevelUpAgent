@@ -3,13 +3,18 @@ use std::sync::Mutex;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::harness::types::{
+    HarnessApprovalRecord, HarnessDraftRequest, HarnessOperationStarted, HarnessPendingApproval,
+    HarnessQueueItem, HarnessQueueRequest, HarnessRecoveryItem, HarnessSessionNode,
+    HarnessSessionNodeRequest, RuntimeState,
+};
 use crate::models::{
     GoalCreateRequest, GoalState, GoalStatus, ImageAttachment, McpServerConfig, McpTransport,
-    MediaAsset, MediaKind, MediaStatus, ProviderHealth, ProviderRequestLog, ProviderSettings,
-    StoredMessage, StoredThread, ToolCall, WritingProjectRecord,
+    MediaAsset, MediaKind, MediaStatus, ProviderHealth, ProviderProfile, ProviderRequestLog,
+    ProviderSettings, StoredMessage, StoredThread, ToolCall, WritingProjectRecord,
 };
 
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 14;
 
 pub struct Database {
     connection: Mutex<Connection>,
@@ -69,6 +74,7 @@ impl Database {
                      attachments_json TEXT NOT NULL DEFAULT '[]',
                      model_name TEXT,
                      provider_brand TEXT,
+                     change_set_json TEXT,
                      UNIQUE(thread_id, position)
                  );
 
@@ -186,6 +192,26 @@ impl Database {
                  );",
             )
             .map_err(|error| format!("Could not migrate conversation database: {error}"))?;
+        connection
+            .execute_batch(crate::harness::persistence::MIGRATION_SQL)
+            .map_err(|error| format!("Could not migrate harness database: {error}"))?;
+        let has_harness_arguments = connection
+            .prepare("PRAGMA table_info(harness_tool_executions)")
+            .and_then(|mut statement| {
+                let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+                columns.collect::<Result<Vec<_>, _>>()
+            })
+            .map_err(database_error)?
+            .iter()
+            .any(|column| column == "arguments_json");
+        if !has_harness_arguments {
+            connection
+                .execute(
+                    "ALTER TABLE harness_tool_executions ADD COLUMN arguments_json TEXT NOT NULL DEFAULT '{}'",
+                    [],
+                )
+                .map_err(database_error)?;
+        }
         let has_request_id = connection
             .prepare("PRAGMA table_info(messages)")
             .and_then(|mut statement| {
@@ -262,6 +288,20 @@ impl Database {
                 .execute("ALTER TABLE messages ADD COLUMN provider_brand TEXT", [])
                 .map_err(database_error)?;
         }
+        let has_change_set = connection
+            .prepare("PRAGMA table_info(messages)")
+            .and_then(|mut statement| {
+                let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+                columns.collect::<Result<Vec<_>, _>>()
+            })
+            .map_err(database_error)?
+            .iter()
+            .any(|column| column == "change_set_json");
+        if !has_change_set {
+            connection
+                .execute("ALTER TABLE messages ADD COLUMN change_set_json TEXT", [])
+                .map_err(database_error)?;
+        }
         connection
             .execute_batch(
                 "CREATE INDEX IF NOT EXISTS idx_provider_requests_started_at
@@ -328,7 +368,8 @@ impl Database {
                             ORDER BY provider_request.started_at DESC
                             LIMIT 1
                         )) AS model_name,
-                        m.provider_brand
+                        m.provider_brand,
+                        m.change_set_json
                  FROM messages AS m
                  WHERE m.thread_id = ?1 ORDER BY m.position ASC",
             )
@@ -356,6 +397,9 @@ impl Database {
                         attachments,
                         model_name: row.get(10)?,
                         provider_brand: row.get(11)?,
+                        change_set: row
+                            .get::<_, Option<String>>(12)?
+                            .and_then(|value| serde_json::from_str(&value).ok()),
                     })
                 })
                 .map_err(database_error)?
@@ -407,8 +451,8 @@ impl Database {
             let mut statement = transaction
                 .prepare(
                     "INSERT INTO messages
-                     (id, thread_id, position, role, content, tool_calls_json, tool_call_id, created_at, is_error, request_id, internal, attachments_json, model_name, provider_brand)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                     (id, thread_id, position, role, content, tool_calls_json, tool_call_id, created_at, is_error, request_id, internal, attachments_json, model_name, provider_brand, change_set_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 )
                 .map_err(database_error)?;
             for (position, message) in thread.messages.iter().enumerate() {
@@ -432,6 +476,11 @@ impl Database {
                         attachments,
                         message.model_name,
                         message.provider_brand,
+                        message
+                            .change_set
+                            .as_ref()
+                            .map(|value| serde_json::to_string(value)
+                                .unwrap_or_else(|_| "null".to_owned())),
                     ])
                     .map_err(database_error)?;
             }
@@ -1197,6 +1246,1014 @@ impl Database {
         Ok(())
     }
 
+    pub fn start_harness_operation(
+        &self,
+        request: &HarnessDraftRequest,
+        workspace: &str,
+        profile_id: &str,
+    ) -> Result<HarnessOperationStarted, String> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let transaction = connection.transaction().map_err(database_error)?;
+        let thread_exists = transaction
+            .query_row(
+                "SELECT 1 FROM threads WHERE id = ?1",
+                [&request.thread_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(database_error)?
+            .is_some();
+        if !thread_exists {
+            return Err("Cannot start harness operation for an unknown thread".to_owned());
+        }
+
+        let draft_id = uuid::Uuid::new_v4().to_string();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let now = now_millis();
+        let mode = serde_json::to_string(&request.mode)
+            .map_err(|error| format!("Could not encode harness mode: {error}"))?
+            .trim_matches('"')
+            .to_owned();
+        let permission_level = serde_json::to_string(&request.permission_level)
+            .map_err(|error| format!("Could not encode harness permission: {error}"))?
+            .trim_matches('"')
+            .to_owned();
+        let attachment_ids_json = serde_json::to_string(&request.attachment_ids)
+            .map_err(|error| format!("Could not encode harness attachments: {error}"))?;
+        transaction
+            .execute(
+                "INSERT INTO harness_drafts
+                 (id, thread_id, raw_user_input, attachment_ids_json, mode, permission_level, status, created_at, promoted_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'promoted', ?7, ?7)",
+                rusqlite::params![
+                    &draft_id,
+                    &request.thread_id,
+                    &request.raw_user_input,
+                    &attachment_ids_json,
+                    &mode,
+                    &permission_level,
+                    now,
+                ],
+            )
+            .map_err(database_error)?;
+        transaction
+            .execute(
+                "INSERT INTO harness_operations
+                 (id, thread_id, draft_id, state, mode, permission_level, last_event_sequence, started_at, updated_at)
+                 VALUES (?1, ?2, ?3, 'compiling', ?4, ?5, 1, ?6, ?6)",
+                rusqlite::params![
+                    &operation_id,
+                    &request.thread_id,
+                    &draft_id,
+                    &mode,
+                    &permission_level,
+                    now,
+                ],
+            )
+            .map_err(database_error)?;
+        let snapshot_id = uuid::Uuid::new_v4().to_string();
+        let snapshot_json = serde_json::json!({
+            "draftId": &draft_id,
+            "profileId": profile_id,
+            "workspace": workspace,
+            "mode": &mode,
+            "permissionLevel": &permission_level,
+        });
+        let snapshot_json = serde_json::to_string(&snapshot_json)
+            .map_err(|error| format!("Could not encode harness snapshot: {error}"))?;
+        transaction
+            .execute(
+                "INSERT INTO harness_snapshots
+                 (id, operation_id, version, snapshot_json, snapshot_hash, created_at)
+                 VALUES (?1, ?2, 1, ?3, ?4, ?5)",
+                rusqlite::params![
+                    &snapshot_id,
+                    &operation_id,
+                    &snapshot_json,
+                    harness_hash(&snapshot_json),
+                    now,
+                ],
+            )
+            .map_err(database_error)?;
+        transaction
+            .execute(
+                "UPDATE harness_operations SET current_snapshot_id = ?1 WHERE id = ?2",
+                rusqlite::params![&snapshot_id, &operation_id],
+            )
+            .map_err(database_error)?;
+        let payload = serde_json::json!({
+            "draftId": &draft_id,
+            "profileId": profile_id,
+            "workspace": workspace,
+        });
+        transaction
+            .execute(
+                "INSERT INTO harness_events
+                 (id, operation_id, sequence, schema_version, kind, payload_json, created_at)
+                 VALUES (?1, ?2, 1, ?3, 'operation_started', ?4, ?5)",
+                rusqlite::params![
+                    uuid::Uuid::new_v4().to_string(),
+                    &operation_id,
+                    crate::harness::types::HARNESS_SCHEMA_VERSION,
+                    serde_json::to_string(&payload)
+                        .map_err(|error| format!("Could not encode harness event: {error}"))?,
+                    now,
+                ],
+            )
+            .map_err(database_error)?;
+        transaction.commit().map_err(database_error)?;
+        Ok(HarnessOperationStarted {
+            operation_id,
+            draft_id,
+            state: RuntimeState::Compiling,
+            event_sequence: 1,
+        })
+    }
+
+    pub fn update_harness_operation_state(
+        &self,
+        operation_id: &str,
+        state: &RuntimeState,
+    ) -> Result<(), String> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let transaction = connection.transaction().map_err(database_error)?;
+        let current = transaction
+            .query_row(
+                "SELECT state, last_event_sequence FROM harness_operations WHERE id = ?1",
+                [operation_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .map_err(database_error)?;
+        let Some((current_state, sequence)) = current else {
+            return Err("Unknown harness operation".to_owned());
+        };
+        if matches!(current_state.as_str(), "completed" | "failed" | "cancelled") {
+            transaction.commit().map_err(database_error)?;
+            return Ok(());
+        }
+        let next_state = serde_json::to_string(state)
+            .map_err(|error| format!("Could not encode harness state: {error}"))?
+            .trim_matches('"')
+            .to_owned();
+        let next_sequence = sequence.saturating_add(1);
+        let now = now_millis();
+        let ended_at = if matches!(
+            state,
+            RuntimeState::Completed
+                | RuntimeState::Failed
+                | RuntimeState::Cancelled
+                | RuntimeState::Interrupted
+        ) {
+            Some(now)
+        } else {
+            None
+        };
+        transaction
+            .execute(
+                "UPDATE harness_operations
+                 SET state = ?1, last_event_sequence = ?2, updated_at = ?3, ended_at = COALESCE(?4, ended_at)
+                 WHERE id = ?5",
+                rusqlite::params![next_state, next_sequence, now, ended_at, operation_id],
+            )
+            .map_err(database_error)?;
+        let kind = format!("operation_{next_state}");
+        transaction
+            .execute(
+                "INSERT INTO harness_events
+                 (id, operation_id, sequence, schema_version, kind, payload_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, '{}', ?6)",
+                rusqlite::params![
+                    uuid::Uuid::new_v4().to_string(),
+                    operation_id,
+                    next_sequence,
+                    crate::harness::types::HARNESS_SCHEMA_VERSION,
+                    kind,
+                    now,
+                ],
+            )
+            .map_err(database_error)?;
+        transaction.commit().map_err(database_error)
+    }
+
+    pub fn append_harness_event(
+        &self,
+        operation_id: &str,
+        kind: &str,
+        payload: &serde_json::Value,
+    ) -> Result<u64, String> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let transaction = connection.transaction().map_err(database_error)?;
+        let sequence: i64 = transaction
+            .query_row(
+                "SELECT last_event_sequence FROM harness_operations WHERE id = ?1",
+                [operation_id],
+                |row| row.get(0),
+            )
+            .map_err(database_error)?;
+        let next = sequence.saturating_add(1);
+        transaction
+            .execute(
+                "UPDATE harness_operations SET last_event_sequence = ?1, updated_at = ?2 WHERE id = ?3",
+                params![next, now_millis(), operation_id],
+            )
+            .map_err(database_error)?;
+        transaction
+            .execute(
+                "INSERT INTO harness_events
+                 (id, operation_id, sequence, schema_version, kind, payload_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    uuid::Uuid::new_v4().to_string(),
+                    operation_id,
+                    next,
+                    crate::harness::types::HARNESS_SCHEMA_VERSION,
+                    kind,
+                    payload.to_string(),
+                    now_millis(),
+                ],
+            )
+            .map_err(database_error)?;
+        transaction.commit().map_err(database_error)?;
+        Ok(next as u64)
+    }
+
+    pub fn start_harness_tool_execution(
+        &self,
+        operation_id: &str,
+        call_id: &str,
+        tool_name: &str,
+        risk: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<(), String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let now = now_millis();
+        let snapshot_id = connection
+            .query_row(
+                "SELECT current_snapshot_id FROM harness_operations WHERE id = ?1",
+                [operation_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(database_error)?
+            .flatten()
+            .ok_or_else(|| "Harness operation has no current snapshot".to_owned())?;
+        if let Some(status) = connection
+            .query_row(
+                "SELECT status FROM harness_tool_executions WHERE operation_id = ?1 AND call_id = ?2",
+                params![operation_id, call_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(database_error)?
+            && matches!(status.as_str(), "succeeded" | "failed" | "cancelled" | "unknown")
+        {
+            return Err(format!(
+                "Tool call '{call_id}' already has terminal status '{status}'; refusing replay"
+            ));
+        }
+        connection
+            .execute(
+                "INSERT INTO harness_tool_executions
+                 (id, operation_id, snapshot_id, call_id, tool_name, risk, arguments_hash, arguments_json, status, started_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'running', ?9)
+                 ON CONFLICT(operation_id, call_id) DO UPDATE SET
+                   status = CASE WHEN harness_tool_executions.status IN ('succeeded', 'failed')
+                                 THEN harness_tool_executions.status ELSE 'running' END,
+                   started_at = CASE WHEN harness_tool_executions.status IN ('succeeded', 'failed')
+                                     THEN harness_tool_executions.started_at ELSE excluded.started_at END,
+                   finished_at = CASE WHEN harness_tool_executions.status IN ('succeeded', 'failed')
+                                     THEN harness_tool_executions.finished_at ELSE NULL END",
+                params![
+                    uuid::Uuid::new_v4().to_string(),
+                    operation_id,
+                    snapshot_id,
+                    call_id,
+                    tool_name,
+                    risk,
+                    harness_hash_value(arguments),
+                    arguments.to_string(),
+                    now,
+                ],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+
+    pub fn create_harness_approval(
+        &self,
+        operation_id: &str,
+        call_id: &str,
+        tool_name: &str,
+        risk: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<(String, String, String), String> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let transaction = connection.transaction().map_err(database_error)?;
+        let snapshot_id = transaction
+            .query_row(
+                "SELECT current_snapshot_id FROM harness_operations WHERE id = ?1",
+                [operation_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(database_error)?
+            .flatten()
+            .ok_or_else(|| "Harness operation has no current snapshot".to_owned())?;
+        if let Some((approval_id, token_hash, execution_id)) = transaction
+            .query_row(
+                "SELECT a.id, a.token_hash, t.id
+                 FROM harness_approvals a
+                 JOIN harness_tool_executions t ON t.id = a.tool_execution_id
+                 WHERE a.operation_id = ?1 AND t.call_id = ?2 AND a.consumed_at IS NULL
+                 ORDER BY a.created_at DESC LIMIT 1",
+                params![operation_id, call_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(database_error)?
+        {
+            return Err(format!(
+                "An approval is already pending for call '{call_id}' ({approval_id}/{execution_id}); token hash {token_hash}"
+            ));
+        }
+        let tool_execution_id = uuid::Uuid::new_v4().to_string();
+        let approval_id = uuid::Uuid::new_v4().to_string();
+        let token = uuid::Uuid::new_v4().to_string();
+        let now = now_millis();
+        transaction
+            .execute(
+                "INSERT INTO harness_tool_executions
+                 (id, operation_id, snapshot_id, call_id, tool_name, risk, arguments_hash, arguments_json, status, started_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'awaiting_approval', ?9)",
+                params![
+                    &tool_execution_id,
+                    operation_id,
+                    snapshot_id,
+                    call_id,
+                    tool_name,
+                    risk,
+                    harness_hash_value(arguments),
+                    arguments.to_string(),
+                    now,
+                ],
+            )
+            .map_err(database_error)?;
+        transaction
+            .execute(
+                "INSERT INTO harness_approvals
+                 (id, operation_id, snapshot_id, tool_execution_id, arguments_hash, decision, token_hash, created_at, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?7, ?8)",
+                params![
+                    &approval_id,
+                    operation_id,
+                    snapshot_id,
+                    &tool_execution_id,
+                    harness_hash_value(arguments),
+                    harness_hash(&token),
+                    now,
+                    now.saturating_add(15 * 60 * 1_000),
+                ],
+            )
+            .map_err(database_error)?;
+        transaction.commit().map_err(database_error)?;
+        Ok((approval_id, token, tool_execution_id))
+    }
+
+    pub fn resolve_harness_approval(
+        &self,
+        token: &str,
+        approved: bool,
+    ) -> Result<HarnessApprovalRecord, String> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let transaction = connection.transaction().map_err(database_error)?;
+        let token_hash = harness_hash(token);
+        let row = transaction
+            .query_row(
+                "SELECT a.id, a.operation_id, a.tool_execution_id, t.call_id, t.tool_name, t.arguments_json
+                 FROM harness_approvals a
+                 JOIN harness_tool_executions t ON t.id = a.tool_execution_id
+                 WHERE a.token_hash = ?1 AND a.consumed_at IS NULL AND a.expires_at >= ?2",
+                params![token_hash, now_millis()],
+                |row| {
+                    let arguments: String = row.get(5)?;
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        arguments,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(database_error)?
+            .ok_or_else(|| "Approval token is invalid, expired, or already consumed".to_owned())?;
+        let arguments = serde_json::from_str(&row.5)
+            .map_err(|error| format!("Stored approval arguments are invalid: {error}"))?;
+        let decision = if approved { "approved" } else { "denied" };
+        transaction
+            .execute(
+                "UPDATE harness_approvals SET decision = ?1, consumed_at = ?2 WHERE id = ?3",
+                params![decision, now_millis(), row.0],
+            )
+            .map_err(database_error)?;
+        transaction
+            .execute(
+                "UPDATE harness_tool_executions
+                 SET status = ?1, finished_at = CASE WHEN ?1 = 'denied' THEN ?2 ELSE NULL END
+                 WHERE id = ?3",
+                params![
+                    if approved { "running" } else { "denied" },
+                    now_millis(),
+                    row.2
+                ],
+            )
+            .map_err(database_error)?;
+        transaction.commit().map_err(database_error)?;
+        Ok(HarnessApprovalRecord {
+            approval_id: row.0,
+            operation_id: row.1,
+            tool_execution_id: row.2,
+            call_id: row.3,
+            tool_name: row.4,
+            arguments,
+            approved,
+        })
+    }
+
+    pub fn has_consumed_harness_approval(
+        &self,
+        operation_id: &str,
+        call_id: &str,
+    ) -> Result<bool, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        connection
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1
+                   FROM harness_approvals a
+                   JOIN harness_tool_executions t ON t.id = a.tool_execution_id
+                   WHERE a.operation_id = ?1
+                     AND t.call_id = ?2
+                     AND a.decision = 'approved'
+                     AND a.consumed_at IS NOT NULL
+                 )",
+                params![operation_id, call_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(database_error)
+    }
+
+    pub fn harness_approval_operation(&self, token: &str) -> Result<Option<String>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        connection
+            .query_row(
+                "SELECT operation_id FROM harness_approvals WHERE token_hash = ?1",
+                [harness_hash(token)],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(database_error)
+    }
+
+    pub fn list_harness_pending_approvals(&self) -> Result<Vec<HarnessPendingApproval>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let mut statement = connection
+            .prepare(
+                "SELECT a.id, a.operation_id, o.thread_id, t.call_id, t.tool_name, t.arguments_json
+                 FROM harness_approvals a
+                 JOIN harness_operations o ON o.id = a.operation_id
+                 JOIN harness_tool_executions t ON t.id = a.tool_execution_id
+                 WHERE a.decision = 'pending' AND a.consumed_at IS NULL AND a.expires_at > ?1
+                 ORDER BY a.created_at",
+            )
+            .map_err(database_error)?;
+        statement
+            .query_map([now_millis()], |row| {
+                let arguments: String = row.get(5)?;
+                Ok(HarnessPendingApproval {
+                    approval_id: row.get(0)?,
+                    operation_id: row.get(1)?,
+                    thread_id: row.get(2)?,
+                    call_id: row.get(3)?,
+                    tool_name: row.get(4)?,
+                    arguments: serde_json::from_str(&arguments).unwrap_or(serde_json::Value::Null),
+                })
+            })
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)
+    }
+
+    pub fn reissue_harness_approval(&self, approval_id: &str) -> Result<String, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let token = uuid::Uuid::new_v4().to_string();
+        let updated = connection
+            .execute(
+                "UPDATE harness_approvals
+                 SET token_hash = ?1, expires_at = ?2
+                 WHERE id = ?3 AND decision = 'pending' AND consumed_at IS NULL",
+                params![
+                    harness_hash(&token),
+                    now_millis().saturating_add(15 * 60 * 1000),
+                    approval_id
+                ],
+            )
+            .map_err(database_error)?;
+        if updated == 0 {
+            return Err("Approval is no longer pending".to_owned());
+        }
+        Ok(token)
+    }
+
+    pub fn record_harness_context_manifest(
+        &self,
+        operation_id: &str,
+        snapshot_id: &str,
+        budget: &serde_json::Value,
+        selection: &serde_json::Value,
+        estimator_version: &str,
+    ) -> Result<String, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let id = uuid::Uuid::new_v4().to_string();
+        connection
+            .execute(
+                "INSERT INTO harness_context_manifests
+                 (id, operation_id, snapshot_id, budget_json, selection_json, estimator_version, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    &id,
+                    operation_id,
+                    snapshot_id,
+                    budget.to_string(),
+                    selection.to_string(),
+                    estimator_version,
+                    now_millis(),
+                ],
+            )
+            .map_err(database_error)?;
+        Ok(id)
+    }
+
+    pub fn current_harness_snapshot(&self, operation_id: &str) -> Result<String, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        connection
+            .query_row(
+                "SELECT current_snapshot_id FROM harness_operations WHERE id = ?1",
+                [operation_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(database_error)?
+            .flatten()
+            .ok_or_else(|| "Harness operation has no current snapshot".to_owned())
+    }
+
+    pub fn start_harness_provider_attempt(
+        &self,
+        operation_id: &str,
+        snapshot_id: &str,
+        context_manifest_id: &str,
+        profile: &ProviderProfile,
+        failover_index: u32,
+    ) -> Result<String, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let id = uuid::Uuid::new_v4().to_string();
+        connection
+            .execute(
+                "INSERT INTO harness_provider_attempts
+                 (id, operation_id, snapshot_id, context_manifest_id, profile_id, model, protocol, status, failover_index, started_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'running', ?8, ?9)",
+                params![
+                    &id,
+                    operation_id,
+                    snapshot_id,
+                    context_manifest_id,
+                    &profile.id,
+                    &profile.model,
+                    serde_json::to_string(&profile.protocol)
+                        .map_err(|error| format!("Could not encode provider protocol: {error}"))?
+                        .trim_matches('"')
+                        .to_owned(),
+                    failover_index,
+                    now_millis(),
+                ],
+            )
+            .map_err(database_error)?;
+        Ok(id)
+    }
+
+    pub fn finish_harness_provider_attempt(
+        &self,
+        attempt_id: &str,
+        response: Option<&crate::models::AgentTurnResponse>,
+        error: Option<&str>,
+    ) -> Result<(), String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let status = if error.is_some() {
+            "failed"
+        } else {
+            "succeeded"
+        };
+        connection
+            .execute(
+                "UPDATE harness_provider_attempts
+                 SET status = ?1, finished_at = ?2, input_tokens = ?3, output_tokens = ?4,
+                     request_id = ?5, error_class = ?6
+                 WHERE id = ?7",
+                params![
+                    status,
+                    now_millis(),
+                    response
+                        .and_then(|value| value.input_tokens)
+                        .map(|value| value as i64),
+                    response
+                        .and_then(|value| value.output_tokens)
+                        .map(|value| value as i64),
+                    response.and_then(|value| value.request_id.as_deref()),
+                    error.map(|value| value.chars().take(300).collect::<String>()),
+                    attempt_id,
+                ],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+
+    pub fn recover_harness_operations(&self) -> Result<(), String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let now = now_millis();
+        connection
+            .execute(
+                "UPDATE harness_tool_executions SET status = 'unknown' WHERE status = 'running'",
+                [],
+            )
+            .map_err(database_error)?;
+        connection
+            .execute(
+                "UPDATE harness_operations
+                 SET state = 'interrupted', updated_at = ?1, ended_at = ?1
+                 WHERE state IN ('compiling', 'running', 'compacting', 'persisting')",
+                [now],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+
+    pub fn list_harness_recovery_items(&self) -> Result<Vec<HarnessRecoveryItem>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let mut statement = connection
+            .prepare(
+                "SELECT operation_id, id, call_id, tool_name, status, started_at
+                 FROM harness_tool_executions
+                 WHERE status = 'unknown' OR status = 'awaiting_approval'
+                 ORDER BY started_at DESC",
+            )
+            .map_err(database_error)?;
+        statement
+            .query_map([], |row| {
+                Ok(HarnessRecoveryItem {
+                    operation_id: row.get(0)?,
+                    tool_execution_id: row.get(1)?,
+                    call_id: row.get(2)?,
+                    tool_name: row.get(3)?,
+                    status: row.get(4)?,
+                    started_at: row.get(5)?,
+                })
+            })
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)
+    }
+
+    pub fn resolve_unknown_harness_tool(
+        &self,
+        tool_execution_id: &str,
+        decision: &str,
+    ) -> Result<(), String> {
+        let status = match decision {
+            "mark_completed" => "succeeded",
+            "mark_not_executed" => "failed",
+            "cancel" => "cancelled",
+            _ => return Err("Unknown recovery decision".to_owned()),
+        };
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        connection
+            .execute(
+                "UPDATE harness_tool_executions SET status = ?1, finished_at = ?2 WHERE id = ?3 AND status = 'unknown'",
+                params![status, now_millis(), tool_execution_id],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+
+    pub fn enqueue_harness_item(
+        &self,
+        request: &HarnessQueueRequest,
+    ) -> Result<HarnessQueueItem, String> {
+        if !matches!(request.kind.as_str(), "steer" | "follow_up" | "next_turn") {
+            return Err("Unknown harness queue kind".to_owned());
+        }
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let id = uuid::Uuid::new_v4().to_string();
+        connection
+            .execute(
+                "INSERT INTO harness_queues (id, operation_id, kind, body, status, created_at)
+                 VALUES (?1, ?2, ?3, ?4, 'pending', ?5)",
+                params![
+                    &id,
+                    &request.operation_id,
+                    &request.kind,
+                    &request.body,
+                    now_millis()
+                ],
+            )
+            .map_err(database_error)?;
+        Ok(HarnessQueueItem {
+            id,
+            operation_id: request.operation_id.clone(),
+            kind: request.kind.clone(),
+            body: request.body.clone(),
+            status: "pending".to_owned(),
+        })
+    }
+
+    pub fn list_harness_queue(&self, operation_id: &str) -> Result<Vec<HarnessQueueItem>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, operation_id, kind, body, status FROM harness_queues
+                 WHERE operation_id = ?1 AND status = 'pending' ORDER BY created_at",
+            )
+            .map_err(database_error)?;
+        statement
+            .query_map([operation_id], |row| {
+                Ok(HarnessQueueItem {
+                    id: row.get(0)?,
+                    operation_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    body: row.get(3)?,
+                    status: row.get(4)?,
+                })
+            })
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)
+    }
+
+    pub fn consume_harness_queue(
+        &self,
+        queue_id: &str,
+    ) -> Result<Option<HarnessQueueItem>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let item = connection
+            .query_row(
+                "SELECT id, operation_id, kind, body, status FROM harness_queues
+                 WHERE id = ?1 AND status = 'pending'",
+                [queue_id],
+                |row| {
+                    Ok(HarnessQueueItem {
+                        id: row.get(0)?,
+                        operation_id: row.get(1)?,
+                        kind: row.get(2)?,
+                        body: row.get(3)?,
+                        status: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(database_error)?;
+        if item.is_some() {
+            connection
+                .execute(
+                    "UPDATE harness_queues SET status = 'injected', injected_at = ?1 WHERE id = ?2",
+                    params![now_millis(), queue_id],
+                )
+                .map_err(database_error)?;
+        }
+        Ok(item)
+    }
+
+    pub fn cancel_harness_queue(&self, queue_id: &str) -> Result<(), String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        connection
+            .execute(
+                "UPDATE harness_queues SET status = 'cancelled', injected_at = ?1
+                 WHERE id = ?2 AND status = 'pending'",
+                params![now_millis(), queue_id],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+
+    pub fn promote_harness_queue_to_steer(
+        &self,
+        operation_id: &str,
+        queue_id: &str,
+    ) -> Result<(), String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let updated = connection
+            .execute(
+                "UPDATE harness_queues SET kind = 'steer'
+                 WHERE id = ?1 AND operation_id = ?2 AND status = 'pending'",
+                params![queue_id, operation_id],
+            )
+            .map_err(database_error)?;
+        if updated == 0 {
+            return Err("Queue item is no longer pending for this operation".to_owned());
+        }
+        Ok(())
+    }
+
+    pub fn create_harness_session_node(
+        &self,
+        request: &HarnessSessionNodeRequest,
+    ) -> Result<HarnessSessionNode, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let position: i64 = connection
+            .query_row(
+                "SELECT COALESCE(MAX(position), -1) + 1 FROM harness_session_nodes WHERE thread_id = ?1 AND branch_id = ?2",
+                params![&request.thread_id, &request.branch_id],
+                |row| row.get(0),
+            )
+            .map_err(database_error)?;
+        connection
+            .execute(
+                "INSERT INTO harness_session_nodes
+                 (id, thread_id, parent_id, branch_id, kind, message_id, operation_id, position, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    &id,
+                    &request.thread_id,
+                    &request.parent_id,
+                    &request.branch_id,
+                    &request.kind,
+                    &request.message_id,
+                    &request.operation_id,
+                    position,
+                    now_millis(),
+                ],
+            )
+            .map_err(database_error)?;
+        Ok(HarnessSessionNode {
+            id,
+            thread_id: request.thread_id.clone(),
+            parent_id: request.parent_id.clone(),
+            branch_id: request.branch_id.clone(),
+            kind: request.kind.clone(),
+            message_id: request.message_id.clone(),
+            operation_id: request.operation_id.clone(),
+            position,
+        })
+    }
+
+    pub fn list_harness_session_nodes(
+        &self,
+        thread_id: &str,
+    ) -> Result<Vec<HarnessSessionNode>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, thread_id, parent_id, branch_id, kind, message_id, operation_id, position
+                 FROM harness_session_nodes WHERE thread_id = ?1 ORDER BY position",
+            )
+            .map_err(database_error)?;
+        statement
+            .query_map([thread_id], |row| {
+                Ok(HarnessSessionNode {
+                    id: row.get(0)?,
+                    thread_id: row.get(1)?,
+                    parent_id: row.get(2)?,
+                    branch_id: row.get(3)?,
+                    kind: row.get(4)?,
+                    message_id: row.get(5)?,
+                    operation_id: row.get(6)?,
+                    position: row.get(7)?,
+                })
+            })
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)
+    }
+
+    pub fn finish_harness_tool_execution(
+        &self,
+        operation_id: &str,
+        call_id: &str,
+        response: &crate::models::ToolExecutionResponse,
+    ) -> Result<(), String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let status = if response.is_error {
+            "failed"
+        } else {
+            "succeeded"
+        };
+        let output = response.output.chars().take(20_000).collect::<String>();
+        let result_json = serde_json::json!({
+            "output": output,
+            "isError": response.is_error,
+        });
+        connection
+            .execute(
+                "UPDATE harness_tool_executions
+                 SET status = ?1, result_json = ?2, finished_at = ?3
+                 WHERE operation_id = ?4 AND call_id = ?5",
+                params![
+                    status,
+                    serde_json::to_string(&result_json)
+                        .map_err(|error| format!("Could not encode tool result: {error}"))?,
+                    now_millis(),
+                    operation_id,
+                    call_id,
+                ],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+
     pub fn record_provider_request(&self, log: &ProviderRequestLog) -> Result<(), String> {
         let connection = self
             .connection
@@ -1444,6 +2501,17 @@ fn now_millis() -> i64 {
         .min(i64::MAX as u128) as i64
 }
 
+fn harness_hash(value: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn harness_hash_value(value: &serde_json::Value) -> String {
+    harness_hash(&value.to_string())
+}
+
 fn mcp_server_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<McpServerConfig> {
     let transport: String = row.get(3)?;
     let parse = |index| -> rusqlite::Result<serde_json::Value> {
@@ -1517,6 +2585,14 @@ mod tests {
                 is_error: false,
                 request_id: Some("request-1".to_owned()),
                 internal: true,
+                change_set: Some(serde_json::json!({
+                    "operationId": "operation-1",
+                    "workspace": "C:/workspace",
+                    "status": "completed",
+                    "startedAt": 1_699_999_999_000_i64,
+                    "completedAt": 1_700_000_000_000_i64,
+                    "files": [{ "path": "README.md", "kind": "modified" }],
+                })),
                 attachments: Vec::new(),
                 model_name: Some("gpt-5.5".to_owned()),
                 provider_brand: Some("openai".to_owned()),
@@ -1536,6 +2612,251 @@ mod tests {
     }
 
     #[test]
+    fn starts_one_harness_operation_and_records_its_first_event() {
+        let database = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        database.save_thread(&sample_thread()).unwrap();
+        let request = crate::harness::types::HarnessDraftRequest {
+            thread_id: "thread-1".to_owned(),
+            raw_user_input: "continue".to_owned(),
+            attachment_ids: Vec::new(),
+            mode: crate::harness::types::HarnessMode::Agent,
+            permission_level: crate::harness::types::PermissionLevel::Request,
+            requested_profile_id: Some("test".to_owned()),
+            workspace: Some("C:/workspace".to_owned()),
+        };
+        let started = database
+            .start_harness_operation(&request, "C:/workspace", "test")
+            .unwrap();
+        assert_eq!(
+            started.state,
+            crate::harness::types::RuntimeState::Compiling
+        );
+        assert_eq!(started.event_sequence, 1);
+        let connection = database.connection.lock().unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM harness_events WHERE operation_id = ?1",
+                    [&started.operation_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        drop(connection);
+        database
+            .start_harness_tool_execution(
+                &started.operation_id,
+                "call-1",
+                "read_file",
+                "read_only",
+                &serde_json::json!({ "path": "README.md" }),
+            )
+            .unwrap();
+        database
+            .finish_harness_tool_execution(
+                &started.operation_id,
+                "call-1",
+                &crate::models::ToolExecutionResponse {
+                    output: "ok".to_owned(),
+                    is_error: false,
+                },
+            )
+            .unwrap();
+        let replay = database.start_harness_tool_execution(
+            &started.operation_id,
+            "call-1",
+            "read_file",
+            "read_only",
+            &serde_json::json!({ "path": "README.md" }),
+        );
+        assert!(replay.unwrap_err().contains("refusing replay"));
+        let connection = database.connection.lock().unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT status FROM harness_tool_executions WHERE operation_id = ?1 AND call_id = 'call-1'",
+                    [&started.operation_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "succeeded"
+        );
+        drop(connection);
+        let error = database
+            .start_harness_operation(&request, "C:/workspace", "test")
+            .unwrap_err();
+        assert!(error.contains("UNIQUE") || error.contains("unique"));
+        database
+            .update_harness_operation_state(
+                &started.operation_id,
+                &crate::harness::types::RuntimeState::Completed,
+            )
+            .unwrap();
+        let restarted = database
+            .start_harness_operation(&request, "C:/workspace", "test")
+            .unwrap();
+        assert_ne!(restarted.operation_id, started.operation_id);
+    }
+
+    #[test]
+    fn approval_token_is_persisted_and_consumed_once() {
+        let database = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        database.save_thread(&sample_thread()).unwrap();
+        let request = crate::harness::types::HarnessDraftRequest {
+            thread_id: "thread-1".to_owned(),
+            raw_user_input: "write".to_owned(),
+            attachment_ids: Vec::new(),
+            mode: crate::harness::types::HarnessMode::Agent,
+            permission_level: crate::harness::types::PermissionLevel::Request,
+            requested_profile_id: Some("test".to_owned()),
+            workspace: Some("C:/workspace".to_owned()),
+        };
+        let operation = database
+            .start_harness_operation(&request, "C:/workspace", "test")
+            .unwrap();
+        let (approval_id, token, execution_id) = database
+            .create_harness_approval(
+                &operation.operation_id,
+                "call-write",
+                "write_file",
+                "workspace_write",
+                &serde_json::json!({ "path": "out.txt", "content": "ok" }),
+            )
+            .unwrap();
+        assert!(!approval_id.is_empty());
+        assert!(!execution_id.is_empty());
+        let record = database.resolve_harness_approval(&token, true).unwrap();
+        assert!(record.approved);
+        assert!(
+            database
+                .has_consumed_harness_approval(&operation.operation_id, "call-write")
+                .unwrap()
+        );
+        let replay = database.resolve_harness_approval(&token, true);
+        assert!(replay.unwrap_err().contains("already consumed"));
+    }
+
+    #[test]
+    fn restart_recovery_marks_running_unknown_but_keeps_approval_waiting() {
+        let database = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        database.save_thread(&sample_thread()).unwrap();
+        let request = crate::harness::types::HarnessDraftRequest {
+            thread_id: "thread-1".to_owned(),
+            raw_user_input: "continue".to_owned(),
+            attachment_ids: Vec::new(),
+            mode: crate::harness::types::HarnessMode::Agent,
+            permission_level: crate::harness::types::PermissionLevel::Request,
+            requested_profile_id: Some("test".to_owned()),
+            workspace: Some("C:/workspace".to_owned()),
+        };
+        let operation = database
+            .start_harness_operation(&request, "C:/workspace", "test")
+            .unwrap();
+        database
+            .start_harness_tool_execution(
+                &operation.operation_id,
+                "call-running",
+                "write_file",
+                "workspace_write",
+                &serde_json::json!({ "path": "out.txt" }),
+            )
+            .unwrap();
+        database
+            .create_harness_approval(
+                &operation.operation_id,
+                "call-approval",
+                "write_file",
+                "workspace_write",
+                &serde_json::json!({ "path": "approval.txt" }),
+            )
+            .unwrap();
+        database.recover_harness_operations().unwrap();
+        let connection = database.connection.lock().unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT status FROM harness_tool_executions WHERE call_id = 'call-running'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "unknown"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT status FROM harness_tool_executions WHERE call_id = 'call-approval'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "awaiting_approval"
+        );
+    }
+
+    #[test]
+    fn queue_and_session_fork_are_durable() {
+        let database = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        database.save_thread(&sample_thread()).unwrap();
+        let request = crate::harness::types::HarnessDraftRequest {
+            thread_id: "thread-1".to_owned(),
+            raw_user_input: "continue".to_owned(),
+            attachment_ids: Vec::new(),
+            mode: crate::harness::types::HarnessMode::Agent,
+            permission_level: crate::harness::types::PermissionLevel::Request,
+            requested_profile_id: Some("test".to_owned()),
+            workspace: Some("C:/workspace".to_owned()),
+        };
+        let operation = database
+            .start_harness_operation(&request, "C:/workspace", "test")
+            .unwrap();
+        let queued = database
+            .enqueue_harness_item(&crate::harness::types::HarnessQueueRequest {
+                operation_id: operation.operation_id.clone(),
+                kind: "steer".to_owned(),
+                body: "use the smaller file".to_owned(),
+            })
+            .unwrap();
+        assert_eq!(
+            database
+                .list_harness_queue(&operation.operation_id)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            database
+                .consume_harness_queue(&queued.id)
+                .unwrap()
+                .unwrap()
+                .kind,
+            "steer"
+        );
+        let node = database
+            .create_harness_session_node(&crate::harness::types::HarnessSessionNodeRequest {
+                thread_id: "thread-1".to_owned(),
+                parent_id: None,
+                branch_id: "main".to_owned(),
+                kind: "root".to_owned(),
+                message_id: None,
+                operation_id: Some(operation.operation_id),
+            })
+            .unwrap();
+        let fork = database
+            .create_harness_session_node(&crate::harness::types::HarnessSessionNodeRequest {
+                thread_id: "thread-1".to_owned(),
+                parent_id: Some(node.id),
+                branch_id: "branch-1".to_owned(),
+                kind: "fork".to_owned(),
+                message_id: None,
+                operation_id: None,
+            })
+            .unwrap();
+        assert_eq!(fork.kind, "fork");
+    }
+
+    #[test]
     fn replaces_message_order_transactionally() {
         let database = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
         let mut thread = sample_thread();
@@ -1552,6 +2873,7 @@ mod tests {
                 is_error: false,
                 request_id: None,
                 internal: false,
+                change_set: None,
                 attachments: Vec::new(),
                 model_name: None,
                 provider_brand: None,

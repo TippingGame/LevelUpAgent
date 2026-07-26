@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type ReactNode } from "react";
-import ReactMarkdown from "react-markdown";
+import { Children, isValidElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type CSSProperties, type DragEvent as ReactDragEvent, type HTMLAttributes, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -90,12 +90,26 @@ import {
   fetchModels,
   getGitDiff,
   getGitStatus,
+  getGitWorkspaceSnapshot,
   getGoal,
   getDefaultWorkspace,
   getGatewayDiagnostics,
   getCustomInstructions,
   getPetRuntime,
   getProviderSettings,
+  harnessPreflight,
+  harnessStart,
+  harnessRun,
+  harnessEnqueue,
+  harnessCancelQueue,
+  harnessForkSession,
+  harnessSteer,
+  harnessResolveApproval,
+  harnessListPendingApprovals,
+  harnessReissueApproval,
+  harnessListRecovery,
+  harnessResolveUnknown,
+  harnessUpdateState,
   hasApiKey,
   importExternalConfig,
   importAttachments,
@@ -147,6 +161,7 @@ import {
   loadHiddenProjectKeys,
   loadProfiles,
   loadActiveThemeId,
+  loadDiffViewSettings,
   loadPermissionLevel,
   loadPinnedThreadIds,
   loadThreads,
@@ -160,6 +175,7 @@ import {
   saveHiddenProjectKeys,
   saveThreads,
   saveActiveThemeId,
+  saveDiffViewSettings,
 } from "./lib/storage";
 import { getAppLocale, setAppLocale, tr, type AppLocale } from "./lib/i18n";
 import { executeCallsWithParallelMedia } from "./lib/mediaConcurrency";
@@ -186,15 +202,26 @@ import type {
   AppUpdateInfo,
   ConfigWritePreview,
   ConfigWriteResult,
+  ConversationChangeSet,
+  ConversationChangeStatus,
+  ConversationFileChange,
+  DiffFontFamily,
+  DiffViewSettings,
   ExternalConfigCandidate,
   ExternalConfigTarget,
   GitDiff,
   GitFileChange,
   GitRollbackPreview,
   GitStatus,
+  GitWorkspaceSnapshot,
   GoalState,
   GatewayDiagnostics,
   HatchEnvironment,
+  HarnessOperationState,
+  HarnessRuntimeEvent,
+  HarnessRecoveryItem,
+  HarnessPendingApproval,
+  HarnessQueueItem,
   ImageAttachment,
   McpSecretValues,
   McpServerConfig,
@@ -407,6 +434,146 @@ function useModalKeyboard(onClose: () => void) {
   return dialogRef;
 }
 
+interface WorkspaceRunBaseline {
+  threadId: string;
+  workspace: string;
+  startedAt: number;
+  snapshot: GitWorkspaceSnapshot;
+}
+
+type InspectorTab = "details" | "changes";
+
+function conversationChangeKind(
+  indexStatus: string,
+  worktreeStatus: string,
+  fallback?: ConversationFileChange["kind"],
+): ConversationFileChange["kind"] {
+  const status = `${indexStatus}${worktreeStatus}`;
+  if (status.includes("R")) return "renamed";
+  if (status.includes("D")) return "deleted";
+  if (status.includes("A") || status.includes("?")) return "added";
+  return fallback ?? "modified";
+}
+
+const MAX_TURN_DIFF_LINES = 4_000;
+const MAX_TURN_DIFF_CHARS = 512 * 1024;
+const MAX_CHANGE_SET_DIFF_CHARS = 2 * 1024 * 1024;
+
+function buildTurnDiff(before: string | null, after: string | null, path: string) {
+  const beforeLines = before == null ? [] : before.split("\n");
+  const afterLines = after == null ? [] : after.split("\n");
+  let prefix = 0;
+  while (prefix < beforeLines.length && prefix < afterLines.length && beforeLines[prefix] === afterLines[prefix]) prefix += 1;
+  let suffix = 0;
+  while (
+    suffix < beforeLines.length - prefix
+    && suffix < afterLines.length - prefix
+    && beforeLines[beforeLines.length - 1 - suffix] === afterLines[afterLines.length - 1 - suffix]
+  ) suffix += 1;
+  const context = 3;
+  const oldStart = Math.max(0, prefix - context);
+  const newStart = Math.max(0, prefix - context);
+  const oldChangeEnd = beforeLines.length - suffix;
+  const newChangeEnd = afterLines.length - suffix;
+  const oldEnd = Math.min(beforeLines.length, oldChangeEnd + context);
+  const newEnd = Math.min(afterLines.length, newChangeEnd + context);
+  const lines = [
+    `--- ${before == null ? "/dev/null" : `a/${path}`}`,
+    `+++ ${after == null ? "/dev/null" : `b/${path}`}`,
+    `@@ -${oldStart + 1},${oldEnd - oldStart} +${newStart + 1},${newEnd - newStart} @@`,
+    ...beforeLines.slice(oldStart, prefix).map((line) => ` ${line}`),
+    ...beforeLines.slice(prefix, oldChangeEnd).map((line) => `-${line}`),
+    ...afterLines.slice(prefix, newChangeEnd).map((line) => `+${line}`),
+    ...afterLines.slice(newChangeEnd, newEnd).map((line) => ` ${line}`),
+  ];
+  const additions = Math.max(0, newChangeEnd - prefix);
+  const deletions = Math.max(0, oldChangeEnd - prefix);
+  const truncated = lines.length > MAX_TURN_DIFF_LINES || lines.join("\n").length > MAX_TURN_DIFF_CHARS;
+  return {
+    content: lines.slice(0, MAX_TURN_DIFF_LINES).join("\n").slice(0, MAX_TURN_DIFF_CHARS),
+    additions,
+    deletions,
+    truncated,
+  };
+}
+
+function compareWorkspaceSnapshots(
+  before: GitWorkspaceSnapshot,
+  after: GitWorkspaceSnapshot,
+): ConversationFileChange[] {
+  if (!before.isRepository || !after.isRepository) return [];
+  const beforeFiles = new Map(before.files.map((file) => [file.path, file]));
+  const afterFiles = new Map(after.files.map((file) => [file.path, file]));
+  const paths = new Set([...beforeFiles.keys(), ...afterFiles.keys()]);
+  const changes: ConversationFileChange[] = [];
+  for (const path of paths) {
+    const previous = beforeFiles.get(path);
+    const current = afterFiles.get(path);
+    if (previous?.fingerprint === current?.fingerprint) continue;
+    if (!current) {
+      const wasUntracked = `${previous?.indexStatus}${previous?.worktreeStatus}`.includes("?");
+      const turnDiff = wasUntracked && previous?.content != null
+        ? buildTurnDiff(previous.content, null, path)
+        : null;
+      changes.push({
+        path,
+        kind: wasUntracked ? "deleted" : "modified",
+        indexStatus: " ",
+        worktreeStatus: " ",
+        additions: turnDiff?.additions,
+        deletions: turnDiff?.deletions,
+        diffAvailable: Boolean(turnDiff),
+        turnDiff: turnDiff?.content,
+        turnDiffTruncated: turnDiff?.truncated,
+      });
+      continue;
+    }
+    const kind = conversationChangeKind(current.indexStatus, current.worktreeStatus);
+    const turnDiff = previous?.content != null && current.content != null
+      ? buildTurnDiff(previous.content, current.content, path)
+      : previous?.content != null && kind === "deleted"
+        ? buildTurnDiff(previous.content, null, path)
+        : !previous && current.content != null && current.baseContent != null
+          ? buildTurnDiff(current.baseContent, current.content, path)
+          : !previous && kind === "added" && current.content != null
+            ? buildTurnDiff(null, current.content, path)
+            : null;
+    changes.push({
+      path,
+      kind,
+      indexStatus: current.indexStatus,
+      worktreeStatus: current.worktreeStatus,
+      additions: turnDiff?.additions,
+      deletions: turnDiff?.deletions,
+      diffAvailable: Boolean(turnDiff) || current.indexStatus !== " " || current.worktreeStatus !== " ",
+      turnDiff: turnDiff?.content,
+      turnDiffTruncated: turnDiff?.truncated,
+    });
+  }
+  const sorted = changes.sort((left, right) => left.path.localeCompare(right.path));
+  let remainingDiffChars = MAX_CHANGE_SET_DIFF_CHARS;
+  for (const change of sorted) {
+    if (!change.turnDiff) continue;
+    if (remainingDiffChars <= 0) {
+      change.turnDiff = undefined;
+      change.turnDiffTruncated = true;
+      change.diffAvailable = change.indexStatus !== " " || change.worktreeStatus !== " ";
+      continue;
+    }
+    if (change.turnDiff.length > remainingDiffChars) {
+      change.turnDiff = change.turnDiff.slice(0, remainingDiffChars);
+      change.turnDiffTruncated = true;
+    }
+    remainingDiffChars -= change.turnDiff.length;
+  }
+  return sorted;
+}
+
+function terminalChangeStatus(state?: HarnessOperationState): ConversationChangeStatus | null {
+  if (state === "completed" || state === "failed" || state === "cancelled" || state === "interrupted") return state;
+  return null;
+}
+
 function App() {
   const [locale, setLocale] = useState<AppLocale>(getAppLocale);
   const [profiles, setProfiles] = useState<ProviderProfile[]>(loadProfiles);
@@ -445,6 +612,8 @@ function App() {
   const [fileDragActive, setFileDragActive] = useState(false);
   const [runningThreadIds, setRunningThreadIds] = useState<Set<string>>(() => new Set());
   const [pendingApprovals, setPendingApprovals] = useState<Record<string, PendingApproval>>({});
+  const [harnessRecovery, setHarnessRecovery] = useState<HarnessRecoveryItem[]>([]);
+  const [harnessQueueItems, setHarnessQueueItems] = useState<Record<string, HarnessQueueItem[]>>({});
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [petOpen, setPetOpen] = useState(false);
   const [themesOpen, setThemesOpen] = useState(false);
@@ -470,6 +639,13 @@ function App() {
   const [balanceBusy, setBalanceBusy] = useState(false);
   const [balanceError, setBalanceError] = useState<string | null>(null);
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
+  const [inspectorWidth, setInspectorWidth] = useState(320);
+  const [diffViewSettings, setDiffViewSettings] = useState<DiffViewSettings>(loadDiffViewSettings);
+  const [inspectorTab, setInspectorTab] = useState<InspectorTab>("details");
+  const [reviewedChangeSet, setReviewedChangeSet] = useState<ConversationChangeSet | null>(null);
+  const [reviewedFile, setReviewedFile] = useState<ConversationFileChange | null>(null);
+  const [reviewedDiff, setReviewedDiff] = useState<GitDiff | null>(null);
+  const [reviewedDiffBusy, setReviewedDiffBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [availableAppUpdate, setAvailableAppUpdate] = useState<AppUpdateInfo | null>(null);
   const [updateInstalling, setUpdateInstalling] = useState(false);
@@ -480,6 +656,7 @@ function App() {
   const runningThreadIdsRef = useRef<Set<string>>(new Set());
   const pendingApprovalsRef = useRef<Record<string, PendingApproval>>({});
   const operationIdsRef = useRef<Map<string, string>>(new Map());
+  const workspaceRunBaselinesRef = useRef<Map<string, Promise<WorkspaceRunBaseline | null>>>(new Map());
   const themeImportingRef = useRef<string | null>(null);
   const attachmentPasteRef = useRef(false);
   const runModesRef = useRef<Map<string, AgentMode>>(new Map());
@@ -505,6 +682,9 @@ function App() {
   activePetIdRef.current = activePetId;
   const running = runningThreadIds.has(activeThread.id);
   const pending = pendingApprovals[activeThread.id] ?? null;
+  const queuedItems = harnessQueueItems[activeThread.id] ?? [];
+  const latestChangeSet = [...activeThread.messages].reverse().find((item) => item.changeSet)?.changeSet ?? null;
+  const visibleChangeSet = reviewedChangeSet ?? latestChangeSet;
   const persistentThreads = threads.filter((thread) => thread.kind !== "pet");
   const projectGroups = groupThreadsByWorkspace(persistentThreads, pinnedThreadIds, defaultWorkspace);
   const displayedProjectGroups = projectGroups.filter((project) => !project.workspace || !hiddenProjectKeys.has(project.key));
@@ -1048,6 +1228,35 @@ function App() {
         clearLegacyProfiles();
         clearLegacyThreads();
         databaseReadyRef.current = true;
+        const recovery = await harnessListRecovery().catch(() => [] as HarnessRecoveryItem[]);
+        if (!disposed) {
+          setHarnessRecovery(recovery);
+          if (recovery.length > 0) {
+            setNotice(tr(
+              `检测到 ${recovery.length} 个重启后需要人工确认的工具执行`,
+              `${recovery.length} tool executions need manual reconciliation after restart`,
+            ));
+          }
+        }
+        const pendingAfterRestart = await harnessListPendingApprovals().catch(() => [] as HarnessPendingApproval[]);
+        if (!disposed) {
+          for (const approval of pendingAfterRestart) {
+            const thread = hydratedThreads.find((candidate) => candidate.id === approval.threadId);
+            if (!thread) continue;
+            setThreadPending(approval.threadId, {
+              calls: [{ id: approval.callId, name: approval.toolName, arguments: approval.arguments }],
+              history: thread.messages,
+              mode: "agent",
+              permissionLevel: "request",
+              startedAt: Date.now(),
+              nextRound: 0,
+              profileId: activeProfileIdRef.current,
+              operationId: approval.operationId,
+              approvalId: approval.approvalId,
+              approvalTokens: [],
+            });
+          }
+        }
         // No in-memory agent operation survives a process restart. Mark any
         // durable active hatch Goal as paused during hydration so an old crash
         // cannot leave a permanent global lock or restart a stale tool loop.
@@ -1191,6 +1400,9 @@ function App() {
     setThreadMenuOpen(false);
     setRenamingThread(false);
     setRenameDraft("");
+    setReviewedChangeSet(null);
+    setReviewedFile(null);
+    setReviewedDiff(null);
   }, [activeThread.id]);
 
   useEffect(() => {
@@ -1276,6 +1488,125 @@ function App() {
     setPendingApprovals(next);
   };
 
+  const setThreadQueue = (threadId: string, value: HarnessQueueItem[]) => {
+    setHarnessQueueItems((current) => ({ ...current, [threadId]: value }));
+  };
+
+  const ensureWorkspaceRunBaseline = (
+    operationId: string,
+    threadId: string,
+    workspace?: string,
+  ) => {
+    const existing = workspaceRunBaselinesRef.current.get(operationId);
+    if (existing) return existing;
+    const startedAt = Date.now();
+    const pending = !workspace?.trim() || !isDesktop()
+      ? Promise.resolve(null)
+      : getGitWorkspaceSnapshot(workspace)
+          .then((snapshot) => snapshot.isRepository
+            ? { threadId, workspace, startedAt, snapshot }
+            : null)
+          .catch(() => null);
+    workspaceRunBaselinesRef.current.set(operationId, pending);
+    return pending;
+  };
+
+  const finalizeWorkspaceRunChanges = async (
+    threadId: string,
+    operationId: string,
+    state: ConversationChangeStatus,
+    completedAt: number,
+  ) => {
+    const pending = workspaceRunBaselinesRef.current.get(operationId);
+    workspaceRunBaselinesRef.current.delete(operationId);
+    if (!pending) return;
+    const baseline = await pending;
+    if (!baseline || baseline.threadId !== threadId) return;
+    const after = await getGitWorkspaceSnapshot(baseline.workspace).catch(() => null);
+    if (!after?.isRepository) return;
+    const files = compareWorkspaceSnapshots(baseline.snapshot, after);
+    const changeSet: ConversationChangeSet = {
+      operationId,
+      workspace: baseline.workspace,
+      status: state,
+      startedAt: baseline.startedAt,
+      completedAt,
+      files,
+    };
+    const current = threadsRef.current.find((thread) => thread.id === threadId);
+    if (!current) return;
+    let targetIndex = -1;
+    for (let index = current.messages.length - 1; index >= 0; index -= 1) {
+      const candidate = current.messages[index];
+      if (candidate.role !== "assistant" || candidate.changeSet) continue;
+      if (candidate.createdAt < baseline.startedAt || candidate.createdAt > completedAt) continue;
+      targetIndex = index;
+      break;
+    }
+    if (targetIndex < 0) return;
+    const messages = [...current.messages];
+    messages[targetIndex] = { ...messages[targetIndex], changeSet };
+    commitThread({ ...current, messages, updatedAt: Date.now() });
+    if (activeThreadIdRef.current === threadId) {
+      setReviewedChangeSet(changeSet);
+      setReviewedFile(null);
+      setReviewedDiff(null);
+      if (files.length > 0) {
+        setInspectorTab("changes");
+        setRightPanelOpen(true);
+      }
+      setGitStatus((currentStatus) => ({
+        isAvailable: after.isAvailable,
+        isRepository: after.isRepository,
+        branch: currentStatus?.branch,
+        changes: after.files.map(({ path, indexStatus, worktreeStatus }) => ({ path, indexStatus, worktreeStatus })),
+      }));
+    }
+  };
+
+  const reviewChangeSet = (changeSet: ConversationChangeSet) => {
+    setReviewedChangeSet(changeSet);
+    setReviewedFile(null);
+    setReviewedDiff(null);
+    setInspectorTab("changes");
+    setRightPanelOpen(true);
+  };
+
+  const reviewChangedFile = async (changeSet: ConversationChangeSet, file: ConversationFileChange) => {
+    setReviewedChangeSet(changeSet);
+    setReviewedFile(file);
+    setReviewedDiff(null);
+    setInspectorTab("changes");
+    setRightPanelOpen(true);
+    if (!file.diffAvailable) return;
+    if (file.turnDiff) {
+      setReviewedDiff({ path: file.path, content: file.turnDiff, truncated: Boolean(file.turnDiffTruncated) });
+      return;
+    }
+    setReviewedDiffBusy(true);
+    try {
+      const staged = file.worktreeStatus === " " && file.indexStatus !== " ";
+      setReviewedDiff(await getGitDiff(changeSet.workspace, file.path, staged));
+    } catch (error) {
+      setNotice(`${tr("无法读取变更", "Could not read changes")}: ${errorText(error)}`);
+    } finally {
+      setReviewedDiffBusy(false);
+    }
+  };
+
+  const enqueueCurrentRunMessage = async (
+    threadId: string,
+    operationId: string,
+    kind: HarnessQueueItem["kind"],
+    body: string,
+  ) => {
+    const queued = await harnessEnqueue(operationId, kind, body);
+    setHarnessQueueItems((current) => ({
+      ...current,
+      [threadId]: [...(current[threadId] ?? []), queued],
+    }));
+  };
+
   const beginHatchRun = (threadId: string) => {
     const token = (hatchRunTokensRef.current.get(threadId) ?? 0) + 1;
     hatchRunTokensRef.current.set(threadId, token);
@@ -1302,9 +1633,21 @@ function App() {
    * when the expected operation is still current, this always clears the
    * local running flag so a cancelled run cannot leave a permanent lock.
    */
-  const finishThreadRun = (threadId: string, expectedOperationId?: string) => {
+  const finishThreadRun = (
+    threadId: string,
+    expectedOperationId?: string,
+    harnessState?: HarnessOperationState,
+  ) => {
     if (expectedOperationId
       && operationIdsRef.current.get(threadId) !== expectedOperationId) return;
+    if (expectedOperationId && harnessState && isDesktop()) {
+      void harnessUpdateState(expectedOperationId, harnessState).catch(() => undefined);
+    }
+    const operationId = expectedOperationId ?? operationIdsRef.current.get(threadId);
+    const changeStatus = terminalChangeStatus(harnessState);
+    if (operationId && changeStatus) {
+      void finalizeWorkspaceRunChanges(threadId, operationId, changeStatus, Date.now());
+    }
     operationIdsRef.current.delete(threadId);
     runModesRef.current.delete(threadId);
     setThreadRunning(threadId, false);
@@ -1321,6 +1664,124 @@ function App() {
 
   const releasePetHatchJob = (threadId: string) => {
     setPetHatchJob((current) => current?.threadId === threadId ? null : current);
+  };
+
+  const runHarnessAgent = async (
+    thread: AgentThread,
+    history: AgentMessage[],
+    runMode: AgentMode,
+    runPermission: PermissionLevel,
+    runProfile: ProviderProfile,
+    runFallbackProfiles: ProviderProfile[],
+    operationId: string,
+  ): Promise<void> => {
+    await ensureWorkspaceRunBaseline(operationId, thread.id, thread.workspace);
+    setThreadRunning(thread.id, true);
+    runModesRef.current.set(thread.id, runMode);
+    operationIdsRef.current.set(thread.id, operationId);
+    let projected = history;
+    try {
+      await harnessRun({
+        operationId,
+        threadId: thread.id,
+        messages: history,
+        profile: runProfile,
+        mode: runMode,
+        permissionLevel: runPermission,
+        workspace: thread.workspace,
+        fallbackProfiles: runFallbackProfiles,
+        hatch: false,
+        hatchSkillLoaded: false,
+      }, (event: HarnessRuntimeEvent) => {
+        if (event.kind === "assistant_completed") {
+          const payload = event.payload as {
+            content?: string;
+            toolCalls?: ToolCall[];
+            requestId?: string;
+            providerId?: string;
+            inputTokens?: number;
+            outputTokens?: number;
+          };
+          const respondingProfile = payload.providerId
+            ? [runProfile, ...runFallbackProfiles].find((profile) => profile.id === payload.providerId) ?? runProfile
+            : runProfile;
+          const assistant: AgentMessage = message("assistant", payload.content ?? "", {
+            toolCalls: payload.toolCalls ?? [],
+            requestId: payload.requestId,
+            ...assistantMessageIdentity(respondingProfile),
+          });
+          projected = [...projected, assistant];
+          commitThread({
+            ...thread,
+            messages: projected,
+            updatedAt: Date.now(),
+            inputTokens: thread.inputTokens + (payload.inputTokens ?? 0),
+            outputTokens: thread.outputTokens + (payload.outputTokens ?? 0),
+          });
+        } else if (event.kind === "tool_execution_completed") {
+          const payload = event.payload as { callId?: string; output?: string; isError?: boolean };
+          projected = [...projected, message("tool", payload.output ?? "", {
+            toolCallId: payload.callId,
+            isError: payload.isError,
+          })];
+          commitThread({ ...thread, messages: projected, updatedAt: Date.now() });
+        } else if (event.kind === "queue_injected") {
+          const payload = event.payload as { queueId?: string; body?: string };
+          if (payload.body) {
+            projected = [...projected, message("user", payload.body)];
+            commitThread({ ...thread, messages: projected, updatedAt: Date.now() });
+          }
+          if (payload.queueId) {
+            setThreadQueue(
+              thread.id,
+              (harnessQueueItems[thread.id] ?? []).filter((item) => item.id !== payload.queueId),
+            );
+          }
+        } else if (event.kind === "approval_required") {
+          const payload = event.payload as { token?: string; call?: ToolCall };
+          if (payload.call) {
+            setThreadPending(thread.id, {
+              calls: [payload.call],
+              history: projected,
+              mode: runMode,
+              permissionLevel: runPermission,
+              startedAt: Date.now(),
+              nextRound: 0,
+              profileId: runProfile.id,
+              operationId,
+              approvalTokens: payload.token ? [payload.token] : [],
+            });
+          }
+        }
+      });
+      if (pendingApprovalsRef.current[thread.id]) {
+        // Keep the operation owner while the approval bar is visible. The
+        // resolver needs the same operation ID to finalize a deny or resume
+        // the loop; clearing it here leaves the UI permanently "thinking".
+        setThreadRunning(thread.id, false);
+      } else {
+        commitThread({ ...thread, messages: projected, updatedAt: Date.now() });
+        finishThreadRun(thread.id, operationId, "completed");
+      }
+    } catch (error) {
+      const reason = errorText(error);
+      if (reason.includes("REQUEST_CANCELLED")) {
+        finishThreadRun(thread.id, operationId, "cancelled");
+        return;
+      }
+      commitThread({
+        ...thread,
+        messages: finalizeConversationMessages([
+          ...projected,
+          message("assistant", friendlyAgentError(reason), {
+            isError: true,
+            ...assistantMessageIdentity(runProfile),
+          }),
+        ], Date.now()),
+        updatedAt: Date.now(),
+      });
+      finishThreadRun(thread.id, operationId, "failed");
+    }
   };
 
   const pausePetHatchGoal = async (threadId: string) => {
@@ -1345,6 +1806,39 @@ function App() {
     setRenameDraft(localizedThreadTitle(activeThread.title));
     setThreadMenuOpen(false);
     setRenamingThread(true);
+  };
+
+  const forkActiveThread = async () => {
+    if (running || pending) {
+      setNotice(tr("请先完成当前运行再创建分支", "Finish the active run before creating a fork"));
+      return;
+    }
+    const branchId = crypto.randomUUID();
+    const fork = createThread(activeThread.workspace);
+    const forked: AgentThread = {
+      ...fork,
+      title: `${localizedThreadTitle(activeThread.title)} · ${tr("分支", "Fork")}`,
+      // Message IDs are globally unique in SQLite, not scoped to a thread.
+      // A fork keeps the conversation content but must receive fresh row IDs.
+      messages: activeThread.messages.map((item) => ({
+        ...item,
+        id: crypto.randomUUID(),
+        attachments: item.attachments.map((attachment) => ({ ...attachment })),
+        toolCalls: item.toolCalls.map((call) => ({ ...call })),
+      })),
+      inputTokens: activeThread.inputTokens,
+      outputTokens: activeThread.outputTokens,
+    };
+    commitThread(forked);
+    setActiveThreadId(forked.id);
+    setThreadMenuOpen(false);
+    if (isDesktop()) {
+      await harnessForkSession({
+        threadId: activeThread.id,
+        branchId,
+        operationId: operationIdsRef.current.get(activeThread.id),
+      }).catch(() => undefined);
+    }
   };
 
   const finishThreadRename = () => {
@@ -1563,6 +2057,7 @@ function App() {
     runFallbackProfiles: ProviderProfile[] = profiles.filter((profile) => profile.id !== activeProfile.id),
     rewardPetId: string = activePetIdRef.current,
     hatchToken: number | null = null,
+    harnessOperationId?: string,
   ): Promise<void> => {
     const threadId = thread.id;
     const hatchRun = isPetHatchThread(thread);
@@ -1579,8 +2074,12 @@ function App() {
     const hatchSkillLoaded = hatchRun && hatchSkillManifestWasRead(history);
     setThreadRunning(threadId, true);
     runModesRef.current.set(threadId, runMode);
-    const operationId = crypto.randomUUID();
+    const operationId = harnessOperationId ?? crypto.randomUUID();
+    await ensureWorkspaceRunBaseline(operationId, threadId, thread.workspace);
     operationIdsRef.current.set(threadId, operationId);
+    if (harnessOperationId && isDesktop()) {
+      await harnessUpdateState(operationId, "running").catch(() => undefined);
+    }
     const streamingAssistant = message("assistant", "", assistantMessageIdentity(runProfile));
     let streamedContent = "";
     let frameId: number | null = null;
@@ -1618,7 +2117,7 @@ function App() {
       );
       if (frameId !== null) window.cancelAnimationFrame(frameId);
       if (!hatchRunStillCurrent()) {
-        finishThreadRun(threadId, operationId);
+        finishThreadRun(threadId, operationId, "interrupted");
         return;
       }
       const respondingProfile = result.providerId
@@ -1681,10 +2180,15 @@ function App() {
           runFallbackProfiles,
           hatchRun,
           decision.skillLoadedForCall,
+          false,
+          runMode,
+          runPermission,
+          operationId,
+          false,
         );
       }, !hatchRun);
       if (!hatchRunStillCurrent()) {
-        finishThreadRun(threadId, operationId);
+        finishThreadRun(threadId, operationId, "interrupted");
         return;
       }
       for (const { call, result: toolResult } of automaticResults) {
@@ -1710,7 +2214,7 @@ function App() {
           }),
         ], runStartedAt);
         commitThread({ ...nextThread, messages: stopped, updatedAt: Date.now() });
-        finishThreadRun(threadId, operationId);
+        finishThreadRun(threadId, operationId, "failed");
         return;
       }
 
@@ -1724,8 +2228,9 @@ function App() {
           nextRound: round + 1,
           profileId: runProfile.id,
           rewardPetId,
+          operationId,
         });
-        finishThreadRun(threadId, operationId);
+        finishThreadRun(threadId, operationId, "awaiting_approval");
         return;
       }
       const hatchContinuationText = hatchRun
@@ -1742,19 +2247,19 @@ function App() {
         ? await getGoal(thread.id)
         : null;
       if (!hatchRunStillCurrent()) {
-        finishThreadRun(threadId, operationId);
+        finishThreadRun(threadId, operationId, "interrupted");
         return;
       }
       if (runMode === "goal" && activeThreadIdRef.current === threadId) setGoalState(currentGoal);
       const goalContinues = currentGoal?.status === "active" || currentGoal?.status === "auditing";
       if (automatic.length > 0) {
         if (runMode !== "goal" || goalContinues) {
-          await runAgent(nextThread, nextHistory, round + 1, runMode, runPermission, runStartedAt, runProfile, runFallbackProfiles, rewardPetId, hatchToken);
+          await runAgent(nextThread, nextHistory, round + 1, runMode, runPermission, runStartedAt, runProfile, runFallbackProfiles, rewardPetId, hatchToken, operationId);
           if (!hatchRunStillCurrent()) finishThreadRun(threadId, operationId);
         } else {
           const completedHistory = finalizeConversationMessages(nextHistory, runStartedAt);
           commitThread({ ...nextThread, messages: completedHistory, updatedAt: Date.now() });
-          finishThreadRun(threadId, operationId);
+          finishThreadRun(threadId, operationId, "completed");
         }
       } else if (runMode === "goal" && goalContinues) {
         const continuation = message(
@@ -1771,12 +2276,12 @@ function App() {
         nextHistory = [...nextHistory, continuation];
         nextThread = { ...nextThread, messages: nextHistory, updatedAt: Date.now() };
         commitThread(nextThread);
-        await runAgent(nextThread, nextHistory, round + 1, runMode, runPermission, runStartedAt, runProfile, runFallbackProfiles, rewardPetId, hatchToken);
+        await runAgent(nextThread, nextHistory, round + 1, runMode, runPermission, runStartedAt, runProfile, runFallbackProfiles, rewardPetId, hatchToken, operationId);
         if (!hatchRunStillCurrent()) finishThreadRun(threadId, operationId);
       } else {
         const completedHistory = finalizeConversationMessages(nextHistory, runStartedAt);
         commitThread({ ...nextThread, messages: completedHistory, updatedAt: Date.now() });
-        finishThreadRun(threadId, operationId);
+        finishThreadRun(threadId, operationId, "completed");
       }
     } catch (error) {
       if (frameId !== null) window.cancelAnimationFrame(frameId);
@@ -1784,7 +2289,7 @@ function App() {
       // provider may return a late cancellation/error after a newer hatch run
       // has taken over this thread.
       if (!hatchRunStillCurrent()) {
-        finishThreadRun(threadId, operationId);
+        finishThreadRun(threadId, operationId, "interrupted");
         return;
       }
       const reason = error instanceof Error ? error.message : String(error);
@@ -1798,7 +2303,7 @@ function App() {
           messages: cancelledHistory,
           updatedAt: Date.now(),
         });
-        finishThreadRun(threadId, operationId);
+        finishThreadRun(threadId, operationId, "cancelled");
         return;
       }
       if (hatchRun && runMode === "goal" && hatchRunStillCurrent()) await pausePetHatchGoal(threadId);
@@ -1813,7 +2318,7 @@ function App() {
         messages: failedHistory,
         updatedAt: Date.now(),
       });
-      finishThreadRun(threadId, operationId);
+      finishThreadRun(threadId, operationId, "failed");
     }
   };
 
@@ -1850,10 +2355,28 @@ function App() {
   };
 
   const send = async () => {
+    const rawValue = draft;
     const value = draft.trim();
     const thread = activeThread;
     if (attachmentPasteRef.current) {
       setNotice(tr("请等待附件导入完成", "Wait for the attachments to finish importing"));
+      return;
+    }
+    const activeOperationId = operationIdsRef.current.get(thread.id);
+    if (runningThreadIdsRef.current.has(thread.id) && isDesktop() && activeOperationId && value) {
+      if (draftAttachments.length > 0) {
+        setNotice(tr("运行中的队列只支持文本消息", "The active queue accepts text messages only"));
+        return;
+      }
+      const command = value.match(/^\/(steer|follow-up|next-turn)\s+([\s\S]+)$/i);
+      const kind = command?.[1].toLowerCase().replace("-", "_") as "steer" | "follow_up" | "next_turn" | undefined;
+      if (kind && command) {
+        await enqueueCurrentRunMessage(thread.id, activeOperationId, kind, command[2]);
+        setDraft("");
+      } else {
+        await enqueueCurrentRunMessage(thread.id, activeOperationId, "follow_up", value);
+        setDraft("");
+      }
       return;
     }
     if ((!value && draftAttachments.length === 0)
@@ -1908,24 +2431,77 @@ function App() {
       messages: [...conversationHistory, user],
       updatedAt: Date.now(),
     };
+    const runProfile = activeProfile;
+    const runFallbackProfiles = profiles.filter((profile) => profile.id !== runProfile.id);
+    const runMode = thread.kind === "pet" ? "chat" : mode;
+    let harnessOperationId: string | undefined;
+    if (isDesktop()) {
+      try {
+        const harnessRequest = {
+          threadId: thread.id,
+          rawUserInput: rawValue,
+          attachmentIds: draftAttachments.map((attachment) => attachment.id),
+          mode: runMode,
+          permissionLevel,
+          requestedProfileId: runProfile.id,
+          workspace: thread.workspace,
+        };
+        const report = await harnessPreflight(harnessRequest);
+        if (!report.ok) {
+          setNotice(report.errors.join("; ") || tr("预检未通过", "Harness preflight blocked"));
+          setSettingsOpen(true);
+          return;
+        }
+        const started = await harnessStart(harnessRequest);
+        harnessOperationId = started.operationId;
+      } catch (error) {
+        setNotice(`${tr("无法启动 Harness", "Could not start harness")}: ${errorText(error)}`);
+        return;
+      }
+    }
     setDraft("");
     draftAttachmentsRef.current = [];
     setDraftAttachments([]);
     commitThread(next);
-    const runProfile = activeProfile;
-    const runFallbackProfiles = profiles.filter((profile) => profile.id !== runProfile.id);
-    const runMode = thread.kind === "pet" ? "chat" : mode;
-    await runAgent(
-      next,
-      next.messages,
-      0,
-      runMode,
-      permissionLevel,
-      Date.now(),
-      runProfile,
-      runFallbackProfiles,
-      thread.petId ?? activePetIdRef.current,
-    );
+    if (isDesktop() && thread.kind !== "pet" && harnessOperationId) {
+      await runHarnessAgent(
+        next,
+        next.messages,
+        runMode,
+        permissionLevel,
+        runProfile,
+        runFallbackProfiles,
+        harnessOperationId,
+      );
+    } else {
+      await runAgent(
+        next,
+        next.messages,
+        0,
+        runMode,
+        permissionLevel,
+        Date.now(),
+        runProfile,
+        runFallbackProfiles,
+        thread.petId ?? activePetIdRef.current,
+        null,
+        harnessOperationId,
+      );
+    }
+  };
+
+  const interruptWithQueuedMessage = async (item: HarnessQueueItem) => {
+    const thread = activeThread;
+    const currentOperationId = operationIdsRef.current.get(thread.id);
+    if (!currentOperationId || thread.kind === "pet") return;
+    try {
+      // Steer preserves the current operation. The Rust runtime only
+      // interrupts the provider phase; an in-flight tool is allowed to finish.
+      await harnessSteer(currentOperationId, item.id);
+      setThreadQueue(thread.id, (harnessQueueItems[thread.id] ?? []).filter((entry) => entry.id !== item.id));
+    } catch (error) {
+      setNotice(`${tr("无法引导当前对话", "Could not steer the active conversation")}: ${errorText(error)}`);
+    }
   };
 
   const addDroppedAttachments = async (paths: string[]) => {
@@ -2067,6 +2643,73 @@ function App() {
     if (!approval) return;
     const runProfile = profilesRef.current.find((profile) => profile.id === approval.profileId) ?? activeProfile;
     const runFallbackProfiles = profilesRef.current.filter((profile) => profile.id !== runProfile.id);
+    let harnessToken = approval.approvalTokens?.[0];
+    if (approval.approvalId && !harnessToken) {
+      try {
+        harnessToken = await harnessReissueApproval(approval.approvalId);
+      } catch (error) {
+        setNotice(`${tr("审批已失效", "Approval is no longer valid")}: ${errorText(error)}`);
+        return;
+      }
+    }
+    if (harnessToken && approval.operationId && isDesktop() && thread.kind !== "pet") {
+      setThreadPending(thread.id, null);
+      setThreadRunning(thread.id, true);
+      try {
+        const record = await harnessResolveApproval({
+          operationId: approval.operationId,
+          token: harnessToken,
+          approved,
+        });
+        const call = approval.calls.find((candidate) => candidate.id === record.callId) ?? approval.calls[0];
+        if (!approved) {
+          const deniedHistory = [
+            ...approval.history,
+            message("tool", "User denied this tool call", { toolCallId: call.id, isError: true }),
+          ];
+          commitThread({ ...thread, messages: deniedHistory, updatedAt: Date.now() });
+          finishThreadRun(thread.id, approval.operationId, "failed");
+          return;
+        }
+        const result = await executeTool(
+          call,
+          thread.workspace ?? "",
+          thread.id,
+          runProfile,
+          runFallbackProfiles,
+          false,
+          false,
+          false,
+          approval.mode,
+          approval.permissionLevel,
+          approval.operationId,
+          true,
+        );
+        const nextHistory = [
+          ...approval.history,
+          message("tool", result.output, { toolCallId: call.id, isError: result.isError }),
+        ];
+        const nextThread = { ...thread, messages: nextHistory, updatedAt: Date.now() };
+        commitThread(nextThread);
+        await runHarnessAgent(
+          nextThread,
+          nextHistory,
+          approval.mode,
+          approval.permissionLevel,
+          runProfile,
+          runFallbackProfiles,
+          approval.operationId,
+        );
+      } catch (error) {
+        commitThread({
+          ...thread,
+          messages: [...approval.history, message("assistant", errorText(error), { isError: true })],
+          updatedAt: Date.now(),
+        });
+        finishThreadRun(thread.id, approval.operationId, "failed");
+      }
+      return;
+    }
     const hatchRun = isPetHatchThread(thread);
     const hatchToken = hatchRun
       ? hatchRunTokensRef.current.get(thread.id) ?? beginHatchRun(thread.id)
@@ -2096,6 +2739,11 @@ function App() {
               runFallbackProfiles,
               hatchRun,
               decision.skillLoadedForCall,
+              false,
+              approval.mode,
+              approval.permissionLevel,
+              approval.operationId,
+              approved,
             );
           }, !hatchRun)
         : approval.calls.map((call) => ({ call, result: { output: "User denied this tool call", isError: true } }));
@@ -2128,7 +2776,7 @@ function App() {
           }),
         ], approval.startedAt);
         commitThread({ ...next, messages: stopped, updatedAt: Date.now() });
-        finishThreadRun(thread.id);
+        finishThreadRun(thread.id, approval.operationId, "failed");
         return;
       }
       if (hatchRun && hatchToken !== null && !hatchRunIsCurrent(thread.id, hatchToken)) {
@@ -2146,6 +2794,7 @@ function App() {
         runFallbackProfiles,
         approval.rewardPetId ?? activePetIdRef.current,
         hatchToken,
+        approval.operationId,
       );
       if (hatchRun && hatchToken !== null && !hatchRunIsCurrent(thread.id, hatchToken)) {
         finishCancelledHatchLocalRun(thread.id, hatchToken);
@@ -2161,7 +2810,7 @@ function App() {
       });
       const failedHistory = finalizeConversationMessages([...approval.history, failure], approval.startedAt);
       commitThread({ ...thread, messages: failedHistory, updatedAt: Date.now() });
-      finishThreadRun(thread.id);
+      finishThreadRun(thread.id, approval.operationId, "failed");
     }
   };
 
@@ -2667,6 +3316,10 @@ function App() {
                     <Pencil size={14} />
                     <span>{tr("重命名会话", "Rename conversation")}</span>
                   </button>
+                  <button role="menuitem" onClick={() => { void forkActiveThread(); }}>
+                    <GitBranch size={14} />
+                    <span>{tr("从当前会话分支", "Fork from conversation")}</span>
+                  </button>
                 </div>
               )}
             </div>
@@ -2718,7 +3371,13 @@ function App() {
               {groupConversationMessages(activeThread.messages.filter((item) => !item.internal)).map((block) => block.kind === "user" ? (
                 <MessageRow key={block.item.id} item={block.item} />
               ) : (
-                <AssistantMessageGroup key={block.items[0]?.id ?? "assistant"} items={block.items} pending={pending} pet={activePetProfile} />
+                <AssistantMessageGroup
+                  key={block.items[0]?.id ?? "assistant"}
+                  items={block.items}
+                  pending={pending}
+                  pet={activePetProfile}
+                  onReviewChanges={reviewChangeSet}
+                />
               ))}
               {running && <ThinkingRow />}
               <div ref={endRef} />
@@ -2737,6 +3396,35 @@ function App() {
             <button className="primary-button" onClick={() => resolvePending(true)}>
               <Check size={15} /> {tr("批准并运行", "Approve and run")}
             </button>
+          </div>
+        )}
+
+        {queuedItems.length > 0 && (
+          <div className="harness-queue-panel" aria-live="polite">
+            <div className="harness-queue-heading">
+              <strong>{tr("当前对话队列", "Active conversation queue")}</strong>
+              <span>{queuedItems.length} {tr("条待处理消息", "pending")}</span>
+            </div>
+            {queuedItems.map((item) => (
+              <div className="harness-queue-item" key={item.id}>
+                <div className="harness-queue-copy">
+                  <span className="harness-queue-kind">{item.kind === "steer" ? tr("引导", "Steer") : item.kind === "next_turn" ? tr("下一轮", "Next turn") : tr("跟进", "Follow-up")}</span>
+                  <span>{item.body}</span>
+                </div>
+                <div className="harness-queue-actions">
+                  <button type="button" onClick={() => void interruptWithQueuedMessage(item)}>
+                    <Hand size={14} /> {tr("立即引导", "Steer now")}
+                  </button>
+                  <button type="button" onClick={() => {
+                    void harnessCancelQueue(item.id).then(() => {
+                      setThreadQueue(activeThread.id, queuedItems.filter((entry) => entry.id !== item.id));
+                    });
+                  }}>
+                    <X size={14} /> {tr("移除", "Remove")}
+                  </button>
+                </div>
+              </div>
+            ))}
           </div>
         )}
 
@@ -2787,6 +3475,37 @@ function App() {
       </main>
   ) : null;
 
+  const startInspectorResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (window.matchMedia("(max-width: 680px)").matches) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = inspectorWidth;
+    const maxWidth = Math.min(560, Math.max(260, window.innerWidth - 764));
+    const onMove = (moveEvent: PointerEvent) => {
+      const nextWidth = Math.min(maxWidth, Math.max(260, startWidth + startX - moveEvent.clientX));
+      setInspectorWidth(nextWidth);
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.style.removeProperty("cursor");
+      document.body.style.removeProperty("user-select");
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp, { once: true });
+  };
+
+  const updateDiffViewSettings = (next: DiffViewSettings) => {
+    const normalized: DiffViewSettings = {
+      fontFamily: next.fontFamily,
+      fontSize: Math.min(24, Math.max(10, Math.round(next.fontSize))),
+    };
+    setDiffViewSettings(normalized);
+    saveDiffViewSettings(normalized);
+  };
+
   const inspectorSlot = workspaceView === "chat" && rightPanelOpen ? (
     <Inspector
       profile={activeProfile}
@@ -2796,10 +3515,23 @@ function App() {
       keyConfigured={connectionReady}
       gitStatus={gitStatus}
       goal={goalState}
+      activeTab={inspectorTab}
+      changeSet={visibleChangeSet}
+      reviewedFile={reviewedFile}
+      reviewedDiff={reviewedDiff}
+      reviewedDiffBusy={reviewedDiffBusy}
       onWorkspace={chooseWorkspace}
       onSettings={() => setSettingsOpen(true)}
       onDiff={openGitDiff}
       onGoalAction={controlGoal}
+      onTabChange={setInspectorTab}
+      onReviewFile={(file) => visibleChangeSet && void reviewChangedFile(visibleChangeSet, file)}
+      onBackToChanges={() => {
+        setReviewedFile(null);
+        setReviewedDiff(null);
+      }}
+      onResizeStart={startInspectorResize}
+      onClose={() => setRightPanelOpen(false)}
     />
   ) : null;
 
@@ -2820,6 +3552,8 @@ function App() {
           profiles={profiles}
           profile={activeProfile}
           keyConfigured={keyConfigured}
+          diffViewSettings={diffViewSettings}
+          onDiffViewSettingsChange={updateDiffViewSettings}
           onClose={() => setSettingsOpen(false)}
           onOpenMcp={() => {
             setSettingsOpen(false);
@@ -2913,6 +3647,36 @@ function App() {
         />
       )}
 
+      {harnessRecovery.length > 0 && (
+        <div className="harness-recovery-panel" role="dialog" aria-label={tr("工具执行人工对账", "Tool execution reconciliation")}>
+          <div className="harness-recovery-header">
+            <strong>{tr("需要人工对账的工具执行", "Tool executions need reconciliation")}</strong>
+            <IconButton label={tr("关闭", "Close")} onClick={() => setHarnessRecovery([])}>
+              <X size={14} />
+            </IconButton>
+          </div>
+          {harnessRecovery.map((item) => (
+            <div className="harness-recovery-row" key={item.toolExecutionId}>
+              <span>{item.toolName} · {item.callId}</span>
+              <div>
+                <button type="button" onClick={() => {
+                  void harnessResolveUnknown(item.operationId, item.toolExecutionId, "mark_completed")
+                    .then(() => setHarnessRecovery((current) => current.filter((entry) => entry.toolExecutionId !== item.toolExecutionId)));
+                }}>{tr("已执行", "Executed")}</button>
+                <button type="button" onClick={() => {
+                  void harnessResolveUnknown(item.operationId, item.toolExecutionId, "mark_not_executed")
+                    .then(() => setHarnessRecovery((current) => current.filter((entry) => entry.toolExecutionId !== item.toolExecutionId)));
+                }}>{tr("未执行", "Not executed")}</button>
+                <button type="button" onClick={() => {
+                  void harnessResolveUnknown(item.operationId, item.toolExecutionId, "cancel")
+                    .then(() => setHarnessRecovery((current) => current.filter((entry) => entry.toolExecutionId !== item.toolExecutionId)));
+                }}>{tr("取消", "Cancel")}</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {notice && (
         <button className="toast" onClick={() => setNotice(null)}>
           {notice}<X size={14} />
@@ -2991,6 +3755,11 @@ function App() {
       data={layoutData}
       actions={layoutActions}
       shellClassName={rightPanelOpen && workspaceView === "chat" ? undefined : "details-collapsed"}
+      shellStyle={{
+        "--inspector-width": `${inspectorWidth}px`,
+        "--diff-font-family": diffFontStack(diffViewSettings.fontFamily),
+        "--diff-font-size": `${diffViewSettings.fontSize}px`,
+      } as CSSProperties}
       slots={{
         sidebar: sidebarSlot,
         workspace: workspaceSlot,
@@ -3329,6 +4098,60 @@ type ConversationBlock =
   | { kind: "user"; item: AgentMessage }
   | { kind: "assistant"; items: AgentMessage[] };
 
+function MarkdownContent({ content }: { content: string }) {
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>
+      {content}
+    </ReactMarkdown>
+  );
+}
+
+function diffFontStack(fontFamily: DiffFontFamily): string {
+  if (fontFamily === "system") return "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
+  if (fontFamily === "consolas") return "Consolas, Monaco, SFMono-Regular, monospace";
+  return "var(--font-mono)";
+}
+
+function MarkdownCodeBlock({ children, ...props }: HTMLAttributes<HTMLPreElement>) {
+  const [copied, setCopied] = useState(false);
+  const firstChild = Children.toArray(children)[0];
+  const codeProps = isValidElement(firstChild)
+    ? firstChild.props as { children?: ReactNode; className?: string }
+    : undefined;
+  const source = String(codeProps?.children ?? "").replace(/\n$/, "");
+  const language = codeProps?.className?.match(/language-([\w-]+)/)?.[1] ?? "";
+
+  const copy = async () => {
+    try {
+      await copyText(source);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1_500);
+    } catch {
+      setCopied(false);
+    }
+  };
+
+  return (
+    <div className="markdown-code-block">
+      <div className="markdown-code-toolbar">
+        <span>{language || tr("代码", "Code")}</span>
+        <button type="button" onClick={() => void copy()} title={tr("复制代码", "Copy code")}>
+          {copied ? <Check size={13} /> : <Copy size={13} />}
+          <span>{copied ? tr("已复制", "Copied") : tr("复制", "Copy")}</span>
+        </button>
+      </div>
+      <pre {...props}>{children}</pre>
+    </div>
+  );
+}
+
+const MARKDOWN_COMPONENTS: Components = {
+  pre: MarkdownCodeBlock,
+  a: ({ href, children, ...props }) => (
+    <a href={href} target="_blank" rel="noreferrer" {...props}>{children}</a>
+  ),
+};
+
 function groupConversationMessages(messages: AgentMessage[]): ConversationBlock[] {
   const blocks: ConversationBlock[] = [];
   for (const item of messages) {
@@ -3355,7 +4178,7 @@ function MessageRow({ item }: { item: AgentMessage }) {
         <MessageAttachments item={item} />
         {item.content && (
           <div className="markdown-body">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{item.content}</ReactMarkdown>
+            <MarkdownContent content={item.content} />
           </div>
         )}
         <MessageCopyButton content={item.content} />
@@ -3368,10 +4191,12 @@ function AssistantMessageGroup({
   items,
   pending,
   pet,
+  onReviewChanges,
 }: {
   items: AgentMessage[];
   pending: PendingApproval | null;
   pet?: PetProfile;
+  onReviewChanges: (changeSet: ConversationChangeSet) => void;
 }) {
   const identity = items.find((item) => item.role === "assistant" && (item.modelName?.trim() || item.providerBrand));
   const identityModelName = identity?.modelName?.trim();
@@ -3380,6 +4205,7 @@ function AssistantMessageGroup({
     : "levelup");
   const modelName = identityModelName || providerBrandLabel(providerBrand);
   const requestIds = items.flatMap((item) => item.requestId ? [item.requestId] : []);
+  const changeSet = [...items].reverse().find((item) => item.changeSet)?.changeSet;
   const copyContent = items
     .filter((item) => item.role === "assistant" && item.content.trim())
     .map((item) => item.content.trim())
@@ -3411,8 +4237,46 @@ function AssistantMessageGroup({
         {durationMs != null && (
           <div className="message-duration"><Timer size={13} />{tr("处理总时长", "Total processing time")} {formatDuration(durationMs)}</div>
         )}
+        {changeSet && <ChangeSetSummary changeSet={changeSet} onReview={() => onReviewChanges(changeSet)} />}
       </div>
     </article>
+  );
+}
+
+function ChangeSetSummary({
+  changeSet,
+  onReview,
+}: {
+  changeSet: ConversationChangeSet;
+  onReview: () => void;
+}) {
+  const counts = changeSet.files.reduce((result, file) => {
+    result[file.kind] += 1;
+    return result;
+  }, { added: 0, modified: 0, deleted: 0, renamed: 0 });
+  const statusLabel = changeSet.status === "completed"
+    ? tr("本轮变更", "Turn changes")
+    : changeSet.status === "failed"
+      ? tr("任务失败后保留的变更", "Changes kept after failure")
+      : changeSet.status === "cancelled"
+        ? tr("取消前产生的变更", "Changes made before cancellation")
+        : tr("中断前产生的变更", "Changes made before interruption");
+  return (
+    <button className="change-set-summary" type="button" onClick={onReview}>
+      <span className="change-set-summary-icon"><FileCode2 size={16} /></span>
+      <span>
+        <strong>{statusLabel}</strong>
+        <small>{changeSet.files.length === 0
+          ? tr("未修改文件", "No files changed")
+          : [
+              counts.added ? tr(`新增 ${counts.added}`, `${counts.added} added`) : "",
+              counts.modified ? tr(`修改 ${counts.modified}`, `${counts.modified} modified`) : "",
+              counts.deleted ? tr(`删除 ${counts.deleted}`, `${counts.deleted} deleted`) : "",
+              counts.renamed ? tr(`重命名 ${counts.renamed}`, `${counts.renamed} renamed`) : "",
+            ].filter(Boolean).join(" · ")}</small>
+      </span>
+      <span className="change-set-summary-action">{tr("在侧栏查看", "Review in side panel")}<ChevronRight size={14} /></span>
+    </button>
   );
 }
 
@@ -3472,7 +4336,7 @@ function AssistantMessageSegment({ item, pending }: { item: AgentMessage; pendin
             <ChevronDown size={15} />
           </summary>
           <div className="markdown-body">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{item.content}</ReactMarkdown>
+            <MarkdownContent content={item.content} />
           </div>
         </details>
       );
@@ -3501,7 +4365,7 @@ function AssistantMessageSegment({ item, pending }: { item: AgentMessage; pendin
         <MessageAttachments item={item} />
         {item.content && (
           <div className="markdown-body">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{item.content}</ReactMarkdown>
+            <MarkdownContent content={item.content} />
           </div>
         )}
         {item.toolCalls.length > 0 && (
@@ -3667,8 +4531,18 @@ function Composer({
           </div>
           <span className="composer-spacer" />
           {modelControl}
-          <IconButton label={running ? tr("停止", "Stop") : tr("发送", "Send")} className="send-button" disabled={disabled || (!running && !draft.trim() && attachments.length === 0)} onClick={running ? onStop : onSend}>
-            {running ? <CircleStop size={18} /> : <Send size={18} />}
+          {running && (
+            <IconButton label={tr("停止", "Stop")} className="send-button" onClick={onStop}>
+              <CircleStop size={18} />
+            </IconButton>
+          )}
+          <IconButton
+            label={running ? tr("加入当前运行队列", "Queue for active run") : tr("发送", "Send")}
+            className="send-button"
+            disabled={disabled || (!draft.trim() && (running || attachments.length === 0))}
+            onClick={onSend}
+          >
+            <Send size={18} />
           </IconButton>
         </div>
       </div>
@@ -3684,10 +4558,20 @@ function Inspector({
   keyConfigured,
   gitStatus,
   goal,
+  activeTab,
+  changeSet,
+  reviewedFile,
+  reviewedDiff,
+  reviewedDiffBusy,
   onWorkspace,
   onSettings,
   onDiff,
   onGoalAction,
+  onTabChange,
+  onReviewFile,
+  onBackToChanges,
+  onResizeStart,
+  onClose,
 }: {
   profile: ProviderProfile;
   thread: AgentThread;
@@ -3696,18 +4580,51 @@ function Inspector({
   keyConfigured: boolean;
   gitStatus: GitStatus | null;
   goal: GoalState | null;
+  activeTab: InspectorTab;
+  changeSet: ConversationChangeSet | null;
+  reviewedFile: ConversationFileChange | null;
+  reviewedDiff: GitDiff | null;
+  reviewedDiffBusy: boolean;
   onWorkspace: () => void;
   onSettings: () => void;
   onDiff: (change: GitFileChange) => void;
   onGoalAction: (action: "pause" | "resume" | "cancel") => void;
+  onTabChange: (tab: InspectorTab) => void;
+  onReviewFile: (file: ConversationFileChange) => void;
+  onBackToChanges: () => void;
+  onResizeStart: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  onClose: () => void;
 }) {
   const gitUnavailable = gitStatus?.isAvailable === false;
   return (
     <aside className="inspector">
-      <div className="inspector-title" data-tauri-drag-region>
-        <strong>{tr("任务详情", "Task details")}</strong>
-        <Activity size={16} />
+      <div
+        className="inspector-resize-handle"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label={tr("调整右侧栏宽度", "Resize side panel")}
+        onPointerDown={onResizeStart}
+      />
+      <div className="inspector-tabs" data-tauri-drag-region>
+        <button className={activeTab === "details" ? "active" : ""} type="button" onClick={() => onTabChange("details")}>
+          <Activity size={14} />{tr("任务详情", "Task details")}
+        </button>
+        <button className={activeTab === "changes" ? "active" : ""} type="button" onClick={() => onTabChange("changes")}>
+          <FileCode2 size={14} />{tr("本轮变更", "Turn changes")}
+          {changeSet && <small>{changeSet.files.length}</small>}
+        </button>
+        <IconButton className="inspector-close" label={tr("关闭侧栏", "Close side panel")} onClick={onClose}><X size={14} /></IconButton>
       </div>
+      {activeTab === "changes" ? (
+        <ChangeInspectorPanel
+          changeSet={changeSet}
+          reviewedFile={reviewedFile}
+          diff={reviewedDiff}
+          busy={reviewedDiffBusy}
+          onReviewFile={onReviewFile}
+          onBack={onBackToChanges}
+        />
+      ) : (<>
       <section>
         <div className="section-heading"><Folder size={15} /><span>{tr("项目", "Project")}</span></div>
         <button className="detail-row clickable" onClick={onWorkspace}>
@@ -3788,7 +4705,112 @@ function Inspector({
         <div className="permission-line"><ShieldCheck size={13} /><span>{tr("权限等级", "Permission level")}</span><small>{permissionLabel(permissionLevel)}</small></div>
         <div className="permission-line"><Command size={13} /><span>{tr("当前模式", "Current mode")}</span><small>{modeLabel(mode)}</small></div>
       </section>
+      </>)}
     </aside>
+  );
+}
+
+function ChangeInspectorPanel({
+  changeSet,
+  reviewedFile,
+  diff,
+  busy,
+  onReviewFile,
+  onBack,
+}: {
+  changeSet: ConversationChangeSet | null;
+  reviewedFile: ConversationFileChange | null;
+  diff: GitDiff | null;
+  busy: boolean;
+  onReviewFile: (file: ConversationFileChange) => void;
+  onBack: () => void;
+}) {
+  if (!changeSet) {
+    return (
+      <div className="change-review-empty">
+        <FileCode2 size={24} />
+        <strong>{tr("还没有可校对的结果", "No result to review yet")}</strong>
+        <span>{tr("完成一次项目任务后，本轮文件变更会出现在这里。", "Complete a project task to see its file changes here.")}</span>
+      </div>
+    );
+  }
+  if (reviewedFile) {
+    const lines = diff?.content.split("\n").slice(0, 4000) ?? [];
+    return (
+      <div className="change-review-detail">
+        <button className="change-review-back" type="button" onClick={onBack}><ChevronRight size={14} />{tr("返回文件列表", "Back to files")}</button>
+        <div className="change-review-file-heading">
+          <span className={`file-change-kind ${reviewedFile.kind}`}>{fileChangeKindLabel(reviewedFile.kind)}</span>
+          <strong title={reviewedFile.path}>{reviewedFile.path}</strong>
+        </div>
+        {busy ? (
+          <div className="change-review-loading"><LoaderCircle size={17} />{tr("正在读取 diff", "Loading diff")}</div>
+        ) : lines.length > 0 ? (
+          <div className="side-diff-content">
+            {lines.map((line, index) => <DiffLine line={line} index={index} key={`${index}:${line}`} />)}
+            {diff?.truncated && <div className="side-diff-truncated">{tr("大型 diff 已截断", "Large diff truncated")}</div>}
+          </div>
+        ) : (
+          <div className="change-review-empty compact">
+            <Check size={20} />
+            <strong>{tr("当前没有可显示的 diff", "No current diff to display")}</strong>
+            <span>{tr("该文件可能已恢复为任务开始前的状态。", "The file may have returned to its pre-task state.")}</span>
+          </div>
+        )}
+      </div>
+    );
+  }
+  return (
+    <div className="change-review-list">
+      <div className="change-review-summary">
+        <strong>{changeSet.files.length} {tr("个文件", "files")}</strong>
+        <span>{changeSetStatusLabel(changeSet.status)} · {formatTime(changeSet.completedAt)}</span>
+      </div>
+      {changeSet.files.length === 0 ? (
+        <div className="change-review-empty">
+          <Check size={24} />
+          <strong>{tr("本轮未修改文件", "No files changed this turn")}</strong>
+          <span>{tr("对话已完成，工作区内容没有发生变化。", "The task completed without changing workspace files.")}</span>
+        </div>
+      ) : changeSet.files.map((file) => (
+        <button className="change-review-row" type="button" key={`${file.kind}:${file.path}`} onClick={() => onReviewFile(file)}>
+          <span className={`file-change-kind ${file.kind}`}>{fileChangeKindLabel(file.kind)}</span>
+          <span title={file.path}>{file.path}</span>
+          <small>{file.additions != null || file.deletions != null ? `+${file.additions ?? 0} -${file.deletions ?? 0}` : ""}</small>
+          <ChevronRight size={14} />
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function fileChangeKindLabel(kind: ConversationFileChange["kind"]) {
+  if (kind === "added") return "A";
+  if (kind === "deleted") return "D";
+  if (kind === "renamed") return "R";
+  return "M";
+}
+
+function changeSetStatusLabel(status: ConversationChangeStatus) {
+  if (status === "completed") return tr("任务已完成", "Task completed");
+  if (status === "failed") return tr("任务失败，变更仍保留", "Task failed; changes kept");
+  if (status === "cancelled") return tr("任务已取消", "Task cancelled");
+  return tr("任务已中断", "Task interrupted");
+}
+
+function DiffLine({ line, index }: { line: string; index: number }) {
+  const kind = line.startsWith("+") && !line.startsWith("+++")
+    ? "addition"
+    : line.startsWith("-") && !line.startsWith("---")
+      ? "deletion"
+      : line.startsWith("@@")
+        ? "hunk"
+        : "context";
+  return (
+    <div className={`diff-line ${kind}`}>
+      <span>{index + 1}</span>
+      <code>{line || " "}</code>
+    </div>
   );
 }
 
@@ -4095,6 +5117,8 @@ function ConnectionDialog({
   profiles,
   profile,
   keyConfigured,
+  diffViewSettings,
+  onDiffViewSettingsChange,
   onClose,
   onOpenMcp,
   onOpenSkills,
@@ -4109,6 +5133,8 @@ function ConnectionDialog({
   profiles: ProviderProfile[];
   profile: ProviderProfile;
   keyConfigured: boolean;
+  diffViewSettings: DiffViewSettings;
+  onDiffViewSettingsChange: (settings: DiffViewSettings) => void;
   onClose: () => void;
   onOpenMcp: () => void;
   onOpenSkills: () => void;
@@ -4131,6 +5157,7 @@ function ConnectionDialog({
   const [error, setError] = useState<string | null>(null);
   const [health, setHealth] = useState<ProviderHealth[]>([]);
   const [diagnostics, setDiagnostics] = useState<GatewayDiagnostics | null>(null);
+  const [settingsTab, setSettingsTab] = useState<"general" | "connections">("connections");
 
   const refreshHealth = async () => {
     setHealth(await listProviderHealth());
@@ -4263,11 +5290,60 @@ function ConnectionDialog({
 
   return (
     <div className="dialog-backdrop" onMouseDown={onClose}>
-      <div ref={dialogRef} className="dialog connection-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-label={tr("模型连接", "Model connections")}>
+      <div ref={dialogRef} className="dialog connection-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-label={tr("应用设置", "Application settings")}>
         <div className="dialog-header">
-          <div><strong>{tr("模型连接", "Model connections")}</strong><span>{tr("LevelUpAPI 与兼容服务", "LevelUpAPI and compatible services")}</span></div>
+          <div><strong>{settingsTab === "general" ? tr("通用设置", "General settings") : tr("模型连接", "Model connections")}</strong><span>{settingsTab === "general" ? tr("界面、Diff 和应用行为", "Interface, Diff, and application behavior") : tr("LevelUpAPI 与兼容服务", "LevelUpAPI and compatible services")}</span></div>
           <IconButton label={tr("关闭", "Close")} onClick={onClose}><X size={18} /></IconButton>
         </div>
+        <div className="settings-nav" role="tablist" aria-label={tr("设置分类", "Settings categories")}>
+          <button className={settingsTab === "connections" ? "active" : ""} type="button" role="tab" aria-selected={settingsTab === "connections"} onClick={() => setSettingsTab("connections")}>
+            <Cpu size={15} />{tr("模型连接", "Model connections")}
+          </button>
+          <button className={settingsTab === "general" ? "active" : ""} type="button" role="tab" aria-selected={settingsTab === "general"} onClick={() => setSettingsTab("general")}>
+            <Settings2 size={15} />{tr("通用设置", "General")}
+          </button>
+        </div>
+        {settingsTab === "general" ? (
+          <div className="dialog-body general-settings-body">
+            <section className="general-settings-section wide">
+              <div className="general-settings-heading">
+                <span><Code2 size={16} /><span><strong>{tr("侧栏 Diff 显示", "Side panel Diff display")}</strong><small>{tr("控制右侧变更校对和代码预览的字体", "Controls the font used by change review and code previews")}</small></span></span>
+              </div>
+              <div className="diff-settings-controls">
+                <label className="field">
+                  <span>{tr("字体", "Font")}</span>
+                  <select value={diffViewSettings.fontFamily} onChange={(event) => onDiffViewSettingsChange({ ...diffViewSettings, fontFamily: event.target.value as DiffFontFamily })}>
+                    <option value="monaco">Monaco · {tr("内置", "Bundled")}</option>
+                    <option value="system">{tr("系统等宽字体", "System monospace")}</option>
+                    <option value="consolas">Consolas</option>
+                  </select>
+                </label>
+                <label className="field">
+                  <span>{tr("字号", "Font size")} <small>10–24 px</small></span>
+                  <input type="number" min="10" max="24" step="1" value={diffViewSettings.fontSize} onChange={(event) => onDiffViewSettingsChange({ ...diffViewSettings, fontSize: Number(event.target.value) || 13 })} />
+                </label>
+              </div>
+            </section>
+            <section className="general-settings-section wide">
+              <div className="general-settings-heading">
+                <span><Palette size={16} /><span><strong>{tr("主题", "Theme")}</strong><small>{tr("切换应用的颜色和布局主题", "Change the application's colors and layout")}</small></span></span>
+                <button className="secondary-button" type="button" onClick={onOpenThemes}><Palette size={14} />{tr("管理主题", "Manage themes")}</button>
+              </div>
+            </section>
+            <section className="general-settings-section wide">
+              <div className="general-settings-heading">
+                <span><Settings2 size={16} /><span><strong>{tr("其他设置", "More settings")}</strong><small>{tr("打开扩展、指令、请求日志和桌宠设置", "Open extensions, instructions, request logs, and pet settings")}</small></span></span>
+              </div>
+              <div className="general-settings-actions">
+                <button className="secondary-button" type="button" onClick={onOpenMcp}><Network size={14} />MCP</button>
+                <button className="secondary-button" type="button" onClick={onOpenSkills}><BookOpen size={14} />Skills</button>
+                <button className="secondary-button" type="button" onClick={onOpenInstructions}><BrainCircuit size={14} />Instructions</button>
+                <button className="secondary-button" type="button" onClick={onOpenLogs}><Activity size={14} />{tr("请求日志", "Request logs")}</button>
+                <button className="secondary-button" type="button" onClick={onOpenPet}><PawPrint size={14} />{tr("桌宠", "Pet")}</button>
+              </div>
+            </section>
+          </div>
+        ) : (
         <div className="dialog-body">
           <button className="levelup-connection-card" type="button" title={LEVELUP_WEBSITE} onClick={() => void openLevelUpWebsite()}>
             <span className="levelup-connection-logo"><img src="/logo.png" alt="" /></span>
@@ -4438,7 +5514,8 @@ function ConnectionDialog({
           <ConfigWritebackPanel profile={draftProfile} keyConfigured={localKeyConfigured} />
           {error && <div className="dialog-error">{error}</div>}
         </div>
-        <div className="dialog-footer">
+        )}
+        {settingsTab === "connections" ? <div className="dialog-footer">
           <div className="dialog-footer-actions">
             <button className="secondary-button" onClick={onOpenMcp}><Network size={14} /> {tr("MCP 服务器", "MCP servers")}</button>
             <button className="secondary-button" onClick={onOpenSkills}><BookOpen size={14} /> Skills</button>
@@ -4454,7 +5531,10 @@ function ConnectionDialog({
           <button className="primary-button" onClick={saveConnection} disabled={!draftProfile.name.trim() || !draftProfile.baseUrl || !draftProfile.model || busy}>
             {tr("保存连接", "Save connection")}
           </button>
-        </div>
+        </div> : <div className="dialog-footer general-settings-footer">
+          <span>{tr("通用设置会自动保存", "General settings are saved automatically")}</span>
+          <button className="primary-button" type="button" onClick={onClose}>{tr("完成", "Done")}</button>
+        </div>}
       </div>
     </div>
   );
