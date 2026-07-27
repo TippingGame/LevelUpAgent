@@ -1,4 +1,4 @@
-import type { AgentThread, PermissionLevel, ProviderProfile } from "./types";
+import type { AgentThread, DiffViewSettings, PermissionLevel, ProviderProfile } from "./types";
 import { tr } from "./i18n";
 
 const PROFILE_KEY = "levelup-agent.profiles.v1";
@@ -9,6 +9,12 @@ const PERMISSION_LEVEL_KEY = "levelup-agent.permission-level.v1";
 const HIDDEN_PROJECTS_KEY = "levelup-agent.hidden-projects.v1";
 const PINNED_THREADS_KEY = "levelup-agent.pinned-threads.v1";
 const ACTIVE_THEME_KEY = "levelup-agent.active-theme.v1";
+const DIFF_VIEW_SETTINGS_KEY = "levelup-agent.diff-view-settings.v1";
+
+export const DEFAULT_DIFF_VIEW_SETTINGS: DiffViewSettings = {
+  fontFamily: "monaco",
+  fontSize: 13,
+};
 
 export const DEFAULT_LEVELUP_BASE_URL = "https://levelup.mom";
 
@@ -98,7 +104,7 @@ export function saveActiveThreadId(threadId: string) {
 
 export function loadPermissionLevel(): PermissionLevel {
   const stored = localStorage.getItem(PERMISSION_LEVEL_KEY);
-  return stored === "request" || stored === "agent" || stored === "full" ? stored : "full";
+  return stored === "request" || stored === "agent" || stored === "full" ? stored : "request";
 }
 
 export function savePermissionLevel(level: PermissionLevel) {
@@ -130,6 +136,24 @@ export function saveActiveThemeId(themeId: string) {
   else localStorage.setItem(ACTIVE_THEME_KEY, themeId);
 }
 
+export function loadDiffViewSettings(): DiffViewSettings {
+  const stored = readJson<Partial<DiffViewSettings>>(DIFF_VIEW_SETTINGS_KEY, {});
+  const fontFamily = stored.fontFamily === "system" || stored.fontFamily === "consolas"
+    ? stored.fontFamily
+    : DEFAULT_DIFF_VIEW_SETTINGS.fontFamily;
+  const fontSize = typeof stored.fontSize === "number" && Number.isFinite(stored.fontSize)
+    ? Math.min(24, Math.max(10, Math.round(stored.fontSize)))
+    : DEFAULT_DIFF_VIEW_SETTINGS.fontSize;
+  return { fontFamily, fontSize };
+}
+
+export function saveDiffViewSettings(settings: DiffViewSettings) {
+  localStorage.setItem(DIFF_VIEW_SETTINGS_KEY, JSON.stringify({
+    fontFamily: settings.fontFamily,
+    fontSize: Math.min(24, Math.max(10, Math.round(settings.fontSize))),
+  } satisfies DiffViewSettings));
+}
+
 export function clearLegacyThreads() {
   localStorage.removeItem(THREAD_KEY);
 }
@@ -149,7 +173,7 @@ export function createThread(workspace?: string): AgentThread {
 export function message(
   role: AgentMessageRole,
   content: string,
-  options: Partial<Pick<import("./types").AgentMessage, "toolCalls" | "toolCallId" | "isError" | "requestId" | "modelName" | "providerBrand" | "durationMs" | "internal" | "attachments">> = {},
+  options: Partial<Pick<import("./types").AgentMessage, "toolCalls" | "toolCallId" | "isError" | "requestId" | "modelName" | "providerBrand" | "durationMs" | "internal" | "changeSet" | "attachments">> = {},
 ) {
   return {
     id: crypto.randomUUID(),
@@ -163,6 +187,7 @@ export function message(
     providerBrand: options.providerBrand,
     durationMs: options.durationMs,
     internal: options.internal,
+    changeSet: options.changeSet,
     attachments: options.attachments ?? [],
     createdAt: Date.now(),
   } satisfies import("./types").AgentMessage;

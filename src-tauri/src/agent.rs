@@ -1078,6 +1078,49 @@ fn system_prompt(request: &AgentTurnRequest) -> String {
 fn prepare_context(messages: &[AgentMessage]) -> PreparedContext {
     let current_user_index = messages.iter().rposition(|message| message.role == "user");
     let units = context_units(messages, current_user_index);
+    // The Harness Context Manager owns the coarse budget decision. The
+    // provider-specific preparation below still applies UTF-8-safe excerpts,
+    // but it may only consider atomic units admitted by the shared selector.
+    let context_blocks = units
+        .iter()
+        .enumerate()
+        .rev()
+        .map(|(index, unit)| crate::harness::types::ContextBlock {
+            id: format!("unit-{index}"),
+            source_kind: "conversation".to_owned(),
+            content_hash: format!("unit-{index}-{}", unit.original_chars),
+            estimated_tokens: crate::harness::context::estimate_tokens(
+                &unit
+                    .messages
+                    .iter()
+                    .map(|message| message.content.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                4,
+            ),
+            trust: crate::harness::types::TrustLevel::User,
+            inclusion: crate::harness::types::ContextInclusion::Include,
+            group_id: Some(format!("unit-{index}")),
+            mandatory: unit.contains_current_user,
+        })
+        .collect::<Vec<_>>();
+    let harness_budget = crate::harness::types::ContextBudget {
+        context_window: (CONTEXT_MAX_CHARS / 4) as u32,
+        reserve_output_tokens: 4_000,
+        safety_margin_tokens: 1_000,
+        system_tokens: 0,
+        instruction_tokens: 0,
+        tool_schema_tokens: 0,
+        message_tokens: 0,
+        attachment_tokens: 0,
+        memory_tokens: 0,
+    };
+    let harness_selection =
+        crate::harness::context::select_blocks(&context_blocks, &harness_budget);
+    let harness_selected = harness_selection
+        .selected_ids
+        .into_iter()
+        .collect::<BTreeSet<_>>();
     let mut selected = vec![false; units.len()];
     let mut used_chars = 0_usize;
     let mut used_messages = 0_usize;
@@ -1093,7 +1136,11 @@ fn prepare_context(messages: &[AgentMessage]) -> PreparedContext {
 
     let mut accept_older = true;
     for (index, unit) in units.iter().enumerate().rev() {
-        if selected[index] || !unit.valid || !accept_older {
+        if selected[index]
+            || !unit.valid
+            || !accept_older
+            || !harness_selected.contains(&format!("unit-{index}"))
+        {
             continue;
         }
         let fits = used_chars.saturating_add(unit.prepared_chars) <= CONTEXT_MAX_CHARS
