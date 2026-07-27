@@ -5332,14 +5332,14 @@ function ConnectionDialog({
             </section>
             <section className="general-settings-section wide">
               <div className="general-settings-heading">
-                <span><Settings2 size={16} /><span><strong>{tr("其他设置", "More settings")}</strong><small>{tr("打开扩展、指令、请求日志和桌宠设置", "Open extensions, instructions, request logs, and pet settings")}</small></span></span>
+                <span><Settings2 size={16} /><span><strong>{tr("其他设置", "More settings")}</strong><small>{tr("打开扩展、指令、请求日志和摇光残影设置", "Open extensions, instructions, request logs, and Starlight Echoes settings")}</small></span></span>
               </div>
               <div className="general-settings-actions">
                 <button className="secondary-button" type="button" onClick={onOpenMcp}><Network size={14} />MCP</button>
                 <button className="secondary-button" type="button" onClick={onOpenSkills}><BookOpen size={14} />Skills</button>
                 <button className="secondary-button" type="button" onClick={onOpenInstructions}><BrainCircuit size={14} />Instructions</button>
                 <button className="secondary-button" type="button" onClick={onOpenLogs}><Activity size={14} />{tr("请求日志", "Request logs")}</button>
-                <button className="secondary-button" type="button" onClick={onOpenPet}><PawPrint size={14} />{tr("桌宠", "Pet")}</button>
+                <button className="secondary-button" type="button" onClick={onOpenPet}><PawPrint size={14} />{tr("摇光残影", "Starlight Echoes")}</button>
               </div>
             </section>
           </div>
