@@ -156,9 +156,9 @@
 对应 SHA-256：
 
 ```text
-02a1aef8e9f1685746f6fc994e1a70bb4b0c77552311732cacac6115350a598e  levelup-agent.exe
-ace739fb8c5a0221a6ff4a391e72dbeedc51a63df8a2aa76410a3ca6fdc91a53  LevelUpAgent_1.0.14_x64_en-US.msi
-984bba1074503fcdf5c0afa0877b9810b457c6d222c87a353520678e6c7d0cd5  LevelUpAgent_1.0.14_x64-setup.exe
+aa3becdd03d92dd956b8945373531937fef03aed97349200336354e6f441e8fe  levelup-agent.exe
+740b934664a0630b68056d7c53a7dc0d74d2ffca2c3ec04743bf3760e367e389  LevelUpAgent_1.0.14_x64_en-US.msi
+83ba86c3d91e8b44c8b0a21cc67528bdfdc6ed7610f5c8b62acf675d14d14820  LevelUpAgent_1.0.14_x64-setup.exe
 ```
 
 ## 人工验收重点
