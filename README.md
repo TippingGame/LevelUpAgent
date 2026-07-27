@@ -173,6 +173,17 @@ cargo test --manifest-path src-tauri/Cargo.toml
 pnpm tauri build
 ```
 
+macOS Intel 与 Apple Silicon 安装包使用专用脚本构建：
+
+```bash
+pnpm build:macos
+```
+
+脚本会校验 DMG 内应用的架构与完整签名。没有 Developer ID 证书时只生成适合本机测试的
+ad-hoc 签名包；正式分发需在钥匙串中安装 `Developer ID Application` 证书，并设置
+`MACOS_NOTARY_PROFILE` 为 `xcrun notarytool store-credentials` 创建的钥匙串配置名，以完成
+Apple 公证与票据装订。也可用 `MACOS_SIGNING_IDENTITY` 显式选择签名证书。
+
 验证当前代码与本机 LevelUpAPI 的四协议契约：
 
 ```bash

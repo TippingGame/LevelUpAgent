@@ -1,6 +1,6 @@
 import { Children, isValidElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type CSSProperties, type DragEvent as ReactDragEvent, type HTMLAttributes, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
-import remarkGfm from "remark-gfm";
+import remarkGfmCompatible from "./lib/remarkGfmCompatible";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -4100,7 +4100,7 @@ type ConversationBlock =
 
 function MarkdownContent({ content }: { content: string }) {
   return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>
+    <ReactMarkdown remarkPlugins={[remarkGfmCompatible]} components={MARKDOWN_COMPONENTS}>
       {content}
     </ReactMarkdown>
   );
