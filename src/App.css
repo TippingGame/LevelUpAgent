@@ -1487,7 +1487,9 @@ button.detail-row { padding: 0; border: 0; background: transparent; text-align: 
 .media-asset-content .media-export-success, .media-asset-content .media-export-error { display: flex; align-items: center; gap: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .media-asset-content .media-export-success { color: #059669; }
 .media-asset-actions { position: absolute; right: 7px; bottom: 8px; display: flex; align-items: center; gap: 2px; }
-.media-export-asset, .media-delete-asset { width: 26px; height: 26px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--faint); cursor: pointer; }
+.media-reuse-asset, .media-export-asset, .media-delete-asset { width: 26px; height: 26px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--faint); cursor: pointer; }
+.media-reuse-asset:hover:not(:disabled) { background: rgba(16,185,129,.1); color: #059669; }
+.media-reuse-asset:disabled { cursor: wait; opacity: .7; }
 .media-export-asset:hover { background: rgba(2,132,199,.1); color: #0284c7; }
 .media-export-asset:disabled { cursor: wait; opacity: .7; }
 .media-delete-asset:hover { background: var(--danger-soft); color: #e11d48; }
