@@ -659,6 +659,7 @@ function App() {
   const workspaceRunBaselinesRef = useRef<Map<string, Promise<WorkspaceRunBaseline | null>>>(new Map());
   const themeImportingRef = useRef<string | null>(null);
   const attachmentPasteRef = useRef(false);
+  const deletingThreadIdsRef = useRef<Set<string>>(new Set());
   const runModesRef = useRef<Map<string, AgentMode>>(new Map());
   // Bootstrap uses local Tauri tools before an agent operation ID exists.
   // Keep a generation token so pause/cancel can invalidate that async work
@@ -2370,14 +2371,25 @@ function App() {
       }
       const command = value.match(/^\/(steer|follow-up|next-turn)\s+([\s\S]+)$/i);
       const kind = command?.[1].toLowerCase().replace("-", "_") as "steer" | "follow_up" | "next_turn" | undefined;
-      if (kind && command) {
-        await enqueueCurrentRunMessage(thread.id, activeOperationId, kind, command[2]);
+      try {
+        if (kind && command) {
+          await enqueueCurrentRunMessage(thread.id, activeOperationId, kind, command[2]);
+        } else {
+          await enqueueCurrentRunMessage(thread.id, activeOperationId, "follow_up", value);
+        }
         setDraft("");
-      } else {
-        await enqueueCurrentRunMessage(thread.id, activeOperationId, "follow_up", value);
-        setDraft("");
+        return;
+      } catch (error) {
+        if (!errorText(error).includes("Harness operation is no longer active")) {
+          setNotice(`${tr("无法加入运行队列", "Could not queue the message")}: ${errorText(error)}`);
+          return;
+        }
+        // The operation may finish between the render and the enqueue call.
+        // Release the stale local owner and submit this input as a new run.
+        operationIdsRef.current.delete(thread.id);
+        runModesRef.current.delete(thread.id);
+        setThreadRunning(thread.id, false);
       }
-      return;
     }
     if ((!value && draftAttachments.length === 0)
       || runningThreadIdsRef.current.has(thread.id)
@@ -2452,8 +2464,26 @@ function App() {
           setSettingsOpen(true);
           return;
         }
-        const started = await harnessStart(harnessRequest);
-        harnessOperationId = started.operationId;
+        const submission = await harnessStart(harnessRequest);
+        if (submission.disposition === "queued") {
+          const queued = submission.value;
+          setHarnessQueueItems((current) => ({
+            ...current,
+            [thread.id]: [...(current[thread.id] ?? []), queued],
+          }));
+          setDraft("");
+          draftAttachmentsRef.current = [];
+          setDraftAttachments([]);
+          setNotice(tr("已加入当前运行队列", "Added to the active run queue"));
+          return;
+        }
+        harnessOperationId = submission.value.operationId;
+        // Claim local ownership as soon as the durable operation exists. This
+        // closes the gap before the run loop starts, so later sends take the
+        // queue path instead of attempting another operation.
+        setThreadRunning(thread.id, true);
+        runModesRef.current.set(thread.id, runMode);
+        operationIdsRef.current.set(thread.id, harnessOperationId);
       } catch (error) {
         setNotice(`${tr("无法启动 Harness", "Could not start harness")}: ${errorText(error)}`);
         return;
@@ -2832,11 +2862,28 @@ function App() {
     if (thread) setThreadPendingDelete(thread);
   };
 
-  const deleteThread = (threadId: string) => {
-    if (runningThreadIdsRef.current.has(threadId) || pendingApprovalsRef.current[threadId]) return;
+  const deleteThread = async (threadId: string) => {
+    if (runningThreadIdsRef.current.has(threadId)
+      || pendingApprovalsRef.current[threadId]
+      || deletingThreadIdsRef.current.has(threadId)) return;
+    deletingThreadIdsRef.current.add(threadId);
     const removed = threadsRef.current.find((thread) => thread.id === threadId);
     const remaining = threadsRef.current.filter((thread) => thread.id !== threadId);
     const nextThreads = remaining.length > 0 ? remaining : [createThread(defaultWorkspace)];
+    if (isDesktop() && databaseReadyRef.current) {
+      const persistence = persistenceQueueRef.current.then(async () => {
+        await deletePersistedThread(threadId);
+        if (remaining.length === 0) await savePersistedThread(nextThreads[0]);
+      });
+      persistenceQueueRef.current = persistence.catch(() => undefined);
+      try {
+        await persistence;
+      } catch (error) {
+        setNotice(`${tr("无法删除会话", "Could not delete conversation")}: ${errorText(error)}`);
+        deletingThreadIdsRef.current.delete(threadId);
+        return;
+      }
+    }
     threadsRef.current = nextThreads;
     setThreads(nextThreads);
     setThreadPendingDelete(null);
@@ -2854,12 +2901,7 @@ function App() {
         : undefined;
       setActiveThreadId((sameProject ?? [...nextThreads].sort((left, right) => right.updatedAt - left.updatedAt)[0]).id);
     }
-    if (isDesktop() && databaseReadyRef.current) {
-      enqueuePersistence(async () => {
-        await deletePersistedThread(threadId);
-        if (remaining.length === 0) await savePersistedThread(nextThreads[0]);
-      });
-    }
+    deletingThreadIdsRef.current.delete(threadId);
   };
 
   const saveProfile = async (profile: ProviderProfile, apiKey: string) => {
@@ -3634,7 +3676,7 @@ function App() {
         <DeleteThreadDialog
           thread={threadPendingDelete}
           onClose={() => setThreadPendingDelete(null)}
-          onConfirm={() => deleteThread(threadPendingDelete.id)}
+          onConfirm={() => { void deleteThread(threadPendingDelete.id); }}
         />
       )}
 

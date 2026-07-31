@@ -6,7 +6,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::harness::types::{
     HarnessApprovalRecord, HarnessDraftRequest, HarnessOperationStarted, HarnessPendingApproval,
     HarnessQueueItem, HarnessQueueRequest, HarnessRecoveryItem, HarnessSessionNode,
-    HarnessSessionNodeRequest, RuntimeState,
+    HarnessSessionNodeRequest, HarnessSubmission, RuntimeState,
 };
 use crate::models::{
     GoalCreateRequest, GoalState, GoalStatus, ImageAttachment, McpServerConfig, McpTransport,
@@ -493,6 +493,21 @@ impl Database {
             .connection
             .lock()
             .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let has_active_operation = connection
+            .query_row(
+                "SELECT 1 FROM harness_operations
+                 WHERE thread_id = ?1
+                   AND state IN ('compiling', 'running', 'awaiting_approval', 'compacting', 'persisting')
+                 LIMIT 1",
+                [thread_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(database_error)?
+            .is_some();
+        if has_active_operation {
+            return Err("Cannot delete a thread while its harness operation is active".to_owned());
+        }
         let exists = connection
             .query_row("SELECT 1 FROM threads WHERE id = ?1", [thread_id], |_| {
                 Ok(())
@@ -1251,7 +1266,7 @@ impl Database {
         request: &HarnessDraftRequest,
         workspace: &str,
         profile_id: &str,
-    ) -> Result<HarnessOperationStarted, String> {
+    ) -> Result<HarnessSubmission, String> {
         let mut connection = self
             .connection
             .lock()
@@ -1268,6 +1283,49 @@ impl Database {
             .is_some();
         if !thread_exists {
             return Err("Cannot start harness operation for an unknown thread".to_owned());
+        }
+
+        let active_operation_id = transaction
+            .query_row(
+                "SELECT id FROM harness_operations
+                 WHERE thread_id = ?1
+                   AND state IN ('compiling', 'running', 'awaiting_approval', 'compacting', 'persisting')
+                 ORDER BY updated_at DESC LIMIT 1",
+                [&request.thread_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(database_error)?;
+        if let Some(operation_id) = active_operation_id {
+            if !request.attachment_ids.is_empty() {
+                return Err("The active harness queue accepts text messages only".to_owned());
+            }
+            let body = request.raw_user_input.trim();
+            if body.is_empty() {
+                return Err("Cannot queue an empty harness message".to_owned());
+            }
+            let queued = HarnessQueueItem {
+                id: uuid::Uuid::new_v4().to_string(),
+                operation_id,
+                kind: "follow_up".to_owned(),
+                body: body.to_owned(),
+                status: "pending".to_owned(),
+            };
+            transaction
+                .execute(
+                    "INSERT INTO harness_queues (id, operation_id, kind, body, status, created_at)
+                     VALUES (?1, ?2, ?3, ?4, 'pending', ?5)",
+                    params![
+                        &queued.id,
+                        &queued.operation_id,
+                        &queued.kind,
+                        &queued.body,
+                        now_millis(),
+                    ],
+                )
+                .map_err(database_error)?;
+            transaction.commit().map_err(database_error)?;
+            return Ok(HarnessSubmission::Queued(queued));
         }
 
         let draft_id = uuid::Uuid::new_v4().to_string();
@@ -1365,12 +1423,12 @@ impl Database {
             )
             .map_err(database_error)?;
         transaction.commit().map_err(database_error)?;
-        Ok(HarnessOperationStarted {
+        Ok(HarnessSubmission::Started(HarnessOperationStarted {
             operation_id,
             draft_id,
             state: RuntimeState::Compiling,
             event_sequence: 1,
-        })
+        }))
     }
 
     pub fn update_harness_operation_state(
@@ -2012,10 +2070,27 @@ impl Database {
         if !matches!(request.kind.as_str(), "steer" | "follow_up" | "next_turn") {
             return Err("Unknown harness queue kind".to_owned());
         }
+        if request.body.trim().is_empty() {
+            return Err("Cannot queue an empty harness message".to_owned());
+        }
         let connection = self
             .connection
             .lock()
             .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let operation_is_active = connection
+            .query_row(
+                "SELECT 1 FROM harness_operations
+                 WHERE id = ?1
+                   AND state IN ('compiling', 'running', 'awaiting_approval', 'compacting', 'persisting')",
+                [&request.operation_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(database_error)?
+            .is_some();
+        if !operation_is_active {
+            return Err("Harness operation is no longer active".to_owned());
+        }
         let id = uuid::Uuid::new_v4().to_string();
         connection
             .execute(
@@ -2626,6 +2701,8 @@ mod tests {
         };
         let started = database
             .start_harness_operation(&request, "C:/workspace", "test")
+            .unwrap()
+            .into_started()
             .unwrap();
         assert_eq!(
             started.state,
@@ -2683,10 +2760,14 @@ mod tests {
             "succeeded"
         );
         drop(connection);
-        let error = database
+        let queued = database
             .start_harness_operation(&request, "C:/workspace", "test")
-            .unwrap_err();
-        assert!(error.contains("UNIQUE") || error.contains("unique"));
+            .unwrap()
+            .into_queued()
+            .unwrap();
+        assert_eq!(queued.operation_id, started.operation_id);
+        assert_eq!(queued.kind, "follow_up");
+        assert_eq!(queued.body, "continue");
         database
             .update_harness_operation_state(
                 &started.operation_id,
@@ -2695,6 +2776,8 @@ mod tests {
             .unwrap();
         let restarted = database
             .start_harness_operation(&request, "C:/workspace", "test")
+            .unwrap()
+            .into_started()
             .unwrap();
         assert_ne!(restarted.operation_id, started.operation_id);
     }
@@ -2714,6 +2797,8 @@ mod tests {
         };
         let operation = database
             .start_harness_operation(&request, "C:/workspace", "test")
+            .unwrap()
+            .into_started()
             .unwrap();
         let (approval_id, token, execution_id) = database
             .create_harness_approval(
@@ -2752,6 +2837,8 @@ mod tests {
         };
         let operation = database
             .start_harness_operation(&request, "C:/workspace", "test")
+            .unwrap()
+            .into_started()
             .unwrap();
         database
             .start_harness_tool_execution(
@@ -2796,6 +2883,46 @@ mod tests {
     }
 
     #[test]
+    fn restart_recovery_allows_a_new_operation_after_interrupting_the_old_one() {
+        let database = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        database.save_thread(&sample_thread()).unwrap();
+        let request = crate::harness::types::HarnessDraftRequest {
+            thread_id: "thread-1".to_owned(),
+            raw_user_input: "continue".to_owned(),
+            attachment_ids: Vec::new(),
+            mode: crate::harness::types::HarnessMode::Agent,
+            permission_level: crate::harness::types::PermissionLevel::Request,
+            requested_profile_id: Some("test".to_owned()),
+            workspace: Some("C:/workspace".to_owned()),
+        };
+        let interrupted = database
+            .start_harness_operation(&request, "C:/workspace", "test")
+            .unwrap()
+            .into_started()
+            .unwrap();
+
+        database.recover_harness_operations().unwrap();
+
+        let restarted = database
+            .start_harness_operation(&request, "C:/workspace", "test")
+            .unwrap()
+            .into_started()
+            .unwrap();
+        assert_ne!(restarted.operation_id, interrupted.operation_id);
+        let connection = database.connection.lock().unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT state FROM harness_operations WHERE id = ?1",
+                    [&interrupted.operation_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "interrupted"
+        );
+    }
+
+    #[test]
     fn queue_and_session_fork_are_durable() {
         let database = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
         database.save_thread(&sample_thread()).unwrap();
@@ -2810,6 +2937,8 @@ mod tests {
         };
         let operation = database
             .start_harness_operation(&request, "C:/workspace", "test")
+            .unwrap()
+            .into_started()
             .unwrap();
         let queued = database
             .enqueue_harness_item(&crate::harness::types::HarnessQueueRequest {
@@ -2893,6 +3022,35 @@ mod tests {
         assert!(database.delete_thread("thread-1").unwrap());
         assert!(database.list_threads().unwrap().is_empty());
         assert!(!database.delete_thread("missing").unwrap());
+    }
+
+    #[test]
+    fn deleting_thread_with_an_active_harness_operation_is_rejected() {
+        let database = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        database.save_thread(&sample_thread()).unwrap();
+        let request = crate::harness::types::HarnessDraftRequest {
+            thread_id: "thread-1".to_owned(),
+            raw_user_input: "continue".to_owned(),
+            attachment_ids: Vec::new(),
+            mode: crate::harness::types::HarnessMode::Agent,
+            permission_level: crate::harness::types::PermissionLevel::Request,
+            requested_profile_id: Some("test".to_owned()),
+            workspace: Some("C:/workspace".to_owned()),
+        };
+        let operation = database
+            .start_harness_operation(&request, "C:/workspace", "test")
+            .unwrap()
+            .into_started()
+            .unwrap();
+
+        let error = database.delete_thread("thread-1").unwrap_err();
+
+        assert!(error.contains("harness operation is active"));
+        assert_eq!(database.list_threads().unwrap().len(), 1);
+        database
+            .update_harness_operation_state(&operation.operation_id, &RuntimeState::Completed)
+            .unwrap();
+        assert!(database.delete_thread("thread-1").unwrap());
     }
 
     #[test]

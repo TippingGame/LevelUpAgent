@@ -2442,7 +2442,7 @@ fn harness_start(
     app: tauri::AppHandle,
     database: tauri::State<'_, database::Database>,
     mut request: crate::harness::types::HarnessDraftRequest,
-) -> Result<crate::harness::types::HarnessOperationStarted, String> {
+) -> Result<crate::harness::types::HarnessSubmission, String> {
     let workspace = request
         .workspace
         .take()

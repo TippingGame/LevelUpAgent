@@ -443,6 +443,10 @@ export interface HarnessOperationStarted {
   eventSequence: number;
 }
 
+export type HarnessSubmission =
+  | { disposition: "started"; value: HarnessOperationStarted }
+  | { disposition: "queued"; value: HarnessQueueItem };
+
 export type HarnessOperationState =
   | "draft_saved"
   | "compiling"

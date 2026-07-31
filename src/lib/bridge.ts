@@ -19,7 +19,7 @@ import type {
   GoalState,
   GatewayDiagnostics,
   HarnessDraftRequest,
-  HarnessOperationStarted,
+  HarnessSubmission,
   HarnessOperationState,
   HarnessPreflightReport,
   HarnessPolicyDecision,
@@ -732,8 +732,8 @@ export async function harnessPreflight(
 
 export async function harnessStart(
   request: HarnessDraftRequest,
-): Promise<HarnessOperationStarted> {
-  return invoke<HarnessOperationStarted>("harness_start", { request });
+): Promise<HarnessSubmission> {
+  return invoke<HarnessSubmission>("harness_start", { request });
 }
 
 export async function harnessCheckTool(
