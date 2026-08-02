@@ -1,0 +1,37 @@
+.fatal-error-screen {
+  min-height: 100vh;
+  box-sizing: border-box;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  color: #242321;
+  background: #f3f2ee;
+  font-family: Inter, "Segoe UI", sans-serif;
+}
+
+.fatal-error-panel {
+  width: min(560px, 100%);
+  padding: 28px;
+  border: 1px solid #d7d3ca;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 12px 36px rgba(39, 34, 26, .12);
+}
+
+.fatal-error-mark {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: #fff;
+  background: #a84737;
+  font-weight: 700;
+}
+
+.fatal-error-panel h1 { margin: 18px 0 8px; font-size: 24px; letter-spacing: 0; }
+.fatal-error-panel p { margin: 0; color: #666158; line-height: 1.6; }
+.fatal-error-panel pre { max-height: 160px; overflow: auto; margin: 18px 0; padding: 12px; border: 1px solid #e3dfd7; background: #f8f7f4; white-space: pre-wrap; word-break: break-word; font: 12px/1.5 Consolas, monospace; }
+.fatal-error-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.fatal-error-actions button { min-height: 36px; display: inline-flex; align-items: center; gap: 7px; padding: 0 14px; border: 1px solid #c9c4ba; border-radius: 6px; color: #242321; background: #fff; font: inherit; cursor: pointer; }
+.fatal-error-actions button:first-child { border-color: #242321; color: #fff; background: #242321; }

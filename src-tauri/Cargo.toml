@@ -44,6 +44,7 @@ json5 = "0.4"
 base64 = "0.22"
 http = "1"
 imagesize = "0.14"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rmcp = { version = "2.2.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 lopdf = "0.36"
 quick-xml = "0.37"

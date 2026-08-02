@@ -6,6 +6,7 @@ mod filesystem;
 mod git;
 mod harness;
 mod layout;
+mod logging;
 mod mcp;
 mod media;
 mod migration;
@@ -21,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use models::{
@@ -45,6 +46,19 @@ const KEYRING_SERVICE: &str = "com.levelup.agent";
 const PROVIDER_CREDENTIAL_PREFIX: &str = "provider:";
 const MCP_CREDENTIAL_PREFIX: &str = "mcp:";
 const MAX_PENDING_CONFIRMATIONS: usize = 128;
+const PROVIDER_RECONNECT_RETRIES: u32 = 5;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FrontendLogEntry {
+    level: String,
+    event: String,
+    message: Option<String>,
+    stack: Option<String>,
+    component_stack: Option<String>,
+    route: Option<String>,
+    visibility: Option<String>,
+}
 
 struct AppState {
     client: Client,
@@ -956,6 +970,159 @@ fn provider_protocol_id(protocol: &models::ProviderProtocol) -> &'static str {
     }
 }
 
+fn provider_reconnect_delay(retry_number: u32) -> Duration {
+    #[cfg(test)]
+    const BASE_DELAY_MS: u64 = 1;
+    #[cfg(not(test))]
+    const BASE_DELAY_MS: u64 = 2_000;
+
+    Duration::from_millis(BASE_DELAY_MS.saturating_mul(retry_number.min(5) as u64))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn log_provider_request_started(
+    request: &AgentTurnRequest,
+    profile: &ProviderProfile,
+    operation_id: Option<&str>,
+    round: Option<usize>,
+    attempt_number: u32,
+    failover_index: u32,
+    streaming: bool,
+) {
+    logging::write(
+        "info",
+        "provider",
+        "provider_request_started",
+        serde_json::json!({
+            "operationId": operation_id,
+            "threadId": request.thread_id.as_deref(),
+            "round": round,
+            "profileId": &profile.id,
+            "model": &profile.model,
+            "protocol": provider_protocol_id(&profile.protocol),
+            "attemptNumber": attempt_number,
+            "maxAttempts": PROVIDER_RECONNECT_RETRIES + 1,
+            "failoverIndex": failover_index,
+            "streaming": streaming,
+        }),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn log_provider_response_completed(
+    request: &AgentTurnRequest,
+    profile: &ProviderProfile,
+    response: &AgentTurnResponse,
+    operation_id: Option<&str>,
+    round: Option<usize>,
+    attempt_number: u32,
+    failover_index: u32,
+    latency_ms: u64,
+    streaming: bool,
+) {
+    logging::write(
+        "info",
+        "provider",
+        "provider_response_completed",
+        serde_json::json!({
+            "operationId": operation_id,
+            "threadId": request.thread_id.as_deref(),
+            "round": round,
+            "profileId": &profile.id,
+            "model": &profile.model,
+            "protocol": provider_protocol_id(&profile.protocol),
+            "attemptNumber": attempt_number,
+            "failoverIndex": failover_index,
+            "latencyMs": latency_ms,
+            "requestId": response.request_id.as_deref(),
+            "inputTokens": response.input_tokens,
+            "outputTokens": response.output_tokens,
+            "toolCallCount": response.tool_calls.len(),
+            "streaming": streaming,
+        }),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn log_provider_request_failed(
+    request: &AgentTurnRequest,
+    profile: &ProviderProfile,
+    operation_id: Option<&str>,
+    round: Option<usize>,
+    attempt_number: u32,
+    failover_index: u32,
+    latency_ms: u64,
+    phase: &str,
+    will_retry: bool,
+    emitted_output: bool,
+    streaming: bool,
+    error: &str,
+) {
+    logging::write(
+        if error.contains("REQUEST_CANCELLED") {
+            "info"
+        } else if will_retry {
+            "warn"
+        } else {
+            "error"
+        },
+        "provider",
+        "provider_request_failed",
+        serde_json::json!({
+            "operationId": operation_id,
+            "threadId": request.thread_id.as_deref(),
+            "round": round,
+            "profileId": &profile.id,
+            "model": &profile.model,
+            "protocol": provider_protocol_id(&profile.protocol),
+            "attemptNumber": attempt_number,
+            "failoverIndex": failover_index,
+            "latencyMs": latency_ms,
+            "phase": phase,
+            "willRetry": will_retry,
+            "emittedOutput": emitted_output,
+            "streaming": streaming,
+            "error": logging::safe_error(error),
+        }),
+    );
+}
+
+fn log_provider_retry_scheduled(
+    request: &AgentTurnRequest,
+    profile: &ProviderProfile,
+    operation_id: Option<&str>,
+    round: Option<usize>,
+    retry_number: u32,
+    streaming: bool,
+) {
+    logging::write(
+        "warn",
+        "provider",
+        "provider_retry_scheduled",
+        serde_json::json!({
+            "operationId": operation_id,
+            "threadId": request.thread_id.as_deref(),
+            "round": round,
+            "profileId": &profile.id,
+            "model": &profile.model,
+            "nextAttemptNumber": retry_number + 1,
+            "maxAttempts": PROVIDER_RECONNECT_RETRIES + 1,
+            "delayMs": provider_reconnect_delay(retry_number).as_millis().min(u64::MAX as u128) as u64,
+            "streaming": streaming,
+        }),
+    );
+}
+
+async fn wait_for_provider_reconnect(
+    retry_number: u32,
+    cancellation: &CancellationToken,
+) -> Result<(), String> {
+    tokio::select! {
+        _ = tokio::time::sleep(provider_reconnect_delay(retry_number)) => Ok(()),
+        _ = cancellation.cancelled() => Err("REQUEST_CANCELLED".to_owned()),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn record_provider_request(
     database: &database::Database,
@@ -988,18 +1155,57 @@ fn record_provider_request(
 async fn run_agent_turn_with_failover<F>(
     client: &Client,
     database: &database::Database,
-    mut request: AgentTurnRequest,
-    mut key_loader: F,
+    request: AgentTurnRequest,
+    key_loader: F,
 ) -> Result<AgentTurnResponse, String>
 where
     F: FnMut(&str) -> Result<String, String>,
+{
+    run_agent_turn_with_failover_events(
+        client,
+        database,
+        request,
+        None,
+        None,
+        key_loader,
+        |_, _, _, _| {},
+    )
+    .await
+}
+
+async fn run_agent_turn_with_failover_events<F, R>(
+    client: &Client,
+    database: &database::Database,
+    mut request: AgentTurnRequest,
+    operation_id: Option<&str>,
+    round: Option<usize>,
+    mut key_loader: F,
+    mut on_connection_event: R,
+) -> Result<AgentTurnResponse, String>
+where
+    F: FnMut(&str) -> Result<String, String>,
+    R: FnMut(&ProviderProfile, u32, u32, Option<&str>),
 {
     let candidates = provider_candidates(&request);
     request.fallback_profiles.clear();
     let mut last_error = "No provider is available".to_owned();
     let mut failover_attempts = 0_u32;
-    for (index, profile) in candidates.into_iter().enumerate() {
+    let mut reconnecting = false;
+    let mut last_reconnect_attempt = 0_u32;
+    'providers: for (index, profile) in candidates.into_iter().enumerate() {
         if index > 0 && provider_is_cooling_down(database, &profile.id)? {
+            logging::write(
+                "info",
+                "provider",
+                "provider_candidate_skipped",
+                serde_json::json!({
+                    "operationId": operation_id,
+                    "threadId": request.thread_id.as_deref(),
+                    "round": round,
+                    "profileId": &profile.id,
+                    "reason": "cooldown",
+                }),
+            );
             continue;
         }
         if index > 0 {
@@ -1021,57 +1227,140 @@ where
                     failover_attempts,
                     Some(&error),
                 )?;
+                log_provider_request_failed(
+                    &request,
+                    &profile,
+                    operation_id,
+                    round,
+                    0,
+                    failover_attempts,
+                    0,
+                    "credentials",
+                    false,
+                    false,
+                    false,
+                    &error,
+                );
                 last_error = error;
                 continue;
             }
         };
-        let mut attempt = request.clone();
-        attempt.profile = profile.clone();
-        let started = Instant::now();
-        match agent::run_turn(client, attempt, &api_key).await {
-            Ok(mut result) => {
-                let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                database.record_provider_success(&profile.id, latency_ms, index > 0)?;
-                result.provider_id = Some(profile.id.clone());
-                result.failover_count = failover_attempts;
-                record_provider_request(
-                    database,
-                    &request,
-                    &profile,
-                    started_at,
-                    latency_ms,
-                    "success",
-                    Some(&result),
-                    failover_attempts,
-                    None,
-                )?;
-                return Ok(result);
-            }
-            Err(error) => {
-                let error = agent::annotate_tool_compatibility_error(error, &request);
-                let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                let status = if error.contains("REQUEST_CANCELLED") {
-                    "cancelled"
-                } else {
-                    "error"
-                };
-                record_provider_request(
-                    database,
-                    &request,
-                    &profile,
-                    started_at,
-                    latency_ms,
-                    status,
-                    None,
-                    failover_attempts,
-                    Some(&error),
-                )?;
-                if agent::is_retryable_provider_error(&error) {
-                    database.record_provider_failure(&profile.id, &error)?;
-                    last_error = error;
-                    continue;
+        for retry_number in 0..=PROVIDER_RECONNECT_RETRIES {
+            let mut attempt = request.clone();
+            attempt.profile = profile.clone();
+            let retry_started_at = now_millis();
+            let started = Instant::now();
+            log_provider_request_started(
+                &request,
+                &profile,
+                operation_id,
+                round,
+                retry_number + 1,
+                failover_attempts,
+                false,
+            );
+            match agent::run_turn(client, attempt, &api_key).await {
+                Ok(mut result) => {
+                    let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                    database.record_provider_success(&profile.id, latency_ms, index > 0)?;
+                    result.provider_id = Some(profile.id.clone());
+                    result.failover_count = failover_attempts;
+                    record_provider_request(
+                        database,
+                        &request,
+                        &profile,
+                        retry_started_at,
+                        latency_ms,
+                        "success",
+                        Some(&result),
+                        failover_attempts,
+                        None,
+                    )?;
+                    log_provider_response_completed(
+                        &request,
+                        &profile,
+                        &result,
+                        operation_id,
+                        round,
+                        retry_number + 1,
+                        failover_attempts,
+                        latency_ms,
+                        false,
+                    );
+                    if reconnecting {
+                        on_connection_event(
+                            &profile,
+                            last_reconnect_attempt,
+                            PROVIDER_RECONNECT_RETRIES,
+                            None,
+                        );
+                    }
+                    return Ok(result);
                 }
-                return Err(error);
+                Err(error) => {
+                    let error = agent::annotate_tool_compatibility_error(error, &request);
+                    let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                    let reconnectable = agent::is_reconnectable_provider_error(&error);
+                    let will_retry = reconnectable && retry_number < PROVIDER_RECONNECT_RETRIES;
+                    let status = if will_retry {
+                        "retrying"
+                    } else if error.contains("REQUEST_CANCELLED") {
+                        "cancelled"
+                    } else {
+                        "error"
+                    };
+                    record_provider_request(
+                        database,
+                        &request,
+                        &profile,
+                        retry_started_at,
+                        latency_ms,
+                        status,
+                        None,
+                        failover_attempts,
+                        Some(&error),
+                    )?;
+                    log_provider_request_failed(
+                        &request,
+                        &profile,
+                        operation_id,
+                        round,
+                        retry_number + 1,
+                        failover_attempts,
+                        latency_ms,
+                        "request",
+                        will_retry,
+                        false,
+                        false,
+                        &error,
+                    );
+                    if will_retry {
+                        reconnecting = true;
+                        last_reconnect_attempt = retry_number + 1;
+                        on_connection_event(
+                            &profile,
+                            retry_number + 1,
+                            PROVIDER_RECONNECT_RETRIES,
+                            Some(&error),
+                        );
+                        log_provider_retry_scheduled(
+                            &request,
+                            &profile,
+                            operation_id,
+                            round,
+                            retry_number + 1,
+                            false,
+                        );
+                        tokio::time::sleep(provider_reconnect_delay(retry_number + 1)).await;
+                        continue;
+                    }
+                    if agent::is_retryable_provider_error(&error) {
+                        database.record_provider_failure(&profile.id, &error)?;
+                        last_error = error;
+                        continue 'providers;
+                    }
+                    return Err(error);
+                }
             }
         }
     }
@@ -1770,31 +2059,137 @@ async fn agent_turn(
     manager: tauri::State<'_, mcp::McpManager>,
     mut request: AgentTurnRequest,
 ) -> Result<AgentTurnResponse, String> {
-    attach_default_workspace(&app, &mut request)?;
-    attach_images(&app, &mut request)?;
-    attach_custom_instructions(&database, &mut request)?;
-    attach_goal(&database, &mut request)?;
-    attach_subagent_tools(&mut request);
-    attach_media_tools(&mut request);
-    attach_skills(&app, &database, &mut request)?;
-    attach_mcp_tools(&database, &manager, &mut request).await?;
-    let goal_thread = (request.mode == "goal")
-        .then(|| request.thread_id.clone())
-        .flatten();
-    let response =
-        run_agent_turn_with_failover(&state.client, &database, request, load_api_key).await?;
-    if let Some(thread_id) = goal_thread {
-        database.record_goal_usage(
-            &thread_id,
-            response.input_tokens.unwrap_or(0),
-            response.output_tokens.unwrap_or(0),
-        )?;
+    let started = Instant::now();
+    let thread_id = request.thread_id.clone();
+    let mode = request.mode.clone();
+    let provider_id = request.profile.id.clone();
+    logging::write(
+        "info",
+        "agent",
+        "turn_started",
+        serde_json::json!({
+            "threadId": thread_id,
+            "mode": mode,
+            "providerId": provider_id,
+            "messageCount": request.messages.len(),
+            "streaming": false,
+        }),
+    );
+    let result = async {
+        attach_default_workspace(&app, &mut request)?;
+        attach_images(&app, &mut request)?;
+        attach_custom_instructions(&database, &mut request)?;
+        attach_goal(&database, &mut request)?;
+        attach_subagent_tools(&mut request);
+        attach_media_tools(&mut request);
+        attach_skills(&app, &database, &mut request)?;
+        attach_mcp_tools(&database, &manager, &mut request).await?;
+        let goal_thread = (request.mode == "goal")
+            .then(|| request.thread_id.clone())
+            .flatten();
+        let response =
+            run_agent_turn_with_failover(&state.client, &database, request, load_api_key).await?;
+        if let Some(thread_id) = goal_thread {
+            database.record_goal_usage(
+                &thread_id,
+                response.input_tokens.unwrap_or(0),
+                response.output_tokens.unwrap_or(0),
+            )?;
+        }
+        Ok(response)
     }
-    Ok(response)
+    .await;
+    log_agent_turn_result("turn_completed", None, started, &result);
+    result
+}
+
+fn log_agent_turn_result(
+    event: &str,
+    operation_id: Option<&str>,
+    started: Instant,
+    result: &Result<AgentTurnResponse, String>,
+) {
+    match result {
+        Ok(response) => logging::write(
+            "info",
+            "agent",
+            event,
+            serde_json::json!({
+                "operationId": operation_id,
+                "latencyMs": started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                "providerId": response.provider_id,
+                "inputTokens": response.input_tokens,
+                "outputTokens": response.output_tokens,
+                "toolCallCount": response.tool_calls.len(),
+                "failoverCount": response.failover_count,
+            }),
+        ),
+        Err(error) => logging::write(
+            if error.contains("REQUEST_CANCELLED") {
+                "info"
+            } else {
+                "error"
+            },
+            "agent",
+            if error.contains("REQUEST_CANCELLED") {
+                "turn_cancelled"
+            } else {
+                "turn_failed"
+            },
+            serde_json::json!({
+                "operationId": operation_id,
+                "latencyMs": started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                "error": logging::safe_error(error),
+            }),
+        ),
+    }
 }
 
 #[tauri::command]
 async fn agent_turn_stream(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    database: tauri::State<'_, database::Database>,
+    manager: tauri::State<'_, mcp::McpManager>,
+    request: AgentTurnRequest,
+    operation_id: String,
+    on_event: Channel<AgentStreamEvent>,
+) -> Result<AgentTurnResponse, String> {
+    let command_started = Instant::now();
+    let logged_operation_id = operation_id.clone();
+    logging::write(
+        "info",
+        "agent",
+        "turn_started",
+        serde_json::json!({
+            "operationId": operation_id,
+            "threadId": request.thread_id,
+            "mode": request.mode,
+            "providerId": request.profile.id,
+            "messageCount": request.messages.len(),
+            "streaming": true,
+        }),
+    );
+    let result = agent_turn_stream_inner(
+        app,
+        state,
+        database,
+        manager,
+        request,
+        operation_id,
+        on_event,
+    )
+    .await;
+    log_agent_turn_result(
+        "turn_completed",
+        Some(&logged_operation_id),
+        command_started,
+        &result,
+    );
+    result
+}
+
+async fn agent_turn_stream_inner(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     database: tauri::State<'_, database::Database>,
@@ -1830,8 +2225,22 @@ async fn agent_turn_stream(
     let mut last_error = "No provider is available".to_owned();
     let mut result = None;
     let mut failover_attempts = 0_u32;
-    for (index, profile) in candidates.into_iter().enumerate() {
+    let mut reconnecting = false;
+    let mut last_reconnect_attempt = 0_u32;
+    'providers: for (index, profile) in candidates.into_iter().enumerate() {
         if index > 0 && provider_is_cooling_down(&database, &profile.id)? {
+            logging::write(
+                "info",
+                "provider",
+                "provider_candidate_skipped",
+                serde_json::json!({
+                    "operationId": &operation_id,
+                    "threadId": request.thread_id.as_deref(),
+                    "profileId": &profile.id,
+                    "reason": "cooldown",
+                    "streaming": true,
+                }),
+            );
             continue;
         }
         if index > 0 {
@@ -1852,81 +2261,187 @@ async fn agent_turn_stream(
                     failover_attempts,
                     Some(&error),
                 )?;
+                log_provider_request_failed(
+                    &request,
+                    &profile,
+                    Some(&operation_id),
+                    None,
+                    0,
+                    failover_attempts,
+                    0,
+                    "credentials",
+                    false,
+                    false,
+                    true,
+                    &error,
+                );
                 last_error = error;
                 continue;
             }
         };
-        let mut attempt = request.clone();
-        attempt.profile = profile.clone();
-        let emitted = Arc::new(AtomicBool::new(false));
-        let output_started = emitted.clone();
-        let event_channel = on_event.clone();
-        let started = Instant::now();
-        match agent::run_turn_stream(
-            &state.client,
-            attempt,
-            &api_key,
-            cancellation.clone(),
-            move |event| {
-                if event
-                    .delta
-                    .as_deref()
-                    .is_some_and(|delta| !delta.is_empty())
-                {
-                    output_started.store(true, Ordering::Release);
+        for retry_number in 0..=PROVIDER_RECONNECT_RETRIES {
+            let mut attempt = request.clone();
+            attempt.profile = profile.clone();
+            let emitted = Arc::new(AtomicBool::new(false));
+            let output_started = emitted.clone();
+            let event_channel = on_event.clone();
+            let retry_started_at = now_millis();
+            let started = Instant::now();
+            let first_token_operation_id = operation_id.clone();
+            let first_token_thread_id = request.thread_id.clone();
+            let first_token_profile_id = profile.id.clone();
+            let first_token_model = profile.model.clone();
+            let first_token_started = started;
+            log_provider_request_started(
+                &request,
+                &profile,
+                Some(&operation_id),
+                None,
+                retry_number + 1,
+                failover_attempts,
+                true,
+            );
+            match agent::run_turn_stream(
+                &state.client,
+                attempt,
+                &api_key,
+                cancellation.clone(),
+                move |event| {
+                    if event
+                        .delta
+                        .as_deref()
+                        .is_some_and(|delta| !delta.is_empty())
+                        && !output_started.swap(true, Ordering::AcqRel)
+                    {
+                        logging::write(
+                            "info",
+                            "provider",
+                            "provider_first_token",
+                            serde_json::json!({
+                                "operationId": &first_token_operation_id,
+                                "threadId": first_token_thread_id.as_deref(),
+                                "profileId": &first_token_profile_id,
+                                "model": &first_token_model,
+                                "attemptNumber": retry_number + 1,
+                                "firstTokenMs": first_token_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                            }),
+                        );
+                    }
+                    let _ = event_channel.send(event);
+                },
+            )
+            .await
+            {
+                Ok(mut response) => {
+                    let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                    database.record_provider_success(&profile.id, latency_ms, index > 0)?;
+                    response.provider_id = Some(profile.id.clone());
+                    response.failover_count = failover_attempts;
+                    record_provider_request(
+                        &database,
+                        &request,
+                        &profile,
+                        retry_started_at,
+                        latency_ms,
+                        "success",
+                        Some(&response),
+                        failover_attempts,
+                        None,
+                    )?;
+                    log_provider_response_completed(
+                        &request,
+                        &profile,
+                        &response,
+                        Some(&operation_id),
+                        None,
+                        retry_number + 1,
+                        failover_attempts,
+                        latency_ms,
+                        true,
+                    );
+                    if reconnecting {
+                        let _ = on_event.send(AgentStreamEvent::provider_reconnected(
+                            last_reconnect_attempt,
+                            PROVIDER_RECONNECT_RETRIES,
+                        ));
+                    }
+                    result = Some(Ok(response));
+                    break 'providers;
                 }
-                let _ = event_channel.send(event);
-            },
-        )
-        .await
-        {
-            Ok(mut response) => {
-                let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                database.record_provider_success(&profile.id, latency_ms, index > 0)?;
-                response.provider_id = Some(profile.id.clone());
-                response.failover_count = failover_attempts;
-                record_provider_request(
-                    &database,
-                    &request,
-                    &profile,
-                    started_at,
-                    latency_ms,
-                    "success",
-                    Some(&response),
-                    failover_attempts,
-                    None,
-                )?;
-                result = Some(Ok(response));
-                break;
-            }
-            Err(error) => {
-                let error = agent::annotate_tool_compatibility_error(error, &request);
-                let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-                let status = if error.contains("REQUEST_CANCELLED") {
-                    "cancelled"
-                } else {
-                    "error"
-                };
-                record_provider_request(
-                    &database,
-                    &request,
-                    &profile,
-                    started_at,
-                    latency_ms,
-                    status,
-                    None,
-                    failover_attempts,
-                    Some(&error),
-                )?;
-                let retryable = agent::is_retryable_provider_error(&error);
-                if retryable {
-                    database.record_provider_failure(&profile.id, &error)?;
+                Err(error) => {
+                    let error = agent::annotate_tool_compatibility_error(error, &request);
+                    let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                    let output_was_emitted = emitted.load(Ordering::Acquire);
+                    let retryable = agent::is_retryable_provider_error(&error);
+                    let reconnectable = agent::is_reconnectable_provider_error(&error);
+                    let will_retry = reconnectable
+                        && !output_was_emitted
+                        && retry_number < PROVIDER_RECONNECT_RETRIES;
+                    let status = if will_retry {
+                        "retrying"
+                    } else if error.contains("REQUEST_CANCELLED") {
+                        "cancelled"
+                    } else {
+                        "error"
+                    };
+                    record_provider_request(
+                        &database,
+                        &request,
+                        &profile,
+                        retry_started_at,
+                        latency_ms,
+                        status,
+                        None,
+                        failover_attempts,
+                        Some(&error),
+                    )?;
+                    log_provider_request_failed(
+                        &request,
+                        &profile,
+                        Some(&operation_id),
+                        None,
+                        retry_number + 1,
+                        failover_attempts,
+                        latency_ms,
+                        "stream",
+                        will_retry,
+                        output_was_emitted,
+                        true,
+                        &error,
+                    );
+                    if will_retry {
+                        reconnecting = true;
+                        last_reconnect_attempt = retry_number + 1;
+                        let _ = on_event.send(AgentStreamEvent::provider_reconnecting(
+                            retry_number + 1,
+                            PROVIDER_RECONNECT_RETRIES,
+                        ));
+                        log_provider_retry_scheduled(
+                            &request,
+                            &profile,
+                            Some(&operation_id),
+                            None,
+                            retry_number + 1,
+                            true,
+                        );
+                        if let Err(cancelled) =
+                            wait_for_provider_reconnect(retry_number + 1, &cancellation).await
+                        {
+                            result = Some(Err(cancelled));
+                            break 'providers;
+                        }
+                        continue;
+                    }
+                    if retryable {
+                        database.record_provider_failure(&profile.id, &error)?;
+                    }
+                    if output_was_emitted || !retryable {
+                        result = Some(Err(error));
+                        break 'providers;
+                    }
+                    last_error = error;
+                    continue 'providers;
                 }
-                if emitted.load(Ordering::Acquire) || !retryable {
-                    result = Some(Err(error));
-                    break;
-                }
-                last_error = error;
             }
         }
     }
@@ -1947,6 +2462,64 @@ async fn agent_turn_stream(
 
 #[tauri::command]
 async fn harness_run(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    database: tauri::State<'_, database::Database>,
+    manager: tauri::State<'_, mcp::McpManager>,
+    subagents: tauri::State<'_, subagent::SubagentManager>,
+    request: crate::harness::types::HarnessRunRequest,
+    on_event: Channel<crate::harness::types::HarnessRuntimeEvent>,
+) -> Result<(), String> {
+    let operation_id = request.operation_id.clone();
+    let thread_id = request.thread_id.clone();
+    let started = Instant::now();
+    logging::write(
+        "info",
+        "harness",
+        "operation_started",
+        serde_json::json!({
+            "operationId": operation_id,
+            "threadId": thread_id,
+            "messageCount": request.messages.len(),
+        }),
+    );
+    let result =
+        harness_run_inner(app, state, database, manager, subagents, request, on_event).await;
+    match &result {
+        Ok(()) => logging::write(
+            "info",
+            "harness",
+            "operation_completed",
+            serde_json::json!({
+                "operationId": operation_id,
+                "threadId": thread_id,
+                "latencyMs": started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+            }),
+        ),
+        Err(error) => logging::write(
+            if error.contains("REQUEST_CANCELLED") {
+                "info"
+            } else {
+                "error"
+            },
+            "harness",
+            if error.contains("REQUEST_CANCELLED") {
+                "operation_cancelled"
+            } else {
+                "operation_failed"
+            },
+            serde_json::json!({
+                "operationId": operation_id,
+                "threadId": thread_id,
+                "latencyMs": started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                "error": logging::safe_error(error),
+            }),
+        ),
+    }
+    result
+}
+
+async fn harness_run_inner(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     database: tauri::State<'_, database::Database>,
@@ -2012,6 +2585,7 @@ async fn harness_run_loop(
             return Err("Harness tool loop exceeded 64 rounds".to_owned());
         }
         round += 1;
+        let round_started = Instant::now();
         if cancellation.is_cancelled() {
             database.update_harness_operation_state(
                 &operation_id,
@@ -2019,6 +2593,17 @@ async fn harness_run_loop(
             )?;
             return Err("REQUEST_CANCELLED".to_owned());
         }
+        logging::write(
+            "info",
+            "harness",
+            "round_started",
+            serde_json::json!({
+                "operationId": &operation_id,
+                "threadId": &request.thread_id,
+                "round": round,
+                "historyMessageCount": history.len(),
+            }),
+        );
         database.update_harness_operation_state(
             &operation_id,
             &crate::harness::types::RuntimeState::Running,
@@ -2149,8 +2734,45 @@ async fn harness_run_loop(
             .lock()
             .map_err(|_| "Could not lock harness turn state".to_owned())?
             .insert(operation_id.clone(), turn_cancellation.clone());
-        let provider_future =
-            run_agent_turn_with_failover(&state.client, database, turn_request, load_api_key);
+        let provider_future = run_agent_turn_with_failover_events(
+            &state.client,
+            database,
+            turn_request,
+            Some(&operation_id),
+            Some(round),
+            load_api_key,
+            |profile, retry_attempt, max_retry_attempts, error| {
+                let (kind, payload) = if let Some(error) = error {
+                    (
+                        "provider_reconnecting",
+                        serde_json::json!({
+                            "profileId": profile.id,
+                            "model": profile.model,
+                            "retryAttempt": retry_attempt,
+                            "maxRetryAttempts": max_retry_attempts,
+                            "error": error,
+                        }),
+                    )
+                } else {
+                    (
+                        "provider_reconnected",
+                        serde_json::json!({
+                            "profileId": profile.id,
+                            "model": profile.model,
+                            "retryAttempts": retry_attempt,
+                        }),
+                    )
+                };
+                if let Ok(sequence) = database.append_harness_event(&operation_id, kind, &payload) {
+                    let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+                        &operation_id,
+                        sequence,
+                        kind,
+                        payload,
+                    ));
+                }
+            },
+        );
         let response = tokio::select! {
             result = provider_future => result,
             _ = cancellation.cancelled() => Err("REQUEST_CANCELLED".to_owned()),
@@ -2161,6 +2783,21 @@ async fn harness_run_loop(
         }
         match response {
             Ok(response) => {
+                logging::write(
+                    "info",
+                    "harness",
+                    "round_provider_completed",
+                    serde_json::json!({
+                        "operationId": &operation_id,
+                        "threadId": &request.thread_id,
+                        "round": round,
+                        "providerId": response.provider_id.as_deref(),
+                        "inputTokens": response.input_tokens,
+                        "outputTokens": response.output_tokens,
+                        "toolCallCount": response.tool_calls.len(),
+                        "elapsedMs": round_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                    }),
+                );
                 database.finish_harness_provider_attempt(&attempt_id, Some(&response), None)?;
                 let response_payload = serde_json::to_value(&response)
                     .map_err(|error| format!("Could not encode provider response: {error}"))?;
@@ -2184,6 +2821,18 @@ async fn harness_run_loop(
                     attachments: Vec::new(),
                 });
                 if response.tool_calls.is_empty() {
+                    logging::write(
+                        "info",
+                        "harness",
+                        "round_completed",
+                        serde_json::json!({
+                            "operationId": &operation_id,
+                            "threadId": &request.thread_id,
+                            "round": round,
+                            "outcome": "operation_completed",
+                            "latencyMs": round_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                        }),
+                    );
                     database.update_harness_operation_state(
                         &operation_id,
                         &crate::harness::types::RuntimeState::Completed,
@@ -2219,6 +2868,18 @@ async fn harness_run_loop(
                         &policy_call,
                     );
                     if matches!(decision, crate::harness::types::PolicyDecision::Deny) {
+                        logging::write(
+                            "warn",
+                            "agent_tool",
+                            "tool_call_denied",
+                            serde_json::json!({
+                                "operationId": &operation_id,
+                                "threadId": &request.thread_id,
+                                "round": round,
+                                "callId": &call.id,
+                                "toolName": &call.name,
+                            }),
+                        );
                         let payload = serde_json::json!({ "call": call, "decision": "deny" });
                         let sequence = database.append_harness_event(
                             &operation_id,
@@ -2255,6 +2916,19 @@ async fn harness_run_loop(
                                 &risk,
                                 &call.arguments,
                             )?;
+                        logging::write(
+                            "info",
+                            "agent_tool",
+                            "tool_approval_required",
+                            serde_json::json!({
+                                "operationId": &operation_id,
+                                "threadId": &request.thread_id,
+                                "round": round,
+                                "callId": &call.id,
+                                "toolName": &call.name,
+                                "risk": &risk,
+                            }),
+                        );
                         database.update_harness_operation_state(
                             &operation_id,
                             &crate::harness::types::RuntimeState::AwaitingApproval,
@@ -2307,9 +2981,20 @@ async fn harness_run_loop(
                         approval_granted: false,
                     };
                     let tool_name = tool_request.name.clone();
+                    let tool_started = Instant::now();
+                    log_tool_started(&tool_name, Some(&operation_id), Some(&call.id), Some(round));
                     let tool_result =
                         execute_tool_inner(app, state, database, manager, subagents, tool_request)
-                            .await?;
+                            .await;
+                    log_tool_result(
+                        &tool_name,
+                        Some(&operation_id),
+                        Some(&call.id),
+                        Some(round),
+                        tool_started,
+                        &tool_result,
+                    );
+                    let tool_result = tool_result?;
                     let result_payload = serde_json::json!({
                         "callId": call.id,
                         "toolName": tool_name,
@@ -2340,12 +3025,36 @@ async fn harness_run_loop(
                         attachments: Vec::new(),
                     });
                 }
+                logging::write(
+                    "info",
+                    "harness",
+                    "round_completed",
+                    serde_json::json!({
+                        "operationId": &operation_id,
+                        "threadId": &request.thread_id,
+                        "round": round,
+                        "outcome": "tools_completed",
+                        "latencyMs": round_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                    }),
+                );
             }
             Err(error) => {
                 let steered = error == "REQUEST_STEER";
                 let cancelled = error.contains("REQUEST_CANCELLED");
                 database.finish_harness_provider_attempt(&attempt_id, None, Some(&error))?;
                 if steered {
+                    logging::write(
+                        "info",
+                        "harness",
+                        "round_interrupted",
+                        serde_json::json!({
+                            "operationId": &operation_id,
+                            "threadId": &request.thread_id,
+                            "round": round,
+                            "reason": "user_steer",
+                            "latencyMs": round_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                        }),
+                    );
                     let payload = serde_json::json!({ "reason": "user_steer" });
                     let sequence = database.append_harness_event(
                         &operation_id,
@@ -2360,6 +3069,18 @@ async fn harness_run_loop(
                     ));
                     continue;
                 }
+                logging::write(
+                    if cancelled { "info" } else { "error" },
+                    "harness",
+                    "round_failed",
+                    serde_json::json!({
+                        "operationId": &operation_id,
+                        "threadId": &request.thread_id,
+                        "round": round,
+                        "latencyMs": round_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                        "error": logging::safe_error(&error),
+                    }),
+                );
                 database.update_harness_operation_state(
                     &operation_id,
                     if cancelled {
@@ -3263,7 +3984,78 @@ async fn execute_tool(
     subagents: tauri::State<'_, subagent::SubagentManager>,
     request: ToolExecutionRequest,
 ) -> Result<ToolExecutionResponse, String> {
-    execute_tool_inner(&app, &state, &database, &manager, &subagents, request).await
+    let name = request.name.clone();
+    let operation_id = request.operation_id.clone();
+    let call_id = request.call_id.clone();
+    let started = Instant::now();
+    log_tool_started(&name, operation_id.as_deref(), call_id.as_deref(), None);
+    let result = execute_tool_inner(&app, &state, &database, &manager, &subagents, request).await;
+    log_tool_result(
+        &name,
+        operation_id.as_deref(),
+        call_id.as_deref(),
+        None,
+        started,
+        &result,
+    );
+    result
+}
+
+fn log_tool_started(
+    name: &str,
+    operation_id: Option<&str>,
+    call_id: Option<&str>,
+    round: Option<usize>,
+) {
+    logging::write(
+        "info",
+        "agent_tool",
+        "tool_execution_started",
+        serde_json::json!({
+            "operationId": operation_id,
+            "callId": call_id,
+            "round": round,
+            "toolName": name,
+        }),
+    );
+}
+
+fn log_tool_result(
+    name: &str,
+    operation_id: Option<&str>,
+    call_id: Option<&str>,
+    round: Option<usize>,
+    started: Instant,
+    result: &Result<ToolExecutionResponse, String>,
+) {
+    match result {
+        Ok(response) => logging::write(
+            if response.is_error { "warn" } else { "info" },
+            "agent_tool",
+            "tool_execution_completed",
+            serde_json::json!({
+                "operationId": operation_id,
+                "callId": call_id,
+                "round": round,
+                "toolName": name,
+                "latencyMs": started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                "isError": response.is_error,
+            }),
+        ),
+        Err(error) => logging::write(
+            "error",
+            "agent_tool",
+            "tool_execution_failed",
+            serde_json::json!({
+                "operationId": operation_id,
+                "callId": call_id,
+                "round": round,
+                "toolName": name,
+                "latencyMs": started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                "error": logging::safe_error(error),
+            }),
+        ),
+    }
 }
 
 async fn execute_tool_inner(
@@ -3948,6 +4740,32 @@ fn rollback_external_prompt_write(
     config_writeback::prompt_rollback(&home, target, &backup_id)
 }
 
+#[tauri::command]
+fn frontend_log(entry: FrontendLogEntry) {
+    let level = match entry.level.as_str() {
+        "error" => "error",
+        "warn" => "warn",
+        _ => "info",
+    };
+    logging::write(
+        level,
+        "react",
+        &logging::truncate_chars(&entry.event, 80),
+        serde_json::json!({
+            "message": entry.message.map(|value| logging::safe_error(&value)),
+            "stack": entry.stack.map(|value| logging::safe_error(&logging::truncate_chars(&value, 16_000))),
+            "componentStack": entry.component_stack.map(|value| logging::truncate_chars(&value, 16_000)),
+            "route": entry.route.map(|value| logging::truncate_chars(&value, 500)),
+            "visibility": entry.visibility.map(|value| logging::truncate_chars(&value, 20)),
+        }),
+    );
+}
+
+#[tauri::command]
+fn get_app_log_info() -> Result<logging::AppLogInfo, String> {
+    logging::info().ok_or_else(|| "The application logger is not available".to_owned())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
@@ -3967,14 +4785,35 @@ pub fn run() {
         .manage(mcp::McpManager::default())
         .manage(subagent::SubagentManager::default())
         .on_window_event(|window, event| {
-            if window.label() == "main"
-                && matches!(event, tauri::WindowEvent::CloseRequested { .. })
-                && let Some(pet_window) = window.app_handle().get_webview_window("pet")
-            {
-                let _ = pet_window.close();
+            if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                logging::write(
+                    "info",
+                    "app",
+                    "window_close_requested",
+                    serde_json::json!({ "windowLabel": window.label() }),
+                );
+                if window.label() == "main"
+                    && let Some(pet_window) = window.app_handle().get_webview_window("pet")
+                {
+                    let _ = pet_window.close();
+                }
             }
         })
         .setup(|app| {
+            let app_data = app.path().app_data_dir()?;
+            let log_info = logging::init(&app_data)
+                .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+            logging::install_panic_hook();
+            logging::write(
+                "info",
+                "app",
+                "startup_started",
+                serde_json::json!({
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "debug": cfg!(debug_assertions),
+                    "logFile": log_info.current_file,
+                }),
+            );
             ensure_default_workspace(app.handle())
                 .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
             if let Some(source) = bundled_theme_source(app.handle())
@@ -3985,7 +4824,6 @@ pub fn run() {
                 theme::sync_bundled(&storage, &source)
                     .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
             }
-            let app_data = app.path().app_data_dir()?;
             let media_directory = app_data.join("media");
             std::fs::create_dir_all(&media_directory)?;
             filesystem::restrict_directory(&media_directory)
@@ -3995,9 +4833,20 @@ pub fn run() {
             let database_path = app_data.join("levelup-agent.sqlite3");
             let database = database::Database::open(&database_path)
                 .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
-            database
+            let recovery_summary = database
                 .recover_harness_operations()
                 .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+            logging::write(
+                "info",
+                "harness",
+                "startup_recovery_completed",
+                serde_json::json!({
+                    "interruptedOperations": recovery_summary.interrupted_operations,
+                    "unknownToolExecutions": recovery_summary.unknown_tool_executions,
+                    "failedProviderAttempts": recovery_summary.failed_provider_attempts,
+                    "cancelledQueueItems": recovery_summary.cancelled_queue_items,
+                }),
+            );
             let home = app.path().home_dir()?;
             let built_in_skills = built_in_skill_root(app.handle());
             let pet_manager =
@@ -4016,6 +4865,12 @@ pub fn run() {
             app.manage(pet::PetRuntime::default());
             pet::create_window(app.handle(), pet_visible)
                 .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+            logging::write(
+                "info",
+                "app",
+                "startup_completed",
+                serde_json::json!({ "petWindowVisible": pet_visible }),
+            );
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())
@@ -4036,8 +4891,10 @@ pub fn run() {
     } else {
         builder
     };
-    builder
+    let app = builder
         .invoke_handler(tauri::generate_handler![
+            frontend_log,
+            get_app_log_info,
             save_api_key,
             has_api_key,
             delete_api_key,
@@ -4136,8 +4993,40 @@ pub fn run() {
             update_pet_activities,
             open_pet_chat
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .unwrap_or_else(|error| {
+            logging::write(
+                "error",
+                "app",
+                "runtime_build_failed",
+                serde_json::json!({ "error": logging::safe_error(&error.to_string()) }),
+            );
+            panic!("error while running tauri application: {error}");
+        });
+    let exit_code = app.run_return(|_, event| match event {
+        tauri::RunEvent::Ready => {
+            logging::write("info", "app", "event_loop_ready", serde_json::json!({}))
+        }
+        tauri::RunEvent::ExitRequested { code, .. } => logging::write(
+            "info",
+            "app",
+            "process_exit_requested",
+            serde_json::json!({ "requestedExitCode": code }),
+        ),
+        tauri::RunEvent::Exit => {
+            logging::write("info", "app", "event_loop_exiting", serde_json::json!({}))
+        }
+        _ => {}
+    });
+    logging::write(
+        "info",
+        "app",
+        "process_exited_normally",
+        serde_json::json!({ "exitCode": exit_code }),
+    );
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
 }
 
 #[cfg(test)]
@@ -4545,6 +5434,115 @@ mod tests {
         format!("http://{address}")
     }
 
+    fn mock_responses_status_sequence_server(
+        responses: Vec<(&'static str, &'static str)>,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = vec![0_u8; 32 * 1024];
+                let size = stream.read(&mut request).unwrap();
+                assert!(
+                    String::from_utf8_lossy(&request[..size]).starts_with("POST /v1/responses ")
+                );
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn transient_provider_failures_reconnect_five_times_before_succeeding() {
+        let root = std::env::temp_dir().join(format!(
+            "levelup-provider-reconnect-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let database = database::Database::open(&root.join("test.sqlite3")).unwrap();
+        let mut primary = profile("primary", 10, false);
+        primary.base_url = mock_responses_status_sequence_server(vec![
+            ("502 Bad Gateway", r#"{"error":{"message":"temporary"}}"#),
+            ("502 Bad Gateway", r#"{"error":{"message":"temporary"}}"#),
+            ("502 Bad Gateway", r#"{"error":{"message":"temporary"}}"#),
+            ("502 Bad Gateway", r#"{"error":{"message":"temporary"}}"#),
+            ("502 Bad Gateway", r#"{"error":{"message":"temporary"}}"#),
+            (
+                "200 OK",
+                r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"reconnected"}]}]}"#,
+            ),
+        ]);
+        let request = AgentTurnRequest {
+            profile: primary,
+            messages: vec![models::AgentMessage {
+                role: "user".to_owned(),
+                content: "test".to_owned(),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                internal: false,
+                attachments: Vec::new(),
+            }],
+            mode: "chat".to_owned(),
+            workspace: None,
+            thread_id: Some("thread-reconnect".to_owned()),
+            hatch: false,
+            hatch_skill_loaded: false,
+            available_tools: Vec::new(),
+            available_skills: Vec::new(),
+            goal: None,
+            fallback_profiles: Vec::new(),
+            custom_instructions: None,
+        };
+
+        let mut connection_events = Vec::new();
+        let result = run_agent_turn_with_failover_events(
+            &Client::new(),
+            &database,
+            request,
+            None,
+            None,
+            |_| Ok("test-key".to_owned()),
+            |_, retry_attempt, max_retry_attempts, error| {
+                connection_events.push((retry_attempt, max_retry_attempts, error.is_some()));
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.content, "reconnected");
+        assert_eq!(
+            connection_events,
+            vec![
+                (1, 5, true),
+                (2, 5, true),
+                (3, 5, true),
+                (4, 5, true),
+                (5, 5, true),
+                (5, 5, false),
+            ]
+        );
+        let logs = database.list_provider_requests(10).unwrap();
+        assert_eq!(logs.len(), 6);
+        assert_eq!(
+            logs.iter().filter(|item| item.status == "retrying").count(),
+            5
+        );
+        assert_eq!(
+            database
+                .get_provider_health("primary")
+                .unwrap()
+                .consecutive_failures,
+            0
+        );
+        drop(database);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[tokio::test]
     async fn real_http_failure_fails_over_and_records_both_attempts() {
         let root = std::env::temp_dir().join(format!("levelup-failover-{}", uuid::Uuid::new_v4()));
@@ -4595,7 +5593,7 @@ mod tests {
             1
         );
         let logs = database.list_provider_requests(10).unwrap();
-        assert_eq!(logs.len(), 2);
+        assert_eq!(logs.len(), 7);
         assert!(
             logs.iter()
                 .any(|item| item.profile_id == "primary" && item.status == "error")

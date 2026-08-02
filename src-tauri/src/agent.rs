@@ -231,10 +231,21 @@ pub fn is_retryable_provider_error(error: &str) -> bool {
         || error.contains("Invalid provider response")
         || error.contains("Base URL is invalid")
         || [
-            "401 ", "403 ", "404 ", "408 ", "409 ", "429 ", "500 ", "502 ", "503 ", "504 ",
+            "401 ", "403 ", "404 ", "408 ", "409 ", "429 ", "500 ", "502 ", "503 ", "504 ", "524 ",
         ]
         .iter()
         .any(|status| error.contains(status))
+}
+
+pub fn is_reconnectable_provider_error(error: &str) -> bool {
+    if error.contains("REQUEST_CANCELLED") {
+        return false;
+    }
+    error.contains("Connection failed")
+        || error.to_ascii_lowercase().contains("timed out")
+        || ["408 ", "429 ", "500 ", "502 ", "503 ", "504 ", "524 "]
+            .iter()
+            .any(|status| error.contains(status))
 }
 
 pub fn annotate_tool_compatibility_error(error: String, request: &AgentTurnRequest) -> String {
@@ -2151,6 +2162,7 @@ mod tests {
             "Provider returned 401 Unauthorized",
             "Provider returned 429 Too Many Requests",
             "Provider returned 503 Service Unavailable",
+            "Provider returned 524 <unknown status code>: upstream timeout",
             "Invalid provider response",
             "Base URL is invalid",
         ] {
@@ -2162,6 +2174,32 @@ mod tests {
             "Provider returned 422 Unprocessable Entity",
         ] {
             assert!(!is_retryable_provider_error(error), "{error}");
+        }
+    }
+
+    #[test]
+    fn reconnectable_provider_errors_only_include_transient_failures() {
+        for error in [
+            "Connection failed: refused",
+            "Request timed out",
+            "Provider returned 429 Too Many Requests",
+            "Provider returned 502 Bad Gateway",
+            "Provider returned 503 Service Unavailable",
+            "Provider returned 524 <unknown status code>: upstream timeout",
+        ] {
+            assert!(is_reconnectable_provider_error(error), "{error}");
+        }
+        for error in [
+            "REQUEST_CANCELLED",
+            "Base URL is invalid",
+            "Provider returned 400 Bad Request",
+            "Provider returned 401 Unauthorized",
+            "Provider returned 403 Forbidden",
+            "Provider returned 404 Not Found",
+            "Provider returned 422 Unprocessable Entity",
+            "Invalid provider response",
+        ] {
+            assert!(!is_reconnectable_provider_error(error), "{error}");
         }
     }
 

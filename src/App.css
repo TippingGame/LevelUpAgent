@@ -620,6 +620,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .assistant-message-content { min-width: 0; }
 .assistant-message-segment { min-width: 0; }
 .assistant-message-segment:not(:first-child) { margin-top: 14px; }
+.assistant-status-segment { display: flex; align-items: center; gap: 7px; min-height: 28px; color: var(--muted); font-size: var(--font-small); }
+.assistant-status-segment.reconnected { color: var(--teal); }
+.assistant-status-segment.failed { color: #aa4638; }
+.assistant-status-segment span { min-width: 0; overflow-wrap: anywhere; }
 .message-attachments { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 9px; }
 .message.user .message-attachments { justify-content: flex-end; }
 .message-attachments .attachment-chip { max-width: 300px; height: 38px; padding-inline: 9px; background: rgba(255,255,255,.62); }

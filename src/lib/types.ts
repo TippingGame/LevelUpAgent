@@ -189,6 +189,7 @@ export interface AgentMessage {
   requestId?: string;
   modelName?: string;
   providerBrand?: ModelProviderBrand;
+  status?: "reconnecting" | "reconnected" | "failed";
   durationMs?: number;
   internal?: boolean;
   changeSet?: ConversationChangeSet;
@@ -407,8 +408,10 @@ export interface ConfigWriteResult {
 }
 
 export interface AgentStreamEvent {
-  kind: "content_delta";
+  kind: "content_delta" | "provider_reconnecting" | "provider_reconnected";
   delta?: string;
+  retryAttempt?: number;
+  maxRetryAttempts?: number;
 }
 
 export interface ToolExecutionResponse {

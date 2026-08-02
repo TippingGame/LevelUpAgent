@@ -14,7 +14,15 @@ use crate::models::{
     ProviderSettings, StoredMessage, StoredThread, ToolCall, WritingProjectRecord,
 };
 
-const SCHEMA_VERSION: i64 = 14;
+const SCHEMA_VERSION: i64 = 15;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HarnessRecoverySummary {
+    pub interrupted_operations: usize,
+    pub unknown_tool_executions: usize,
+    pub failed_provider_attempts: usize,
+    pub cancelled_queue_items: usize,
+}
 
 pub struct Database {
     connection: Mutex<Connection>,
@@ -75,6 +83,7 @@ impl Database {
                      model_name TEXT,
                      provider_brand TEXT,
                      change_set_json TEXT,
+                     status TEXT,
                      UNIQUE(thread_id, position)
                  );
 
@@ -302,6 +311,20 @@ impl Database {
                 .execute("ALTER TABLE messages ADD COLUMN change_set_json TEXT", [])
                 .map_err(database_error)?;
         }
+        let has_status = connection
+            .prepare("PRAGMA table_info(messages)")
+            .and_then(|mut statement| {
+                let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+                columns.collect::<Result<Vec<_>, _>>()
+            })
+            .map_err(database_error)?
+            .iter()
+            .any(|column| column == "status");
+        if !has_status {
+            connection
+                .execute("ALTER TABLE messages ADD COLUMN status TEXT", [])
+                .map_err(database_error)?;
+        }
         connection
             .execute_batch(
                 "CREATE INDEX IF NOT EXISTS idx_provider_requests_started_at
@@ -369,7 +392,8 @@ impl Database {
                             LIMIT 1
                         )) AS model_name,
                         m.provider_brand,
-                        m.change_set_json
+                        m.change_set_json,
+                        m.status
                  FROM messages AS m
                  WHERE m.thread_id = ?1 ORDER BY m.position ASC",
             )
@@ -400,6 +424,7 @@ impl Database {
                         change_set: row
                             .get::<_, Option<String>>(12)?
                             .and_then(|value| serde_json::from_str(&value).ok()),
+                        status: row.get(13)?,
                     })
                 })
                 .map_err(database_error)?
@@ -451,8 +476,8 @@ impl Database {
             let mut statement = transaction
                 .prepare(
                     "INSERT INTO messages
-                     (id, thread_id, position, role, content, tool_calls_json, tool_call_id, created_at, is_error, request_id, internal, attachments_json, model_name, provider_brand, change_set_json)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                     (id, thread_id, position, role, content, tool_calls_json, tool_call_id, created_at, is_error, request_id, internal, attachments_json, model_name, provider_brand, change_set_json, status)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 )
                 .map_err(database_error)?;
             for (position, message) in thread.messages.iter().enumerate() {
@@ -481,6 +506,7 @@ impl Database {
                             .as_ref()
                             .map(|value| serde_json::to_string(value)
                                 .unwrap_or_else(|_| "null".to_owned())),
+                        message.status,
                     ])
                     .map_err(database_error)?;
             }
@@ -1817,7 +1843,11 @@ impl Database {
                  FROM harness_approvals a
                  JOIN harness_operations o ON o.id = a.operation_id
                  JOIN harness_tool_executions t ON t.id = a.tool_execution_id
-                 WHERE a.decision = 'pending' AND a.consumed_at IS NULL AND a.expires_at > ?1
+                 WHERE a.decision = 'pending'
+                   AND a.consumed_at IS NULL
+                   AND a.expires_at > ?1
+                   AND o.state = 'awaiting_approval'
+                   AND t.status = 'awaiting_approval'
                  ORDER BY a.created_at",
             )
             .map_err(database_error)?;
@@ -1987,19 +2017,41 @@ impl Database {
         Ok(())
     }
 
-    pub fn recover_harness_operations(&self) -> Result<(), String> {
-        let connection = self
+    pub fn recover_harness_operations(&self) -> Result<HarnessRecoverySummary, String> {
+        let mut connection = self
             .connection
             .lock()
             .map_err(|_| "Could not lock conversation database".to_owned())?;
         let now = now_millis();
-        connection
+        let transaction = connection.transaction().map_err(database_error)?;
+        let unknown_tool_executions = transaction
             .execute(
                 "UPDATE harness_tool_executions SET status = 'unknown' WHERE status = 'running'",
                 [],
             )
             .map_err(database_error)?;
-        connection
+        let failed_provider_attempts = transaction
+            .execute(
+                "UPDATE harness_provider_attempts
+                 SET status = 'failed', finished_at = ?1,
+                     error_class = 'Application restarted during provider request'
+                 WHERE status = 'running'",
+                [now],
+            )
+            .map_err(database_error)?;
+        let cancelled_queue_items = transaction
+            .execute(
+                "UPDATE harness_queues
+                 SET status = 'cancelled'
+                 WHERE status = 'pending'
+                   AND operation_id IN (
+                     SELECT id FROM harness_operations
+                     WHERE state IN ('compiling', 'running', 'compacting', 'persisting')
+                   )",
+                [],
+            )
+            .map_err(database_error)?;
+        let interrupted_operations = transaction
             .execute(
                 "UPDATE harness_operations
                  SET state = 'interrupted', updated_at = ?1, ended_at = ?1
@@ -2007,7 +2059,13 @@ impl Database {
                 [now],
             )
             .map_err(database_error)?;
-        Ok(())
+        transaction.commit().map_err(database_error)?;
+        Ok(HarnessRecoverySummary {
+            interrupted_operations,
+            unknown_tool_executions,
+            failed_provider_attempts,
+            cancelled_queue_items,
+        })
     }
 
     pub fn list_harness_recovery_items(&self) -> Result<Vec<HarnessRecoveryItem>, String> {
@@ -2671,6 +2729,7 @@ mod tests {
                 attachments: Vec::new(),
                 model_name: Some("gpt-5.5".to_owned()),
                 provider_brand: Some("openai".to_owned()),
+                status: Some("reconnected".to_owned()),
             }],
             updated_at: 1_700_000_000_000,
             input_tokens: 120,
@@ -2858,7 +2917,17 @@ mod tests {
                 &serde_json::json!({ "path": "approval.txt" }),
             )
             .unwrap();
-        database.recover_harness_operations().unwrap();
+        database
+            .update_harness_operation_state(
+                &operation.operation_id,
+                &crate::harness::types::RuntimeState::AwaitingApproval,
+            )
+            .unwrap();
+        let summary = database.recover_harness_operations().unwrap();
+        assert_eq!(summary.interrupted_operations, 0);
+        assert_eq!(summary.unknown_tool_executions, 1);
+        assert_eq!(summary.failed_provider_attempts, 0);
+        assert_eq!(summary.cancelled_queue_items, 0);
         let connection = database.connection.lock().unwrap();
         assert_eq!(
             connection
@@ -2880,6 +2949,8 @@ mod tests {
                 .unwrap(),
             "awaiting_approval"
         );
+        drop(connection);
+        assert_eq!(database.list_harness_pending_approvals().unwrap().len(), 1);
     }
 
     #[test]
@@ -2900,8 +2971,50 @@ mod tests {
             .unwrap()
             .into_started()
             .unwrap();
+        let context_manifest_id = database
+            .record_harness_context_manifest(
+                &interrupted.operation_id,
+                &database
+                    .current_harness_snapshot(&interrupted.operation_id)
+                    .unwrap(),
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+                "test",
+            )
+            .unwrap();
+        let provider_attempt_id = database
+            .start_harness_provider_attempt(
+                &interrupted.operation_id,
+                &database
+                    .current_harness_snapshot(&interrupted.operation_id)
+                    .unwrap(),
+                &context_manifest_id,
+                &crate::models::ProviderProfile {
+                    id: "test".to_owned(),
+                    name: "Test".to_owned(),
+                    base_url: "https://example.test".to_owned(),
+                    model: "test".to_owned(),
+                    protocol: crate::models::ProviderProtocol::OpenaiResponses,
+                    allow_unauthenticated: true,
+                    priority: 0,
+                    failover_enabled: false,
+                },
+                0,
+            )
+            .unwrap();
+        let queued = database
+            .enqueue_harness_item(&crate::harness::types::HarnessQueueRequest {
+                operation_id: interrupted.operation_id.clone(),
+                kind: "follow_up".to_owned(),
+                body: "queued before restart".to_owned(),
+            })
+            .unwrap();
 
-        database.recover_harness_operations().unwrap();
+        let summary = database.recover_harness_operations().unwrap();
+        assert_eq!(summary.interrupted_operations, 1);
+        assert_eq!(summary.unknown_tool_executions, 0);
+        assert_eq!(summary.failed_provider_attempts, 1);
+        assert_eq!(summary.cancelled_queue_items, 1);
 
         let restarted = database
             .start_harness_operation(&request, "C:/workspace", "test")
@@ -2919,6 +3032,26 @@ mod tests {
                 )
                 .unwrap(),
             "interrupted"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT status FROM harness_provider_attempts WHERE id = ?1",
+                    [&provider_attempt_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "failed"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT status FROM harness_queues WHERE id = ?1",
+                    [&queued.id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "cancelled"
         );
     }
 
@@ -3006,6 +3139,7 @@ mod tests {
                 attachments: Vec::new(),
                 model_name: None,
                 provider_brand: None,
+                status: None,
             },
         );
         database.save_thread(&thread).unwrap();
@@ -3090,6 +3224,7 @@ mod tests {
         assert!(columns.iter().any(|column| column == "attachments_json"));
         assert!(columns.iter().any(|column| column == "model_name"));
         assert!(columns.iter().any(|column| column == "provider_brand"));
+        assert!(columns.iter().any(|column| column == "status"));
     }
 
     #[test]

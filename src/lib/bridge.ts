@@ -531,7 +531,7 @@ export async function agentTurn(
   hatch = false,
   hatchSkillLoaded = false,
 ): Promise<AgentTurnResponse> {
-  const cleanMessages = messages.map(({ role, content, toolCalls, toolCallId, internal, attachments }) => ({
+  const cleanMessages = messages.filter((message) => !message.status).map(({ role, content, toolCalls, toolCallId, internal, attachments }) => ({
     role,
     content,
     toolCalls,
@@ -555,8 +555,10 @@ export async function agentTurnStream(
   fallbackProfiles: ProviderProfile[] = [],
   hatch = false,
   hatchSkillLoaded = false,
+  onReconnect?: (retryAttempt: number, maxRetryAttempts: number) => void,
+  onReconnected?: (retryAttempt?: number) => void,
 ): Promise<AgentTurnResponse> {
-  const cleanMessages = messages.map(({ role, content, toolCalls, toolCallId, internal, attachments }) => ({
+  const cleanMessages = messages.filter((message) => !message.status).map(({ role, content, toolCalls, toolCallId, internal, attachments }) => ({
     role,
     content,
     toolCalls,
@@ -567,6 +569,10 @@ export async function agentTurnStream(
   const onEvent = new Channel<AgentStreamEvent>();
   onEvent.onmessage = (event) => {
     if (event.kind === "content_delta" && event.delta) onDelta(event.delta);
+    if (event.kind === "provider_reconnecting") {
+      onReconnect?.(event.retryAttempt ?? 1, event.maxRetryAttempts ?? 5);
+    }
+    if (event.kind === "provider_reconnected") onReconnected?.(event.retryAttempt);
   };
   return invoke<AgentTurnResponse>("agent_turn_stream", {
     request: { profile, messages: cleanMessages, mode, workspace, threadId, fallbackProfiles, hatch, hatchSkillLoaded },
@@ -832,7 +838,13 @@ export async function harnessRun(
 ): Promise<void> {
   const channel = new Channel<HarnessRuntimeEvent>();
   channel.onmessage = onEvent;
-  await invoke("harness_run", { request, onEvent: channel });
+  await invoke("harness_run", {
+    request: {
+      ...request,
+      messages: request.messages.filter((message) => !message.status),
+    },
+    onEvent: channel,
+  });
 }
 
 export async function createGoal(
