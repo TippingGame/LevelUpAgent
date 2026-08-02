@@ -1310,6 +1310,8 @@ async fn generate_videos(
                     size: video_size_label(request),
                     quality: request.quality.clone(),
                     output_format: Some("mp4".to_owned()),
+                    background: None,
+                    count: request.count,
                     voice: None,
                     seconds: request.seconds,
                     created_at: now,
@@ -1617,6 +1619,8 @@ async fn save_completed_blob(
         size: request.size.clone(),
         quality: request.quality.clone(),
         output_format: request.output_format.clone(),
+        background: request.background.clone(),
+        count: request.count,
         voice: request.voice.clone(),
         seconds: request.seconds,
         created_at: now,
@@ -1660,6 +1664,8 @@ pub fn failed_asset(
         size: request.size.clone(),
         quality: request.quality.clone(),
         output_format: request.output_format.clone(),
+        background: request.background.clone(),
+        count: request.count,
         voice: request.voice.clone(),
         seconds: request.seconds,
         created_at: now,
@@ -2780,6 +2786,7 @@ mod tests {
 
         assert_eq!(result.assets.len(), 2);
         assert!(result.errors.is_empty());
+        assert!(result.assets.iter().all(|asset| asset.count == 2));
         server.join().unwrap();
         drop(database);
         let _ = std::fs::remove_dir_all(root);

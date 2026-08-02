@@ -154,7 +154,6 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
   const [seconds, setSeconds] = useState(8);
   const [voice, setVoice] = useState("");
   const [instructions, setInstructions] = useState("");
-  const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -522,12 +521,11 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
 
   const generate = async () => {
     const activePrompts = prompts.map((item) => item.prompt.trim()).filter(Boolean);
-    if (!selected || activePrompts.length === 0 || busy) return;
+    if (!selected || activePrompts.length === 0) return;
     if (!videoReferenceReady) {
       setError(videoReferenceRequirement(activeVideoMode));
       return;
     }
-    setBusy(true);
     setError(null);
     const grokVideoHasOutputControls = isGrokVideo && activeVideoMode !== "video";
     const videoSizeLabel = grokVideoHasOutputControls ? `${videoResolution} · ${videoAspectRatio}` : undefined;
@@ -577,21 +575,17 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
     });
     setPendingAssets((current) => [...tasks.flatMap((task) => task.placeholders), ...current]);
 
-    try {
-      const results = await Promise.allSettled(tasks.map(async (task) => {
-        try {
-          const result = await generateMedia({ ...base, prompt: task.prompt });
-          setAssets((current) => mergeAssets(current, result.assets));
-          return result;
-        } finally {
-          setPendingAssets((current) => current.filter((asset) => asset.batchId !== task.pendingBatchId));
-        }
-      }));
-      const failures = results.flatMap((result) => result.status === "rejected" ? [errorText(result.reason)] : result.value.errors);
-      if (failures.length > 0) setError(failures.join(" · "));
-    } finally {
-      setBusy(false);
-    }
+    const results = await Promise.allSettled(tasks.map(async (task) => {
+      try {
+        const result = await generateMedia({ ...base, prompt: task.prompt });
+        setAssets((current) => mergeAssets(current, result.assets));
+        return result;
+      } finally {
+        setPendingAssets((current) => current.filter((asset) => asset.batchId !== task.pendingBatchId));
+      }
+    }));
+    const failures = results.flatMap((result) => result.status === "rejected" ? [errorText(result.reason)] : result.value.errors);
+    if (failures.length > 0) setError(failures.join(" · "));
   };
 
   const refreshAll = async () => {
@@ -604,6 +598,30 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
     try {
       await deleteMediaAsset(asset.id);
       setAssets((current) => current.filter((item) => item.id !== asset.id));
+    } catch (reason) {
+      setError(errorText(reason));
+    }
+  };
+
+  const reuseImage = async (asset: MediaAsset) => {
+    if (asset.kind !== "image" || asset.status !== "completed" || !asset.filePath) return;
+    setError(null);
+    try {
+      const imported = await importMediaReferences([asset.filePath]);
+      await acceptImageReferences(imported);
+
+      setKind("image");
+      setPrompts((current) => [{ id: current[0]?.id ?? crypto.randomUUID(), prompt: asset.prompt }]);
+      setSelectedModels((current) => ({ ...current, image: `${asset.providerId}::${asset.model}` }));
+      setCount(clampMediaCount(asset.count));
+      setSize(normalizeImageSize(asset.size));
+      setQuality(normalizeImageQuality(asset.quality));
+      setOutputFormat(normalizeImageFormat(asset.outputFormat, asset.fileName));
+      setBackground(normalizeImageBackground(asset.background));
+
+      window.setTimeout(() => {
+        rootRef.current?.querySelector<HTMLTextAreaElement>(".media-prompt-card textarea")?.focus();
+      }, 0);
     } catch (reason) {
       setError(errorText(reason));
     }
@@ -777,9 +795,9 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
           {models.length === 0 && !loading ? (
             <button className="media-configure-button" onClick={onConfigureConnection}><Settings2 size={15} />{tr("配置支持生成能力的模型连接", "Configure a media-capable model connection")}</button>
           ) : (
-            <button className="media-generate-button" disabled={busy || pastingReferences || loading || !selected || !videoReferenceReady || !prompts.some((item) => item.prompt.trim())} onClick={() => void generate()}>
-              {busy || pastingReferences ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}
-              {pastingReferences ? tr("正在添加参考素材", "Adding references") : busy ? tr(`正在并行生成 ${pendingAssets.length} 个结果`, `Generating ${pendingAssets.length} outputs in parallel`) : tr("开始生成", "Generate")}
+            <button className="media-generate-button" disabled={pastingReferences || loading || !selected || !videoReferenceReady || !prompts.some((item) => item.prompt.trim())} onClick={() => void generate()}>
+              {pastingReferences ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}
+              {pastingReferences ? tr("正在添加参考素材", "Adding references") : tr("开始生成", "Generate")}
             </button>
           )}
         </section>
@@ -795,7 +813,7 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
           {currentHistoryState.loading && !currentHistoryState.loaded ? <div className="media-empty"><LoaderCircle className="spin" size={24} /><span>{tr("正在读取首段历史", "Loading recent history")}</span></div>
             : displayedAssets.length === 0 ? <div className="media-empty"><KindIcon kind={kind} /><strong>{tr("还没有作品", "No creations yet")}</strong><span>{tr("输入提示词后，结果会自动出现在这里", "Generated outputs will appear here automatically")}</span></div>
               : <>
-                <div className="media-gallery-grid">{displayedAssets.map((asset) => <MediaAssetCard asset={asset} locale={locale} onDelete={asset.pendingOutput ? undefined : () => void removeAsset(asset)} onPreview={asset.kind === "image" && asset.status === "completed" ? () => setPreviewAsset(asset) : undefined} key={asset.id} />)}</div>
+                <div className="media-gallery-grid">{displayedAssets.map((asset) => <MediaAssetCard asset={asset} locale={locale} onDelete={asset.pendingOutput ? undefined : () => void removeAsset(asset)} onPreview={asset.kind === "image" && asset.status === "completed" ? () => setPreviewAsset(asset) : undefined} onReuse={asset.kind === "image" && asset.status === "completed" && Boolean(asset.filePath) ? () => reuseImage(asset) : undefined} key={asset.id} />)}</div>
                 {currentHistoryState.hasMore && <div className="media-history-pagination">
                   <button type="button" disabled={currentHistoryState.loadingMore} onClick={() => void loadHistory(kind)}>
                     {currentHistoryState.loadingMore && <LoaderCircle className="spin" size={14} />}
@@ -816,15 +834,17 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
   );
 }
 
-export function MediaAssetCard({ asset, locale, onDelete, onPreview }: { asset: StudioMediaAsset; locale: string; onDelete?: () => void; onPreview?: () => void }) {
+export function MediaAssetCard({ asset, locale, onDelete, onPreview, onReuse }: { asset: StudioMediaAsset; locale: string; onDelete?: () => void; onPreview?: () => void; onReuse?: () => Promise<void> | void }) {
   const url = mediaAssetUrl(asset);
   const [exporting, setExporting] = useState(false);
+  const [reusing, setReusing] = useState(false);
   const [promptExpanded, setPromptExpanded] = useState(false);
   const [promptCopyStatus, setPromptCopyStatus] = useState<"idle" | "copied" | "error">("idle");
   const [exportFeedback, setExportFeedback] = useState<{ error: boolean; text: string } | null>(null);
   const [videoRatio, setVideoRatio] = useState<number | null>(null);
   const canExport = asset.status === "completed" && Boolean(asset.filePath && asset.fileName);
   const canPreview = asset.status === "completed" && asset.kind === "image" && Boolean(url && onPreview);
+  const canReuse = asset.status === "completed" && asset.kind === "image" && Boolean(onReuse);
   const canExpandPrompt = asset.prompt.trim().length > 42;
   const previewRatio = asset.kind === "video" ? videoRatio ?? mediaAssetAspectRatio(asset) ?? 16 / 9 : 4 / 3;
 
@@ -856,8 +876,18 @@ export function MediaAssetCard({ asset, locale, onDelete, onPreview }: { asset: 
     window.setTimeout(() => setPromptCopyStatus("idle"), 1_500);
   };
 
+  const reuseAsset = async () => {
+    if (!canReuse || !onReuse || reusing) return;
+    setReusing(true);
+    try {
+      await onReuse();
+    } finally {
+      setReusing(false);
+    }
+  };
+
   return (
-    <article className={`media-asset-card kind-${asset.kind} status-${asset.status} ${canExport || onDelete ? "has-actions" : ""}`}>
+    <article className={`media-asset-card kind-${asset.kind} status-${asset.status} ${canExport || canReuse || onDelete ? "has-actions" : ""}`}>
       <div className="media-preview" style={{ aspectRatio: previewRatio }}>
         {asset.status === "completed" && url && asset.kind === "image" && (canPreview ? (
           <button className="media-preview-trigger" type="button" onClick={onPreview} aria-label={tr("打开大图预览", "Open large image preview")}>
@@ -894,7 +924,8 @@ export function MediaAssetCard({ asset, locale, onDelete, onPreview }: { asset: 
         {asset.error && <em title={asset.error}>{mediaErrorSummary(asset.error)}</em>}
         {exportFeedback && <em className={exportFeedback.error ? "media-export-error" : "media-export-success"} title={exportFeedback.text}>{exportFeedback.error ? <CircleAlert size={11} /> : <Check size={11} />}{exportFeedback.text}</em>}
       </div>
-      {(canExport || onDelete) && <div className="media-asset-actions">
+      {(canExport || canReuse || onDelete) && <div className="media-asset-actions">
+        {canReuse && <button className="media-reuse-asset" disabled={reusing} onClick={() => void reuseAsset()} title={tr("复用图片与参数", "Reuse image and parameters")} aria-label={tr("复用图片与参数", "Reuse image and parameters")}>{reusing ? <LoaderCircle className="spin" size={13} /> : <RefreshCw size={13} />}</button>}
         {canExport && <button className="media-export-asset" disabled={exporting} onClick={() => void exportAsset()} title={tr("另存为", "Save as")} aria-label={tr("另存为", "Save as")}>{exporting ? <LoaderCircle className="spin" size={13} /> : <Download size={13} />}</button>}
         {onDelete && <button className="media-delete-asset" onClick={onDelete} title={tr("删除作品", "Delete creation")} aria-label={tr("删除作品", "Delete creation")}><Trash2 size={13} /></button>}
       </div>}
@@ -1289,6 +1320,32 @@ function mediaAssetAspectRatio(asset: MediaAsset) {
   const width = Number(dimensions[1]);
   const height = Number(dimensions[2]);
   return width > 0 && height > 0 ? width / height : null;
+}
+
+function clampMediaCount(value: number | undefined) {
+  return Number.isFinite(value) ? Math.min(8, Math.max(1, Math.round(value as number))) : 1;
+}
+
+function normalizeImageSize(value: string | undefined) {
+  return value && IMAGE_SIZE_OPTIONS.includes(value) ? value : "auto";
+}
+
+function normalizeImageQuality(value: string | undefined) {
+  if (!value) return "auto";
+  const normalized = value.toLocaleLowerCase();
+  return ["auto", "high", "medium", "2k", "4k"].includes(normalized)
+    ? normalized === "2k" ? "2K" : normalized === "4k" ? "4K" : normalized
+    : "auto";
+}
+
+function normalizeImageFormat(value: string | undefined, fileName: string | undefined) {
+  const candidate = value?.toLocaleLowerCase() || fileName?.split(".").pop()?.toLocaleLowerCase();
+  if (candidate === "jpg") return "jpeg";
+  return candidate && ["png", "webp", "jpeg"].includes(candidate) ? candidate : "png";
+}
+
+function normalizeImageBackground(value: string | undefined) {
+  return value && ["auto", "transparent", "opaque"].includes(value) ? value : "auto";
 }
 
 function mergeAssets(current: MediaAsset[], incoming: MediaAsset[]) {

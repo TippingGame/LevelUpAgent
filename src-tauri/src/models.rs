@@ -492,7 +492,10 @@ pub struct MediaAsset {
     pub progress: Option<u32>,
     pub size: Option<String>,
     pub quality: Option<String>,
+    pub background: Option<String>,
     pub output_format: Option<String>,
+    #[serde(default = "default_media_count")]
+    pub count: u32,
     pub voice: Option<String>,
     pub seconds: Option<u32>,
     pub created_at: i64,

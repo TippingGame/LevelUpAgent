@@ -154,7 +154,9 @@ impl Database {
                     voice TEXT,
                     seconds INTEGER,
                     created_at INTEGER NOT NULL,
-                    updated_at INTEGER NOT NULL
+                    updated_at INTEGER NOT NULL,
+                    background TEXT,
+                    generation_count INTEGER NOT NULL DEFAULT 1
                  );
 
                  CREATE TABLE IF NOT EXISTS writing_projects (
@@ -323,6 +325,29 @@ impl Database {
         if !has_status {
             connection
                 .execute("ALTER TABLE messages ADD COLUMN status TEXT", [])
+                .map_err(database_error)?;
+        }
+        let media_columns = connection
+            .prepare("PRAGMA table_info(media_assets)")
+            .and_then(|mut statement| {
+                let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+                columns.collect::<Result<Vec<_>, _>>()
+            })
+            .map_err(database_error)?;
+        if !media_columns.iter().any(|column| column == "background") {
+            connection
+                .execute("ALTER TABLE media_assets ADD COLUMN background TEXT", [])
+                .map_err(database_error)?;
+        }
+        if !media_columns
+            .iter()
+            .any(|column| column == "generation_count")
+        {
+            connection
+                .execute(
+                    "ALTER TABLE media_assets ADD COLUMN generation_count INTEGER NOT NULL DEFAULT 1",
+                    [],
+                )
                 .map_err(database_error)?;
         }
         connection
@@ -832,10 +857,11 @@ impl Database {
                 "INSERT INTO media_assets
                  (id, batch_id, thread_id, provider_id, provider_name, kind, status, prompt,
                   model, mime_type, file_name, remote_id, revised_prompt, error, progress,
-                  size, quality, output_format, voice, seconds, created_at, updated_at)
+                  size, quality, output_format, voice, seconds, created_at, updated_at,
+                  background, generation_count)
                  VALUES
                  (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                  ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+                  ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
                  ON CONFLICT(id) DO UPDATE SET
                    batch_id = excluded.batch_id,
                    thread_id = excluded.thread_id,
@@ -856,6 +882,8 @@ impl Database {
                    output_format = excluded.output_format,
                    voice = excluded.voice,
                    seconds = excluded.seconds,
+                   background = excluded.background,
+                   generation_count = excluded.generation_count,
                    updated_at = excluded.updated_at",
                 params![
                     asset.id,
@@ -880,6 +908,8 @@ impl Database {
                     asset.seconds.map(i64::from),
                     asset.created_at,
                     asset.updated_at,
+                    asset.background,
+                    i64::from(asset.count),
                 ],
             )
             .map_err(database_error)?;
@@ -895,7 +925,8 @@ impl Database {
             .prepare(
                 "SELECT id, batch_id, thread_id, provider_id, provider_name, kind, status,
                         prompt, model, mime_type, file_name, remote_id, revised_prompt, error,
-                        progress, size, quality, output_format, voice, seconds, created_at, updated_at
+                        progress, size, quality, output_format, voice, seconds, created_at, updated_at,
+                        background, generation_count
                  FROM media_assets ORDER BY created_at DESC LIMIT ?1",
             )
             .map_err(database_error)?;
@@ -920,7 +951,8 @@ impl Database {
             .prepare(
                 "SELECT id, batch_id, thread_id, provider_id, provider_name, kind, status,
                         prompt, model, mime_type, file_name, remote_id, revised_prompt, error,
-                        progress, size, quality, output_format, voice, seconds, created_at, updated_at
+                        progress, size, quality, output_format, voice, seconds, created_at, updated_at,
+                        background, generation_count
                  FROM media_assets
                  WHERE kind = ?1
                  ORDER BY created_at DESC, id DESC
@@ -950,7 +982,8 @@ impl Database {
             .query_row(
                 "SELECT id, batch_id, thread_id, provider_id, provider_name, kind, status,
                         prompt, model, mime_type, file_name, remote_id, revised_prompt, error,
-                        progress, size, quality, output_format, voice, seconds, created_at, updated_at
+                        progress, size, quality, output_format, voice, seconds, created_at, updated_at,
+                        background, generation_count
                  FROM media_assets WHERE id = ?1",
                 [id],
                 media_asset_from_row,
@@ -2580,6 +2613,8 @@ fn media_asset_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MediaAsset>
             .map(|value| value.clamp(0, u32::MAX as i64) as u32),
         created_at: row.get(20)?,
         updated_at: row.get(21)?,
+        background: row.get(22)?,
+        count: row.get::<_, i64>(23)?.clamp(1, u32::MAX as i64) as u32,
     })
 }
 
@@ -3538,6 +3573,8 @@ mod tests {
             size: Some("1280x720".to_owned()),
             quality: None,
             output_format: Some("mp4".to_owned()),
+            background: Some("opaque".to_owned()),
+            count: 3,
             voice: None,
             seconds: Some(8),
             created_at: 100,
@@ -3583,6 +3620,8 @@ mod tests {
             size: None,
             quality: None,
             output_format: None,
+            background: None,
+            count: 1,
             voice: None,
             seconds: None,
             created_at,

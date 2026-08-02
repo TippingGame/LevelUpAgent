@@ -570,7 +570,9 @@ export interface MediaAsset {
   progress?: number;
   size?: string;
   quality?: string;
+  background?: string;
   outputFormat?: string;
+  count?: number;
   voice?: string;
   seconds?: number;
   createdAt: number;
