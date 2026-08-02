@@ -6,8 +6,29 @@ import {
   useRef,
   useState,
   type ChangeEvent,
-  type PointerEvent as ReactPointerEvent,
 } from "react";
+import {
+  Background,
+  BackgroundVariant,
+  Controls,
+  Handle,
+  MarkerType,
+  MiniMap,
+  Panel,
+  Position,
+  ReactFlow,
+  ReactFlowProvider,
+  SelectionMode,
+  applyEdgeChanges,
+  applyNodeChanges,
+  useReactFlow,
+  type Connection,
+  type Edge as FlowEdge,
+  type EdgeChange,
+  type Node as FlowNode,
+  type NodeChange,
+  type NodeProps,
+} from "@xyflow/react";
 import {
   BookOpen,
   Bot,
@@ -16,6 +37,7 @@ import {
   CircleAlert,
   CircleCheck,
   Clock3,
+  CopyPlus,
   Download,
   FilePlus2,
   FileText,
@@ -23,22 +45,31 @@ import {
   History,
   ImagePlus,
   Import,
+  LayoutDashboard,
+  LibraryBig,
   Link2,
   ListChecks,
   LoaderCircle,
   MapPinned,
+  Maximize2,
+  MousePointer2,
   Network,
   PanelLeftClose,
   PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   Play,
   Plus,
+  Redo2,
   RefreshCw,
   Save,
   Search,
   Settings2,
   Sparkles,
   Square,
+  Target,
   Trash2,
+  Undo2,
   UserRound,
   WandSparkles,
   X,
@@ -54,33 +85,47 @@ import {
 import { tr } from "../lib/i18n";
 import type { AgentMessage, ProviderProfile } from "../lib/types";
 import {
+  autoLayoutStoryNodes,
+  applyWritingGoalStep,
   buildCompletionPrompt,
+  buildWritingGoalPlanPrompt,
+  buildWritingGoalStepPrompt,
   buildWritingContext,
   applyTextCompletion,
   cleanCompletionText,
+  createDefaultWritingGoalPlan,
   createPlayState,
   createSnapshot,
   createStoryNode,
   createStoryVariable,
   createWritingDocument,
   createWritingEntity,
+  createWritingGoal,
   createWritingProject,
+  createWritingReference,
+  duplicateStoryNodes,
   entityKindLabel,
   followStoryChoice,
   inlineCompletionSegments,
   nodeTypeLabel,
   parseChoiceSuggestion,
   parseImportedProject,
+  parseWritingGoalPlan,
   projectFromRecord,
   projectToMarkdown,
   projectToRecord,
   projectToYarn,
+  reconnectStoryConnection,
+  removeStoryConnection,
+  removeStoryNodes,
   renameStoryVariableReferences,
   restoreSnapshot,
   trimCompletionPrefixOverlap,
   validateNarrative,
   visibleStoryChoices,
   writingStats,
+  setStoryConnectionTarget,
+  storyGraphConnections,
   type CompletionIntent,
   type EntityRelation,
   type NarrativeIssue,
@@ -94,12 +139,22 @@ import {
   type WritingDocumentKind,
   type WritingEntity,
   type WritingEntityKind,
+  type WritingGoal,
   type WritingProject,
   type WritingProjectType,
+  type WritingReferenceKind,
 } from "../lib/writing";
+import {
+  GoalNavigator,
+  ReferenceNavigator,
+  ReferenceWorkspace,
+  WritingGoalWorkspace,
+  type GoalRunView,
+} from "./WritingMissionControl";
+import "@xyflow/react/dist/style.css";
 import "./WritingStudio.css";
 
-type StudioSection = "write" | "entities" | "story";
+type StudioSection = "write" | "entities" | "story" | "references" | "goal";
 type StoryInspectorTab = "node" | "variables" | "issues";
 
 type CompletionTarget =
@@ -159,6 +214,9 @@ export function WritingStudio({
   const [selectedEntityId, setSelectedEntityId] = useState<string>();
   const [selectedNodeId, setSelectedNodeId] = useState<string>();
   const [selectedContextIds, setSelectedContextIds] = useState<Set<string>>(() => new Set());
+  const [selectedReferenceId, setSelectedReferenceId] = useState<string>();
+  const [selectedReferenceContextIds, setSelectedReferenceContextIds] = useState<Set<string>>(() => new Set());
+  const [selectedGoalId, setSelectedGoalId] = useState<string>();
   const [entityFilter, setEntityFilter] = useState("");
   const [entityKind, setEntityKind] = useState<WritingEntityKind | "all">("all");
   const [newProjectType, setNewProjectType] = useState<WritingProjectType>("novel");
@@ -178,11 +236,15 @@ export function WritingStudio({
   const [savedAt, setSavedAt] = useState<number>();
   const [saving, setSaving] = useState(false);
   const [playState, setPlayState] = useState<PlayState>();
+  const [goalRun, setGoalRun] = useState<GoalRunView>();
   const [userEditRevision, setUserEditRevision] = useState(0);
   const [lastTypedAt, setLastTypedAt] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const importRef = useRef<HTMLInputElement>(null);
+  const referenceImportRef = useRef<HTMLInputElement>(null);
   const operationRef = useRef<string | undefined>(undefined);
+  const goalOperationRef = useRef<string | undefined>(undefined);
+  const goalEpochRef = useRef(0);
   const completionEpochRef = useRef(0);
   const hydrationRef = useRef(false);
   const savedSignaturesRef = useRef(new Map<string, string>());
@@ -207,11 +269,16 @@ export function WritingStudio({
     ?? activeProject?.documents[0];
   const selectedEntity = activeProject?.entities.find((entity) => entity.id === selectedEntityId);
   const selectedNode = activeProject?.storyNodes.find((node) => node.id === selectedNodeId);
+  const selectedReference = activeProject?.references.find((reference) => reference.id === selectedReferenceId)
+    ?? activeProject?.references[0];
+  const activeGoal = activeProject?.goals.find((goal) => goal.id === selectedGoalId)
+    ?? activeProject?.goals.find((goal) => goal.id === activeProject.activeGoalId)
+    ?? activeProject?.goals[0];
   projectsRef.current = projects;
   const issues = useMemo(() => activeProject ? validateNarrative(activeProject) : [], [activeProject]);
   const context = useMemo(() => activeProject
-    ? buildWritingContext(activeProject, activeDocument, selection.start, selectedContextIds, selectedNodeId)
-    : emptyContext(), [activeDocument, activeProject, selectedContextIds, selectedNodeId, selection.start]);
+    ? buildWritingContext(activeProject, activeDocument, selection.start, selectedContextIds, selectedNodeId, selectedReferenceContextIds)
+    : emptyContext(), [activeDocument, activeProject, selectedContextIds, selectedNodeId, selectedReferenceContextIds, selection.start]);
 
   const updateProject = useCallback((updater: (project: WritingProject) => WritingProject) => {
     setProjects((current) => current.map((project) => project.id === activeProjectId
@@ -263,6 +330,8 @@ export function WritingStudio({
       setProjects(next);
       setActiveProjectId(next[0].id);
       setSelectedNodeId(next[0].storyNodes[0]?.id);
+      setSelectedReferenceId(next[0].references[0]?.id);
+      setSelectedGoalId(next[0].activeGoalId ?? next[0].goals[0]?.id);
       for (const project of restored) savedSignaturesRef.current.set(project.id, projectSignature(project));
       hydrationRef.current = true;
       setLoading(false);
@@ -282,7 +351,7 @@ export function WritingStudio({
     const query = window.matchMedia("(max-width: 600px)");
     const sync = () => {
       setNavigatorOpen(!query.matches);
-      setContextOpen(!query.matches && section !== "story");
+      setContextOpen(!query.matches && (section === "write" || section === "entities"));
     };
     sync();
     query.addEventListener("change", sync);
@@ -330,7 +399,9 @@ export function WritingStudio({
     }
     if (selectedEntityId && !activeProject.entities.some((entity) => entity.id === selectedEntityId)) setSelectedEntityId(undefined);
     if (selectedNodeId && !activeProject.storyNodes.some((node) => node.id === selectedNodeId)) setSelectedNodeId(activeProject.storyNodes[0]?.id);
-  }, [activeProject, selectedEntityId, selectedNodeId, updateProject]);
+    if (selectedReferenceId && !activeProject.references.some((reference) => reference.id === selectedReferenceId)) setSelectedReferenceId(activeProject.references[0]?.id);
+    if (selectedGoalId && !activeProject.goals.some((goal) => goal.id === selectedGoalId)) setSelectedGoalId(activeProject.activeGoalId ?? activeProject.goals[0]?.id);
+  }, [activeProject, selectedEntityId, selectedGoalId, selectedNodeId, selectedReferenceId, updateProject]);
 
   useEffect(() => {
     if (!completion) return;
@@ -406,7 +477,7 @@ export function WritingStudio({
     const start = target.kind === "document" ? target.start : selection.start;
     const end = target.kind === "document" ? target.end : selection.end;
     const cursor = target.kind === "document" ? target.start : selection.start;
-    const liveContext = buildWritingContext(activeProject, document, cursor, selectedContextIds, node?.id);
+    const liveContext = buildWritingContext(activeProject, document, cursor, selectedContextIds, node?.id, selectedReferenceContextIds);
     const prompt = buildCompletionPrompt({
       project: activeProject,
       document,
@@ -583,6 +654,9 @@ export function WritingStudio({
     setSelectedEntityId(undefined);
     setSelectedNodeId(project.storyNodes[0]?.id);
     setSelectedContextIds(new Set());
+    setSelectedReferenceId(undefined);
+    setSelectedReferenceContextIds(new Set());
+    setSelectedGoalId(undefined);
     setSection("write");
     setContextOpen(!isCompactWritingViewport());
   };
@@ -601,6 +675,9 @@ export function WritingStudio({
       setSelectedEntityId(undefined);
       setSelectedNodeId(next[0]?.storyNodes[0]?.id);
       setSelectedContextIds(new Set());
+      setSelectedReferenceId(next[0]?.references[0]?.id);
+      setSelectedReferenceContextIds(new Set());
+      setSelectedGoalId(next[0]?.activeGoalId ?? next[0]?.goals[0]?.id);
     } catch (reason) {
       setError(errorText(reason));
     }
@@ -646,6 +723,24 @@ export function WritingStudio({
     setNavigatorOpen(false);
   };
 
+  const addReference = (kind: WritingReferenceKind = "research") => {
+    const reference = createWritingReference(kind);
+    updateProject((project) => ({ ...project, references: [...project.references, reference] }));
+    setSelectedReferenceId(reference.id);
+    setSection("references");
+    setContextOpen(false);
+    setNavigatorOpen(false);
+  };
+
+  const addGoal = () => {
+    const goal = createWritingGoal(activeDocument?.id, tr("新的创作目标", "New writing goal"));
+    updateProject((project) => ({ ...project, goals: [...project.goals, goal], activeGoalId: goal.id }));
+    setSelectedGoalId(goal.id);
+    setSection("goal");
+    setContextOpen(false);
+    setNavigatorOpen(false);
+  };
+
   const addNode = () => {
     const offset = (activeProject?.storyNodes.length ?? 0) * 28;
     const node = createStoryNode(newNodeType, undefined, 80 + offset % 420, 80 + offset % 300);
@@ -686,6 +781,9 @@ export function WritingStudio({
         setSelectedNodeId(project.storyNodes[0]?.id);
         setSelectedEntityId(undefined);
         setSelectedContextIds(new Set());
+        setSelectedReferenceId(project.references[0]?.id);
+        setSelectedReferenceContextIds(new Set());
+        setSelectedGoalId(project.activeGoalId ?? project.goals[0]?.id);
       } else {
         const document = createWritingDocument(file.name.replace(/\.[^.]+$/, ""), /\.yarn$/i.test(file.name) ? "scene" : "note");
         document.content = text;
@@ -706,6 +804,32 @@ export function WritingStudio({
     }
   };
 
+  const handleReferenceImport = async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = [...(event.target.files ?? [])];
+    event.target.value = "";
+    if (files.length === 0) return;
+    try {
+      const oversized = files.find((file) => file.size > MAX_WRITING_FILE_BYTES);
+      if (oversized) throw new Error(tr(`参考文件“${oversized.name}”不能超过 16 MiB`, `Reference “${oversized.name}” may not exceed 16 MiB`));
+      const references = await Promise.all(files.map(async (file) => {
+        const reference = createWritingReference("source", file.name.replace(/\.[^.]+$/, ""));
+        reference.content = (await file.text()).slice(0, 500_000);
+        reference.notes = tr(`从本地文件 ${file.name} 导入。请区分可核验事实与仅供灵感的内容。`, `Imported from local file ${file.name}. Distinguish verifiable facts from inspiration-only material.`);
+        reference.updatedAt = Date.now();
+        return reference;
+      }));
+      updateProject((project) => ({ ...project, references: [...project.references, ...references] }));
+      setSelectedReferenceId(references[0]?.id);
+      setSelectedReferenceContextIds((current) => new Set([...current, ...references.map((reference) => reference.id)]));
+      setSection("references");
+      setContextOpen(false);
+      setNavigatorOpen(false);
+      setError(undefined);
+    } catch (reason) {
+      setError(errorText(reason));
+    }
+  };
+
   const exportProject = async (format: "json" | "md" | "yarn") => {
     if (!activeProject) return;
     setExportOpen(false);
@@ -717,6 +841,297 @@ export function WritingStudio({
     } catch (reason) {
       setError(errorText(reason));
     }
+  };
+
+  const commitGoalProject = (nextProject: WritingProject) => {
+    setProjects((current) => {
+      const next = current.map((project) => project.id === nextProject.id ? nextProject : project);
+      projectsRef.current = next;
+      return next;
+    });
+  };
+
+  const requestGoalAgent = async (
+    prompt: string,
+    epoch: number,
+    view: Omit<GoalRunView, "preview">,
+  ): Promise<string | undefined> => {
+    const previousOperationId = goalOperationRef.current;
+    goalOperationRef.current = undefined;
+    if (previousOperationId) await cancelAgentTurn(previousOperationId).catch(() => false);
+    if (goalEpochRef.current !== epoch) return undefined;
+    const operationId = crypto.randomUUID();
+    goalOperationRef.current = operationId;
+    let streamed = "";
+    setGoalRun({ ...view, preview: "" });
+    const messages: AgentMessage[] = [{
+      id: crypto.randomUUID(),
+      role: "user",
+      content: prompt,
+      toolCalls: [],
+      createdAt: Date.now(),
+      attachments: [],
+    }];
+    const fallbackProfiles = profiles
+      .filter((profile) => profile.id !== activeProfile.id && profile.failoverEnabled)
+      .sort((left, right) => left.priority - right.priority);
+    try {
+      const response = await agentTurnStream(
+        activeProfile,
+        messages,
+        "chat",
+        workspace,
+        operationId,
+        (delta) => {
+          if (goalEpochRef.current !== epoch || goalOperationRef.current !== operationId) return;
+          streamed += delta;
+          setGoalRun((current) => current?.goalId === view.goalId && current.stepId === view.stepId
+            ? { ...current, preview: streamed.slice(-5_000) }
+            : current);
+        },
+        undefined,
+        fallbackProfiles,
+      );
+      if (goalEpochRef.current !== epoch || goalOperationRef.current !== operationId) return undefined;
+      goalOperationRef.current = undefined;
+      const output = cleanCompletionText(streamed || response.content);
+      if (!output.trim()) throw new Error(tr("模型没有返回可用产物", "The model returned no usable output"));
+      return output;
+    } catch (reason) {
+      if (goalOperationRef.current === operationId) goalOperationRef.current = undefined;
+      if (goalEpochRef.current !== epoch) return undefined;
+      throw reason;
+    }
+  };
+
+  const planGoalProject = async (
+    project: WritingProject,
+    goalId: string,
+    epoch: number,
+    automatic: boolean,
+  ): Promise<WritingProject | undefined> => {
+    const goal = project.goals.find((candidate) => candidate.id === goalId);
+    if (!goal) return undefined;
+    const targetDocument = project.documents.find((document) => document.id === goal.targetDocumentId) ?? project.documents[0];
+    const goalContext = buildWritingContext(
+      project,
+      targetDocument,
+      targetDocument?.content.length ?? 0,
+      selectedContextIds,
+      undefined,
+      selectedReferenceContextIds,
+    );
+    const runningProject = patchGoal(project, goal.id, (current) => ({
+      ...current,
+      status: "running",
+      runSummary: tr("AI 正在拆解目标并设计执行计划…", "AI is decomposing the goal and designing an execution plan…"),
+      updatedAt: Date.now(),
+    }));
+    commitGoalProject(runningProject);
+    try {
+      const output = await requestGoalAgent(
+        buildWritingGoalPlanPrompt({ project: runningProject, goal: runningProject.goals.find((candidate) => candidate.id === goal.id) ?? goal, context: goalContext }),
+        epoch,
+        { goalId: goal.id, phase: "planning", message: tr("AI 正在设计执行计划", "AI is designing the execution plan"), automatic },
+      );
+      if (!output) return undefined;
+      const parsedPlan = parseWritingGoalPlan(output, goal.targetDocumentId);
+      const plan = parsedPlan.length > 0 ? parsedPlan : createDefaultWritingGoalPlan(goal);
+      const latestProject = projectsRef.current.find((candidate) => candidate.id === project.id) ?? runningProject;
+      const plannedProject = patchGoal(latestProject, goal.id, (current) => ({
+        ...current,
+        plan,
+        activeStepId: plan[0]?.id,
+        status: "ready",
+        runSummary: parsedPlan.length > 0
+          ? tr(`AI 已生成 ${plan.length} 步执行计划。`, `AI created a ${plan.length}-step execution plan.`)
+          : tr("模型计划格式不可用，已采用可靠的内置阶段计划。", "The model plan was malformed, so a reliable built-in staged plan was used."),
+        updatedAt: Date.now(),
+      }));
+      commitGoalProject(plannedProject);
+      return plannedProject;
+    } catch (reason) {
+      const failedProject = patchGoal(projectsRef.current.find((candidate) => candidate.id === project.id) ?? runningProject, goal.id, (current) => ({
+        ...current,
+        status: "failed",
+        runSummary: errorText(reason),
+        updatedAt: Date.now(),
+      }));
+      commitGoalProject(failedProject);
+      setError(errorText(reason));
+      return undefined;
+    }
+  };
+
+  const executeGoalStep = async (
+    project: WritingProject,
+    goalId: string,
+    stepId: string,
+    epoch: number,
+    automatic: boolean,
+  ): Promise<WritingProject | undefined> => {
+    const goal = project.goals.find((candidate) => candidate.id === goalId);
+    const step = goal?.plan.find((candidate) => candidate.id === stepId);
+    if (!goal || !step) return undefined;
+    if (step.status === "review" && step.output.trim() && automatic) {
+      const applied = applyWritingGoalStep(project, goal.id, step.id, step.output);
+      commitGoalProject(applied);
+      return applied;
+    }
+    const runningProject = patchGoal(project, goal.id, (current) => ({
+      ...current,
+      status: "running",
+      activeStepId: step.id,
+      runSummary: tr(`正在执行：${step.title}`, `Running: ${step.title}`),
+      plan: current.plan.map((candidate) => candidate.id === step.id ? { ...candidate, status: "running", error: undefined } : candidate),
+      updatedAt: Date.now(),
+    }));
+    commitGoalProject(runningProject);
+    const runningGoal = runningProject.goals.find((candidate) => candidate.id === goal.id) ?? goal;
+    const runningStep = runningGoal.plan.find((candidate) => candidate.id === step.id) ?? step;
+    const targetDocument = runningProject.documents.find((document) => document.id === (runningStep.targetDocumentId || runningGoal.targetDocumentId))
+      ?? runningProject.documents[0];
+    const goalContext = buildWritingContext(
+      runningProject,
+      targetDocument,
+      targetDocument?.content.length ?? 0,
+      selectedContextIds,
+      undefined,
+      selectedReferenceContextIds,
+    );
+    try {
+      const output = await requestGoalAgent(
+        buildWritingGoalStepPrompt({ project: runningProject, goal: runningGoal, step: runningStep, context: goalContext }),
+        epoch,
+        { goalId: goal.id, stepId: step.id, phase: "executing", message: `${tr("正在执行", "Running")} ${runningStep.title}`, automatic },
+      );
+      if (!output) return undefined;
+      const latestProject = projectsRef.current.find((candidate) => candidate.id === project.id) ?? runningProject;
+      if (automatic || goal.mode === "director") {
+        const appliedProject = applyWritingGoalStep(latestProject, goal.id, step.id, output);
+        commitGoalProject(appliedProject);
+        return appliedProject;
+      }
+      const reviewProject = patchGoal(latestProject, goal.id, (current) => ({
+        ...current,
+        status: "paused",
+        activeStepId: step.id,
+        runSummary: tr(`“${step.title}”已生成，等待你审阅。`, `“${step.title}” is ready for review.`),
+        plan: current.plan.map((candidate) => candidate.id === step.id ? {
+          ...candidate,
+          status: "review",
+          output: output.slice(0, 80_000),
+          error: undefined,
+        } : candidate),
+        updatedAt: Date.now(),
+      }));
+      commitGoalProject(reviewProject);
+      return reviewProject;
+    } catch (reason) {
+      const failedProject = patchGoal(projectsRef.current.find((candidate) => candidate.id === project.id) ?? runningProject, goal.id, (current) => ({
+        ...current,
+        status: "failed",
+        activeStepId: step.id,
+        runSummary: errorText(reason),
+        plan: current.plan.map((candidate) => candidate.id === step.id ? { ...candidate, status: "failed", error: errorText(reason) } : candidate),
+        updatedAt: Date.now(),
+      }));
+      commitGoalProject(failedProject);
+      setError(errorText(reason));
+      return undefined;
+    }
+  };
+
+  const ensureGoalConnection = () => {
+    if (connectionReady) return true;
+    setError(tr("请先配置可用的文字模型", "Configure a text model first"));
+    onConfigureConnection();
+    return false;
+  };
+
+  const planActiveGoal = async () => {
+    if (!activeProject || !activeGoal || !ensureGoalConnection()) return;
+    if (goalOperationRef.current) await stopGoalRun();
+    const epoch = goalEpochRef.current + 1;
+    goalEpochRef.current = epoch;
+    await planGoalProject(activeProject, activeGoal.id, epoch, false);
+    if (goalEpochRef.current === epoch) setGoalRun(undefined);
+  };
+
+  const runNextGoalStep = async (requestedStepId?: string) => {
+    if (!activeProject || !activeGoal || !ensureGoalConnection()) return;
+    if (!requestedStepId && activeGoal.plan.some((step) => step.status === "review")) {
+      setError(tr("请先审阅并应用当前步骤的产物，再运行下一步。", "Review and apply the current step output before running the next step."));
+      return;
+    }
+    if (goalOperationRef.current) await stopGoalRun();
+    const epoch = goalEpochRef.current + 1;
+    goalEpochRef.current = epoch;
+    let workingProject: WritingProject | undefined = activeProject;
+    let workingGoal = workingProject.goals.find((candidate) => candidate.id === activeGoal.id);
+    if (!workingGoal?.plan.length) {
+      workingProject = await planGoalProject(workingProject, activeGoal.id, epoch, false);
+      workingGoal = workingProject?.goals.find((candidate) => candidate.id === activeGoal.id);
+    }
+    if (workingProject && workingGoal && goalEpochRef.current === epoch) {
+      const step = workingGoal.plan.find((candidate) => candidate.id === requestedStepId)
+        ?? workingGoal.plan.find((candidate) => candidate.status === "pending" || candidate.status === "failed");
+      if (step) await executeGoalStep(workingProject, workingGoal.id, step.id, epoch, false);
+    }
+    if (goalEpochRef.current === epoch) setGoalRun(undefined);
+  };
+
+  const runGoalAutopilot = async () => {
+    if (!activeProject || !activeGoal || !ensureGoalConnection()) return;
+    if (goalOperationRef.current) await stopGoalRun();
+    const epoch = goalEpochRef.current + 1;
+    goalEpochRef.current = epoch;
+    let workingProject: WritingProject | undefined = activeProject;
+    let workingGoal = workingProject.goals.find((candidate) => candidate.id === activeGoal.id);
+    if (!workingGoal?.plan.length) {
+      workingProject = await planGoalProject(workingProject, activeGoal.id, epoch, true);
+      workingGoal = workingProject?.goals.find((candidate) => candidate.id === activeGoal.id);
+    }
+    for (let guard = 0; workingProject && workingGoal && guard < 12 && goalEpochRef.current === epoch; guard += 1) {
+      const step = workingGoal.plan.find((candidate) => candidate.status === "review" && candidate.output.trim())
+        ?? workingGoal.plan.find((candidate) => candidate.status === "pending" || candidate.status === "failed");
+      if (!step) break;
+      workingProject = await executeGoalStep(workingProject, workingGoal.id, step.id, epoch, true);
+      workingGoal = workingProject?.goals.find((candidate) => candidate.id === activeGoal.id);
+    }
+    if (workingProject && workingGoal && workingGoal.plan.every((step) => step.status === "completed" || step.status === "skipped")) {
+      workingProject = patchGoal(workingProject, workingGoal.id, (current) => ({
+        ...current,
+        status: "completed",
+        activeStepId: undefined,
+        runSummary: tr("目标已完成；最终验收记录和所有改稿前快照均已保留。", "Goal completed; final QA notes and every pre-edit snapshot were preserved."),
+        updatedAt: Date.now(),
+      }));
+      commitGoalProject(workingProject);
+    }
+    if (goalEpochRef.current === epoch) setGoalRun(undefined);
+  };
+
+  const stopGoalRun = async () => {
+    goalEpochRef.current += 1;
+    const operationId = goalOperationRef.current;
+    goalOperationRef.current = undefined;
+    setGoalRun(undefined);
+    setProjects((current) => {
+      const next = current.map((project) => ({
+        ...project,
+        goals: project.goals.map((goal) => goal.status === "running" ? {
+          ...goal,
+          status: "paused" as const,
+          runSummary: tr("已由作者暂停，可从当前步骤继续。", "Paused by the author; resume from the current step when ready."),
+          plan: goal.plan.map((step) => step.status === "running" ? { ...step, status: "pending" as const } : step),
+          updatedAt: Date.now(),
+        } : goal),
+      }));
+      projectsRef.current = next;
+      return next;
+    });
+    if (operationId) await cancelAgentTurn(operationId).catch(() => false);
   };
 
   keyboardActionsRef.current = { active, completion, section, stopCompletion, acceptCompletion, runCompletion, saveNow };
@@ -754,6 +1169,10 @@ export function WritingStudio({
     const operationId = operationRef.current;
     operationRef.current = undefined;
     if (operationId) void cancelAgentTurn(operationId).catch(() => false);
+    goalEpochRef.current += 1;
+    const goalOperationId = goalOperationRef.current;
+    goalOperationRef.current = undefined;
+    if (goalOperationId) void cancelAgentTurn(goalOperationId).catch(() => false);
   }, []);
 
   if (!active) return <main className="writing-studio" hidden />;
@@ -802,6 +1221,7 @@ export function WritingStudio({
           <button type="button" className={connectionReady ? "writing-model ready" : "writing-model"} onClick={onConfigureConnection}><Bot size={15} /><span>{activeProfile.model || tr("配置模型", "Configure model")}</span></button>
         </div>
         <input ref={importRef} type="file" hidden accept=".json,.md,.markdown,.txt,.yarn" onChange={(event) => void handleImport(event)} />
+        <input ref={referenceImportRef} type="file" hidden multiple accept=".md,.markdown,.txt,.json,.csv,.tsv,.yarn" onChange={(event) => void handleReferenceImport(event)} />
       </header>
 
       <div className={`writing-layout${contextOpen ? " context-open" : ""}${navigatorOpen ? " navigator-open" : ""}`}>
@@ -814,6 +1234,9 @@ export function WritingStudio({
               setSelectedEntityId(undefined);
               setSelectedNodeId(project?.storyNodes[0]?.id);
               setSelectedContextIds(new Set());
+              setSelectedReferenceId(project?.references[0]?.id);
+              setSelectedReferenceContextIds(new Set());
+              setSelectedGoalId(project?.activeGoalId ?? project?.goals[0]?.id);
               void stopCompletion();
             }} aria-label={tr("写作项目", "Writing project")}>
               {projects.map((project) => <option value={project.id} key={project.id}>{project.title}</option>)}
@@ -839,6 +1262,8 @@ export function WritingStudio({
 
           <nav className="writing-section-tabs" aria-label={tr("写作视图", "Writing views")}>
             <button className={section === "write" ? "active" : ""} onClick={() => { setSection("write"); setContextOpen(!isCompactWritingViewport()); setNavigatorOpen(false); }}><FileText size={15} />{tr("文稿", "Manuscript")}</button>
+            <button className={section === "goal" ? "active" : ""} onClick={() => { setSection("goal"); setContextOpen(false); setNavigatorOpen(false); }} title={tr("写作目标模式", "Writing goal mode")}><Target size={15} />{tr("目标", "Goals")}</button>
+            <button className={section === "references" ? "active" : ""} onClick={() => { setSection("references"); setContextOpen(false); setNavigatorOpen(false); }} title={tr("参考资料库", "Reference library")}><LibraryBig size={15} />{tr("资料", "Sources")}</button>
             <button className={section === "entities" ? "active" : ""} onClick={() => { setSection("entities"); setContextOpen(!isCompactWritingViewport()); setNavigatorOpen(false); }}><UserRound size={15} />{tr("设定", "Codex")}</button>
             <button className={section === "story" ? "active" : ""} onClick={() => { setSection("story"); setContextOpen(false); setNavigatorOpen(false); }}><GitBranch size={15} />{tr("剧情图", "Story graph")}</button>
           </nav>
@@ -866,6 +1291,23 @@ export function WritingStudio({
             onNewKind={setNewEntityKind}
             onSelect={(id) => { setSelectedEntityId(id); setNavigatorOpen(false); }}
             onAdd={addEntity}
+          />}
+          {section === "references" && <ReferenceNavigator
+            references={activeProject.references}
+            selectedId={selectedReference?.id}
+            onSelect={(id) => { setSelectedReferenceId(id); setNavigatorOpen(false); }}
+            onAdd={() => addReference()}
+            onImport={() => referenceImportRef.current?.click()}
+          />}
+          {section === "goal" && <GoalNavigator
+            goals={activeProject.goals}
+            selectedId={activeGoal?.id}
+            onSelect={(id) => {
+              setSelectedGoalId(id);
+              updateProject((project) => ({ ...project, activeGoalId: id }));
+              setNavigatorOpen(false);
+            }}
+            onAdd={addGoal}
           />}
           {section === "story" && <StoryNavigator
             nodes={activeProject.storyNodes}
@@ -953,19 +1395,80 @@ export function WritingStudio({
             onAccept={acceptCompletion}
             onRegenerate={regenerate}
           />}
+          {section === "references" && <ReferenceWorkspace
+            reference={selectedReference}
+            onChange={(patch) => {
+              if (!selectedReference) return;
+              updateProject((project) => ({
+                ...project,
+                references: project.references.map((reference) => reference.id === selectedReference.id
+                  ? { ...reference, ...patch, updatedAt: Date.now() }
+                  : reference),
+              }));
+            }}
+            onDelete={() => {
+              if (!selectedReference || !window.confirm(tr(`删除参考资料“${selectedReference.title}”？`, `Delete reference “${selectedReference.title}”?`))) return;
+              const removedIndex = activeProject.references.findIndex((reference) => reference.id === selectedReference.id);
+              const remaining = activeProject.references.filter((reference) => reference.id !== selectedReference.id);
+              updateProject((project) => ({ ...project, references: project.references.filter((reference) => reference.id !== selectedReference.id) }));
+              setSelectedReferenceId(remaining[Math.min(Math.max(0, removedIndex), remaining.length - 1)]?.id);
+              setSelectedReferenceContextIds((current) => {
+                const next = new Set(current);
+                next.delete(selectedReference.id);
+                return next;
+              });
+            }}
+            onAdd={() => addReference()}
+            onImport={() => referenceImportRef.current?.click()}
+          />}
+          {section === "goal" && <WritingGoalWorkspace
+            project={activeProject}
+            goal={activeGoal}
+            run={goalRun}
+            connectionReady={connectionReady}
+            onChange={(patch) => {
+              if (!activeGoal) return;
+              updateProject((project) => patchGoal(project, activeGoal.id, (goal) => ({ ...goal, ...patch, updatedAt: Date.now() })));
+            }}
+            onDelete={() => {
+              if (!activeGoal || !window.confirm(tr(`删除创作目标“${activeGoal.title}”？文稿与快照不会被删除。`, `Delete writing goal “${activeGoal.title}”? Manuscripts and snapshots are kept.`))) return;
+              const removedIndex = activeProject.goals.findIndex((goal) => goal.id === activeGoal.id);
+              const remaining = activeProject.goals.filter((goal) => goal.id !== activeGoal.id);
+              const nextGoal = remaining[Math.min(Math.max(0, removedIndex), remaining.length - 1)];
+              updateProject((project) => ({ ...project, goals: project.goals.filter((goal) => goal.id !== activeGoal.id), activeGoalId: nextGoal?.id }));
+              setSelectedGoalId(nextGoal?.id);
+            }}
+            onAdd={addGoal}
+            onPlan={() => void planActiveGoal()}
+            onRunNext={() => void runNextGoalStep()}
+            onRunAll={() => void runGoalAutopilot()}
+            onStop={() => void stopGoalRun()}
+            onApplyStep={(stepId) => {
+              if (!activeGoal) return;
+              const step = activeGoal.plan.find((candidate) => candidate.id === stepId);
+              if (!step?.output.trim()) return;
+              commitGoalProject(applyWritingGoalStep(projectsRef.current.find((project) => project.id === activeProject.id) ?? activeProject, activeGoal.id, step.id, step.output));
+            }}
+            onRetryStep={(stepId) => void runNextGoalStep(stepId)}
+            onSkipStep={(stepId) => {
+              if (!activeGoal) return;
+              commitGoalProject(skipWritingGoalStep(projectsRef.current.find((project) => project.id === activeProject.id) ?? activeProject, activeGoal.id, stepId));
+            }}
+            onResetPlan={() => {
+              if (!activeGoal || !window.confirm(tr("清空当前执行计划？目标契约和已经生成的文稿会保留。", "Reset this execution plan? The goal contract and generated manuscripts are kept."))) return;
+              updateProject((project) => patchGoal(project, activeGoal.id, (goal) => ({ ...goal, plan: [], activeStepId: undefined, status: "draft", runSummary: "", updatedAt: Date.now() })));
+            }}
+          />}
           {section === "story" && <StoryWorkspace
             project={activeProject}
             selectedNode={selectedNode}
             selectedNodeId={selectedNodeId}
+            newNodeType={newNodeType}
             inspectorTab={storyInspectorTab}
             issues={issues}
             completion={completion}
             onInspectorTab={setStoryInspectorTab}
             onSelect={setSelectedNodeId}
-            onMove={(id, x, y) => updateProject((project) => ({
-              ...project,
-              storyNodes: project.storyNodes.map((node) => node.id === id ? { ...node, x, y, updatedAt: Date.now() } : node),
-            }))}
             onNode={(patch) => {
               if (!selectedNode) return;
               if ((completion?.target.kind === "node" || completion?.target.kind === "choices") && completion.target.nodeId === selectedNode.id) void stopCompletion();
@@ -977,20 +1480,6 @@ export function WritingStudio({
             onProject={(patch) => {
               if (completion?.target.kind === "node" || completion?.target.kind === "choices") void stopCompletion();
               updateProject((project) => ({ ...project, ...patch }));
-            }}
-            onDeleteNode={() => {
-              if (!selectedNode || !window.confirm(tr(`删除节点“${selectedNode.title}”？`, `Delete node “${selectedNode.title}”?`))) return;
-              const removedIndex = activeProject.storyNodes.findIndex((node) => node.id === selectedNode.id);
-              const remaining = activeProject.storyNodes.filter((node) => node.id !== selectedNode.id);
-              updateProject((project) => {
-                const storyNodes = project.storyNodes.filter((node) => node.id !== selectedNode.id).map((node) => ({
-                  ...node,
-                  nextNodeId: node.nextNodeId === selectedNode.id ? undefined : node.nextNodeId,
-                  choices: node.choices.map((choice) => choice.targetNodeId === selectedNode.id ? { ...choice, targetNodeId: undefined } : choice),
-                }));
-                return { ...project, storyNodes, startNodeId: project.startNodeId === selectedNode.id ? storyNodes[0]?.id : project.startNodeId };
-              });
-              setSelectedNodeId(remaining[Math.min(Math.max(0, removedIndex), remaining.length - 1)]?.id);
             }}
             onComplete={(intent) => void runCompletion(intent)}
             onStop={() => void stopCompletion()}
@@ -1005,7 +1494,9 @@ export function WritingStudio({
           document={activeDocument}
           context={context}
           selectedIds={selectedContextIds}
+          selectedReferenceIds={selectedReferenceContextIds}
           onSelectedIds={setSelectedContextIds}
+          onSelectedReferenceIds={setSelectedReferenceContextIds}
           onProject={(patch) => {
             if (completion) void stopCompletion();
             updateProject((project) => ({ ...project, ...patch }));
@@ -1020,7 +1511,7 @@ export function WritingStudio({
           }}
           onClose={() => setContextOpen(false)}
         />}
-        {!contextOpen && <button className="writing-context-reopen" onClick={() => setContextOpen(true)} title={tr("打开上下文", "Open context")}><Network size={16} /></button>}
+        {!contextOpen && section !== "goal" && section !== "references" && <button className="writing-context-reopen" onClick={() => setContextOpen(true)} title={tr("打开上下文", "Open context")}><Network size={16} /></button>}
       </div>
 
       {snapshotsOpen && <SnapshotPanel
@@ -1115,13 +1606,19 @@ function StoryNavigator({ nodes, selectedId, startNodeId, newType, onNewType, on
   onSelect: (id: string) => void;
   onAdd: () => void;
 }) {
+  const [query, setQuery] = useState("");
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const visibleNodes = normalizedQuery
+    ? nodes.filter((node) => [node.title, node.content, nodeTypeLabel(node.type), ...node.choices.map((choice) => choice.label)].join("\n").toLocaleLowerCase().includes(normalizedQuery))
+    : nodes;
   return <div className="writing-nav-content story-nav">
-    <div className="writing-nav-heading"><span>{tr("剧情节点", "Story nodes")}<small>{nodes.length}</small></span></div>
+    <div className="writing-nav-heading"><span>{tr("剧情节点", "Story nodes")}<small>{normalizedQuery ? `${visibleNodes.length}/${nodes.length}` : nodes.length}</small></span></div>
+    <label className="writing-nav-search"><Search size={13} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={tr("搜索标题、正文或选项", "Search nodes and choices")} /></label>
     <div className="story-node-list">
-      {nodes.map((node) => <button type="button" className={node.id === selectedId ? "active" : ""} onClick={() => onSelect(node.id)} key={node.id}>
+      {visibleNodes.map((node) => <button type="button" className={node.id === selectedId ? "active" : ""} onClick={() => onSelect(node.id)} key={node.id}>
         <i className={`node-type-dot ${node.type}`} /><span><strong>{node.title}</strong><small>{nodeTypeLabel(node.type)}{node.id === startNodeId ? tr(" · 开始", " · Start") : ""}</small></span>
       </button>)}
-      {nodes.length === 0 && <p>{tr("从一个场景节点开始", "Start with a scene node")}</p>}
+      {visibleNodes.length === 0 && <p>{nodes.length === 0 ? tr("从一个场景节点开始", "Start with a scene node") : tr("没有匹配的剧情节点", "No matching story nodes")}</p>}
     </div>
     <div className="writing-nav-add">
       <select value={newType} onChange={(event) => onNewType(event.target.value as StoryNodeType)}>{NODE_TYPES.map((value) => <option value={value} key={value}>{nodeTypeLabel(value)}</option>)}</select>
@@ -1389,12 +1886,14 @@ function EntityEditor({ project, entity, completion, onSelectFirst, onChange, on
   </div>;
 }
 
-function WritingContextPanel({ project, document, context, selectedIds, onSelectedIds, onProject, onDocument, onClose }: {
+function WritingContextPanel({ project, document, context, selectedIds, selectedReferenceIds, onSelectedIds, onSelectedReferenceIds, onProject, onDocument, onClose }: {
   project: WritingProject;
   document?: WritingDocument;
   context: WritingContextBundle;
   selectedIds: Set<string>;
+  selectedReferenceIds: Set<string>;
   onSelectedIds: (value: Set<string>) => void;
+  onSelectedReferenceIds: (value: Set<string>) => void;
   onProject: (patch: Partial<WritingProject>) => void;
   onDocument: (patch: Partial<WritingDocument>) => void;
   onClose: () => void;
@@ -1403,6 +1902,11 @@ function WritingContextPanel({ project, document, context, selectedIds, onSelect
     const next = new Set(selectedIds);
     if (next.has(id)) next.delete(id); else next.add(id);
     onSelectedIds(next);
+  };
+  const toggleReference = (id: string) => {
+    const next = new Set(selectedReferenceIds);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    onSelectedReferenceIds(next);
   };
   return <aside className="writing-context-panel">
     <header><span><Network size={15} />{tr("智能上下文", "Smart context")}</span><button type="button" onClick={onClose} aria-label={tr("关闭上下文", "Close context")}><X size={13} /></button></header>
@@ -1416,6 +1920,17 @@ function WritingContextPanel({ project, document, context, selectedIds, onSelect
       <label><span>{tr("核心设定 / 故事前提", "Premise")}</span><textarea value={project.premise} onChange={(event) => onProject({ premise: event.target.value })} placeholder={tr("主冲突、主人公欲望、代价与独特规则", "Central conflict, desire, stakes, and defining rules")} /></label>
       <label><span>{tr("文风与硬性规则", "Style and hard rules")}</span><textarea value={project.styleGuide} onChange={(event) => onProject({ styleGuide: event.target.value })} placeholder={tr("视角、时态、禁用表达、节奏、分级…", "POV, tense, banned phrasing, pacing, rating…")} /></label>
       {document && <label><span>{tr("当前文稿摘要", "Document summary")}</span><textarea value={document.summary} onChange={(event) => onDocument({ summary: event.target.value })} placeholder={tr("用于跨章节保持连贯", "Used for continuity across documents")} /></label>}
+    </details>
+    <details open className="context-references">
+      <summary>{tr("参考资料", "References")}</summary>
+      {project.references.map((reference) => {
+        const included = context.referenceIds.includes(reference.id);
+        return <label className={included ? "included" : ""} key={reference.id}>
+          <input type="checkbox" checked={selectedReferenceIds.has(reference.id)} onChange={() => toggleReference(reference.id)} />
+          <LibraryBig size={14} /><span><strong>{reference.title}</strong><small>{reference.enabled ? tr("自动召回", "Automatic") : tr("仅固定时使用", "Pinned only")}</small></span>{included && <CircleCheck size={13} />}
+        </label>;
+      })}
+      {project.references.length === 0 && <p>{tr("在“资料”页导入研究、原始材料或风格样本。", "Import research, sources, or style samples from the Sources view.")}</p>}
     </details>
     <details open className="context-entities">
       <summary>{tr("设定联动", "Linked codex")}</summary>
@@ -1432,116 +1947,495 @@ function WritingContextPanel({ project, document, context, selectedIds, onSelect
   </aside>;
 }
 
-function StoryWorkspace({ project, selectedNode, selectedNodeId, inspectorTab, issues, completion, onInspectorTab, onSelect, onMove, onNode, onProject, onDeleteNode, onComplete, onStop, onAccept, onRegenerate, onPlay }: {
+interface StoryGraphSnapshot {
+  storyNodes: StoryNode[];
+  startNodeId?: string;
+}
+
+function StoryWorkspace({ project, selectedNode, selectedNodeId, newNodeType, inspectorTab, issues, completion, onInspectorTab, onSelect, onNode, onProject, onComplete, onStop, onAccept, onRegenerate, onPlay }: {
   project: WritingProject;
   selectedNode?: StoryNode;
   selectedNodeId?: string;
+  newNodeType: StoryNodeType;
   inspectorTab: StoryInspectorTab;
   issues: NarrativeIssue[];
   completion?: CompletionPreview;
   onInspectorTab: (tab: StoryInspectorTab) => void;
   onSelect: (id: string) => void;
-  onMove: (id: string, x: number, y: number) => void;
   onNode: (patch: Partial<StoryNode>) => void;
   onProject: (patch: Partial<WritingProject>) => void;
-  onDeleteNode: () => void;
   onComplete: (intent: CompletionIntent) => void;
   onStop: () => void;
   onAccept: () => void;
   onRegenerate: () => void;
   onPlay: () => void;
 }) {
+  const [inspectorOpen, setInspectorOpen] = useState(() => typeof window === "undefined" || !window.matchMedia("(max-width: 1080px)").matches);
+  const [history, setHistory] = useState<{ undo: StoryGraphSnapshot[]; redo: StoryGraphSnapshot[] }>({ undo: [], redo: [] });
+
+  useEffect(() => setHistory({ undo: [], redo: [] }), [project.id]);
+  useEffect(() => {
+    const narrowWindow = window.matchMedia("(max-width: 1080px)");
+    const closeInspectorForNarrowWindow = () => {
+      if (narrowWindow.matches) setInspectorOpen(false);
+    };
+    closeInspectorForNarrowWindow();
+    narrowWindow.addEventListener("change", closeInspectorForNarrowWindow);
+    return () => narrowWindow.removeEventListener("change", closeInspectorForNarrowWindow);
+  }, []);
+
+  const commitGraph = useCallback((next: WritingProject) => {
+    if (next.storyNodes === project.storyNodes && next.startNodeId === project.startNodeId) return;
+    setHistory((current) => ({
+      undo: [...current.undo, { storyNodes: project.storyNodes, startNodeId: project.startNodeId }].slice(-60),
+      redo: [],
+    }));
+    onProject({ storyNodes: next.storyNodes, startNodeId: next.startNodeId });
+  }, [onProject, project]);
+
+  const undoGraph = useCallback(() => {
+    const previous = history.undo[history.undo.length - 1];
+    if (!previous) return;
+    setHistory((current) => ({
+      undo: current.undo.slice(0, -1),
+      redo: [{ storyNodes: project.storyNodes, startNodeId: project.startNodeId }, ...current.redo].slice(0, 60),
+    }));
+    onProject(previous);
+  }, [history.undo, onProject, project.startNodeId, project.storyNodes]);
+
+  const redoGraph = useCallback(() => {
+    const next = history.redo[0];
+    if (!next) return;
+    setHistory((current) => ({
+      undo: [...current.undo, { storyNodes: project.storyNodes, startNodeId: project.startNodeId }].slice(-60),
+      redo: current.redo.slice(1),
+    }));
+    onProject(next);
+  }, [history.redo, onProject, project.startNodeId, project.storyNodes]);
+
+  const deleteNodes = useCallback((nodeIds: string[]) => {
+    const ids = [...new Set(nodeIds)].filter((id) => project.storyNodes.some((node) => node.id === id));
+    if (ids.length === 0) return;
+    const label = ids.length === 1
+      ? project.storyNodes.find((node) => node.id === ids[0])?.title ?? tr("该节点", "this node")
+      : tr(`${ids.length} 个节点`, `${ids.length} nodes`);
+    if (!window.confirm(tr(`删除“${label}”？相关连线会断开，可用 Ctrl+Z 撤销。`, `Delete “${label}”? Related links will be disconnected; Ctrl+Z can undo.`))) return;
+    const removedIndex = project.storyNodes.findIndex((node) => node.id === ids[0]);
+    const next = removeStoryNodes(project, ids);
+    commitGraph(next);
+    const remaining = next.storyNodes;
+    const fallback = remaining[Math.min(Math.max(0, removedIndex), remaining.length - 1)];
+    if (fallback) onSelect(fallback.id);
+  }, [commitGraph, onSelect, project]);
+
+  useEffect(() => {
+    const handleHistoryShortcut = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("input, textarea, select, [contenteditable='true']")) return;
+      if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+      if (event.key.toLowerCase() === "z") {
+        event.preventDefault();
+        if (event.shiftKey) redoGraph(); else undoGraph();
+      } else if (event.key.toLowerCase() === "y") {
+        event.preventDefault();
+        redoGraph();
+      }
+    };
+    window.addEventListener("keydown", handleHistoryShortcut);
+    return () => window.removeEventListener("keydown", handleHistoryShortcut);
+  }, [redoGraph, undoGraph]);
+
   return <div className="story-workspace">
     <header className="story-toolbar">
       <div><GitBranch size={15} /><strong>{tr("互动剧情图", "Interactive story graph")}</strong><span>{project.storyNodes.length} {tr("个节点", "nodes")}</span></div>
       <div>
         <button type="button" onClick={() => onInspectorTab("issues")} className={issues.some((issue) => issue.severity === "error") ? "has-errors" : ""}><ListChecks size={14} />{tr("检查", "Validate")}<b>{issues.filter((issue) => issue.severity !== "info").length}</b></button>
         <button type="button" onClick={onPlay} disabled={project.storyNodes.length === 0}><Play size={14} />{tr("试玩", "Playtest")}</button>
+        <button type="button" onClick={() => setInspectorOpen((open) => !open)} title={inspectorOpen ? tr("收起检查器", "Hide inspector") : tr("打开检查器", "Show inspector")}>
+          {inspectorOpen ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}{inspectorOpen ? tr("专注画布", "Focus canvas") : tr("检查器", "Inspector")}
+        </button>
       </div>
     </header>
-    <div className="story-main">
-      <StoryCanvas project={project} selectedId={selectedNodeId} onSelect={onSelect} onMove={onMove} />
-      <aside className="story-inspector">
+    <div className={`story-main${inspectorOpen ? "" : " inspector-closed"}`}>
+      <StoryCanvas
+        project={project}
+        selectedId={selectedNodeId}
+        newNodeType={newNodeType}
+        issues={issues}
+        canUndo={history.undo.length > 0}
+        canRedo={history.redo.length > 0}
+        onSelect={onSelect}
+        onCommit={commitGraph}
+        onDeleteNodes={deleteNodes}
+        onUndo={undoGraph}
+        onRedo={redoGraph}
+      />
+      {inspectorOpen && <aside className="story-inspector">
         <nav><button className={inspectorTab === "node" ? "active" : ""} onClick={() => onInspectorTab("node")}>{tr("节点", "Node")}</button><button className={inspectorTab === "variables" ? "active" : ""} onClick={() => onInspectorTab("variables")}>{tr("变量", "Variables")}</button><button className={inspectorTab === "issues" ? "active" : ""} onClick={() => onInspectorTab("issues")}>{tr("检查", "Checks")}</button></nav>
-        {inspectorTab === "node" && <NodeInspector project={project} node={selectedNode} completion={completion} onNode={onNode} onProject={onProject} onDelete={onDeleteNode} onComplete={onComplete} onStop={onStop} onAccept={onAccept} onRegenerate={onRegenerate} />}
+        {inspectorTab === "node" && <NodeInspector project={project} node={selectedNode} completion={completion} onNode={onNode} onProject={onProject} onDelete={() => selectedNode && deleteNodes([selectedNode.id])} onComplete={onComplete} onStop={onStop} onAccept={onAccept} onRegenerate={onRegenerate} />}
         {inspectorTab === "variables" && <VariableInspector project={project} onProject={onProject} />}
         {inspectorTab === "issues" && <IssueInspector issues={issues} onSelect={(nodeId) => { if (nodeId) onSelect(nodeId); onInspectorTab("node"); }} />}
-      </aside>
+      </aside>}
     </div>
   </div>;
 }
 
-function StoryCanvas({ project, selectedId, onSelect, onMove }: {
+type StoryFlowNodeData = Record<string, unknown> & {
+  storyNode: StoryNode;
+  isStart: boolean;
+  issueCount: number;
+  incomingCount: number;
+};
+
+type StoryFlowNode = FlowNode<StoryFlowNodeData, "story">;
+type StoryFlowEdgeData = Record<string, unknown> & {
+  sourceNodeId: string;
+  sourceHandle: string;
+  kind: "next" | "choice";
+  condition: string;
+};
+type StoryFlowEdge = FlowEdge<StoryFlowEdgeData>;
+
+function StoryFlowNodeCard({ data, selected, isConnectable }: NodeProps<StoryFlowNode>) {
+  const node = data.storyNode;
+  const visibleChoices = node.choices.slice(0, 6);
+  return <article className={`story-flow-node ${node.type}${selected ? " selected" : ""}${data.issueCount > 0 ? " has-issues" : ""}`}>
+    <Handle type="target" position={Position.Left} id="input" isConnectable={isConnectable} className="story-flow-handle input" aria-label={tr(`连接到 ${node.title}`, `Connect to ${node.title}`)} />
+    <header>
+      <i /><span>{nodeTypeLabel(node.type)}</span>
+      {data.isStart && <b>{tr("开始", "START")}</b>}
+      {data.issueCount > 0 && <em title={tr("该节点存在检查项", "This node has validation findings")}><CircleAlert size={10} />{data.issueCount}</em>}
+    </header>
+    <strong title={node.title}>{node.title}</strong>
+    <p>{node.content || tr("尚未填写内容", "No content yet")}</p>
+    {visibleChoices.length > 0 && <div className="story-flow-choices">
+      {visibleChoices.map((choice) => <div className="story-flow-choice" key={choice.id} title={choice.condition || choice.label}>
+        <span>{choice.label || tr("未命名选项", "Untitled choice")}</span>
+        {choice.condition && <small>if</small>}
+        <Handle type="source" position={Position.Right} id={`choice:${choice.id}`} isConnectable={isConnectable} className="story-flow-handle choice" aria-label={tr(`从选项“${choice.label || "未命名选项"}”连线`, `Connect from choice “${choice.label || "Untitled choice"}”`)} />
+      </div>)}
+      {node.choices.length > visibleChoices.length && <small className="story-flow-more">+{node.choices.length - visibleChoices.length} {tr("个选项", "more")}</small>}
+    </div>}
+    <footer>
+      <div className="story-flow-output" title={tr("拖动端口设置默认后继", "Drag this port to set the default next node")}>
+        <span>{node.choices.length > 0 ? tr("默认路径", "Fallback") : tr("下一步", "Next")}</span>
+        <Handle type="source" position={Position.Right} id="next" isConnectable={isConnectable} className="story-flow-handle next" aria-label={tr("拖动设置顺序后继", "Drag to set the next node")} />
+      </div>
+      <div className="story-flow-output branch" title={tr("拖动端口快速添加新分支", "Drag this port to add a new branch")}>
+        <Plus size={10} /><span>{tr("新分支", "Branch")}</span>
+        <Handle type="source" position={Position.Right} id="branch-new" isConnectable={isConnectable} className="story-flow-handle branch" aria-label={tr("拖动快速添加新分支", "Drag to add a new branch")} />
+      </div>
+    </footer>
+  </article>;
+}
+
+const STORY_FLOW_NODE_TYPES = { story: StoryFlowNodeCard };
+
+function storyMiniMapColor(node: StoryFlowNode) {
+  return ({ scene: "#64748b", dialogue: "#0ea5e9", choice: "#d97706", condition: "#8b5cf6", ending: "#e11d48" } as const)[node.data.storyNode.type];
+}
+
+function StoryCanvas({ project, selectedId, newNodeType, issues, canUndo, canRedo, onSelect, onCommit, onDeleteNodes, onUndo, onRedo }: {
   project: WritingProject;
   selectedId?: string;
+  newNodeType: StoryNodeType;
+  issues: NarrativeIssue[];
+  canUndo: boolean;
+  canRedo: boolean;
   onSelect: (id: string) => void;
-  onMove: (id: string, x: number, y: number) => void;
+  onCommit: (project: WritingProject) => void;
+  onDeleteNodes: (ids: string[]) => void;
+  onUndo: () => void;
+  onRedo: () => void;
 }) {
-  const canvasRef = useRef<HTMLDivElement>(null);
-  const dragRef = useRef<{ id: string; startX: number; startY: number; x: number; y: number } | undefined>(undefined);
-  const [dragPosition, setDragPosition] = useState<{ id: string; x: number; y: number }>();
-  const positions = new Map(project.storyNodes.map((node) => [node.id, dragPosition?.id === node.id ? { x: dragPosition.x, y: dragPosition.y } : { x: node.x, y: node.y }]));
-  const edges = project.storyNodes.flatMap((node) => {
-    const source = positions.get(node.id);
-    if (!source) return [];
-    return [node.nextNodeId, ...node.choices.map((choice) => choice.targetNodeId)].flatMap((targetId, index) => {
-      const target = targetId ? positions.get(targetId) : undefined;
-      return target ? [{ id: `${node.id}-${targetId}-${index}`, source, target, choice: index > 0 || node.choices.length > 0 }] : [];
-    });
-  });
-  const move = (event: ReactPointerEvent<HTMLDivElement>) => {
-    const drag = dragRef.current;
-    if (!drag) return;
-    const x = Math.max(12, Math.min(3_720, drag.x + event.clientX - drag.startX));
-    const y = Math.max(12, Math.min(3_720, drag.y + event.clientY - drag.startY));
-    setDragPosition({ id: drag.id, x, y });
-  };
-  const finish = (event: ReactPointerEvent<HTMLDivElement>) => {
-    const drag = dragRef.current;
-    if (!drag) return;
-    const x = Math.max(12, Math.min(3_720, drag.x + event.clientX - drag.startX));
-    const y = Math.max(12, Math.min(3_720, drag.y + event.clientY - drag.startY));
-    dragRef.current = undefined;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-    if (Math.round(x) !== Math.round(drag.x) || Math.round(y) !== Math.round(drag.y)) onMove(drag.id, Math.round(x), Math.round(y));
-    setDragPosition(undefined);
-  };
   return <div className="story-canvas-shell">
-    <div className="story-canvas" ref={canvasRef} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish}>
-      <svg width="4000" height="4000" aria-hidden="true">
-        {edges.map((edge) => {
-          const x1 = edge.source.x + 210;
-          const y1 = edge.source.y + 55;
-          const x2 = edge.target.x;
-          const y2 = edge.target.y + 55;
-          const bend = Math.max(55, Math.abs(x2 - x1) * .45);
-          return <path d={`M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`} className={edge.choice ? "choice" : ""} key={edge.id} />;
-        })}
-      </svg>
-      {project.storyNodes.map((node) => {
-        const position = positions.get(node.id)!;
-        return <article
-          className={`story-node ${node.type}${node.id === selectedId ? " selected" : ""}${node.id === project.startNodeId ? " start" : ""}`}
-          style={{ transform: `translate(${position.x}px, ${position.y}px)` }}
-          onPointerDown={(event) => {
-            if ((event.target as HTMLElement).closest("button")) return;
-            event.currentTarget.parentElement?.setPointerCapture(event.pointerId);
-            dragRef.current = { id: node.id, startX: event.clientX, startY: event.clientY, x: position.x, y: position.y };
-            setDragPosition({ id: node.id, x: position.x, y: position.y });
-            onSelect(node.id);
-          }}
-          onClick={() => onSelect(node.id)}
-          key={node.id}
-        >
-          <header><i /><span>{nodeTypeLabel(node.type)}</span>{node.id === project.startNodeId && <b>{tr("开始", "START")}</b>}</header>
-          <strong>{node.title}</strong>
-          <p>{node.content || tr("尚未填写内容", "No content yet")}</p>
-          <footer>{node.choices.length > 0 ? tr(`${node.choices.length} 个选项`, `${node.choices.length} choices`) : node.nextNodeId ? tr("顺序连接", "Sequential") : tr("未连接", "Unlinked")}</footer>
-        </article>;
-      })}
-      {project.storyNodes.length === 0 && <div className="story-canvas-empty"><GitBranch size={30} /><strong>{tr("添加第一个剧情节点", "Add your first story node")}</strong></div>}
-    </div>
+    <ReactFlowProvider>
+      <StoryCanvasInner
+        project={project}
+        selectedId={selectedId}
+        newNodeType={newNodeType}
+        issues={issues}
+        canUndo={canUndo}
+        canRedo={canRedo}
+        onSelect={onSelect}
+        onCommit={onCommit}
+        onDeleteNodes={onDeleteNodes}
+        onUndo={onUndo}
+        onRedo={onRedo}
+      />
+    </ReactFlowProvider>
   </div>;
+}
+
+function StoryCanvasInner({ project, selectedId, newNodeType, issues, canUndo, canRedo, onSelect, onCommit, onDeleteNodes, onUndo, onRedo }: {
+  project: WritingProject;
+  selectedId?: string;
+  newNodeType: StoryNodeType;
+  issues: NarrativeIssue[];
+  canUndo: boolean;
+  canRedo: boolean;
+  onSelect: (id: string) => void;
+  onCommit: (project: WritingProject) => void;
+  onDeleteNodes: (ids: string[]) => void;
+  onUndo: () => void;
+  onRedo: () => void;
+}) {
+  const { fitView, getNode, screenToFlowPosition, setCenter } = useReactFlow<StoryFlowNode, StoryFlowEdge>();
+  const [snapToGrid, setSnapToGrid] = useState(false);
+  const [boxSelectEnabled, setBoxSelectEnabled] = useState(false);
+  const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>(selectedId ? [selectedId] : []);
+  const lastCanvasSelectionRef = useRef<string | undefined>(undefined);
+  const issueCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const issue of issues) if (issue.nodeId) counts.set(issue.nodeId, (counts.get(issue.nodeId) ?? 0) + 1);
+    return counts;
+  }, [issues]);
+  const incomingCounts = useMemo(() => {
+    const counts = new Map(project.storyNodes.map((node) => [node.id, 0]));
+    for (const connection of storyGraphConnections(project)) counts.set(connection.targetNodeId, (counts.get(connection.targetNodeId) ?? 0) + 1);
+    return counts;
+  }, [project]);
+  const mappedNodes = useMemo<StoryFlowNode[]>(() => project.storyNodes.map((node) => ({
+    id: node.id,
+    type: "story",
+    position: { x: node.x, y: node.y },
+    data: {
+      storyNode: node,
+      isStart: node.id === project.startNodeId,
+      issueCount: issueCounts.get(node.id) ?? 0,
+      incomingCount: incomingCounts.get(node.id) ?? 0,
+    },
+    draggable: true,
+    connectable: true,
+    selectable: true,
+    deletable: false,
+    ariaLabel: tr(`剧情节点：${node.title}`, `Story node: ${node.title}`),
+  })), [incomingCounts, issueCounts, project.startNodeId, project.storyNodes]);
+  const [flowNodes, setFlowNodes] = useState<StoryFlowNode[]>(mappedNodes);
+
+  useEffect(() => {
+    setFlowNodes((current) => {
+      const previous = new Map(current.map((node) => [node.id, node]));
+      return mappedNodes.map((node) => ({ ...node, selected: previous.get(node.id)?.selected ?? node.id === selectedId }));
+    });
+  }, [mappedNodes, selectedId]);
+
+  useEffect(() => {
+    if (!selectedId) return;
+    if (lastCanvasSelectionRef.current === selectedId) {
+      lastCanvasSelectionRef.current = undefined;
+      return;
+    }
+    lastCanvasSelectionRef.current = undefined;
+    setFlowNodes((nodes) => nodes.map((node) => ({ ...node, selected: node.id === selectedId })));
+    setSelectedNodeIds([selectedId]);
+    let cancelled = false;
+    let timer = 0;
+    let attempts = 0;
+    const centerSelectedNode = () => {
+      if (cancelled) return;
+      const node = getNode(selectedId);
+      if (!node && attempts < 8) {
+        attempts += 1;
+        timer = window.setTimeout(centerSelectedNode, 45);
+        return;
+      }
+      if (!node) return;
+      const width = node.measured?.width ?? 250;
+      const height = node.measured?.height ?? 150;
+      void setCenter(node.position.x + width / 2, node.position.y + height / 2, { zoom: 1, duration: 260 });
+    };
+    timer = window.setTimeout(centerSelectedNode, 35);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [getNode, selectedId, setCenter, setFlowNodes]);
+
+  const mappedEdges = useMemo<StoryFlowEdge[]>(() => storyGraphConnections(project).map((connection) => ({
+    id: connection.id,
+    source: connection.sourceNodeId,
+    sourceHandle: connection.sourceHandle,
+    target: connection.targetNodeId,
+    targetHandle: "input",
+    type: "smoothstep",
+    label: connection.label.length > 34 ? `${connection.label.slice(0, 32)}…` : connection.label,
+    ariaLabel: tr(`从 ${connection.sourceNodeId} 到 ${connection.targetNodeId}：${connection.label}`, `From ${connection.sourceNodeId} to ${connection.targetNodeId}: ${connection.label}`),
+    markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
+    interactionWidth: 24,
+    reconnectable: true,
+    deletable: true,
+    selectable: true,
+    className: `${connection.kind}${connection.condition ? " conditional" : ""}`,
+    style: { stroke: connection.kind === "choice" ? "#d97706" : "#64748b", strokeWidth: 2.2 },
+    labelStyle: { fill: connection.kind === "choice" ? "#92400e" : "#475569", fontSize: 10, fontWeight: 700 },
+    labelBgStyle: { fill: "rgba(255,255,255,.92)", stroke: connection.kind === "choice" ? "#fed7aa" : "#dbe3e8", strokeWidth: 1 },
+    labelBgPadding: [5, 3],
+    labelBgBorderRadius: 5,
+    data: {
+      sourceNodeId: connection.sourceNodeId,
+      sourceHandle: connection.sourceHandle,
+      kind: connection.kind,
+      condition: connection.condition,
+    },
+  })), [project]);
+  const [flowEdges, setFlowEdges] = useState<StoryFlowEdge[]>(mappedEdges);
+
+  useEffect(() => {
+    setFlowEdges((current) => {
+      const previous = new Map(current.map((edge) => [edge.id, edge]));
+      return mappedEdges.map((edge) => ({ ...edge, selected: previous.get(edge.id)?.selected ?? false }));
+    });
+  }, [mappedEdges]);
+
+  const handleNodeChanges = useCallback((changes: NodeChange<StoryFlowNode>[]) => {
+    setFlowNodes((nodes) => applyNodeChanges(changes, nodes));
+  }, []);
+
+  const handleEdgeChanges = useCallback((changes: EdgeChange<StoryFlowEdge>[]) => {
+    setFlowEdges((edges) => applyEdgeChanges(changes, edges));
+  }, []);
+
+  const persistPositions = useCallback((changedNodes: StoryFlowNode[]) => {
+    const positions = new Map(changedNodes.map((node) => [node.id, node.position]));
+    const now = Date.now();
+    const storyNodes = project.storyNodes.map((node) => {
+      const position = positions.get(node.id);
+      if (!position || (Math.round(position.x) === Math.round(node.x) && Math.round(position.y) === Math.round(node.y))) return node;
+      return { ...node, x: Math.round(position.x), y: Math.round(position.y), updatedAt: now };
+    });
+    if (storyNodes.some((node, index) => node !== project.storyNodes[index])) onCommit({ ...project, storyNodes });
+  }, [onCommit, project]);
+
+  const selectFromCanvas = useCallback((id: string) => {
+    lastCanvasSelectionRef.current = id;
+    onSelect(id);
+  }, [onSelect]);
+
+  const handleSelectionChange = useCallback(({ nodes }: { nodes: StoryFlowNode[] }) => {
+    const ids = nodes.map((node) => node.id);
+    setSelectedNodeIds((current) => current.length === ids.length && current.every((id, index) => id === ids[index])
+      ? current
+      : ids);
+  }, []);
+
+  const addNodeAt = useCallback((position: { x: number; y: number }, source?: { id: string; handle: string | null }) => {
+    const node = createStoryNode(newNodeType, undefined, Math.round(position.x), Math.round(position.y));
+    let next: WritingProject = {
+      ...project,
+      storyNodes: [...project.storyNodes, node],
+      startNodeId: project.startNodeId ?? node.id,
+    };
+    if (source) next = setStoryConnectionTarget(next, source.id, source.handle, node.id);
+    onCommit(next);
+    selectFromCanvas(node.id);
+    window.setTimeout(() => void fitView({ nodes: [{ id: node.id }], padding: .7, duration: 260, maxZoom: 1.15 }), 40);
+  }, [fitView, newNodeType, onCommit, project, selectFromCanvas]);
+
+  const actionNodeIds = selectedNodeIds.length > 0 ? selectedNodeIds : selectedId ? [selectedId] : [];
+  const duplicateSelection = useCallback(() => {
+    const result = duplicateStoryNodes(project, actionNodeIds);
+    if (result.nodeIds.length === 0) return;
+    onCommit(result.project);
+    setSelectedNodeIds(result.nodeIds);
+    selectFromCanvas(result.nodeIds[0]);
+    window.setTimeout(() => void fitView({ nodes: result.nodeIds.map((id) => ({ id })), padding: .55, duration: 280, maxZoom: 1.1 }), 40);
+  }, [actionNodeIds, fitView, onCommit, project, selectFromCanvas]);
+
+  const autoLayout = useCallback(() => {
+    const next = autoLayoutStoryNodes(project);
+    if (next === project) return;
+    onCommit(next);
+    window.setTimeout(() => void fitView({ padding: .18, duration: 360, maxZoom: 1 }), 40);
+  }, [fitView, onCommit, project]);
+
+  return <ReactFlow<StoryFlowNode, StoryFlowEdge>
+    nodes={flowNodes}
+    edges={flowEdges}
+    nodeTypes={STORY_FLOW_NODE_TYPES}
+    onNodesChange={handleNodeChanges}
+    onEdgesChange={handleEdgeChanges}
+    onNodeClick={(_event, node) => selectFromCanvas(node.id)}
+    onNodeDragStop={(_event, node, nodes) => persistPositions(nodes.length > 0 ? nodes : [node])}
+    onSelectionDragStop={(_event, nodes) => persistPositions(nodes)}
+    onSelectionChange={handleSelectionChange}
+    onConnect={(connection: Connection) => {
+      if (!connection.source || !connection.target) return;
+      onCommit(setStoryConnectionTarget(project, connection.source, connection.sourceHandle, connection.target));
+    }}
+    onConnectEnd={(event, state) => {
+      if (!state.fromNode || state.toNode) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target?.closest(".react-flow__pane")) return;
+      const client = "clientX" in event
+        ? { x: event.clientX, y: event.clientY }
+        : { x: event.changedTouches[0]?.clientX ?? 0, y: event.changedTouches[0]?.clientY ?? 0 };
+      addNodeAt(screenToFlowPosition(client), { id: state.fromNode.id, handle: state.fromHandle?.id ?? null });
+    }}
+    onReconnect={(oldEdge, connection) => {
+      if (!connection.source || !connection.target) return;
+      onCommit(reconnectStoryConnection(
+        project,
+        oldEdge.source,
+        oldEdge.sourceHandle,
+        connection.source,
+        connection.sourceHandle ?? oldEdge.sourceHandle,
+        connection.target,
+      ));
+    }}
+    onEdgesDelete={(edges) => {
+      const next = edges.reduce((current, edge) => removeStoryConnection(current, edge.source, edge.sourceHandle), project);
+      onCommit(next);
+    }}
+    onPaneClick={(event) => {
+      if (event.detail === 2) addNodeAt(screenToFlowPosition({ x: event.clientX, y: event.clientY }));
+    }}
+    isValidConnection={(connection) => Boolean(connection.source && connection.target && connection.source !== connection.target)}
+    fitView
+    fitViewOptions={{ padding: .22, maxZoom: 1 }}
+    minZoom={.2}
+    maxZoom={2}
+    snapToGrid={snapToGrid}
+    snapGrid={[18, 18]}
+    connectionRadius={30}
+    reconnectRadius={24}
+    edgesReconnectable
+    elementsSelectable
+    selectionMode={SelectionMode.Partial}
+    selectionOnDrag={boxSelectEnabled}
+    selectionKeyCode="Shift"
+    multiSelectionKeyCode="Control"
+    panOnDrag={boxSelectEnabled ? [1, 2] : true}
+    panActivationKeyCode="Space"
+    zoomOnDoubleClick={false}
+    onlyRenderVisibleElements
+    colorMode="system"
+    defaultEdgeOptions={{ type: "smoothstep" }}
+    deleteKeyCode={["Backspace", "Delete"]}
+  >
+    <Background variant={BackgroundVariant.Dots} gap={18} size={1.2} />
+    <Controls position="bottom-left" showInteractive={false} />
+    <MiniMap<StoryFlowNode> position="bottom-right" pannable zoomable nodeColor={storyMiniMapColor} nodeStrokeWidth={3} />
+    <Panel position="top-left" className="story-flow-tools">
+      <button type="button" className="nodrag nopan" onClick={onUndo} disabled={!canUndo} title={tr("撤销画布操作 (Ctrl+Z)", "Undo canvas action (Ctrl+Z)")}><Undo2 size={14} /></button>
+      <button type="button" className="nodrag nopan" onClick={onRedo} disabled={!canRedo} title={tr("重做画布操作 (Ctrl+Y)", "Redo canvas action (Ctrl+Y)")}><Redo2 size={14} /></button>
+      <i />
+      <button type="button" className="nodrag nopan" onClick={autoLayout} disabled={project.storyNodes.length < 2} title={tr("自动整理剧情路径", "Auto-arrange story paths")}><LayoutDashboard size={14} /></button>
+      <button type="button" className="nodrag nopan" onClick={() => void fitView({ padding: .2, duration: 300, maxZoom: 1 })} disabled={project.storyNodes.length === 0} title={tr("显示全部节点", "Fit all nodes")}><Maximize2 size={14} /></button>
+      <button type="button" className={`nodrag nopan${boxSelectEnabled ? " active" : ""}`} onClick={() => setBoxSelectEnabled((value) => !value)} title={tr("框选模式：拖动空白区域选择多个节点", "Box select: drag the canvas to select multiple nodes")}><Square size={14} /></button>
+      <button type="button" className={`nodrag nopan${snapToGrid ? " active" : ""}`} onClick={() => setSnapToGrid((value) => !value)} title={tr("切换网格吸附", "Toggle grid snapping")}><MousePointer2 size={14} /></button>
+      <i />
+      <button type="button" className="nodrag nopan" onClick={duplicateSelection} disabled={actionNodeIds.length === 0} title={tr("复制选中节点", "Duplicate selected nodes")}><CopyPlus size={14} /></button>
+      <button type="button" className="nodrag nopan danger" onClick={() => onDeleteNodes(actionNodeIds)} disabled={actionNodeIds.length === 0} title={tr("删除选中节点", "Delete selected nodes")}><Trash2 size={14} /></button>
+      {actionNodeIds.length > 1 && <span>{actionNodeIds.length} {tr("项", "selected")}</span>}
+    </Panel>
+    <Panel position="bottom-center" className="story-flow-hint">
+      {boxSelectEnabled
+        ? tr("框选模式 · 拖动空白区域多选 · 中/右键或按住空格平移", "Box select · Drag the canvas to multi-select · Middle/right drag or hold Space to pan")
+        : tr(`拖动端口连线 · 拖到空白处自动新建${nodeTypeLabel(newNodeType)} · 双击空白新建节点 · Shift 框选`, `Drag ports to connect · Drop on canvas to create ${nodeTypeLabel(newNodeType)} · Double-click to add · Shift-drag selects`)}
+    </Panel>
+    {project.storyNodes.length === 0 && <Panel position="top-center" className="story-canvas-empty"><GitBranch size={30} /><strong>{tr("双击画布，添加第一个剧情节点", "Double-click the canvas to add your first story node")}</strong></Panel>}
+  </ReactFlow>;
 }
 
 function NodeInspector({ project, node, completion, onNode, onProject, onDelete, onComplete, onStop, onAccept, onRegenerate }: {
@@ -1746,7 +2640,7 @@ function completionLabelEn(intent: CompletionIntent) {
 }
 
 function contextReasonLabel(reason: WritingContextBundle["items"][number]["reason"]) {
-  return ({ selected: tr("手动选择", "Selected"), linked: tr("当前内容绑定", "Linked"), mentioned: tr("正文提及", "Mentioned"), related: tr("关系联动", "Related"), global: tr("全局规则", "Global"), neighbor: tr("相邻文稿", "Neighbor") } as const)[reason];
+  return ({ selected: tr("手动选择", "Selected"), linked: tr("当前内容绑定", "Linked"), mentioned: tr("正文提及", "Mentioned"), related: tr("关系联动", "Related"), global: tr("全局规则", "Global"), neighbor: tr("相邻文稿", "Neighbor"), reference: tr("参考资料", "Reference") } as const)[reason];
 }
 
 function documentKindLabel(kind: WritingDocumentKind) {
@@ -1774,7 +2668,32 @@ function projectSignature(project: WritingProject) {
 }
 
 function emptyContext(): WritingContextBundle {
-  return { text: "", items: [], entityIds: [], estimatedTokens: 0, usedChars: 0, budgetChars: 1 };
+  return { text: "", items: [], entityIds: [], referenceIds: [], estimatedTokens: 0, usedChars: 0, budgetChars: 1 };
+}
+
+function patchGoal(project: WritingProject, goalId: string, updater: (goal: WritingGoal) => WritingGoal): WritingProject {
+  return {
+    ...project,
+    goals: project.goals.map((goal) => goal.id === goalId ? updater(goal) : goal),
+    updatedAt: Date.now(),
+  };
+}
+
+function skipWritingGoalStep(project: WritingProject, goalId: string, stepId: string): WritingProject {
+  const now = Date.now();
+  return patchGoal(project, goalId, (goal) => {
+    const plan = goal.plan.map((step) => step.id === stepId ? { ...step, status: "skipped" as const, error: undefined, completedAt: now } : step);
+    const nextStep = plan.find((step) => step.status === "pending" || step.status === "failed" || step.status === "review");
+    const completed = plan.every((step) => step.status === "completed" || step.status === "skipped");
+    return {
+      ...goal,
+      plan,
+      activeStepId: nextStep?.id,
+      status: completed ? "completed" : "ready",
+      runSummary: completed ? tr("全部计划步骤已结束。", "All planned steps have ended.") : tr("已跳过当前步骤。", "Current step skipped."),
+      updatedAt: now,
+    };
+  });
 }
 
 function errorText(error: unknown) {

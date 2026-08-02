@@ -18,7 +18,7 @@
   </p>
 
   <p>
-<img alt="Version" src="https://img.shields.io/badge/version-1.0.15-ff5a4f?style=flat-square" />
+<img alt="Version" src="https://img.shields.io/badge/version-1.0.16-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-stable-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -91,9 +91,11 @@ Choose a project directory, create a conversation, and describe the outcome you 
 ### AI writing and game narrative
 
 - Creative Studio opens with image, video, and speech tools first, followed by the writing workspace; novel, screenplay, and game narrative projects autosave to local SQLite independently of conversations
+- Dedicated writing Goal Mode turns the deliverable, audience, word target, boundaries, and acceptance criteria into a 3-6 step AI execution plan; use Partner mode for review gates or AI Lead mode for continuous research, outlining, drafting, revision, and QA, with pause/resume and an automatic snapshot before every manuscript mutation
+- The reference library imports Markdown, text, JSON, CSV, TSV, and Yarn as sources, research, style samples, or inspiration; every reference can be disabled or explicitly pinned into the current context and travels with full-project import/export
 - Manuscripts support pause-triggered autocomplete, continue, rewrite, polish, expand, shorten, dialogue, and description; streamed completions appear as gray inline text after the caret, like a code editor, with Tab to accept and Escape to reject, plus an automatic snapshot before acceptance
 - Characters, locations, factions, items, world lore, plots, rules, and quests form a linked codex; explicit picks, document/node bindings, nearby mentions, relations, and global rules are ranked into AI context
-- The game narrative graph supports scene, dialogue, choice, condition, and ending nodes, plus variables, conditions, effects, path validation, and built-in playtesting
+- The game narrative graph supports scene, dialogue, choice, condition, and ending nodes, plus variables, conditions, effects, path validation, and built-in playtesting; nodes can be freely dragged and connected/reconnected from visual ports, with pan/zoom, a minimap, auto-layout, explicit box selection and batch move/duplicate, search, focus mode, and undo/redo
 - Full projects import/export as JSON and can export to Markdown or Yarn Spinner; writing and image, video, and speech creation remain one switch apart
 
 ### Multimodal creation
