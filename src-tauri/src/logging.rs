@@ -110,11 +110,11 @@ fn open_file(path: &Path) -> Result<File, String> {
 }
 
 fn switch_date(directory: &Path, state: &mut LogWriter, date: String) -> Result<(), String> {
-    if let Some(mut writer) = state.writer.take() {
-        if let Err(error) = writer.flush() {
-            state.writer = Some(BufWriter::new(open_file(&state.path)?));
-            return Err(format!("Could not flush the application log: {error}"));
-        }
+    if let Some(mut writer) = state.writer.take()
+        && let Err(error) = writer.flush()
+    {
+        state.writer = Some(BufWriter::new(open_file(&state.path)?));
+        return Err(format!("Could not flush the application log: {error}"));
     }
     let path = directory.join(log_file_name(&date));
     cleanup_expired_logs(directory, &path);
