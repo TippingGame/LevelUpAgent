@@ -127,6 +127,29 @@ pub struct HarnessOperationStarted {
     pub event_sequence: u64,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "disposition", content = "value", rename_all = "snake_case")]
+pub enum HarnessSubmission {
+    Started(HarnessOperationStarted),
+    Queued(HarnessQueueItem),
+}
+
+impl HarnessSubmission {
+    pub fn into_started(self) -> Option<HarnessOperationStarted> {
+        match self {
+            Self::Started(started) => Some(started),
+            Self::Queued(_) => None,
+        }
+    }
+
+    pub fn into_queued(self) -> Option<HarnessQueueItem> {
+        match self {
+            Self::Queued(queued) => Some(queued),
+            Self::Started(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessToolPolicyRequest {

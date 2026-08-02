@@ -195,6 +195,7 @@ import {
   hatchToolPolicyViolation,
 } from "./lib/hatchProgress";
 import { copyText } from "./lib/clipboard";
+import { openAppLogDirectory } from "./lib/appLogging";
 import type {
   AgentMessage,
   AgentMode,
@@ -574,6 +575,86 @@ function terminalChangeStatus(state?: HarnessOperationState): ConversationChange
   return null;
 }
 
+function collapseReconnectStatusMessages(messages: AgentMessage[]): AgentMessage[] {
+  const collapsedMessages: AgentMessage[] = [];
+  for (const item of messages) {
+    const previous = collapsedMessages[collapsedMessages.length - 1];
+    if (item.status && previous?.status === "reconnecting") {
+      collapsedMessages[collapsedMessages.length - 1] = item;
+    } else {
+      collapsedMessages.push(item);
+    }
+  }
+  return collapsedMessages;
+}
+
+function latestReconnectStatusId(messages: AgentMessage[]): string | undefined {
+  let latestUserIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === "user") {
+      latestUserIndex = index;
+      break;
+    }
+  }
+  for (let index = messages.length - 1; index > latestUserIndex; index -= 1) {
+    if (messages[index].status === "reconnecting") return messages[index].id;
+  }
+  return undefined;
+}
+
+function normalizeReconnectHistory(thread: AgentThread): { thread: AgentThread; changed: boolean } {
+  const collapsedMessages = collapseReconnectStatusMessages(thread.messages);
+  let changed = collapsedMessages.length !== thread.messages.length;
+
+  let latestUserIndex = -1;
+  for (let index = collapsedMessages.length - 1; index >= 0; index -= 1) {
+    if (collapsedMessages[index].role === "user") {
+      latestUserIndex = index;
+      break;
+    }
+  }
+  let reconnectIndex = -1;
+  for (let index = collapsedMessages.length - 1; index > latestUserIndex; index -= 1) {
+    const item = collapsedMessages[index];
+    if (item.status) {
+      if (item.status === "reconnecting") reconnectIndex = index;
+      break;
+    }
+    const incompleteStreamPlaceholder = item.role === "assistant"
+      && !item.content.trim()
+      && item.toolCalls.length === 0
+      && item.attachments.length === 0;
+    if (!incompleteStreamPlaceholder) break;
+  }
+  if (reconnectIndex < 0) {
+    return changed
+      ? { thread: { ...thread, messages: collapsedMessages }, changed: true }
+      : { thread, changed: false };
+  }
+
+  const messages = collapsedMessages
+    .filter((item, index) => index <= reconnectIndex || !(
+      item.role === "assistant"
+      && !item.status
+      && !item.content.trim()
+      && item.toolCalls.length === 0
+      && item.attachments.length === 0
+    ))
+    .map((item, index) => index === reconnectIndex ? {
+      ...item,
+      content: tr(
+        "重连因程序重启而中断，可以重新发送消息",
+        "Reconnect interrupted by application restart; you can send the message again",
+      ),
+      status: "failed" as const,
+      isError: true,
+    } : item);
+  return {
+    thread: { ...thread, messages, updatedAt: Math.max(thread.updatedAt, Date.now()) },
+    changed: true,
+  };
+}
+
 function App() {
   const [locale, setLocale] = useState<AppLocale>(getAppLocale);
   const [profiles, setProfiles] = useState<ProviderProfile[]>(loadProfiles);
@@ -659,6 +740,7 @@ function App() {
   const workspaceRunBaselinesRef = useRef<Map<string, Promise<WorkspaceRunBaseline | null>>>(new Map());
   const themeImportingRef = useRef<string | null>(null);
   const attachmentPasteRef = useRef(false);
+  const deletingThreadIdsRef = useRef<Set<string>>(new Set());
   const runModesRef = useRef<Map<string, AgentMode>>(new Map());
   // Bootstrap uses local Tauri tools before an agent operation ID exists.
   // Keep a generation token so pause/cancel can invalidate that async work
@@ -682,6 +764,14 @@ function App() {
   activePetIdRef.current = activePetId;
   const running = runningThreadIds.has(activeThread.id);
   const pending = pendingApprovals[activeThread.id] ?? null;
+  const latestUserCreatedAt = [...activeThread.messages].reverse().find((item) => item.role === "user")?.createdAt ?? 0;
+  const latestConnectionMessage = [...activeThread.messages]
+    .reverse()
+    .find((item) => item.status && item.createdAt >= latestUserCreatedAt);
+  const latestConnectionStatus = latestConnectionMessage?.status;
+  const activeReconnectMessageId = running && latestConnectionMessage?.status === "reconnecting"
+    ? latestConnectionMessage.id
+    : undefined;
   const queuedItems = harnessQueueItems[activeThread.id] ?? [];
   const latestChangeSet = [...activeThread.messages].reverse().find((item) => item.changeSet)?.changeSet ?? null;
   const visibleChangeSet = reviewedChangeSet ?? latestChangeSet;
@@ -1192,16 +1282,22 @@ function App() {
         const migratedThreadIds = new Set(
           sourceThreads.filter((thread) => !thread.workspace?.trim()).map((thread) => thread.id),
         );
-        const hydratedThreads = sourceThreads.map((thread) => thread.workspace?.trim()
-          ? thread
-          : { ...thread, workspace: resolvedDefaultWorkspace });
+        const recoveredThreadIds = new Set<string>();
+        const hydratedThreads = sourceThreads.map((sourceThread) => {
+          const thread = sourceThread.workspace?.trim()
+            ? sourceThread
+            : { ...sourceThread, workspace: resolvedDefaultWorkspace };
+          const recovered = normalizeReconnectHistory(thread);
+          if (recovered.changed) recoveredThreadIds.add(thread.id);
+          return recovered.thread;
+        });
         threadsRef.current = hydratedThreads;
         setThreads(hydratedThreads);
         setActiveThreadId((current) =>
           hydratedThreads.some((thread) => thread.id === current) ? current : loadActiveThreadId(hydratedThreads),
         );
         const threadsToPersist = persisted.length > 0
-          ? hydratedThreads.filter((thread) => migratedThreadIds.has(thread.id))
+          ? hydratedThreads.filter((thread) => migratedThreadIds.has(thread.id) || recoveredThreadIds.has(thread.id))
           : hydratedThreads;
         for (const thread of threadsToPersist) await savePersistedThread(thread);
         const providerSettings = await getProviderSettings();
@@ -1680,6 +1776,8 @@ function App() {
     runModesRef.current.set(thread.id, runMode);
     operationIdsRef.current.set(thread.id, operationId);
     let projected = history;
+    let lastReconnectAttempt = 0;
+    let reconnectStatusMessageId: string | undefined;
     try {
       await harnessRun({
         operationId,
@@ -1693,7 +1791,45 @@ function App() {
         hatch: false,
         hatchSkillLoaded: false,
       }, (event: HarnessRuntimeEvent) => {
-        if (event.kind === "assistant_completed") {
+        if (event.kind === "provider_reconnecting") {
+          const payload = event.payload as { retryAttempt?: number; maxRetryAttempts?: number };
+          const retryAttempt = payload.retryAttempt ?? 1;
+          const maxRetryAttempts = payload.maxRetryAttempts ?? 5;
+          lastReconnectAttempt = retryAttempt;
+          const content = `${tr("正在重连", "Reconnecting")} ${retryAttempt}/${maxRetryAttempts}`;
+          projected = collapseReconnectStatusMessages(projected);
+          reconnectStatusMessageId ??= latestReconnectStatusId(projected);
+          if (reconnectStatusMessageId) {
+            projected = projected.map((item) => item.id === reconnectStatusMessageId
+              ? { ...item, content }
+              : item);
+          } else {
+            const reconnectStatus = message("assistant", content, {
+              internal: true,
+              status: "reconnecting",
+              ...assistantMessageIdentity(runProfile),
+            });
+            reconnectStatusMessageId = reconnectStatus.id;
+            projected = [...projected, reconnectStatus];
+          }
+          commitThread({ ...thread, messages: projected, updatedAt: Date.now() });
+        } else if (event.kind === "provider_reconnected") {
+          const payload = event.payload as { retryAttempts?: number };
+          const content = `${tr("重连", "Reconnect")} ${payload.retryAttempts ?? lastReconnectAttempt}/5 ${tr("已恢复，继续后面的对话", "succeeded; continuing the conversation")}`;
+          if (reconnectStatusMessageId) {
+            projected = projected.map((item) => item.id === reconnectStatusMessageId
+              ? { ...item, content, status: "reconnected" as const }
+              : item);
+          } else {
+            projected = [...projected, message("assistant", content, {
+              internal: true,
+              status: "reconnected",
+              ...assistantMessageIdentity(runProfile),
+            })];
+          }
+          reconnectStatusMessageId = undefined;
+          commitThread({ ...thread, messages: projected, updatedAt: Date.now() });
+        } else if (event.kind === "assistant_completed") {
           const payload = event.payload as {
             content?: string;
             toolCalls?: ToolCall[];
@@ -1767,6 +1903,20 @@ function App() {
       const reason = errorText(error);
       if (reason.includes("REQUEST_CANCELLED")) {
         finishThreadRun(thread.id, operationId, "cancelled");
+        return;
+      }
+      if (lastReconnectAttempt > 0) {
+        const failureContent = `${tr("重连", "Reconnect")} ${lastReconnectAttempt}/5 ${tr("失败", "failed")}: ${friendlyAgentError(reason)}`;
+        projected = reconnectStatusMessageId
+          ? projected.map((item) => item.id === reconnectStatusMessageId ? { ...item, content: failureContent, status: "failed", isError: true } : item)
+          : [...projected, message("assistant", failureContent, {
+              internal: true,
+              status: "failed",
+              isError: true,
+              ...assistantMessageIdentity(runProfile),
+            })];
+        commitThread({ ...thread, messages: projected, updatedAt: Date.now() });
+        finishThreadRun(thread.id, operationId, "failed");
         return;
       }
       commitThread({
@@ -2083,6 +2233,9 @@ function App() {
     const streamingAssistant = message("assistant", "", assistantMessageIdentity(runProfile));
     let streamedContent = "";
     let frameId: number | null = null;
+    let retryStatusMessages: AgentMessage[] = [];
+    let lastReconnectAttempt = 0;
+    let reconnectStatusMessageId: string | undefined;
     commitThread({
       ...thread,
       messages: [...history, streamingAssistant],
@@ -2104,6 +2257,7 @@ function App() {
               ...thread,
               messages: [
                 ...history,
+                ...retryStatusMessages,
                 { ...streamingAssistant, content: streamedContent },
               ],
               updatedAt: Date.now(),
@@ -2114,6 +2268,50 @@ function App() {
         runFallbackProfiles,
         hatchRun,
         hatchSkillLoaded,
+        (retryAttempt, maxRetryAttempts) => {
+          lastReconnectAttempt = retryAttempt;
+          const content = `${tr("正在重连", "Reconnecting")} ${retryAttempt}/${maxRetryAttempts}`;
+          retryStatusMessages = collapseReconnectStatusMessages(retryStatusMessages);
+          reconnectStatusMessageId ??= latestReconnectStatusId([...history, ...retryStatusMessages]);
+          if (reconnectStatusMessageId) {
+            retryStatusMessages = retryStatusMessages.map((item) => item.id === reconnectStatusMessageId
+              ? { ...item, content }
+              : item);
+          } else {
+            const reconnectStatus = message("assistant", content, {
+              internal: true,
+              status: "reconnecting",
+              ...assistantMessageIdentity(runProfile),
+            });
+            reconnectStatusMessageId = reconnectStatus.id;
+            retryStatusMessages = [...retryStatusMessages, reconnectStatus];
+          }
+          commitThread({
+            ...thread,
+            messages: [...history, ...retryStatusMessages, streamingAssistant],
+            updatedAt: Date.now(),
+          });
+        },
+        (retryAttempt) => {
+          const content = `${tr("重连", "Reconnect")} ${retryAttempt ?? lastReconnectAttempt}/5 ${tr("已恢复，继续后面的对话", "succeeded; continuing the conversation")}`;
+          if (reconnectStatusMessageId) {
+            retryStatusMessages = retryStatusMessages.map((item) => item.id === reconnectStatusMessageId
+              ? { ...item, content, status: "reconnected" as const }
+              : item);
+          } else {
+            retryStatusMessages = [...retryStatusMessages, message("assistant", content, {
+              internal: true,
+              status: "reconnected",
+              ...assistantMessageIdentity(runProfile),
+            })];
+          }
+          reconnectStatusMessageId = undefined;
+          commitThread({
+            ...thread,
+            messages: [...history, ...retryStatusMessages, streamingAssistant],
+            updatedAt: Date.now(),
+          });
+        },
       );
       if (frameId !== null) window.cancelAnimationFrame(frameId);
       if (!hatchRunStillCurrent()) {
@@ -2147,7 +2345,7 @@ function App() {
         const providerName = runFallbackProfiles.find((profile) => profile.id === result.providerId)?.name ?? result.providerId;
         setNotice(`${tr("主连接不可用，已安全切换到", "Primary connection unavailable; safely failed over to")} ${providerName}`);
       }
-      let nextHistory = [...history, assistant];
+      let nextHistory = [...history, ...retryStatusMessages, assistant];
       let nextThread: AgentThread = {
         ...thread,
         messages: nextHistory,
@@ -2307,12 +2505,31 @@ function App() {
         return;
       }
       if (hatchRun && runMode === "goal" && hatchRunStillCurrent()) await pausePetHatchGoal(threadId);
+      if (lastReconnectAttempt > 0) {
+        const failureContent = `${tr("重连", "Reconnect")} ${lastReconnectAttempt}/5 ${tr("失败", "failed")}: ${friendlyAgentError(reason)}`;
+        retryStatusMessages = reconnectStatusMessageId
+          ? retryStatusMessages.map((item) => item.id === reconnectStatusMessageId ? { ...item, content: failureContent, status: "failed", isError: true } : item)
+          : [...retryStatusMessages, message("assistant", failureContent, {
+              internal: true,
+              status: "failed",
+              isError: true,
+              ...assistantMessageIdentity(runProfile),
+            })];
+        const failedHistory = finalizeConversationMessages([...history, ...retryStatusMessages], runStartedAt);
+        commitThread({
+          ...thread,
+          messages: failedHistory,
+          updatedAt: Date.now(),
+        });
+        finishThreadRun(threadId, operationId, "failed");
+        return;
+      }
       const failure = message(
         "assistant",
         friendlyAgentError(reason),
         { isError: true, ...assistantMessageIdentity(runProfile) },
       );
-      const failedHistory = finalizeConversationMessages([...history, failure], runStartedAt);
+      const failedHistory = finalizeConversationMessages([...history, ...retryStatusMessages, failure], runStartedAt);
       commitThread({
         ...thread,
         messages: failedHistory,
@@ -2370,14 +2587,28 @@ function App() {
       }
       const command = value.match(/^\/(steer|follow-up|next-turn)\s+([\s\S]+)$/i);
       const kind = command?.[1].toLowerCase().replace("-", "_") as "steer" | "follow_up" | "next_turn" | undefined;
-      if (kind && command) {
-        await enqueueCurrentRunMessage(thread.id, activeOperationId, kind, command[2]);
+      try {
+        if (kind && command) {
+          await enqueueCurrentRunMessage(thread.id, activeOperationId, kind, command[2]);
+        } else {
+          await enqueueCurrentRunMessage(thread.id, activeOperationId, "follow_up", value);
+        }
         setDraft("");
-      } else {
-        await enqueueCurrentRunMessage(thread.id, activeOperationId, "follow_up", value);
-        setDraft("");
+        return;
+      } catch (error) {
+        const reason = errorText(error);
+        const staleOperation = reason.includes("Harness operation is no longer active")
+          || reason.includes("Unknown harness operation");
+        if (!staleOperation) {
+          setNotice(`${tr("无法加入运行队列", "Could not queue the message")}: ${reason}`);
+          return;
+        }
+        // The operation may finish between the render and the enqueue call.
+        // Release the stale local owner and submit this input as a new run.
+        operationIdsRef.current.delete(thread.id);
+        runModesRef.current.delete(thread.id);
+        setThreadRunning(thread.id, false);
       }
-      return;
     }
     if ((!value && draftAttachments.length === 0)
       || runningThreadIdsRef.current.has(thread.id)
@@ -2396,7 +2627,27 @@ function App() {
         }
         if (activeThreadIdRef.current === thread.id) setGoalState(goal);
       } catch (error) {
-        setNotice(`${tr("无法启动 Goal", "Could not start Goal")}: ${error instanceof Error ? error.message : String(error)}`);
+        const failedUser = message("user", value, { attachments: draftAttachments });
+        const failedTitle = thread.messages.length === 0 && isDefaultThreadTitle(thread.title)
+          ? (value || draftAttachments[0]?.name || tr("附件任务", "Attachment task")).slice(0, 42)
+          : thread.title;
+        const reason = `${tr("无法启动 Goal", "Could not start Goal")}: ${errorText(error)}`;
+        setDraft("");
+        draftAttachmentsRef.current = [];
+        setDraftAttachments([]);
+        commitThread({
+          ...thread,
+          title: failedTitle,
+          messages: [
+            ...thread.messages,
+            failedUser,
+            message("assistant", friendlyAgentError(reason), {
+              isError: true,
+              ...assistantMessageIdentity(activeProfile),
+            }),
+          ],
+          updatedAt: Date.now(),
+        });
         return;
       }
     }
@@ -2434,6 +2685,22 @@ function App() {
     const runProfile = activeProfile;
     const runFallbackProfiles = profiles.filter((profile) => profile.id !== runProfile.id);
     const runMode = thread.kind === "pet" ? "chat" : mode;
+    const commitSubmissionError = (reason: string) => {
+      setDraft("");
+      draftAttachmentsRef.current = [];
+      setDraftAttachments([]);
+      commitThread({
+        ...next,
+        messages: [
+          ...next.messages,
+          message("assistant", friendlyAgentError(reason), {
+            isError: true,
+            ...assistantMessageIdentity(runProfile),
+          }),
+        ],
+        updatedAt: Date.now(),
+      });
+    };
     let harnessOperationId: string | undefined;
     if (isDesktop()) {
       try {
@@ -2448,14 +2715,32 @@ function App() {
         };
         const report = await harnessPreflight(harnessRequest);
         if (!report.ok) {
-          setNotice(report.errors.join("; ") || tr("预检未通过", "Harness preflight blocked"));
+          commitSubmissionError(report.errors.join("; ") || tr("预检未通过", "Harness preflight blocked"));
           setSettingsOpen(true);
           return;
         }
-        const started = await harnessStart(harnessRequest);
-        harnessOperationId = started.operationId;
+        const submission = await harnessStart(harnessRequest);
+        if (submission.disposition === "queued") {
+          const queued = submission.value;
+          setHarnessQueueItems((current) => ({
+            ...current,
+            [thread.id]: [...(current[thread.id] ?? []), queued],
+          }));
+          setDraft("");
+          draftAttachmentsRef.current = [];
+          setDraftAttachments([]);
+          setNotice(tr("已加入当前运行队列", "Added to the active run queue"));
+          return;
+        }
+        harnessOperationId = submission.value.operationId;
+        // Claim local ownership as soon as the durable operation exists. This
+        // closes the gap before the run loop starts, so later sends take the
+        // queue path instead of attempting another operation.
+        setThreadRunning(thread.id, true);
+        runModesRef.current.set(thread.id, runMode);
+        operationIdsRef.current.set(thread.id, harnessOperationId);
       } catch (error) {
-        setNotice(`${tr("无法启动 Harness", "Could not start harness")}: ${errorText(error)}`);
+        commitSubmissionError(`${tr("无法启动 Harness", "Could not start harness")}: ${errorText(error)}`);
         return;
       }
     }
@@ -2832,11 +3117,28 @@ function App() {
     if (thread) setThreadPendingDelete(thread);
   };
 
-  const deleteThread = (threadId: string) => {
-    if (runningThreadIdsRef.current.has(threadId) || pendingApprovalsRef.current[threadId]) return;
+  const deleteThread = async (threadId: string) => {
+    if (runningThreadIdsRef.current.has(threadId)
+      || pendingApprovalsRef.current[threadId]
+      || deletingThreadIdsRef.current.has(threadId)) return;
+    deletingThreadIdsRef.current.add(threadId);
     const removed = threadsRef.current.find((thread) => thread.id === threadId);
     const remaining = threadsRef.current.filter((thread) => thread.id !== threadId);
     const nextThreads = remaining.length > 0 ? remaining : [createThread(defaultWorkspace)];
+    if (isDesktop() && databaseReadyRef.current) {
+      const persistence = persistenceQueueRef.current.then(async () => {
+        await deletePersistedThread(threadId);
+        if (remaining.length === 0) await savePersistedThread(nextThreads[0]);
+      });
+      persistenceQueueRef.current = persistence.catch(() => undefined);
+      try {
+        await persistence;
+      } catch (error) {
+        setNotice(`${tr("无法删除会话", "Could not delete conversation")}: ${errorText(error)}`);
+        deletingThreadIdsRef.current.delete(threadId);
+        return;
+      }
+    }
     threadsRef.current = nextThreads;
     setThreads(nextThreads);
     setThreadPendingDelete(null);
@@ -2854,12 +3156,7 @@ function App() {
         : undefined;
       setActiveThreadId((sameProject ?? [...nextThreads].sort((left, right) => right.updatedAt - left.updatedAt)[0]).id);
     }
-    if (isDesktop() && databaseReadyRef.current) {
-      enqueuePersistence(async () => {
-        await deletePersistedThread(threadId);
-        if (remaining.length === 0) await savePersistedThread(nextThreads[0]);
-      });
-    }
+    deletingThreadIdsRef.current.delete(threadId);
   };
 
   const saveProfile = async (profile: ProviderProfile, apiKey: string) => {
@@ -3368,18 +3665,19 @@ function App() {
             />
           ) : (
             <div className="message-stream">
-              {groupConversationMessages(activeThread.messages.filter((item) => !item.internal)).map((block) => block.kind === "user" ? (
+              {groupConversationMessages(activeThread.messages.filter((item) => !item.internal || item.status)).map((block) => block.kind === "user" ? (
                 <MessageRow key={block.item.id} item={block.item} />
               ) : (
                 <AssistantMessageGroup
                   key={block.items[0]?.id ?? "assistant"}
                   items={block.items}
                   pending={pending}
+                  activeReconnectMessageId={activeReconnectMessageId}
                   pet={activePetProfile}
                   onReviewChanges={reviewChangeSet}
                 />
               ))}
-              {running && <ThinkingRow />}
+              {running && latestConnectionStatus !== "reconnecting" && <ThinkingRow />}
               <div ref={endRef} />
             </div>
           )}
@@ -3634,7 +3932,7 @@ function App() {
         <DeleteThreadDialog
           thread={threadPendingDelete}
           onClose={() => setThreadPendingDelete(null)}
-          onConfirm={() => deleteThread(threadPendingDelete.id)}
+          onConfirm={() => { void deleteThread(threadPendingDelete.id); }}
         />
       )}
 
@@ -4190,11 +4488,13 @@ function MessageRow({ item }: { item: AgentMessage }) {
 function AssistantMessageGroup({
   items,
   pending,
+  activeReconnectMessageId,
   pet,
   onReviewChanges,
 }: {
   items: AgentMessage[];
   pending: PendingApproval | null;
+  activeReconnectMessageId?: string;
   pet?: PetProfile;
   onReviewChanges: (changeSet: ConversationChangeSet) => void;
 }) {
@@ -4207,7 +4507,7 @@ function AssistantMessageGroup({
   const requestIds = items.flatMap((item) => item.requestId ? [item.requestId] : []);
   const changeSet = [...items].reverse().find((item) => item.changeSet)?.changeSet;
   const copyContent = items
-    .filter((item) => item.role === "assistant" && item.content.trim())
+    .filter((item) => item.role === "assistant" && !item.status && item.content.trim())
     .map((item) => item.content.trim())
     .join("\n\n");
   let durationMs: number | undefined;
@@ -4231,7 +4531,14 @@ function AssistantMessageGroup({
           {requestIds.length > 1 && <span title={requestIds.join("\n")}>{requestIds.length} {tr("次请求", "requests")}</span>}
         </div>
         <div className="assistant-message-content">
-          {items.map((item) => <AssistantMessageSegment item={item} pending={pending} key={item.id} />)}
+          {items.map((item) => (
+            <AssistantMessageSegment
+              item={item}
+              pending={pending}
+              reconnectingActive={item.id === activeReconnectMessageId}
+              key={item.id}
+            />
+          ))}
         </div>
         <MessageCopyButton content={copyContent} />
         {durationMs != null && (
@@ -4323,7 +4630,23 @@ function MessageAttachments({ item }: { item: AgentMessage }) {
   );
 }
 
-function AssistantMessageSegment({ item, pending }: { item: AgentMessage; pending: PendingApproval | null }) {
+function AssistantMessageSegment({
+  item,
+  pending,
+  reconnectingActive,
+}: {
+  item: AgentMessage;
+  pending: PendingApproval | null;
+  reconnectingActive: boolean;
+}) {
+  if (item.status) {
+    return (
+      <div className={`assistant-status-segment ${item.status}`} role="status">
+        {item.status === "reconnecting" ? <LoaderCircle className={reconnectingActive ? "spin" : undefined} size={14} /> : item.status === "reconnected" ? <Check size={14} /> : <CircleAlert size={14} />}
+        <span>{item.content}</span>
+      </div>
+    );
+  }
   if (item.role === "tool") {
     const firstLine = item.content.split("\n")[0] || tr("工具已完成", "Tool completed");
     if (item.content.startsWith("Sub-Agent completed in an isolated worktree.")) {
@@ -5807,6 +6130,7 @@ function RequestLogsDialog({ profiles, onClose }: { profiles: ProviderProfile[];
         <div className="dialog-header">
           <div><strong>{tr("请求日志", "Request logs")}</strong><span>{tr("仅保存模型、用量、延迟和错误元数据，不保存消息正文", "Stores only model, usage, latency, and error metadata—never message content")}</span></div>
           <div className="dialog-header-actions">
+            <IconButton label={tr("打开应用日志目录", "Open application log directory")} onClick={() => void openAppLogDirectory().catch((reason) => setError(errorText(reason)))}><FolderOpen size={16} /></IconButton>
             <IconButton label={tr("刷新请求日志", "Refresh request logs")} onClick={refresh} disabled={loading}><RefreshCw size={16} className={loading ? "spin" : ""} /></IconButton>
             <IconButton label={tr("关闭", "Close")} onClick={onClose}><X size={18} /></IconButton>
           </div>
@@ -6312,6 +6636,13 @@ function errorText(reason: unknown) {
 }
 
 function friendlyAgentError(reason: string) {
+  const normalized = reason.toLowerCase();
+  if (reason.includes("524 ") || normalized.includes("upstream service temporarily unavailable") || normalized.includes('"code":"upstream_error"')) {
+    return tr(
+      "上游模型服务暂时不可用（524 超时）。软件已完成自动重试；请稍后重试，或切换备用连接。",
+      "The upstream model service is temporarily unavailable (524 timeout). Automatic retries were exhausted; try again later or switch to a fallback connection.",
+    );
+  }
   const marker = "[LEVELUP_TOOL_CALLING_UNSUPPORTED]";
   if (!reason.includes(marker)) return reason;
   const detail = reason.replace(marker, "").trim();

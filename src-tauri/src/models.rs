@@ -227,6 +227,10 @@ pub struct ConfigWriteResult {
 pub struct AgentStreamEvent {
     pub kind: String,
     pub delta: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_attempt: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_retry_attempts: Option<u32>,
 }
 
 impl AgentStreamEvent {
@@ -234,6 +238,26 @@ impl AgentStreamEvent {
         Self {
             kind: "content_delta".to_owned(),
             delta: Some(delta),
+            retry_attempt: None,
+            max_retry_attempts: None,
+        }
+    }
+
+    pub fn provider_reconnecting(retry_attempt: u32, max_retry_attempts: u32) -> Self {
+        Self {
+            kind: "provider_reconnecting".to_owned(),
+            delta: None,
+            retry_attempt: Some(retry_attempt),
+            max_retry_attempts: Some(max_retry_attempts),
+        }
+    }
+
+    pub fn provider_reconnected(retry_attempt: u32, max_retry_attempts: u32) -> Self {
+        Self {
+            kind: "provider_reconnected".to_owned(),
+            delta: None,
+            retry_attempt: Some(retry_attempt),
+            max_retry_attempts: Some(max_retry_attempts),
         }
     }
 }
@@ -519,6 +543,8 @@ pub struct StoredMessage {
     pub model_name: Option<String>,
     #[serde(default)]
     pub provider_brand: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]

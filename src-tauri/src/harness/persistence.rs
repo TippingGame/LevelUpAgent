@@ -33,9 +33,10 @@ CREATE TABLE IF NOT EXISTS harness_operations (
 );
 CREATE INDEX IF NOT EXISTS idx_harness_operations_thread_updated
     ON harness_operations(thread_id, updated_at DESC);
+DROP INDEX IF EXISTS idx_harness_active_operation_per_thread;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_harness_active_operation_per_thread
     ON harness_operations(thread_id)
-    WHERE state IN ('compiling', 'running', 'awaiting_approval', 'compacting', 'persisting', 'interrupted');
+    WHERE state IN ('compiling', 'running', 'awaiting_approval', 'compacting', 'persisting');
 
 CREATE TABLE IF NOT EXISTS harness_snapshots (
     id TEXT PRIMARY KEY NOT NULL,
@@ -171,6 +172,7 @@ CREATE TABLE IF NOT EXISTS harness_compactions (
 #[cfg(test)]
 mod tests {
     use super::MIGRATION_SQL;
+    use rusqlite::Connection;
 
     #[test]
     fn migration_is_additive_and_contains_execution_idempotency_constraints() {
@@ -178,5 +180,47 @@ mod tests {
         assert!(MIGRATION_SQL.contains("UNIQUE(operation_id, call_id)"));
         assert!(MIGRATION_SQL.contains("UNIQUE(operation_id, sequence)"));
         assert!(MIGRATION_SQL.contains("idx_harness_active_operation_per_thread"));
+        assert!(
+            MIGRATION_SQL.contains("DROP INDEX IF EXISTS idx_harness_active_operation_per_thread")
+        );
+        assert!(!MIGRATION_SQL.contains("'persisting', 'interrupted'"));
+    }
+
+    #[test]
+    fn migration_replaces_the_legacy_active_operation_index() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE harness_operations (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    draft_id TEXT,
+                    state TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    permission_level TEXT NOT NULL,
+                    current_snapshot_id TEXT,
+                    last_event_sequence INTEGER NOT NULL DEFAULT 0,
+                    started_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    ended_at INTEGER,
+                    error TEXT
+                );
+                CREATE UNIQUE INDEX idx_harness_active_operation_per_thread
+                    ON harness_operations(thread_id)
+                    WHERE state IN ('compiling', 'running', 'awaiting_approval', 'compacting', 'persisting', 'interrupted');",
+            )
+            .unwrap();
+
+        connection.execute_batch(MIGRATION_SQL).unwrap();
+
+        let definition: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_harness_active_operation_per_thread'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!definition.contains("interrupted"));
+        assert!(definition.contains("persisting"));
     }
 }
