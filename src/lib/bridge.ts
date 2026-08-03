@@ -53,6 +53,7 @@ import type {
   PetProgress,
   PetRuntimeSnapshot,
   ProviderProfile,
+  ProviderModelCatalog,
   ProviderSettings,
   ProviderHealth,
   ProviderRequestLog,
@@ -346,6 +347,11 @@ export async function selectVideoReference(): Promise<ImageAttachment[]> {
 export async function getMediaCatalog(): Promise<MediaCatalog> {
   if (!isDesktop()) return { models: [], errors: [] };
   return invoke<MediaCatalog>("get_media_catalog");
+}
+
+export async function getModelCatalog(): Promise<ProviderModelCatalog> {
+  if (!isDesktop()) return { models: [], errors: [] };
+  return invoke<ProviderModelCatalog>("get_model_catalog");
 }
 
 export async function generateMedia(

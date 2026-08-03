@@ -18,7 +18,7 @@
   </p>
 
   <p>
-<img alt="Version" src="https://img.shields.io/badge/version-1.0.16-ff5a4f?style=flat-square" />
+<img alt="Version" src="https://img.shields.io/badge/version-1.0.17-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-stable-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -58,11 +58,13 @@ LevelUpAgent 把模型连接、项目上下文、工具审批、MCP、Skills、G
 ### 2. 连接模型
 
 1. 打开左下角 **模型连接**。
-2. 添加 LevelUpAPI 或任意兼容 Provider 的地址、协议与模型；可信本机/局域网服务可显式允许无 API Key。
-3. 模型 ID 可直接输入，也可点击 **检测** 从兼容的模型列表接口获取。
-4. 可选：添加最多 7 个备用连接，并设置优先级。
+2. 每个连接分别配置 Base URL、API Key、默认文字模型与默认生成协议；可信本机/局域网服务可显式允许无 API Key。
+3. 模型 ID 可直接输入，也可点击 **检测**。检测会独立查询标准 `/v1/models` 与 Gemini `/v1beta/models`，不再由默认生成协议决定模型列表。
+4. 可继续添加其他连接，并为需要故障转移的连接设置优先级；一次请求最多尝试 7 个备用连接。
 
 Base URL 既可以是服务根地址，例如 `https://api.example.com`，也可以包含 `/v1`、`/v4` 等版本前缀。LevelUpAgent 会显示最终请求地址并避免重复拼接版本前缀。本地服务应使用其 OpenAI、Anthropic 或 Gemini 兼容接口，例如 Ollama 的 `http://127.0.0.1:11434/v1`，而不是原生 `/api/chat`。
+
+LevelUpAgent 将 **连接** 定义为一组 Base URL 与独立凭据，将 **模型路由** 定义为“连接 + 模型 ID + 协议”。同一模型若同时出现在标准与 Gemini 目录中，会保留两条可选路由，而不会互相覆盖。主会话使用当前连接的默认文字路由；写作空间可以独立选择任意可用文字路由；图片、视频和语音会跨全部连接发现模型，并为 Gemini 图片、Imagen、Veo 与 Gemini TTS 自动选择原生路由。API Key 始终只保存在系统凭据库中。
 
 ### 3. 开始工作
 
@@ -73,6 +75,7 @@ Base URL 既可以是服务根地址，例如 `https://api.example.com`，也可
 ### 多模型工作台
 
 - LevelUpAPI / OpenAI-compatible / Anthropic-compatible / Gemini-compatible 连接
+- 多组 Base URL 与独立 API Key；模型发现、默认协议和实际生成路由彼此解耦
 - 主连接优先、健康记录、指数冷却和最多 7 个备用连接的故障转移
 - 四种协议的 SSE 流式输出、真实请求中断和 request-id 诊断
 - 首页余额、30 天用量、延迟与 Token 统计
@@ -91,6 +94,7 @@ Base URL 既可以是服务根地址，例如 `https://api.example.com`，也可
 ### AI 写作与游戏叙事
 
 - 创作空间默认进入图片、视频与语音工作台，写作工作台排在媒体创作之后；小说、剧本和游戏剧情项目自动保存到本地 SQLite，不依赖会话生命周期
+- 写作模型可独立于主会话，从所有已配置连接与可用协议路由中选择并记住
 - 专属写作目标模式把交付物、读者、字数、边界和验收标准转成 3-6 步 AI 执行计划；可选择“合作者”逐步审阅，或让“AI 主笔”连续完成分析、大纲、草稿、修订与验收，每次改稿前自动留快照并支持暂停续跑
 - 参考资料库可导入 Markdown、文本、JSON、CSV、TSV 与 Yarn，区分原始资料、研究笔记、风格样本和灵感素材；每项资料可启停或手动固定到当前上下文，并随完整项目导入导出
 - 正文支持停笔自动补全、续写、改写、润色、扩写、精简、对白与描写；流式补全会像代码编辑器一样在光标后显示灰色待选文字，可按 Tab 接受、Esc 拒绝，接受前自动创建版本快照
@@ -100,7 +104,8 @@ Base URL 既可以是服务根地址，例如 `https://api.example.com`，也可
 
 ### 多媒体创作
 
-- 自动发现并推荐当前连接中最新的生图、视频与 TTS 模型
+- 跨全部已配置连接自动发现并推荐合适的生图、视频与 TTS 模型；Nano Banana 2 Lite 自动识别为原生 Gemini 图片模型
+- 图片、视频和语音分别记住所选连接与模型路由，切换创作类型或重启应用后无需重复选择
 - 独立“创作空间”，支持图片参考、多提示词并行生成、本地历史、预览与另存为
 - 会话可直接调用 `generate_images`、`generate_videos`、`generate_speech`；连续生成调用并行执行，结果保持原顺序后交给模型统一汇总
 - OpenAI-compatible 图片/语音/Sora 与 Gemini 原生图片/语音/Veo；视频任务持久化并自动轮询

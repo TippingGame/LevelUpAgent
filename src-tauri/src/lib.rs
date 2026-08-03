@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
+use futures_util::future::join_all;
 use models::{
     AgentMessage, AgentSkillSummary, AgentStreamEvent, AgentToolDefinition, AgentTurnRequest,
     AgentTurnResponse, AttachmentPreview, ConfigWritePreview, ConfigWriteResult,
@@ -32,9 +33,9 @@ use models::{
     GitRollbackResult, GitStatus, GitWorkspaceSnapshot, GoalCreateRequest, GoalState,
     ImageAttachment, McpSecretValues, McpServerConfig, McpServerSnapshot, McpServerUpsert,
     MediaAsset, MediaAssetPage, MediaBatchResult, MediaCatalog, MediaGenerationRequest, MediaKind,
-    MediaStatus, ModelInfo, ProviderHealth, ProviderProfile, ProviderRequestLog, ProviderSettings,
-    SkillInfo, StoredThread, ToolCall, ToolExecutionRequest, ToolExecutionResponse,
-    WritingProjectRecord,
+    MediaStatus, ModelInfo, ProviderHealth, ProviderModelCatalog, ProviderModelInfo,
+    ProviderProfile, ProviderRequestLog, ProviderSettings, SkillInfo, StoredThread, ToolCall,
+    ToolExecutionRequest, ToolExecutionResponse, WritingProjectRecord,
 };
 use reqwest::Client;
 use serde::Deserialize;
@@ -1483,6 +1484,134 @@ async fn get_media_catalog(
     Ok(catalog)
 }
 
+#[tauri::command]
+async fn get_model_catalog(
+    state: tauri::State<'_, AppState>,
+    database: tauri::State<'_, database::Database>,
+) -> Result<ProviderModelCatalog, String> {
+    let settings = media_settings(&database)?;
+    let (providers, mut errors) = configured_media_providers(&settings);
+    let requests = providers.iter().map(|provider| async {
+        agent::fetch_models(
+            &state.client,
+            provider.profile.clone(),
+            provider.api_key.as_str(),
+        )
+        .await
+    });
+    let responses = join_all(requests).await;
+    let priorities = settings
+        .profiles
+        .iter()
+        .map(|profile| (profile.id.as_str(), profile.priority))
+        .collect::<HashMap<_, _>>();
+    let configured_protocols = settings
+        .profiles
+        .iter()
+        .map(|profile| (profile.id.clone(), profile.protocol.clone()))
+        .collect::<HashMap<_, _>>();
+    let mut models = Vec::new();
+    let mut seen = HashSet::new();
+    for (provider, response) in providers.iter().zip(responses) {
+        let mut discovered = match response {
+            Ok(models) => models,
+            Err(error) => {
+                errors.push(format!("{}: {error}", provider.profile.name));
+                Vec::new()
+            }
+        };
+        let configured_model = provider.profile.model.trim().trim_start_matches("models/");
+        if !configured_model.is_empty()
+            && !discovered.iter().any(|model| {
+                model
+                    .id
+                    .trim()
+                    .trim_start_matches("models/")
+                    .eq_ignore_ascii_case(configured_model)
+            })
+        {
+            discovered.push(ModelInfo {
+                id: provider.profile.model.clone(),
+                owned_by: None,
+                protocol: Some(provider.profile.protocol.clone()),
+                protocols: vec![provider.profile.protocol.clone()],
+                supported_generation_methods: Vec::new(),
+                input_modalities: Vec::new(),
+                output_modalities: Vec::new(),
+            });
+        }
+        for model in discovered {
+            for route in provider_model_routes(&provider.profile, model) {
+                if !seen.insert((
+                    route.profile_id.clone(),
+                    route.id.to_ascii_lowercase(),
+                    provider_protocol_id(&route.protocol),
+                )) {
+                    continue;
+                }
+                models.push(route);
+            }
+        }
+    }
+    models.sort_by(|left, right| {
+        (right.profile_id == settings.active_profile_id)
+            .cmp(&(left.profile_id == settings.active_profile_id))
+            .then_with(|| {
+                priorities
+                    .get(left.profile_id.as_str())
+                    .unwrap_or(&100)
+                    .cmp(priorities.get(right.profile_id.as_str()).unwrap_or(&100))
+            })
+            .then_with(|| left.profile_name.cmp(&right.profile_name))
+            .then_with(|| left.id.cmp(&right.id))
+            .then_with(|| {
+                let left_default = configured_protocols
+                    .get(&left.profile_id)
+                    .is_some_and(|protocol| protocol == &left.protocol);
+                let right_default = configured_protocols
+                    .get(&right.profile_id)
+                    .is_some_and(|protocol| protocol == &right.protocol);
+                right_default.cmp(&left_default)
+            })
+            .then_with(|| {
+                provider_protocol_id(&left.protocol).cmp(provider_protocol_id(&right.protocol))
+            })
+    });
+    Ok(ProviderModelCatalog { models, errors })
+}
+
+fn provider_model_routes(profile: &ProviderProfile, model: ModelInfo) -> Vec<ProviderModelInfo> {
+    let id = model.id.trim().trim_start_matches("models/").to_owned();
+    if id.is_empty() {
+        return Vec::new();
+    }
+    let mut protocols = model.protocols.clone();
+    if let Some(protocol) = model.protocol.clone()
+        && !protocols.contains(&protocol)
+    {
+        protocols.push(protocol);
+    }
+    if protocols.is_empty() {
+        protocols.push(profile.protocol.clone());
+    }
+    protocols.sort_by_key(|protocol| protocol != &profile.protocol);
+    let supported_protocols = protocols.clone();
+    protocols
+        .into_iter()
+        .map(|protocol| ProviderModelInfo {
+            id: id.clone(),
+            profile_id: profile.id.clone(),
+            profile_name: profile.name.clone(),
+            protocol,
+            protocols: supported_protocols.clone(),
+            owned_by: model.owned_by.clone(),
+            supported_generation_methods: model.supported_generation_methods.clone(),
+            input_modalities: model.input_modalities.clone(),
+            output_modalities: model.output_modalities.clone(),
+        })
+        .collect()
+}
+
 fn read_media_references(
     app: &tauri::AppHandle,
     request: &MediaGenerationRequest,
@@ -1691,8 +1820,9 @@ async fn generate_media_internal(
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty()),
+        request.protocol.clone(),
     ) {
-        (Some(profile_id), Some(model)) => {
+        (Some(profile_id), Some(model), Some(protocol)) => {
             let provider = providers
                 .iter()
                 .find(|provider| provider.profile.id == profile_id)
@@ -1702,6 +1832,7 @@ async fn generate_media_internal(
                 })?;
             (
                 vec![media::MediaSelection {
+                    protocol,
                     provider,
                     model: model.trim_start_matches("models/").to_owned(),
                 }],
@@ -1712,7 +1843,34 @@ async fn generate_media_internal(
             let catalog =
                 media::discover_catalog(&state.client, &providers, &settings.active_profile_id)
                     .await;
-            let selections = media::selection_candidates(&providers, &catalog, &request);
+            let mut selections = media::selection_candidates(&providers, &catalog, &request);
+            // Agent media tools do not expose protocol as a model-authored
+            // argument. Resolve an explicit connection/model pair through the
+            // discovered catalog first, then retain the configured protocol as
+            // a compatibility fallback for manually entered or unlisted IDs.
+            if selections.is_empty()
+                && let (Some(profile_id), Some(model)) = (
+                    request.profile_id.as_deref(),
+                    request
+                        .model
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty()),
+                )
+            {
+                let provider = providers
+                    .iter()
+                    .find(|provider| provider.profile.id == profile_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        "The selected media connection is unavailable or has no API key".to_owned()
+                    })?;
+                selections.push(media::MediaSelection {
+                    protocol: provider.profile.protocol.clone(),
+                    provider,
+                    model: model.trim_start_matches("models/").to_owned(),
+                });
+            }
             (selections, Some(catalog))
         }
     };
@@ -4900,6 +5058,7 @@ pub fn run() {
             delete_api_key,
             get_provider_settings,
             save_provider_settings,
+            get_model_catalog,
             get_media_catalog,
             generate_media,
             list_media_assets,
@@ -5048,6 +5207,37 @@ mod tests {
             priority,
             failover_enabled,
         }
+    }
+
+    #[test]
+    fn provider_catalog_expands_each_supported_model_route() {
+        let profile = profile("gateway", 10, true);
+        let routes = provider_model_routes(
+            &profile,
+            ModelInfo {
+                id: "models/gemini-3.1-flash-image".to_owned(),
+                owned_by: Some("levelup".to_owned()),
+                protocol: Some(models::ProviderProtocol::OpenaiResponses),
+                protocols: vec![
+                    models::ProviderProtocol::OpenaiResponses,
+                    models::ProviderProtocol::GeminiGenerateContent,
+                ],
+                supported_generation_methods: vec!["generateContent".to_owned()],
+                input_modalities: Vec::new(),
+                output_modalities: vec!["IMAGE".to_owned(), "TEXT".to_owned()],
+            },
+        );
+        assert_eq!(routes.len(), 2);
+        assert_eq!(
+            routes[0].protocol,
+            models::ProviderProtocol::OpenaiResponses
+        );
+        assert_eq!(
+            routes[1].protocol,
+            models::ProviderProtocol::GeminiGenerateContent
+        );
+        assert_eq!(routes[0].protocols, routes[1].protocols);
+        assert_eq!(routes[0].id, "gemini-3.1-flash-image");
     }
 
     #[test]
@@ -5713,6 +5903,7 @@ mod tests {
             profile_id: None,
             kind: MediaKind::Image,
             model: requested_model.clone(),
+            protocol: None,
             prompt: "A minimal verification image: one coral circle centered on a clean warm-white background, no text".to_owned(),
             count: 1,
             size: Some("1024x1024".to_owned()),

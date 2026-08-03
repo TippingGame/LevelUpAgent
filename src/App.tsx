@@ -3540,6 +3540,7 @@ function App() {
         locale={locale}
         activeProfile={activeProfile}
         profiles={profiles}
+        modelCatalogRevision={mediaCatalogRevision}
         workspace={activeThread.workspace}
         connectionReady={connectionReady}
         onConfigureConnection={() => setSettingsOpen(true)}
@@ -3881,6 +3882,7 @@ function App() {
           onRemove={removeProfile}
           onDeleteKey={async (profileId) => {
             await deleteApiKey(profileId);
+            setMediaCatalogRevision((current) => current + 1);
             if (profileId === activeProfile.id) {
               setKeyConfigured(false);
               setKeyStatusLoaded(true);
@@ -5494,6 +5496,15 @@ function ConnectionDialog({
     setDraftProfile((current) => ({ ...current, [key]: value }));
   };
 
+  const selectDetectedModel = (modelId: string) => {
+    const detected = models.find((item) => item.id === modelId);
+    setDraftProfile((current) => ({
+      ...current,
+      model: modelId,
+      protocol: detected?.protocol ?? current.protocol,
+    }));
+  };
+
   const selectProfile = async (profileId: string) => {
     const selected = profiles.find((item) => item.id === profileId);
     if (!selected) return;
@@ -5567,7 +5578,13 @@ function ConnectionDialog({
       const result = await fetchModels(draftProfile, apiKey);
       setModels(result);
       const preferredModel = preferredDetectedModel(draftProfile, result);
-      if (preferredModel) update("model", preferredModel.id);
+      if (preferredModel) {
+        setDraftProfile((current) => ({
+          ...current,
+          model: preferredModel.id,
+          protocol: preferredModel.protocol ?? current.protocol,
+        }));
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -5744,6 +5761,7 @@ function ConnectionDialog({
             <small className="endpoint-preview" title={providerEndpointPreview(draftProfile)}>
               {tr("最终请求", "Resolved endpoint")}: {providerEndpointPreview(draftProfile) || tr("等待有效地址和模型", "Enter a valid URL and model")}
             </small>
+            <small>{tr("同一连接的模型发现会同时检查标准 /v1/models 与 Gemini /v1beta/models，不由下方生成协议限制。", "Model discovery checks both standard /v1/models and Gemini /v1beta/models for this connection; it is independent of the generation protocol below.")}</small>
           </label>
           <div className="field wide">
             <span>
@@ -5792,13 +5810,13 @@ function ConnectionDialog({
             <span><strong>{tr("允许无 API Key", "Allow connection without an API key")}</strong><small>{tr("仅用于你信任的本机或局域网服务；如果已保存密钥，仍会优先发送密钥。", "Use only with a trusted local or LAN service. A saved key is still sent when present.")}</small></span>
           </label>
           <div className="field">
-            <span>{tr("模型", "Model")}</span>
+            <span>{tr("默认文字模型", "Default text model")}</span>
             <div className="model-id-control">
               <input
                 aria-label={tr("模型 ID", "Model ID")}
                 list={`provider-models-${draftProfile.id}`}
                 value={draftProfile.model}
-                onChange={(event) => update("model", event.target.value)}
+                onChange={(event) => selectDetectedModel(event.target.value)}
                 placeholder={tr("可手动输入模型 ID", "Enter a model ID")}
               />
               <IconButton
@@ -5813,10 +5831,14 @@ function ConnectionDialog({
             <datalist id={`provider-models-${draftProfile.id}`}>
               {models.map((item) => <option value={item.id} key={item.id} />)}
             </datalist>
+            {models.length > 0 && <small>{tr(
+              `已从当前连接合并发现 ${models.length} 个模型；Gemini 原生专用模型会自动采用 GenerateContent，多协议模型保留当前文字协议。`,
+              `${models.length} models merged from this connection; Gemini-native-only models select GenerateContent automatically, while multi-protocol models retain the current text protocol.`,
+            )}</small>}
           </div>
           <div className="field connection-test">
             <span>{tr("连接检查", "Connection check")}</span>
-            <button className="secondary-button" onClick={testModels} disabled={busy} title={tr("检测当前连接可用的模型", "Check models available from this connection")}>
+            <button className="secondary-button" onClick={testModels} disabled={busy} title={tr("独立检测当前连接的标准与 Gemini 模型目录", "Discover standard and Gemini model catalogs independently from the generation protocol")}>
               <RefreshCw size={14} className={busy ? "spin" : ""} />
               {tr("检测模型", "Check models")}
             </button>
@@ -6808,7 +6830,17 @@ function providerEndpointPreview(profile: ProviderProfile) {
     const baseSegments = base.pathname.split("/").filter(Boolean);
     const requestedVersion = requested[0] ?? "";
     const baseVersion = baseSegments[baseSegments.length - 1] ?? "";
-    if (isApiVersionSegment(requestedVersion) && isApiVersionSegment(baseVersion)) requested.shift();
+    if (
+      profile.protocol === "gemini_generate_content"
+      && requestedVersion.toLocaleLowerCase() === "v1beta"
+      && /^(?:v1|v1beta)$/i.test(baseVersion)
+    ) {
+      baseSegments[baseSegments.length - 1] = requestedVersion;
+      base.pathname = `/${baseSegments.join("/")}/`;
+      requested.shift();
+    } else if (isApiVersionSegment(requestedVersion) && isApiVersionSegment(baseVersion)) {
+      requested.shift();
+    }
     return new URL(requested.join("/"), base).toString();
   } catch {
     return "";

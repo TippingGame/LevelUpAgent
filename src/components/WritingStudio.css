@@ -13,6 +13,8 @@
 .writing-loading { place-items: center; align-content: center; gap: 10px; color: var(--muted); }
 
 .writing-topbar {
+  position: relative;
+  z-index: 40;
   min-width: 0;
   display: grid;
   grid-template-columns: minmax(190px, 1fr) auto minmax(300px, 1fr);
@@ -81,7 +83,7 @@
 .creation-mode-switch button.active { background: #fff; color: #047857; box-shadow: 0 1px 4px rgba(15, 23, 42, .08); }
 
 .writing-topbar-actions { min-width: 0; justify-content: flex-end; gap: 5px; }
-.writing-topbar-actions > button, .writing-menu-wrap > button {
+.writing-topbar-actions > button, .writing-menu-wrap > button, .writing-model-wrap > button {
   height: 32px;
   min-width: 32px;
   display: flex;
@@ -95,11 +97,11 @@
   color: var(--muted);
   cursor: pointer;
 }
-.writing-topbar-actions > button:hover, .writing-menu-wrap > button:hover { border-color: rgba(5, 150, 105, .28); color: #047857; }
-.writing-topbar-actions .writing-model { max-width: 210px; justify-content: flex-start; }
+.writing-topbar-actions > button:hover, .writing-menu-wrap > button:hover, .writing-model-wrap > button:hover { border-color: rgba(5, 150, 105, .28); color: #047857; }
+.writing-model-wrap > .writing-model { max-width: 210px; justify-content: flex-start; }
 .writing-model span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--font-caption); }
 .writing-model.ready::after { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: #10b981; content: ""; }
-.writing-menu-wrap { position: relative; }
+.writing-menu-wrap, .writing-model-wrap { position: relative; }
 .writing-popover {
   position: absolute;
   z-index: 90;
@@ -113,6 +115,16 @@
 .writing-export-menu button { width: 100%; height: 31px; padding: 0 9px; border: 0; border-radius: 5px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
 .writing-export-menu button:hover:not(:disabled) { background: #eef7f3; color: #047857; }
 .writing-export-menu button:disabled { opacity: .45; }
+.writing-model-menu { top: 38px; right: 0; width: min(360px, calc(100vw - 84px)); max-height: min(440px, calc(100vh - 88px)); overflow-y: auto; }
+.writing-model-menu > button { width: 100%; min-height: 43px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.writing-model-menu > button:hover, .writing-model-menu > button.active { background: #eef7f3; color: #047857; }
+.writing-model-menu > button > span { min-width: 0; display: flex; align-items: flex-start; flex-direction: column; gap: 2px; }
+.writing-model-menu strong, .writing-model-menu small { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.writing-model-menu strong { font-size: var(--font-caption); }
+.writing-model-menu small { color: var(--muted); font-size: var(--font-compact); }
+.writing-model-menu > p { margin: 0; padding: 13px 9px; color: var(--muted); font-size: var(--font-caption); text-align: center; }
+.writing-model-menu > button.manage { min-height: 34px; justify-content: flex-start; margin-top: 4px; border-top: 1px solid var(--line); border-radius: 0 0 6px 6px; color: var(--muted); }
+.writing-model-menu > button.manage > span { display: inline; }
 
 .writing-layout {
   position: relative;
@@ -657,7 +669,7 @@
   .writing-layout { grid-template-columns: 215px minmax(0, 1fr); }
   .writing-topbar { grid-template-columns: minmax(160px, 1fr) auto minmax(230px, 1fr); }
   .writing-model span { display: none; }
-  .writing-topbar-actions .writing-model { width: 32px; padding: 0; }
+  .writing-model-wrap > .writing-model { width: 32px; padding: 0; }
   .writing-ai-toolbar > button { padding-inline: 5px; }
   .story-main { grid-template-columns: minmax(0, 1fr) 300px; }
 }
@@ -752,7 +764,7 @@
   .reference-nav-list > button.active, .reference-nav-list > button:hover, .context-entities > label.included, .context-references > label.included,
   .story-inspector > nav button.active, .set-start.active { background: rgba(16, 185, 129, .13); color: #6ee7b7; }
   .creation-mode-switch, .writing-ai-toolbar, .manuscript-status { background: #111827; }
-  .creation-mode-switch button.active, .writing-topbar-actions > button, .writing-menu-wrap > button,
+  .creation-mode-switch button.active, .writing-topbar-actions > button, .writing-menu-wrap > button, .writing-model-wrap > button,
   .writing-project-picker > select, .writing-project-picker select, .writing-project-picker input, .writing-project-picker button,
   .writing-nav-heading button, .writing-nav-search, .entity-nav > select, .writing-nav-add select,
   .document-heading select, .writing-ai-instruction, .entity-form input, .entity-form select,
@@ -768,6 +780,7 @@
   .writing-section-tabs button.active, .creation-mode-switch button.active { box-shadow: none; }
   .writing-ai-toolbar > span, .writing-topbar-actions > button:hover, .writing-menu-wrap > button:hover,
   .entity-editor > header .entity-ai-button, .writing-context-panel > header > span { color: #6ee7b7; }
+  .writing-model-menu > button:hover, .writing-model-menu > button.active { background: rgba(16, 185, 129, .13); color: #6ee7b7; }
   .manuscript-input-shell, .manuscript-ghost-mirror { background: #151515; }
   .manuscript-input-shell > textarea { border-color: rgba(226, 232, 240, .15); background: #151515; color: #ece9e1; box-shadow: 0 5px 20px rgba(0, 0, 0, .3); }
   .manuscript-input-shell.has-inline-completion > textarea { background: transparent; caret-color: #ece9e1; }

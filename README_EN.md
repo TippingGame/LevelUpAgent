@@ -18,7 +18,7 @@
   </p>
 
   <p>
-<img alt="Version" src="https://img.shields.io/badge/version-1.0.16-ff5a4f?style=flat-square" />
+<img alt="Version" src="https://img.shields.io/badge/version-1.0.17-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-stable-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -58,11 +58,13 @@ Checksums for the current local Windows validation artifacts are recorded in [th
 ### 2. Connect a model
 
 1. Open **Model connections** in the lower-left corner.
-2. Add LevelUpAPI or another compatible provider URL, protocol, and model. Trusted local or LAN services can explicitly allow a missing API key.
-3. Enter a model ID directly, or select **Test** to retrieve it from a compatible model-list endpoint.
-4. Optionally add up to seven fallback connections and set their priority.
+2. Configure each connection with its own Base URL, API key, default text model, and default generation protocol. Trusted local or LAN services can explicitly allow a missing API key.
+3. Enter a model ID directly, or select **Test**. Discovery queries both standard `/v1/models` and Gemini `/v1beta/models` independently of the default generation protocol.
+4. Add more connections as needed and assign priority to connections used for failover; one request tries at most seven fallback connections.
 
 A Base URL may be a service root such as <code>https://api.example.com</code>, or already include a version prefix such as <code>/v1</code> or <code>/v4</code>. LevelUpAgent previews the resolved request URL and avoids duplicated version prefixes. Local servers must expose an OpenAI-, Anthropic-, or Gemini-compatible endpoint—for example Ollama at <code>http://127.0.0.1:11434/v1</code>, not its native <code>/api/chat</code> endpoint.
+
+LevelUpAgent treats a **connection** as one Base URL plus its isolated credential, and a **model route** as connection + model ID + protocol. When the same model appears in both standard and Gemini catalogs, both routes remain available instead of overwriting one another. The main conversation uses the active connection's default text route; Writing can independently select any available text route; image, video, and speech discovery spans every connection and automatically prefers native routes for Gemini image models, Imagen, Veo, and Gemini TTS. API keys remain exclusively in the OS credential vault.
 
 ### 3. Start working
 
@@ -73,6 +75,7 @@ Choose a project directory, create a conversation, and describe the outcome you 
 ### Multi-model workbench
 
 - LevelUpAPI, OpenAI-compatible, Anthropic-compatible, and Gemini-compatible connections
+- Multiple Base URLs with isolated API keys; discovery, default protocol, and actual generation routes are decoupled
 - Primary-first routing, health history, exponential cooldown, and up to seven fallback connections
 - Streaming and cancellation across four provider protocols
 - Balance, 30-day usage, latency, tokens, and request-id diagnostics
@@ -91,6 +94,7 @@ Choose a project directory, create a conversation, and describe the outcome you 
 ### AI writing and game narrative
 
 - Creative Studio opens with image, video, and speech tools first, followed by the writing workspace; novel, screenplay, and game narrative projects autosave to local SQLite independently of conversations
+- Writing remembers an independent model route selected from every configured connection and available protocol
 - Dedicated writing Goal Mode turns the deliverable, audience, word target, boundaries, and acceptance criteria into a 3-6 step AI execution plan; use Partner mode for review gates or AI Lead mode for continuous research, outlining, drafting, revision, and QA, with pause/resume and an automatic snapshot before every manuscript mutation
 - The reference library imports Markdown, text, JSON, CSV, TSV, and Yarn as sources, research, style samples, or inspiration; every reference can be disabled or explicitly pinned into the current context and travels with full-project import/export
 - Manuscripts support pause-triggered autocomplete, continue, rewrite, polish, expand, shorten, dialogue, and description; streamed completions appear as gray inline text after the caret, like a code editor, with Tab to accept and Escape to reject, plus an automatic snapshot before acceptance
@@ -100,7 +104,8 @@ Choose a project directory, create a conversation, and describe the outcome you 
 
 ### Multimodal creation
 
-- Automatically discovers and recommends the newest available image, video, and TTS model on configured connections
+- Automatically discovers and recommends suitable image, video, and TTS models across all configured connections; Nano Banana 2 Lite is recognized as a native Gemini image model
+- Image, video, and speech each remember their selected connection and model route across mode switches and app restarts
 - A standalone Media Studio with image references, parallel prompts, local history, previews, and Save As export
 - Conversations can call `generate_images`, `generate_videos`, and `generate_speech`; consecutive generation calls run concurrently, preserve result order, and return to the model for one summary
 - OpenAI-compatible image, speech, and Sora flows plus native Gemini image, speech, and Veo flows, with persistent video jobs and automatic polling

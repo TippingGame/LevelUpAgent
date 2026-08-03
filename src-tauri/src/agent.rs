@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use eventsource_stream::Eventsource;
-use futures_util::StreamExt;
+use futures_util::{StreamExt, future::join_all};
 use reqwest::{Client, RequestBuilder};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -140,50 +140,230 @@ pub async fn fetch_models(
     profile: ProviderProfile,
     api_key: &str,
 ) -> Result<Vec<ModelInfo>, String> {
-    let gemini = matches!(&profile.protocol, ProviderProtocol::GeminiGenerateContent);
-    let path = if gemini {
-        "/v1beta/models"
-    } else {
-        "/v1/models"
-    };
-    let url = endpoint(&profile.base_url, path)?;
-    let mut request = bearer_auth_if_present(client.get(url), api_key);
-    if gemini {
-        request = gemini_auth_if_present(request, api_key);
+    // Model discovery is a control-plane operation, not a generation
+    // protocol operation. A gateway may expose OpenAI and native Gemini model
+    // catalogs at the same Base URL, so probe both well-known endpoints and
+    // merge the results instead of deriving the list path from `protocol`.
+    let mut urls = Vec::new();
+    for version in ["v1", "v1beta"] {
+        let url = model_catalog_endpoint(&profile.base_url, version)?;
+        if !urls.iter().any(|candidate| candidate == &url) {
+            urls.push(url);
+        }
     }
+
+    let configured_protocol = profile.protocol.clone();
+    let requests = urls.into_iter().map(|url| {
+        let configured_protocol = configured_protocol.clone();
+        async move {
+            let result = fetch_models_at(client, url.clone(), api_key, &configured_protocol).await;
+            (url, result)
+        }
+    });
+    let responses = join_all(requests).await;
+    let mut successful_endpoints = 0_usize;
+    let mut failures = Vec::new();
+    let mut merged = BTreeMap::<String, ModelInfo>::new();
+    for (url, response) in responses {
+        match response {
+            Ok(models) => {
+                successful_endpoints += 1;
+                for model in models {
+                    merge_model_info(&mut merged, model);
+                }
+            }
+            Err(error) => failures.push(format!("{}: {error}", url.path())),
+        }
+    }
+    if successful_endpoints == 0 {
+        return Err(format!(
+            "Could not discover models from this connection: {}",
+            failures.join("; ")
+        ));
+    }
+
+    let mut models = merged.into_values().collect::<Vec<_>>();
+    for model in &mut models {
+        model.protocol = if model.protocols.contains(&profile.protocol) {
+            Some(profile.protocol.clone())
+        } else if model.protocols.len() == 1 {
+            model.protocols.first().cloned()
+        } else {
+            None
+        };
+    }
+    models.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(models)
+}
+
+async fn fetch_models_at(
+    client: &Client,
+    url: Url,
+    api_key: &str,
+    configured_protocol: &ProviderProtocol,
+) -> Result<Vec<ModelInfo>, String> {
+    let request = client
+        .get(url.clone())
+        .timeout(std::time::Duration::from_secs(30));
+    let request = if is_native_gemini_model_url(&url) {
+        gemini_auth_if_present(request, api_key)
+    } else {
+        bearer_auth_if_present(request, api_key)
+    };
     let response = request
         .send()
         .await
         .map_err(|error| format!("Connection failed: {error}"))?;
     let value = response_json(response).await?;
+    parse_model_list(&url, &value, configured_protocol)
+}
+
+fn parse_model_list(
+    url: &Url,
+    value: &Value,
+    configured_protocol: &ProviderProtocol,
+) -> Result<Vec<ModelInfo>, String> {
     let items = value
         .get("data")
         .and_then(Value::as_array)
         .or_else(|| value.get("models").and_then(Value::as_array))
-        .cloned()
-        .unwrap_or_default();
+        .ok_or_else(|| "Provider response did not contain a model list".to_owned())?;
+    let native_gemini_catalog = is_native_gemini_model_url(url);
 
-    let mut models: Vec<ModelInfo> = items
+    Ok(items
         .iter()
         .filter_map(|item| {
-            let id = item
+            let raw_id = item
                 .get("id")
-                .or_else(|| item.get("name"))?
-                .as_str()?
-                .trim_start_matches("models/")
-                .to_owned();
+                .or_else(|| item.get("name"))
+                .or_else(|| item.get("model"))?
+                .as_str()?;
+            let id = raw_id.trim().trim_start_matches("models/").to_owned();
+            if id.is_empty() {
+                return None;
+            }
+            let supported_generation_methods = model_string_list(
+                item,
+                &[
+                    "supportedGenerationMethods",
+                    "supported_generation_methods",
+                    "supportedMethods",
+                    "supported_methods",
+                ],
+            );
+            let native_gemini_model = native_gemini_catalog
+                || item.get("supportedGenerationMethods").is_some()
+                || item.get("supported_generation_methods").is_some()
+                || supported_generation_methods.iter().any(|method| {
+                    let method = method.to_ascii_lowercase();
+                    method.contains("generatecontent")
+                        || method.contains("embedcontent")
+                        || method.contains("counttokens")
+                        || method.contains("predictlongrunning")
+                });
+            let detected_protocol = if native_gemini_model {
+                ProviderProtocol::GeminiGenerateContent
+            } else {
+                configured_protocol.clone()
+            };
             Some(ModelInfo {
                 id,
-                owned_by: item
-                    .get("owned_by")
-                    .and_then(Value::as_str)
+                owned_by: ["owned_by", "ownedBy", "publisher", "provider"]
+                    .iter()
+                    .find_map(|key| item.get(*key).and_then(Value::as_str))
                     .map(str::to_owned),
+                protocol: Some(detected_protocol.clone()),
+                protocols: vec![detected_protocol],
+                supported_generation_methods,
+                input_modalities: model_string_list(
+                    item,
+                    &[
+                        "inputModalities",
+                        "input_modalities",
+                        "supportedInputModalities",
+                    ],
+                ),
+                output_modalities: model_string_list(
+                    item,
+                    &[
+                        "outputModalities",
+                        "output_modalities",
+                        "supportedOutputModalities",
+                    ],
+                ),
             })
         })
-        .collect();
-    models.sort_by(|left, right| left.id.cmp(&right.id));
-    models.dedup_by(|left, right| left.id == right.id);
-    Ok(models)
+        .collect())
+}
+
+fn is_native_gemini_model_url(url: &Url) -> bool {
+    url.path_segments().is_some_and(|segments| {
+        segments
+            .into_iter()
+            .any(|segment| segment.eq_ignore_ascii_case("v1beta"))
+    })
+}
+
+fn model_string_list(item: &Value, keys: &[&str]) -> Vec<String> {
+    let mut values = keys
+        .iter()
+        .find_map(|key| item.get(*key))
+        .map(|value| match value {
+            Value::Array(items) => items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            Value::String(value) if !value.trim().is_empty() => vec![value.trim().to_owned()],
+            _ => Vec::new(),
+        })
+        .unwrap_or_default();
+    values.sort_by_key(|value| value.to_ascii_lowercase());
+    values.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    values
+}
+
+fn merge_model_info(models: &mut BTreeMap<String, ModelInfo>, incoming: ModelInfo) {
+    let key = incoming.id.to_ascii_lowercase();
+    let Some(existing) = models.get_mut(&key) else {
+        models.insert(key, incoming);
+        return;
+    };
+    if existing.owned_by.is_none() {
+        existing.owned_by = incoming.owned_by;
+    }
+    if existing.protocol.is_none() {
+        existing.protocol = incoming.protocol;
+    }
+    merge_protocol_values(&mut existing.protocols, incoming.protocols);
+    merge_string_values(
+        &mut existing.supported_generation_methods,
+        incoming.supported_generation_methods,
+    );
+    merge_string_values(&mut existing.input_modalities, incoming.input_modalities);
+    merge_string_values(&mut existing.output_modalities, incoming.output_modalities);
+}
+
+fn merge_string_values(target: &mut Vec<String>, incoming: Vec<String>) {
+    for value in incoming {
+        if !target
+            .iter()
+            .any(|current| current.eq_ignore_ascii_case(&value))
+        {
+            target.push(value);
+        }
+    }
+    target.sort_by_key(|value| value.to_ascii_lowercase());
+}
+
+fn merge_protocol_values(target: &mut Vec<ProviderProtocol>, incoming: Vec<ProviderProtocol>) {
+    for protocol in incoming {
+        if !target.contains(&protocol) {
+            target.push(protocol);
+        }
+    }
 }
 
 pub async fn fetch_gateway_diagnostics(
@@ -282,7 +462,7 @@ async fn run_gemini_generate_content(
     api_key: &str,
 ) -> Result<AgentTurnResponse, String> {
     let model = gemini_model_name(&request.profile.model)?;
-    let url = endpoint(
+    let url = gemini_endpoint(
         &request.profile.base_url,
         &format!("/v1beta/models/{model}:generateContent"),
     )?;
@@ -690,7 +870,7 @@ where
     F: FnMut(AgentStreamEvent),
 {
     let model = gemini_model_name(&request.profile.model)?;
-    let url = endpoint(
+    let url = gemini_endpoint(
         &request.profile.base_url,
         &format!("/v1beta/models/{model}:streamGenerateContent?alt=sse"),
     )?;
@@ -2001,6 +2181,43 @@ pub(crate) fn endpoint(base_url: &str, path: &str) -> Result<Url, String> {
         .map_err(|_| "Could not build provider endpoint".to_owned())
 }
 
+/// Build a model-list URL without letting an already-versioned Base URL
+/// collapse both catalogs onto the same endpoint. Generation endpoints keep
+/// the configured version prefix for compatibility, while discovery needs to
+/// treat canonical `/v1` and `/v1beta` catalogs as siblings.
+fn model_catalog_endpoint(base_url: &str, version: &str) -> Result<Url, String> {
+    debug_assert!(matches!(version, "v1" | "v1beta"));
+    canonical_version_endpoint(base_url, &format!("/{version}/models"), version)
+}
+
+/// Resolve a native Gemini request through the canonical `/v1beta` sibling
+/// when a connection Base URL already ends in `/v1` or `/v1beta`. Other
+/// provider-specific version prefixes retain the compatibility behavior of
+/// `endpoint`.
+pub(crate) fn gemini_endpoint(base_url: &str, path: &str) -> Result<Url, String> {
+    canonical_version_endpoint(base_url, path, "v1beta")
+}
+
+fn canonical_version_endpoint(base_url: &str, path: &str, version: &str) -> Result<Url, String> {
+    let mut base = parse_base_url(base_url)?;
+    let base_version = base
+        .path_segments()
+        .and_then(|mut segments| segments.rfind(|segment| !segment.is_empty()));
+    if base_version
+        .is_some_and(|segment| matches!(segment.to_ascii_lowercase().as_str(), "v1" | "v1beta"))
+    {
+        let mut segments = base
+            .path_segments_mut()
+            .map_err(|_| "Could not build provider endpoint".to_owned())?;
+        segments.pop_if_empty();
+        segments.pop();
+        segments.push(version);
+        drop(segments);
+        return endpoint(base.as_str(), path);
+    }
+    endpoint(base_url, path)
+}
+
 fn service_root_endpoint(base_url: &str, path: &str) -> Result<Url, String> {
     let mut base = parse_base_url(base_url)?;
     let normalized = base.path().trim_end_matches('/');
@@ -2151,6 +2368,37 @@ mod tests {
         assert_eq!(
             url.as_str(),
             "https://levelup.example/v1beta/models/gemini-2.5-pro:generateContent"
+        );
+    }
+
+    #[test]
+    fn model_catalog_endpoints_switch_canonical_version_siblings() {
+        let standard = model_catalog_endpoint("https://levelup.example/v1", "v1").unwrap();
+        let gemini = model_catalog_endpoint("https://levelup.example/v1", "v1beta").unwrap();
+        assert_eq!(standard.as_str(), "https://levelup.example/v1/models");
+        assert_eq!(gemini.as_str(), "https://levelup.example/v1beta/models");
+
+        let standard = model_catalog_endpoint("https://levelup.example/v1beta", "v1").unwrap();
+        assert_eq!(standard.as_str(), "https://levelup.example/v1/models");
+
+        let generation = gemini_endpoint(
+            "https://levelup.example/v1",
+            "/v1beta/models/gemini-test:streamGenerateContent?alt=sse",
+        )
+        .unwrap();
+        assert_eq!(
+            generation.as_str(),
+            "https://levelup.example/v1beta/models/gemini-test:streamGenerateContent?alt=sse"
+        );
+
+        let custom = gemini_endpoint(
+            "https://levelup.example/api/v4",
+            "/v1beta/models/gemini-test:generateContent",
+        )
+        .unwrap();
+        assert_eq!(
+            custom.as_str(),
+            "https://levelup.example/api/v4/models/gemini-test:generateContent"
         );
     }
 
@@ -2770,6 +3018,101 @@ mod tests {
         assert!(system_prompt(&request).contains("No project workspace is selected"));
     }
 
+    #[tokio::test]
+    async fn model_discovery_merges_standard_and_gemini_catalogs_independent_of_protocol() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let mut captured = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                loop {
+                    let size = stream.read(&mut buffer).unwrap();
+                    if size == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..size]);
+                    if request.windows(4).any(|part| part == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8_lossy(&request).into_owned();
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or_default();
+                let body = if path == "/v1beta/models" {
+                    r#"{"models":[{"name":"models/gemini-3.1-flash-image","supportedGenerationMethods":["generateContent"],"outputModalities":["TEXT","IMAGE"]},{"name":"models/imagen-4.0-generate-001","supportedGenerationMethods":["predict"]}]}"#
+                } else {
+                    r#"{"data":[{"id":"gemini-grouped-chat","owned_by":"levelup"},{"id":"gemini-3.1-flash-image","owned_by":"levelup"}]}"#
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+                captured.push(request);
+            }
+            sender.send(captured).unwrap();
+        });
+
+        let mut profile = test_request(
+            format!("http://{address}/v1"),
+            ProviderProtocol::OpenaiResponses,
+        )
+        .profile;
+        profile.model = "gemini-grouped-chat".to_owned();
+        let models = fetch_models(&Client::new(), profile, "discovery-key")
+            .await
+            .unwrap();
+        assert_eq!(models.len(), 3);
+        let image = models
+            .iter()
+            .find(|model| model.id == "gemini-3.1-flash-image")
+            .unwrap();
+        assert_eq!(image.protocol, Some(ProviderProtocol::OpenaiResponses));
+        assert_eq!(
+            image.protocols,
+            [
+                ProviderProtocol::OpenaiResponses,
+                ProviderProtocol::GeminiGenerateContent,
+            ]
+        );
+        assert_eq!(image.output_modalities, ["IMAGE", "TEXT"]);
+        let native_only = models
+            .iter()
+            .find(|model| model.id == "imagen-4.0-generate-001")
+            .unwrap();
+        assert_eq!(
+            native_only.protocol,
+            Some(ProviderProtocol::GeminiGenerateContent)
+        );
+
+        let requests = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.starts_with("GET /v1/models "))
+        );
+        let gemini = requests
+            .iter()
+            .find(|request| request.starts_with("GET /v1beta/models "))
+            .unwrap()
+            .to_ascii_lowercase();
+        assert!(gemini.contains("authorization: bearer discovery-key"));
+        assert!(gemini.contains("x-goog-api-key: discovery-key"));
+    }
+
     fn mock_server(expected_path: &'static str, response_body: &'static str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -3270,8 +3613,9 @@ mod tests {
     #[tokio::test]
     async fn parses_gemini_function_calls() {
         let body = r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"Checking."},{"functionCall":{"name":"read_file","args":{"path":"README.md"}}}]}}],"usageMetadata":{"promptTokenCount":14,"candidatesTokenCount":6}}"#;
+        let base_url = mock_server("/v1beta/models/test-model:generateContent", body);
         let request = test_request(
-            mock_server("/v1beta/models/test-model:generateContent", body),
+            format!("{base_url}/v1"),
             ProviderProtocol::GeminiGenerateContent,
         );
         let result = run_turn(&Client::new(), request, "test-key").await.unwrap();

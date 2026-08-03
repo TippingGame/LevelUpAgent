@@ -391,11 +391,50 @@ pub struct SkillInfo {
     pub warning: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
     pub id: String,
     pub owned_by: Option<String>,
+    /// Preferred route after catalog merging. Standard `/v1/models` entries
+    /// inherit the connection's configured protocol because that response
+    /// does not advertise a generation protocol; native catalogs can provide
+    /// a model-specific route.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<ProviderProtocol>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protocols: Vec<ProviderProtocol>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_generation_methods: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_modalities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_modalities: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderModelInfo {
+    pub id: String,
+    pub profile_id: String,
+    pub profile_name: String,
+    pub protocol: ProviderProtocol,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protocols: Vec<ProviderProtocol>,
+    pub owned_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_generation_methods: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_modalities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_modalities: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderModelCatalog {
+    pub models: Vec<ProviderModelInfo>,
+    pub errors: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
@@ -431,6 +470,7 @@ pub struct MediaModelInfo {
     pub id: String,
     pub profile_id: String,
     pub profile_name: String,
+    pub protocol: ProviderProtocol,
     pub kind: MediaKind,
     pub rank: i64,
     pub recommended: bool,
@@ -449,6 +489,10 @@ pub struct MediaGenerationRequest {
     pub profile_id: Option<String>,
     pub kind: MediaKind,
     pub model: Option<String>,
+    /// Optional model-level route selected from discovery. Older callers can
+    /// omit it and fall back to the connection's configured protocol.
+    #[serde(default)]
+    pub protocol: Option<ProviderProtocol>,
     pub prompt: String,
     #[serde(default = "default_media_count")]
     pub count: u32,

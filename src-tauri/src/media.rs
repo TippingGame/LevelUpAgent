@@ -14,7 +14,7 @@ use crate::attachment::ManagedReference;
 use crate::database::Database;
 use crate::models::{
     AttachmentKind, MediaAsset, MediaAssetPage, MediaBatchResult, MediaCatalog,
-    MediaGenerationRequest, MediaKind, MediaModelInfo, MediaStatus, ProviderProfile,
+    MediaGenerationRequest, MediaKind, MediaModelInfo, MediaStatus, ModelInfo, ProviderProfile,
     ProviderProtocol, VideoGenerationMode,
 };
 
@@ -52,6 +52,7 @@ fn gemini_auth_if_present(request: RequestBuilder, provider: &MediaProvider) -> 
 pub struct MediaSelection {
     pub provider: MediaProvider,
     pub model: String,
+    pub protocol: ProviderProtocol,
 }
 
 struct GeneratedBlob {
@@ -87,25 +88,46 @@ pub async fn discover_catalog(
     let mut seen = HashSet::new();
 
     for (provider, response) in providers.iter().zip(responses) {
-        let mut ids = match response {
-            Ok(items) => items.into_iter().map(|item| item.id).collect::<Vec<_>>(),
+        let mut discovered = match response {
+            Ok(items) => items,
             Err(error) => {
                 errors.push(format!("{}: {error}", provider.profile.name));
                 Vec::new()
             }
         };
-        ids.push(provider.profile.model.clone());
-        for id in ids {
-            let id = id.trim().trim_start_matches("models/").to_owned();
+        let configured_model = provider.profile.model.trim().trim_start_matches("models/");
+        if !configured_model.is_empty()
+            && !discovered.iter().any(|model| {
+                model
+                    .id
+                    .trim()
+                    .trim_start_matches("models/")
+                    .eq_ignore_ascii_case(configured_model)
+            })
+        {
+            discovered.push(ModelInfo {
+                id: provider.profile.model.clone(),
+                owned_by: None,
+                protocol: Some(provider.profile.protocol.clone()),
+                protocols: vec![provider.profile.protocol.clone()],
+                supported_generation_methods: Vec::new(),
+                input_modalities: Vec::new(),
+                output_modalities: Vec::new(),
+            });
+        }
+        for model in discovered {
+            let id = model.id.trim().trim_start_matches("models/").to_owned();
             if id.is_empty() {
                 continue;
             }
             for (kind, rank) in classify_media_model(&id) {
+                let protocol = preferred_media_protocol(&model, &kind, &provider.profile.protocol);
                 if seen.insert((provider.profile.id.clone(), kind.clone(), id.clone())) {
                     models.push(MediaModelInfo {
                         id: id.clone(),
                         profile_id: provider.profile.id.clone(),
                         profile_name: provider.profile.name.clone(),
+                        protocol: protocol.clone(),
                         kind,
                         rank,
                         recommended: false,
@@ -115,33 +137,7 @@ pub async fn discover_catalog(
         }
     }
 
-    for kind in [MediaKind::Image, MediaKind::Video, MediaKind::Audio] {
-        let preferred = models
-            .iter()
-            .enumerate()
-            .filter(|(_, item)| item.kind == kind && item.profile_id == active_profile_id)
-            .max_by(|(_, left), (_, right)| {
-                left.rank
-                    .cmp(&right.rank)
-                    .then_with(|| right.id.cmp(&left.id))
-            })
-            .map(|(index, _)| index)
-            .or_else(|| {
-                models
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, item)| item.kind == kind)
-                    .max_by(|(_, left), (_, right)| {
-                        left.rank
-                            .cmp(&right.rank)
-                            .then_with(|| right.id.cmp(&left.id))
-                    })
-                    .map(|(index, _)| index)
-            });
-        if let Some(index) = preferred {
-            models[index].recommended = true;
-        }
-    }
+    mark_recommended_models(&mut models, active_profile_id);
 
     models.sort_by(|left, right| {
         media_kind_order(&left.kind)
@@ -155,6 +151,32 @@ pub async fn discover_catalog(
             .then_with(|| left.id.cmp(&right.id))
     });
     MediaCatalog { models, errors }
+}
+
+fn mark_recommended_models(models: &mut [MediaModelInfo], active_profile_id: &str) {
+    for model in models.iter_mut() {
+        model.recommended = false;
+    }
+    for kind in [MediaKind::Image, MediaKind::Video, MediaKind::Audio] {
+        let preferred = models
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.kind == kind)
+            .max_by(|(_, left), (_, right)| {
+                left.rank
+                    .cmp(&right.rank)
+                    .then_with(|| {
+                        (left.profile_id == active_profile_id)
+                            .cmp(&(right.profile_id == active_profile_id))
+                    })
+                    .then_with(|| right.profile_name.cmp(&left.profile_name))
+                    .then_with(|| right.id.cmp(&left.id))
+            })
+            .map(|(index, _)| index);
+        if let Some(index) = preferred {
+            models[index].recommended = true;
+        }
+    }
 }
 
 pub fn selection_candidates(
@@ -185,6 +207,7 @@ pub fn selection_candidates(
             selections.push(MediaSelection {
                 provider: provider.clone(),
                 model: model.id.clone(),
+                protocol: model.protocol.clone(),
             });
         }
     }
@@ -205,6 +228,10 @@ pub fn selection_candidates(
             selections.push(MediaSelection {
                 provider: provider.clone(),
                 model: model.trim_start_matches("models/").to_owned(),
+                protocol: request
+                    .protocol
+                    .clone()
+                    .unwrap_or_else(|| provider.profile.protocol.clone()),
             });
         }
     }
@@ -352,10 +379,14 @@ pub async fn refresh_asset(
         .remote_id
         .clone()
         .ok_or_else(|| "Video job has no provider job ID".to_owned())?;
-    let result = if matches!(
+    let result = if (matches!(
         provider.profile.protocol,
         ProviderProtocol::GeminiGenerateContent
-    ) && is_gemini_video_model(&asset.model)
+    ) || asset
+        .remote_id
+        .as_deref()
+        .is_some_and(|id| id.starts_with("operations/")))
+        && is_gemini_video_model(&asset.model)
     {
         poll_gemini_video(client, provider, &remote_id).await
     } else {
@@ -437,6 +468,39 @@ fn classify_media_model(model: &str) -> Vec<(MediaKind, i64)> {
     kinds
 }
 
+fn preferred_media_protocol(
+    model: &ModelInfo,
+    kind: &MediaKind,
+    configured_protocol: &ProviderProtocol,
+) -> ProviderProtocol {
+    let gemini = ProviderProtocol::GeminiGenerateContent;
+    let gemini_available = model.protocols.contains(&gemini)
+        || model
+            .protocol
+            .as_ref()
+            .is_some_and(|protocol| protocol == &gemini);
+    if gemini_available && is_native_gemini_media_family(&model.id, kind) {
+        return gemini;
+    }
+    if model.protocols.contains(configured_protocol) {
+        return configured_protocol.clone();
+    }
+    model
+        .protocol
+        .clone()
+        .or_else(|| model.protocols.first().cloned())
+        .unwrap_or_else(|| configured_protocol.clone())
+}
+
+fn is_native_gemini_media_family(model: &str, kind: &MediaKind) -> bool {
+    let id = model.trim_start_matches("models/").to_ascii_lowercase();
+    match kind {
+        MediaKind::Image => id.contains("gemini") || id.contains("imagen"),
+        MediaKind::Video => id.starts_with("veo"),
+        MediaKind::Audio => id.contains("gemini"),
+    }
+}
+
 fn image_rank(id: &str) -> i64 {
     let family = if id == "gpt-image-2" || id.ends_with("/gpt-image-2") {
         9_900_000_000
@@ -446,6 +510,8 @@ fn image_rank(id: &str) -> i64 {
         9_500_000_000
     } else if id.contains("gpt-image-1") {
         9_000_000_000
+    } else if id.contains("gemini-3.1-flash-lite-image") {
+        8_700_000_000
     } else if id.contains("gemini-3.1") {
         8_800_000_000
     } else if id.contains("gemini-3") {
@@ -724,10 +790,8 @@ async fn generate_images(
     references: &[ManagedReference],
     batch_id: String,
 ) -> Result<MediaBatchResult, String> {
-    let native_gemini = matches!(
-        selection.provider.profile.protocol,
-        ProviderProtocol::GeminiGenerateContent
-    ) && !is_grok_image_model(&selection.model);
+    let native_gemini = matches!(selection.protocol, ProviderProtocol::GeminiGenerateContent)
+        && !is_grok_image_model(&selection.model);
     // Some OpenAI-compatible relays expose the Images API but reject `n > 1`
     // when they translate it to an upstream image tool. Fan out single-output
     // requests so "outputs each" works consistently for generations and edits.
@@ -918,7 +982,10 @@ async fn call_gemini_image(
     references: &[ManagedReference],
 ) -> Result<Vec<GeneratedBlob>, String> {
     let model = validate_model_segment(model)?;
-    let url = agent::endpoint(
+    if is_imagen_model(model) {
+        return call_imagen_image(client, provider, model, request, references).await;
+    }
+    let url = agent::gemini_endpoint(
         &provider.profile.base_url,
         &format!("/v1beta/models/{model}:generateContent"),
     )?;
@@ -950,8 +1017,39 @@ async fn call_gemini_image(
     resolve_image_sources(client, parse_image_sources(&value)?).await
 }
 
+async fn call_imagen_image(
+    client: &Client,
+    provider: &MediaProvider,
+    model: &str,
+    request: &MediaGenerationRequest,
+    references: &[ManagedReference],
+) -> Result<Vec<GeneratedBlob>, String> {
+    if !references.is_empty() {
+        return Err("Imagen generation does not accept reference images".to_owned());
+    }
+    let url = agent::gemini_endpoint(
+        &provider.profile.base_url,
+        &format!("/v1beta/models/{model}:predict"),
+    )?;
+    let mut parameters = json!({ "sampleCount": request.count });
+    if let Some(ratio) = request.size.as_deref().and_then(gemini_aspect_ratio) {
+        parameters["aspectRatio"] = Value::String(ratio.to_owned());
+    }
+    let body = json!({
+        "instances": [{ "prompt": effective_image_prompt(request) }],
+        "parameters": parameters
+    });
+    let value = send_json(gemini_auth_if_present(client.post(url), provider).json(&body)).await?;
+    resolve_image_sources(client, parse_image_sources(&value)?).await
+}
+
 fn parse_image_sources(value: &Value) -> Result<Vec<BlobSource>, String> {
     let mut sources = Vec::new();
+    if let Some(predictions) = value.get("predictions").and_then(Value::as_array) {
+        for item in predictions {
+            push_blob_source(&mut sources, item, None);
+        }
+    }
     if let Some(data) = value.get("data").and_then(Value::as_array) {
         for item in data {
             push_blob_source(&mut sources, item, None);
@@ -1032,6 +1130,8 @@ fn push_blob_source(sources: &mut Vec<BlobSource>, value: &Value, revised: Optio
     let base64 = value
         .get("b64_json")
         .or_else(|| value.get("base64"))
+        .or_else(|| value.get("bytesBase64Encoded"))
+        .or_else(|| value.get("bytes_base64_encoded"))
         .or_else(|| {
             value
                 .get("data")
@@ -1101,10 +1201,7 @@ async fn generate_audio(
     batch_id: String,
 ) -> Result<MediaBatchResult, String> {
     let calls = (0..request.count).map(|_| async {
-        if matches!(
-            selection.provider.profile.protocol,
-            ProviderProtocol::GeminiGenerateContent
-        ) {
+        if matches!(selection.protocol, ProviderProtocol::GeminiGenerateContent) {
             call_gemini_audio(client, &selection.provider, &selection.model, request).await
         } else {
             call_openai_audio(client, &selection.provider, &selection.model, request).await
@@ -1191,7 +1288,7 @@ async fn call_gemini_audio(
     request: &MediaGenerationRequest,
 ) -> Result<GeneratedBlob, String> {
     let model = validate_model_segment(model)?;
-    let url = agent::endpoint(
+    let url = agent::gemini_endpoint(
         &provider.profile.base_url,
         &format!("/v1beta/models/{model}:generateContent"),
     )?;
@@ -1264,10 +1361,8 @@ async fn generate_videos(
     batch_id: String,
 ) -> Result<MediaBatchResult, String> {
     let calls = (0..request.count).map(|_| async {
-        if matches!(
-            selection.provider.profile.protocol,
-            ProviderProtocol::GeminiGenerateContent
-        ) && is_gemini_video_model(&selection.model)
+        if matches!(selection.protocol, ProviderProtocol::GeminiGenerateContent)
+            && is_gemini_video_model(&selection.model)
         {
             create_gemini_video(client, &selection.provider, &selection.model, request).await
         } else if is_grok_video_model(&selection.model) {
@@ -1465,7 +1560,7 @@ async fn create_gemini_video(
     request: &MediaGenerationRequest,
 ) -> Result<RemoteVideoJob, String> {
     let model = validate_model_segment(model)?;
-    let url = agent::endpoint(
+    let url = agent::gemini_endpoint(
         &provider.profile.base_url,
         &format!("/v1beta/models/{model}:predictLongRunning"),
     )?;
@@ -1540,7 +1635,7 @@ async fn poll_gemini_video(
     } else {
         format!("/v1beta/{}", remote_id.trim_start_matches('/'))
     };
-    let url = agent::endpoint(&provider.profile.base_url, &operation_path)?;
+    let url = agent::gemini_endpoint(&provider.profile.base_url, &operation_path)?;
     let value = send_json(gemini_auth_if_present(client.get(url), provider)).await?;
     if value.get("done").and_then(Value::as_bool) != Some(true) {
         return Ok(VideoPoll::Pending {
@@ -2081,6 +2176,13 @@ fn is_gemini_video_model(model: &str) -> bool {
         .starts_with("veo")
 }
 
+fn is_imagen_model(model: &str) -> bool {
+    model
+        .trim_start_matches("models/")
+        .to_ascii_lowercase()
+        .starts_with("imagen-")
+}
+
 fn is_grok_video_model(model: &str) -> bool {
     model
         .trim_start_matches("models/")
@@ -2357,6 +2459,7 @@ mod tests {
             profile_id: Some("primary".to_owned()),
             kind,
             model: None,
+            protocol: None,
             prompt: "A useful test output".to_owned(),
             count,
             size: None,
@@ -2388,6 +2491,12 @@ mod tests {
         assert_eq!(classify_media_model("gpt-image-2")[0].0, MediaKind::Image);
         assert!(image_rank("gpt-image-2") > image_rank("gpt-image-1.5"));
         assert!(image_rank("gemini-3.1-flash-image") > image_rank("gemini-2.5-flash-image"));
+        assert_eq!(
+            classify_media_model("gemini-3.1-flash-lite-image")[0].0,
+            MediaKind::Image
+        );
+        assert!(image_rank("gemini-3.1-flash-image") > image_rank("gemini-3.1-flash-lite-image"));
+        assert!(image_rank("gemini-3.1-flash-lite-image") > image_rank("gemini-2.5-flash-image"));
         assert_eq!(
             classify_media_model("imagen-4.0-generate-001")[0].0,
             MediaKind::Image
@@ -2423,6 +2532,91 @@ mod tests {
     }
 
     #[test]
+    fn media_protocol_prefers_native_gemini_route_for_dual_route_models() {
+        for (id, kind) in [
+            ("gemini-3.1-flash-image", MediaKind::Image),
+            ("gemini-3.1-flash-lite-image", MediaKind::Image),
+            ("imagen-4.0-generate-001", MediaKind::Image),
+            ("veo-3.1-generate-preview", MediaKind::Video),
+            ("gemini-2.5-flash-preview-tts", MediaKind::Audio),
+        ] {
+            let model = ModelInfo {
+                id: id.to_owned(),
+                owned_by: None,
+                protocol: Some(ProviderProtocol::OpenaiResponses),
+                protocols: vec![
+                    ProviderProtocol::OpenaiResponses,
+                    ProviderProtocol::GeminiGenerateContent,
+                ],
+                supported_generation_methods: Vec::new(),
+                input_modalities: Vec::new(),
+                output_modalities: Vec::new(),
+            };
+            assert_eq!(
+                preferred_media_protocol(&model, &kind, &ProviderProtocol::OpenaiResponses),
+                ProviderProtocol::GeminiGenerateContent,
+                "{id} should use its native media route"
+            );
+        }
+
+        let openai_image = ModelInfo {
+            id: "gpt-image-2".to_owned(),
+            owned_by: None,
+            protocol: Some(ProviderProtocol::OpenaiResponses),
+            protocols: vec![
+                ProviderProtocol::OpenaiResponses,
+                ProviderProtocol::GeminiGenerateContent,
+            ],
+            supported_generation_methods: Vec::new(),
+            input_modalities: Vec::new(),
+            output_modalities: Vec::new(),
+        };
+        assert_eq!(
+            preferred_media_protocol(
+                &openai_image,
+                &MediaKind::Image,
+                &ProviderProtocol::OpenaiResponses,
+            ),
+            ProviderProtocol::OpenaiResponses
+        );
+    }
+
+    #[test]
+    fn media_recommendation_uses_best_route_across_connections() {
+        let mut models = vec![
+            MediaModelInfo {
+                id: "gpt-image-1".to_owned(),
+                profile_id: "active".to_owned(),
+                profile_name: "Active".to_owned(),
+                protocol: ProviderProtocol::OpenaiResponses,
+                kind: MediaKind::Image,
+                rank: 100,
+                recommended: false,
+            },
+            MediaModelInfo {
+                id: "gemini-3.1-flash-image".to_owned(),
+                profile_id: "creative".to_owned(),
+                profile_name: "Creative".to_owned(),
+                protocol: ProviderProtocol::GeminiGenerateContent,
+                kind: MediaKind::Image,
+                rank: 200,
+                recommended: false,
+            },
+        ];
+        mark_recommended_models(&mut models, "active");
+        assert!(!models[0].recommended);
+        assert!(models[1].recommended);
+
+        models[0].rank = 200;
+        mark_recommended_models(&mut models, "active");
+        assert!(
+            models[0].recommended,
+            "active connection should win a rank tie"
+        );
+        assert!(!models[1].recommended);
+    }
+
+    #[test]
     fn catalog_selection_prefers_recommended_model_and_honors_explicit_choice() {
         let providers = vec![
             provider("primary", "text-model"),
@@ -2434,6 +2628,7 @@ mod tests {
                     id: "gpt-image-2".to_owned(),
                     profile_id: "primary".to_owned(),
                     profile_name: "primary".to_owned(),
+                    protocol: ProviderProtocol::OpenaiChat,
                     kind: MediaKind::Image,
                     rank: 100,
                     recommended: true,
@@ -2442,6 +2637,7 @@ mod tests {
                     id: "gpt-image-1.5".to_owned(),
                     profile_id: "backup".to_owned(),
                     profile_name: "backup".to_owned(),
+                    protocol: ProviderProtocol::OpenaiChat,
                     kind: MediaKind::Image,
                     rank: 90,
                     recommended: false,
@@ -2453,6 +2649,7 @@ mod tests {
             profile_id: None,
             kind: MediaKind::Image,
             model: None,
+            protocol: None,
             prompt: "test".to_owned(),
             count: 1,
             size: None,
@@ -2474,6 +2671,37 @@ mod tests {
         let selected = selection_candidates(&providers, &catalog, &request);
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].provider.profile.id, "backup");
+    }
+
+    #[test]
+    fn catalog_selection_preserves_model_level_gemini_protocol() {
+        let providers = vec![provider("gateway", "gpt-5.6-sol")];
+        let catalog = MediaCatalog {
+            models: vec![MediaModelInfo {
+                id: "gemini-3.1-flash-image".to_owned(),
+                profile_id: "gateway".to_owned(),
+                profile_name: "Gateway".to_owned(),
+                protocol: ProviderProtocol::GeminiGenerateContent,
+                kind: MediaKind::Image,
+                rank: 100,
+                recommended: true,
+            }],
+            errors: Vec::new(),
+        };
+        let mut request = request(MediaKind::Image, 1);
+        request.profile_id = Some("gateway".to_owned());
+        request.model = Some("gemini-3.1-flash-image".to_owned());
+
+        let selected = selection_candidates(&providers, &catalog, &request);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(
+            selected[0].protocol,
+            ProviderProtocol::GeminiGenerateContent
+        );
+        assert_eq!(
+            selected[0].provider.profile.protocol,
+            ProviderProtocol::OpenaiChat
+        );
     }
 
     #[test]
@@ -2645,6 +2873,7 @@ mod tests {
         let selection = MediaSelection {
             provider,
             model: "gpt-image-2".to_owned(),
+            protocol: ProviderProtocol::OpenaiChat,
         };
         let (root, database) = temp_storage("image");
         let storage = root.join("media");
@@ -2715,6 +2944,7 @@ mod tests {
         let selection = MediaSelection {
             provider,
             model: "grok-imagine-image-quality".to_owned(),
+            protocol: ProviderProtocol::OpenaiChat,
         };
         let (root, database) = temp_storage("grok-image");
         let storage = root.join("media");
@@ -2770,6 +3000,7 @@ mod tests {
         let selection = MediaSelection {
             provider,
             model: "gpt-image-2".to_owned(),
+            protocol: ProviderProtocol::OpenaiChat,
         };
         let (root, database) = temp_storage("openai-image-multiple");
         let result = generate_batch(
@@ -2820,6 +3051,7 @@ mod tests {
         let selection = MediaSelection {
             provider,
             model: "gpt-image-2".to_owned(),
+            protocol: ProviderProtocol::OpenaiChat,
         };
         let references = vec![ManagedReference {
             file_name: "reference.png".to_owned(),
@@ -2868,11 +3100,12 @@ mod tests {
             body,
         }]);
         let mut provider = provider("gemini", "gemini-3.1-flash-image");
-        provider.profile.base_url = base_url;
+        provider.profile.base_url = format!("{base_url}/v1");
         provider.profile.protocol = ProviderProtocol::GeminiGenerateContent;
         let selection = MediaSelection {
             provider,
             model: "gemini-3.1-flash-image".to_owned(),
+            protocol: ProviderProtocol::GeminiGenerateContent,
         };
         let (root, database) = temp_storage("gemini-image");
         let storage = root.join("media");
@@ -2889,6 +3122,82 @@ mod tests {
         .unwrap();
         assert_eq!(result.assets.len(), 1);
         assert_eq!(result.assets[0].status, MediaStatus::Completed);
+        assert_eq!(
+            std::fs::read(result.assets[0].file_path.as_deref().unwrap()).unwrap(),
+            png
+        );
+        server.join().unwrap();
+        drop(database);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn generates_and_persists_a_native_imagen_prediction() {
+        let png = b"\x89PNG\r\n\x1a\nmock-imagen-image";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(png);
+        let body = json!({
+            "predictions": [{
+                "bytesBase64Encoded": encoded,
+                "mimeType": "image/png"
+            }]
+        })
+        .to_string()
+        .into_bytes();
+        let (base_url, server) = mock_sequence_inspecting(
+            vec![MockResponse {
+                method: "POST",
+                path: "/v1beta/models/imagen-4.0-generate-001:predict",
+                status: 200,
+                content_type: "application/json",
+                body,
+            }],
+            |_, request| {
+                let request = String::from_utf8_lossy(request);
+                let body = request.split_once("\r\n\r\n").unwrap().1;
+                let value: Value = serde_json::from_str(body).unwrap();
+                assert_eq!(
+                    value
+                        .pointer("/parameters/sampleCount")
+                        .and_then(Value::as_u64),
+                    Some(1)
+                );
+                assert_eq!(
+                    value
+                        .pointer("/parameters/aspectRatio")
+                        .and_then(Value::as_str),
+                    Some("16:9")
+                );
+                assert!(
+                    value
+                        .pointer("/instances/0/prompt")
+                        .and_then(Value::as_str)
+                        .is_some_and(|prompt| prompt.contains("16:9"))
+                );
+            },
+        );
+        let mut provider = provider("gemini", "imagen-4.0-generate-001");
+        provider.profile.base_url = format!("{base_url}/v1");
+        provider.profile.protocol = ProviderProtocol::OpenaiResponses;
+        let selection = MediaSelection {
+            provider,
+            model: "imagen-4.0-generate-001".to_owned(),
+            protocol: ProviderProtocol::GeminiGenerateContent,
+        };
+        let (root, database) = temp_storage("imagen-image");
+        let mut request = request(MediaKind::Image, 1);
+        request.size = Some("16:9".to_owned());
+        let result = generate_batch(
+            &Client::new(),
+            &root.join("media"),
+            &database,
+            &selection,
+            &request,
+            None,
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.assets.len(), 1);
         assert_eq!(
             std::fs::read(result.assets[0].file_path.as_deref().unwrap()).unwrap(),
             png
@@ -2921,6 +3230,7 @@ mod tests {
         let selection = MediaSelection {
             provider,
             model: "gpt-4o-mini-tts".to_owned(),
+            protocol: ProviderProtocol::OpenaiChat,
         };
         let (root, database) = temp_storage("audio-partial");
         let result = generate_batch(
@@ -2967,6 +3277,7 @@ mod tests {
         let selection = MediaSelection {
             provider,
             model: "gemini-2.5-flash-preview-tts".to_owned(),
+            protocol: ProviderProtocol::GeminiGenerateContent,
         };
         let (root, database) = temp_storage("gemini-speech");
         let result = generate_batch(
@@ -3020,6 +3331,7 @@ mod tests {
         let selection = MediaSelection {
             provider: provider.clone(),
             model: "sora-2".to_owned(),
+            protocol: ProviderProtocol::OpenaiChat,
         };
         let (root, database) = temp_storage("video");
         let storage = root.join("media");
@@ -3103,6 +3415,7 @@ mod tests {
         let selection = MediaSelection {
             provider: provider.clone(),
             model: "grok-imagine-video".to_owned(),
+            protocol: ProviderProtocol::OpenaiChat,
         };
         let (root, database) = temp_storage("grok-video");
         let storage = root.join("media");
@@ -3180,6 +3493,7 @@ mod tests {
         let selection = MediaSelection {
             provider: provider.clone(),
             model: "veo-3.1-generate-preview".to_owned(),
+            protocol: ProviderProtocol::GeminiGenerateContent,
         };
         let (root, database) = temp_storage("veo-video");
         let storage = root.join("media");

@@ -512,6 +512,22 @@ export interface SkillInfo {
 export interface ModelInfo {
   id: string;
   ownedBy?: string;
+  protocol?: ProviderProtocol;
+  protocols?: ProviderProtocol[];
+  supportedGenerationMethods?: string[];
+  inputModalities?: string[];
+  outputModalities?: string[];
+}
+
+export interface ProviderModelInfo extends ModelInfo {
+  profileId: string;
+  profileName: string;
+  protocol: ProviderProtocol;
+}
+
+export interface ProviderModelCatalog {
+  models: ProviderModelInfo[];
+  errors: string[];
 }
 
 export type MediaKind = "image" | "video" | "audio";
@@ -522,6 +538,7 @@ export interface MediaModelInfo {
   id: string;
   profileId: string;
   profileName: string;
+  protocol: ProviderProtocol;
   kind: MediaKind;
   rank: number;
   recommended: boolean;
@@ -536,6 +553,7 @@ export interface MediaGenerationRequest {
   profileId?: string;
   kind: MediaKind;
   model?: string;
+  protocol?: ProviderProtocol;
   prompt: string;
   count: number;
   size?: string;

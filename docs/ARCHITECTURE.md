@@ -57,6 +57,24 @@ Rust 适配器负责把通用历史转换为各协议格式，并把响应重新
 省略字符数、截断字符数和非法工具组数都会写入系统提示词，要求模型不能假装读过缺失内容，并在
 需要时重新调用本地工具取证。图片二进制由附件独立的大小/数量限制约束，不计入文本字符预算。
 
+## 连接、模型发现与模型路由
+
+连接（Connection）是稳定的配置与凭据边界：`profile ID + Base URL + 独立 API Key + 默认文字模型 + 默认协议`。
+模型路由（Model Route）是一次实际调用的地址：`profile ID + model ID + protocol`。因此同一连接可提供多个模型，
+同一模型也可同时提供 Responses 与 Gemini GenerateContent 等不同路由，而不需要复制或替换 API Key。
+
+模型发现属于控制面，不属于任何生成协议。Rust 会为每个可用连接并行检查标准 `/v1/models` 与 Gemini
+`/v1beta/models`；Base URL 已带 `/v1` 或 `/v1beta` 时，两个目录按同级版本路径构造，避免折叠成同一 URL。
+结果按大小写不敏感的模型 ID 合并，并保留 `supportedGenerationMethods`、输入/输出模态和全部已确认协议。
+连接当前配置的协议仍是文字模型的默认路由；只有原生目录独占的模型才自动切换为 GenerateContent。
+执行原生 Gemini 路由时同样会把以 `/v1` 结尾的 Base URL 切换到同级 `/v1beta`，避免发现地址与生成地址不一致。
+
+`get_model_catalog` 使用 Rust 从系统凭据库分别加载每个连接的密钥，并把多协议模型展开为多条模型路由；
+前端只收到连接 ID、显示名、模型元数据和协议，不收到密钥。主会话使用当前连接的默认路由；写作空间
+单独保存所选文字路由；媒体目录跨全部可用连接聚合模型，并在已发现 Gemini 路由时为 Gemini 图片、
+Imagen、Veo 与 Gemini TTS 优先选择原生协议。图片、视频和语音分别持久化所选连接与模型；OpenAI 图片、
+Sora 和 OpenAI TTS 仍使用连接的标准路由。
+
 ## 写作与游戏叙事边界
 
 写作项目与会话分离：桌面端以 `writing_projects` 表保存版本化 JSON，Web 预览使用独立的
@@ -64,7 +82,7 @@ localStorage 回退。项目包含文稿、任意类型设定、实体关系、�
 单项目后端编码上限为 16 MiB，项目 ID、类型、标题和时间戳在写入前校验。导入数据经过逐层归一化，
 无效 ID、时间戳、快照和字段会被修复或丢弃，不能直接成为数据库结构。
 
-AI 写作复用当前文字 Provider 和既有故障转移链路，但固定使用不暴露工具的 chat 模式。每次补全只
+AI 写作使用写作空间独立选择的文字模型路由，并复用既有故障转移链路，但固定使用不暴露工具的 chat 模式。每次补全只
 发送当前操作构造的用户消息：项目前提与文风、当前/相邻文稿摘要、显式选择的设定、文稿或节点绑定、
 光标附近名称/别名提及、实体关系以及世界观/规则按分数排序，并在用户设置的字符预算内逐块截断。
 正文建议以预览态流式返回，接受后才写入项目，并在覆盖前创建快照；继续输入、切换目标或离开工作台
@@ -103,7 +121,7 @@ canonicalize 后必须以工作区 canonical path 开头；新文件则验证最
 
 ## 密钥边界
 
-Provider 元数据保存在 WebView 的 localStorage，但 API Key 通过 Rust `keyring` crate 写入：
+Provider 元数据与当前连接保存在 SQLite；Web 预览才使用 localStorage 回退。API Key 通过 Rust `keyring` crate 写入：
 
 - Windows Credential Manager
 - macOS Keychain

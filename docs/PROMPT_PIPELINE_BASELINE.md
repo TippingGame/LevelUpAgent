@@ -235,6 +235,8 @@ Goal 在模型没有发出工具调用但目标仍处于 `active` 或 `auditing`
 ## 独立媒体提示词路径
 
 Media Studio 和 Agent 的媒体工具最终进入 `src-tauri/src/media.rs`，这条路径与主对话模型提示词不同。
+媒体模型目录跨全部已配置连接聚合；每个候选携带 `profile + model + protocol` 路由。Gemini 图片、
+Imagen、Veo 与 Gemini TTS 在已发现原生能力时优先走 GenerateContent，而不是继承主会话协议。
 
 当前行为：
 

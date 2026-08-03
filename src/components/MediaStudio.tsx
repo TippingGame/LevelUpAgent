@@ -130,6 +130,7 @@ const VIDEO_SIZE_OPTIONS = ["1280x720", "720x1280", "16:9", "9:16"];
 const GROK_VIDEO_ASPECT_OPTIONS = ["16:9", "9:16"];
 const GROK_VIDEO_RESOLUTION_OPTIONS = ["480p", "720p"];
 const GROK_VIDEO_MODES: VideoGenerationMode[] = ["text", "image", "reference", "video"];
+const MEDIA_MODEL_ROUTES_KEY = "levelup-agent.media-model-routes.v1";
 
 export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, referenceDrop, onReferenceDropHandled, onConfigureConnection, onPendingCountChange, onWriting }: MediaStudioProps) {
   const rootRef = useRef<HTMLElement>(null);
@@ -137,7 +138,7 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
   const [catalog, setCatalog] = useState<Awaited<ReturnType<typeof getMediaCatalog>> | null>(null);
   const [assets, setAssets] = useState<MediaAsset[]>([]);
   const [pendingAssets, setPendingAssets] = useState<StudioMediaAsset[]>([]);
-  const [selectedModels, setSelectedModels] = useState<Partial<Record<MediaKind, string>>>({});
+  const [selectedModels, setSelectedModels] = useState<Partial<Record<MediaKind, string>>>(loadMediaModelRoutes);
   const [prompts, setPrompts] = useState<PromptDraft[]>([
     { id: crypto.randomUUID(), prompt: "" },
   ]);
@@ -200,6 +201,14 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
   const pendingVideoIds = assets
     .filter((asset) => asset.kind === "video" && (asset.status === "queued" || asset.status === "in_progress"))
     .map((asset) => asset.id);
+
+  const rememberSelectedModel = (targetKind: MediaKind, key: string) => {
+    setSelectedModels((current) => {
+      const next = { ...current, [targetKind]: key };
+      saveMediaModelRoutes(next);
+      return next;
+    });
+  };
 
   const loadCatalog = async (showSpinner = true) => {
     const requestId = ++catalogRequestRef.current;
@@ -273,7 +282,7 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
     if (!selected) return;
     const key = modelKey(selected);
     if (selectedModels[kind] !== key) {
-      setSelectedModels((current) => ({ ...current, [kind]: key }));
+      rememberSelectedModel(kind, key);
     }
   }, [kind, selected?.id, selected?.profileId]);
 
@@ -533,6 +542,7 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
       kind,
       profileId: selected.profileId,
       model: selected.id,
+      protocol: selected.protocol,
       count,
       size: kind === "image" || (kind === "video" && !isGrokVideo) ? size : undefined,
       quality: kind === "image" && quality !== "auto" ? quality : undefined,
@@ -612,7 +622,7 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
 
       setKind("image");
       setPrompts((current) => [{ id: current[0]?.id ?? crypto.randomUUID(), prompt: asset.prompt }]);
-      setSelectedModels((current) => ({ ...current, image: `${asset.providerId}::${asset.model}` }));
+      rememberSelectedModel("image", `${asset.providerId}::${asset.model}`);
       setCount(clampMediaCount(asset.count));
       setSize(normalizeImageSize(asset.size));
       setQuality(normalizeImageQuality(asset.quality));
@@ -676,7 +686,7 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
               <select
                 value={selected ? modelKey(selected) : ""}
                 disabled={models.length === 0}
-                onChange={(event) => setSelectedModels((current) => ({ ...current, [kind]: event.target.value }))}
+                onChange={(event) => rememberSelectedModel(kind, event.target.value)}
               >
                 {models.length === 0 && <option value="">{tr("未发现可用模型", "No model discovered")}</option>}
                 {models.map((model) => (
@@ -686,7 +696,7 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
                 ))}
               </select>
             </label>
-            {selected?.recommended && <span className="recommended-model"><Sparkles size={12} />{tr("已自动选择最新模型", "Newest model selected automatically")}</span>}
+            {selected?.recommended && <span className="recommended-model"><Sparkles size={12} />{tr("已自动选择推荐模型", "Recommended model selected automatically")}</span>}
           </div>
 
           {isGrokVideo && (
@@ -1265,6 +1275,29 @@ function constrainPreviewOffset(
 
 function modelKey(model: MediaModelInfo) {
   return `${model.profileId}::${model.id}`;
+}
+
+function loadMediaModelRoutes(): Partial<Record<MediaKind, string>> {
+  try {
+    const value = JSON.parse(localStorage.getItem(MEDIA_MODEL_ROUTES_KEY) ?? "{}");
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    return Object.fromEntries(
+      (["image", "video", "audio"] as MediaKind[])
+        .filter((kind) => typeof value[kind] === "string" && value[kind].length <= 512)
+        .map((kind) => [kind, value[kind]]),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function saveMediaModelRoutes(routes: Partial<Record<MediaKind, string>>) {
+  try {
+    localStorage.setItem(MEDIA_MODEL_ROUTES_KEY, JSON.stringify(routes));
+  } catch {
+    // Keep model switching available for the current session if WebView
+    // storage is unavailable.
+  }
 }
 
 function matchesImageVideoMode(mode: VideoGenerationMode): mode is "image" | "reference" {

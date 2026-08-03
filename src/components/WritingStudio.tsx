@@ -79,11 +79,13 @@ import {
   cancelAgentTurn,
   deleteWritingProject,
   exportWritingFile,
+  getModelCatalog,
   listWritingProjects,
   saveWritingProject,
 } from "../lib/bridge";
 import { tr } from "../lib/i18n";
-import type { AgentMessage, ProviderProfile } from "../lib/types";
+import { isTextGenerationModel } from "../lib/modelSelection";
+import type { AgentMessage, ProviderModelInfo, ProviderProfile } from "../lib/types";
 import {
   autoLayoutStoryNodes,
   applyWritingGoalStep,
@@ -178,6 +180,7 @@ interface WritingStudioProps {
   locale: string;
   activeProfile: ProviderProfile;
   profiles: ProviderProfile[];
+  modelCatalogRevision: number;
   workspace?: string;
   connectionReady: boolean;
   onConfigureConnection: () => void;
@@ -188,6 +191,7 @@ const ENTITY_KINDS: WritingEntityKind[] = ["character", "location", "faction", "
 const NODE_TYPES: StoryNodeType[] = ["scene", "dialogue", "choice", "condition", "ending"];
 const DOCUMENT_KINDS: WritingDocumentKind[] = ["chapter", "scene", "outline", "note"];
 const MAX_WRITING_FILE_BYTES = 16 * 1024 * 1024;
+const WRITING_MODEL_ROUTE_KEY = "levelup-agent.writing-model-route.v1";
 const COMPLETION_ACTIONS: Array<{ intent: CompletionIntent; label: string; needsSelection?: boolean }> = [
   { intent: "continue", label: "续写" },
   { intent: "rewrite", label: "改写", needsSelection: true },
@@ -203,6 +207,7 @@ export function WritingStudio({
   locale: _locale,
   activeProfile,
   profiles,
+  modelCatalogRevision,
   workspace,
   connectionReady,
   onConfigureConnection,
@@ -230,6 +235,9 @@ export function WritingStudio({
   const [navigatorOpen, setNavigatorOpen] = useState(() => !isCompactWritingViewport());
   const [snapshotsOpen, setSnapshotsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [writingModelMenuOpen, setWritingModelMenuOpen] = useState(false);
+  const [writingModelRouteKey, setWritingModelRouteKey] = useState(loadWritingModelRoute);
+  const [modelCatalog, setModelCatalog] = useState<Awaited<ReturnType<typeof getModelCatalog>> | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
@@ -274,6 +282,27 @@ export function WritingStudio({
   const activeGoal = activeProject?.goals.find((goal) => goal.id === selectedGoalId)
     ?? activeProject?.goals.find((goal) => goal.id === activeProject.activeGoalId)
     ?? activeProject?.goals[0];
+  const writingModels = useMemo(
+    () => (modelCatalog?.models ?? []).filter(isTextGenerationModel),
+    [modelCatalog],
+  );
+  const selectedWritingModel = writingModels.find((model) => providerModelKey(model) === writingModelRouteKey)
+    ?? writingModels.find((model) => model.profileId === activeProfile.id && model.id === activeProfile.model)
+    ?? writingModels.find((model) => model.profileId === activeProfile.id)
+    ?? writingModels[0];
+  const selectedWritingProfile = selectedWritingModel
+    ? profiles.find((profile) => profile.id === selectedWritingModel.profileId)
+    : undefined;
+  const writingRunProfile: ProviderProfile = selectedWritingModel && selectedWritingProfile
+    ? {
+        ...selectedWritingProfile,
+        model: selectedWritingModel.id,
+        protocol: selectedWritingModel.protocol,
+      }
+    : activeProfile;
+  const writingConnectionReady = selectedWritingModel && selectedWritingProfile
+    ? true
+    : connectionReady;
   projectsRef.current = projects;
   const issues = useMemo(() => activeProject ? validateNarrative(activeProject) : [], [activeProject]);
   const context = useMemo(() => activeProject
@@ -348,6 +377,19 @@ export function WritingStudio({
   }, []);
 
   useEffect(() => {
+    if (!active) return;
+    let disposed = false;
+    void getModelCatalog()
+      .then((catalog) => {
+        if (!disposed) setModelCatalog(catalog);
+      })
+      .catch((reason) => {
+        if (!disposed) setError(errorText(reason));
+      });
+    return () => { disposed = true; };
+  }, [active, modelCatalogRevision]);
+
+  useEffect(() => {
     const query = window.matchMedia("(max-width: 600px)");
     const sync = () => {
       setNavigatorOpen(!query.matches);
@@ -416,7 +458,7 @@ export function WritingStudio({
 
   useEffect(() => {
     if (!active || !activeProject || !activeDocument || section !== "write") return;
-    if (!activeProject.settings.autoComplete || !connectionReady || completion || composingRef.current) return;
+    if (!activeProject.settings.autoComplete || !writingConnectionReady || completion || composingRef.current) return;
     if (lastTypedAt === 0 || userEditRevision === lastAutoRevisionRef.current || activeDocument.content.trim().length < 12) return;
     if (selection.start !== selection.end) return;
     const timer = window.setTimeout(() => {
@@ -427,7 +469,7 @@ export function WritingStudio({
     return () => window.clearTimeout(timer);
   // runCompletion intentionally uses current editor state; its dependencies would restart this debounce.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, activeDocument?.content, activeProject?.settings.autoComplete, activeProject?.settings.autoCompleteDelayMs, completion, connectionReady, lastTypedAt, section, selection.end, selection.start, userEditRevision]);
+  }, [active, activeDocument?.content, activeProject?.settings.autoComplete, activeProject?.settings.autoCompleteDelayMs, completion, lastTypedAt, section, selection.end, selection.start, userEditRevision, writingConnectionReady]);
 
   const saveNow = async () => {
     if (!activeProject) return;
@@ -440,9 +482,17 @@ export function WritingStudio({
     }
   };
 
+  const selectWritingModel = (model: ProviderModelInfo) => {
+    const key = providerModelKey(model);
+    setWritingModelRouteKey(key);
+    saveWritingModelRoute(key);
+    setWritingModelMenuOpen(false);
+    setError(undefined);
+  };
+
   const runCompletion = async (intent: CompletionIntent, requestedTarget?: CompletionTarget, requestedInstruction = instruction) => {
     if (!activeProject) return;
-    if (!connectionReady) {
+    if (!writingConnectionReady) {
       setError(tr("请先配置可用的文字模型", "Configure a text model first"));
       onConfigureConnection();
       return;
@@ -505,11 +555,11 @@ export function WritingStudio({
       attachments: [],
     }];
     const fallbackProfiles = profiles
-      .filter((profile) => profile.id !== activeProfile.id && profile.failoverEnabled)
+      .filter((profile) => profile.id !== writingRunProfile.id && profile.failoverEnabled)
       .sort((left, right) => left.priority - right.priority);
     try {
       const response = await agentTurnStream(
-        activeProfile,
+        writingRunProfile,
         messages,
         "chat",
         workspace,
@@ -873,11 +923,11 @@ export function WritingStudio({
       attachments: [],
     }];
     const fallbackProfiles = profiles
-      .filter((profile) => profile.id !== activeProfile.id && profile.failoverEnabled)
+      .filter((profile) => profile.id !== writingRunProfile.id && profile.failoverEnabled)
       .sort((left, right) => left.priority - right.priority);
     try {
       const response = await agentTurnStream(
-        activeProfile,
+        writingRunProfile,
         messages,
         "chat",
         workspace,
@@ -1043,7 +1093,7 @@ export function WritingStudio({
   };
 
   const ensureGoalConnection = () => {
-    if (connectionReady) return true;
+    if (writingConnectionReady) return true;
     setError(tr("请先配置可用的文字模型", "Configure a text model first"));
     onConfigureConnection();
     return false;
@@ -1218,7 +1268,44 @@ export function WritingStudio({
           <button type="button" onClick={takeSnapshot} title={tr("创建版本快照", "Create version snapshot")}><History size={15} /></button>
           <button type="button" onClick={() => setSettingsOpen((value) => !value)} title={tr("写作设置", "Writing settings")}><Settings2 size={15} /></button>
           <button type="button" onClick={() => void saveNow()} title={tr("立即保存", "Save now")}><Save size={15} /></button>
-          <button type="button" className={connectionReady ? "writing-model ready" : "writing-model"} onClick={onConfigureConnection}><Bot size={15} /><span>{activeProfile.model || tr("配置模型", "Configure model")}</span></button>
+          <div className="writing-model-wrap">
+            <button
+              type="button"
+              className={writingConnectionReady ? "writing-model ready" : "writing-model"}
+              aria-haspopup="listbox"
+              aria-expanded={writingModelMenuOpen}
+              title={modelCatalog?.errors.length ? modelCatalog.errors.join(" · ") : `${writingRunProfile.name} · ${writingRunProfile.protocol}`}
+              onClick={() => writingConnectionReady
+                ? setWritingModelMenuOpen((value) => !value)
+                : onConfigureConnection()}
+            >
+              <Bot size={15} />
+              <span>{writingRunProfile.model || tr("配置模型", "Configure model")}</span>
+              {writingConnectionReady && <ChevronDown size={12} />}
+            </button>
+            {writingModelMenuOpen && (
+              <div className="writing-popover writing-model-menu" role="listbox" aria-label={tr("写作模型", "Writing model")}>
+                {writingModels.map((model) => {
+                  const selected = selectedWritingModel && providerModelKey(selectedWritingModel) === providerModelKey(model);
+                  return (
+                    <button
+                      type="button"
+                      role="option"
+                      aria-selected={Boolean(selected)}
+                      className={selected ? "active" : ""}
+                      onClick={() => selectWritingModel(model)}
+                      key={providerModelKey(model)}
+                    >
+                      <span><strong>{model.id}</strong><small>{model.profileName} · {protocolShortLabel(model.protocol)}</small></span>
+                      {selected && <Check size={13} />}
+                    </button>
+                  );
+                })}
+                {writingModels.length === 0 && <p>{tr("没有可用的文字模型", "No text model is available")}</p>}
+                <button type="button" className="manage" onClick={() => { setWritingModelMenuOpen(false); onConfigureConnection(); }}><Settings2 size={13} /><span>{tr("管理模型连接", "Manage model connections")}</span></button>
+              </div>
+            )}
+          </div>
         </div>
         <input ref={importRef} type="file" hidden accept=".json,.md,.markdown,.txt,.yarn" onChange={(event) => void handleImport(event)} />
         <input ref={referenceImportRef} type="file" hidden multiple accept=".md,.markdown,.txt,.json,.csv,.tsv,.yarn" onChange={(event) => void handleReferenceImport(event)} />
@@ -1330,7 +1417,7 @@ export function WritingStudio({
             selectedTextLength={selectedTextLength}
             stats={stats}
             completion={completion}
-            connectionReady={connectionReady}
+            connectionReady={writingConnectionReady}
             onInstruction={setInstruction}
             onSelection={(start, end) => {
               setSelection({ start, end });
@@ -1425,7 +1512,7 @@ export function WritingStudio({
             project={activeProject}
             goal={activeGoal}
             run={goalRun}
-            connectionReady={connectionReady}
+            connectionReady={writingConnectionReady}
             onChange={(patch) => {
               if (!activeGoal) return;
               updateProject((project) => patchGoal(project, activeGoal.id, (goal) => ({ ...goal, ...patch, updatedAt: Date.now() })));
@@ -2694,6 +2781,34 @@ function skipWritingGoalStep(project: WritingProject, goalId: string, stepId: st
       updatedAt: now,
     };
   });
+}
+
+function providerModelKey(model: ProviderModelInfo) {
+  return `${model.profileId}::${model.protocol}::${model.id}`;
+}
+
+function protocolShortLabel(protocol: ProviderModelInfo["protocol"]) {
+  if (protocol === "gemini_generate_content") return "Gemini";
+  if (protocol === "anthropic_messages") return "Messages";
+  if (protocol === "openai_chat") return "Chat";
+  return "Responses";
+}
+
+function loadWritingModelRoute() {
+  try {
+    return localStorage.getItem(WRITING_MODEL_ROUTE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function saveWritingModelRoute(key: string) {
+  try {
+    localStorage.setItem(WRITING_MODEL_ROUTE_KEY, key);
+  } catch {
+    // A blocked WebView storage area should not prevent model switching for
+    // the current session.
+  }
 }
 
 function errorText(error: unknown) {

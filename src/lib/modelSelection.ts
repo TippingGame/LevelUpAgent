@@ -37,7 +37,20 @@ const FAMILY_PREFERENCES: Record<ModelFamily, string[]> = {
   openai: ["gpt-5.6-sol", "gpt-5.6", "gpt-5.5", "gpt-5.4", "gpt-5.3"],
   grok: ["grok-4.5", "grok-4.1", "grok-4"],
   claude: ["claude-fable-5", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6", "claude-opus-4-5"],
-  gemini: ["gemini-3.1-pro", "gemini-3-pro", "gemini-3.1-flash", "gemini-3-flash", "gemini-2.5-pro"],
+  gemini: [
+    "gemini-3.6-flash",
+    "gemini-3.1-pro",
+    "gemini-3.1-pro-preview",
+    "gemini-3-pro",
+    "gemini-3.5-flash",
+    "gemini-3.1-flash",
+    "gemini-3-flash",
+    "gemini-3-flash-preview",
+    "gemini-2.5-pro",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash",
+  ],
   deepseek: ["deepseek-v3.2", "deepseek-v3.1", "deepseek-r1", "deepseek-v3"],
   qwen: ["qwen3.5-max", "qwen3-max", "qwen3.5-plus", "qwen3-plus", "qwen3-coder"],
   glm: ["glm-5", "glm-4.7", "glm-4.6", "glm-4.5"],
@@ -47,8 +60,16 @@ const FAMILY_PREFERENCES: Record<ModelFamily, string[]> = {
   minimax: ["minimax-m2.5", "minimax-m2.1", "minimax-m2"],
 };
 
-const NON_CHAT_MODEL = /(?:^|[\/:._-])(?:audio|embed|image|moderation|realtime|speech|stt|transcri|tts|video|vision-preview)(?:[\/:._-]|$)/i;
+const NON_CHAT_MODEL = /(?:^|[\/:._-])(?:audio|dall-e|embed(?:ding|dings)?|image|imagen|imagine|moderation|realtime|speech|sora|stt|transcri|tts|veo|video|vision-preview|whisper)(?:[\/:._-]|$)/i;
 const LIGHTWEIGHT_MODEL = /(?:^|[\/:._-])(?:flash|haiku|mini|nano|small|lite)(?:[\/:._-]|$)/i;
+
+/** Keep text selectors and automatic defaults aligned as new media model names appear. */
+export function isTextGenerationModel(model: Pick<ModelInfo, "id" | "outputModalities">) {
+  if (NON_CHAT_MODEL.test(model.id)) return false;
+  const outputModalities = model.outputModalities ?? [];
+  return outputModalities.length === 0
+    || outputModalities.some((modality) => modality.toLocaleLowerCase() === "text");
+}
 
 function modelMatches(id: string, preferredId: string) {
   const normalized = id.toLocaleLowerCase();
@@ -76,8 +97,7 @@ function profileFamily(profile: ProviderProfile, models: ModelInfo[]): ModelFami
 }
 
 function newestGeneralModel(models: ModelInfo[]) {
-  const generalModels = models.filter((model) => !NON_CHAT_MODEL.test(model.id));
-  const candidates = generalModels.length > 0 ? generalModels : models;
+  const candidates = models.filter(isTextGenerationModel);
   return [...candidates].sort((left, right) => {
     const qualityDifference = Number(LIGHTWEIGHT_MODEL.test(left.id)) - Number(LIGHTWEIGHT_MODEL.test(right.id));
     if (qualityDifference !== 0) return qualityDifference;
