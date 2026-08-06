@@ -238,6 +238,7 @@ pub fn selection_candidates(
     selections
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub async fn generate_batch(
     client: &Client,
     storage: &Path,
@@ -247,13 +248,31 @@ pub async fn generate_batch(
     thread_id: Option<&str>,
     references: &[ManagedReference],
 ) -> Result<MediaBatchResult, String> {
-    validate_request(request, references)?;
+    generate_batch_with_mask(
+        client, storage, database, selection, request, thread_id, references, None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn generate_batch_with_mask(
+    client: &Client,
+    storage: &Path,
+    database: &Database,
+    selection: &MediaSelection,
+    request: &MediaGenerationRequest,
+    thread_id: Option<&str>,
+    references: &[ManagedReference],
+    mask: Option<&ManagedReference>,
+) -> Result<MediaBatchResult, String> {
+    validate_request(request, references, mask)?;
     validate_model_request(&selection.model, request, references)?;
     let batch_id = uuid::Uuid::new_v4().simple().to_string();
     match request.kind {
         MediaKind::Image => {
             generate_images(
-                client, storage, database, selection, request, thread_id, references, batch_id,
+                client, storage, database, selection, request, thread_id, references, mask,
+                batch_id,
             )
             .await
         }
@@ -602,6 +621,7 @@ fn media_kind_order(kind: &MediaKind) -> u8 {
 fn validate_request(
     request: &MediaGenerationRequest,
     references: &[ManagedReference],
+    mask: Option<&ManagedReference>,
 ) -> Result<(), String> {
     let prompt = request.prompt.trim();
     if prompt.is_empty() || prompt.chars().count() > MAX_PROMPT_CHARS {
@@ -630,13 +650,33 @@ fn validate_request(
             if references.len() > 8 || total > 32 * 1024 * 1024 {
                 return Err("Reference images are limited to 8 files and 32 MiB total".to_owned());
             }
-        }
-        MediaKind::Audio => {
-            if !references.is_empty() {
-                return Err("Audio generation does not accept reference attachments".to_owned());
+            if let Some(mask) = mask {
+                if references.is_empty() {
+                    return Err("Masked image editing requires a source image".to_owned());
+                }
+                if mask.kind != AttachmentKind::Image
+                    || !mask.mime_type.eq_ignore_ascii_case("image/png")
+                {
+                    return Err("Image edit masks must be PNG images".to_owned());
+                }
+                if mask.bytes.len() > 50 * 1024 * 1024 {
+                    return Err("Image edit masks may be at most 50 MiB".to_owned());
+                }
             }
         }
-        MediaKind::Video => validate_video_references(request, references)?,
+        MediaKind::Audio => {
+            if !references.is_empty() || mask.is_some() {
+                return Err(
+                    "Audio generation does not accept reference attachments or masks".to_owned(),
+                );
+            }
+        }
+        MediaKind::Video => {
+            if mask.is_some() {
+                return Err("Video generation does not accept image masks".to_owned());
+            }
+            validate_video_references(request, references)?;
+        }
     }
     Ok(())
 }
@@ -788,10 +828,17 @@ async fn generate_images(
     request: &MediaGenerationRequest,
     thread_id: Option<&str>,
     references: &[ManagedReference],
+    mask: Option<&ManagedReference>,
     batch_id: String,
 ) -> Result<MediaBatchResult, String> {
     let native_gemini = matches!(selection.protocol, ProviderProtocol::GeminiGenerateContent)
         && !is_grok_image_model(&selection.model);
+    if mask.is_some() && native_gemini {
+        return Err(
+            "The selected native Gemini image route does not support explicit edit masks"
+                .to_owned(),
+        );
+    }
     // Some OpenAI-compatible relays expose the Images API but reject `n > 1`
     // when they translate it to an upstream image tool. Fan out single-output
     // requests so "outputs each" works consistently for generations and edits.
@@ -814,6 +861,7 @@ async fn generate_images(
                 &selection.model,
                 &provider_request,
                 references,
+                mask,
             )
             .await
         }
@@ -859,6 +907,7 @@ async fn call_openai_images(
     model: &str,
     request: &MediaGenerationRequest,
     references: &[ManagedReference],
+    mask: Option<&ManagedReference>,
 ) -> Result<Vec<GeneratedBlob>, String> {
     let prompt = effective_image_prompt(request);
     let grok = is_grok_image_model(model);
@@ -880,6 +929,9 @@ async fn call_openai_images(
         }
         send_json(bearer_auth_if_present(client.post(url), provider).json(&body)).await
     } else if grok {
+        if mask.is_some() {
+            return Err("Grok image editing does not support explicit PNG masks".to_owned());
+        }
         if references.len() > 3 {
             return Err("Grok image editing supports at most 3 reference images".to_owned());
         }
@@ -933,6 +985,13 @@ async fn call_openai_images(
                 .mime_str(&image.mime_type)
                 .map_err(|error| format!("Invalid reference image MIME type: {error}"))?;
             form = form.part("image", part);
+        }
+        if let Some(mask) = mask {
+            let part = Part::bytes(mask.bytes.clone())
+                .file_name(mask.file_name.clone())
+                .mime_str("image/png")
+                .map_err(|error| format!("Invalid image mask MIME type: {error}"))?;
+            form = form.part("mask", part);
         }
         send_json(bearer_auth_if_present(client.post(url), provider).multipart(form)).await
     };
@@ -2473,6 +2532,7 @@ mod tests {
             video_resolution: None,
             video_aspect_ratio: None,
             reference_attachment_ids: Vec::new(),
+            mask_attachment_id: None,
         }
     }
 
@@ -2663,6 +2723,7 @@ mod tests {
             video_resolution: None,
             video_aspect_ratio: None,
             reference_attachment_ids: Vec::new(),
+            mask_attachment_id: None,
         };
         let selected = selection_candidates(&providers, &catalog, &request);
         assert_eq!(selected[0].model, "gpt-image-2");
@@ -3077,6 +3138,104 @@ mod tests {
         server.join().unwrap();
         drop(database);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn sends_explicit_png_masks_as_a_distinct_edit_part() {
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\nmock-masked-edit");
+        let (base_url, server) = mock_sequence_inspecting(
+            vec![MockResponse {
+                method: "POST",
+                path: "/v1/images/edits",
+                status: 200,
+                content_type: "application/json",
+                body: json!({ "data": [{ "b64_json": encoded }] })
+                    .to_string()
+                    .into_bytes(),
+            }],
+            |_, request| {
+                let request = String::from_utf8_lossy(request);
+                assert!(request.contains("name=\"image\""));
+                assert!(request.contains("name=\"mask\""));
+                assert!(request.contains("filename=\"mask.png\""));
+                assert!(request.contains("Content-Type: image/png"));
+            },
+        );
+        let mut provider = provider("primary", "gpt-image-1.5");
+        provider.profile.base_url = base_url;
+        let selection = MediaSelection {
+            provider,
+            model: "gpt-image-1.5".to_owned(),
+            protocol: ProviderProtocol::OpenaiChat,
+        };
+        let reference = ManagedReference {
+            file_name: "reference.png".to_owned(),
+            mime_type: "image/png".to_owned(),
+            bytes: b"\x89PNG\r\n\x1a\nmock-reference".to_vec(),
+            kind: AttachmentKind::Image,
+        };
+        let mask = ManagedReference {
+            file_name: "mask.png".to_owned(),
+            mime_type: "image/png".to_owned(),
+            bytes: b"\x89PNG\r\n\x1a\nmock-mask".to_vec(),
+            kind: AttachmentKind::Image,
+        };
+        let (root, database) = temp_storage("openai-masked-edit");
+        let result = generate_batch_with_mask(
+            &Client::new(),
+            &root.join("media"),
+            &database,
+            &selection,
+            &request(MediaKind::Image, 1),
+            None,
+            &[reference],
+            Some(&mask),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.assets.len(), 1);
+        server.join().unwrap();
+        drop(database);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_masks_without_a_source_or_with_a_non_png_format() {
+        let image_mask = ManagedReference {
+            file_name: "mask.png".to_owned(),
+            mime_type: "image/png".to_owned(),
+            bytes: vec![0; 8],
+            kind: AttachmentKind::Image,
+        };
+        assert!(
+            validate_request(&request(MediaKind::Image, 1), &[], Some(&image_mask))
+                .unwrap_err()
+                .contains("source image")
+        );
+
+        let reference = ManagedReference {
+            file_name: "reference.png".to_owned(),
+            mime_type: "image/png".to_owned(),
+            bytes: vec![0; 8],
+            kind: AttachmentKind::Image,
+        };
+        let jpeg_mask = ManagedReference {
+            file_name: "mask.jpg".to_owned(),
+            mime_type: "image/jpeg".to_owned(),
+            bytes: vec![0; 8],
+            kind: AttachmentKind::Image,
+        };
+        assert!(
+            validate_request(
+                &request(MediaKind::Image, 1),
+                &[reference],
+                Some(&jpeg_mask)
+            )
+            .unwrap_err()
+            .contains("PNG")
+        );
     }
 
     #[tokio::test]

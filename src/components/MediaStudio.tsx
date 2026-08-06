@@ -13,6 +13,7 @@ import {
   ArrowLeft,
   ArrowRight,
   BookOpen,
+  Boxes,
   Check,
   CircleAlert,
   Clock3,
@@ -101,6 +102,7 @@ interface MediaStudioProps {
   onConfigureConnection: () => void;
   onPendingCountChange: (count: number) => void;
   onWriting: () => void;
+  onConstellation: () => void;
 }
 
 const KIND_TABS: Array<{ kind: MediaKind; icon: typeof Image }> = [
@@ -132,7 +134,7 @@ const GROK_VIDEO_RESOLUTION_OPTIONS = ["480p", "720p"];
 const GROK_VIDEO_MODES: VideoGenerationMode[] = ["text", "image", "reference", "video"];
 const MEDIA_MODEL_ROUTES_KEY = "levelup-agent.media-model-routes.v1";
 
-export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, referenceDrop, onReferenceDropHandled, onConfigureConnection, onPendingCountChange, onWriting }: MediaStudioProps) {
+export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, referenceDrop, onReferenceDropHandled, onConfigureConnection, onPendingCountChange, onWriting, onConstellation }: MediaStudioProps) {
   const rootRef = useRef<HTMLElement>(null);
   const [kind, setKind] = useState<MediaKind>("image");
   const [catalog, setCatalog] = useState<Awaited<ReturnType<typeof getMediaCatalog>> | null>(null);
@@ -661,6 +663,7 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
         <div className="creation-mode-switch" role="tablist" aria-label={tr("创作类型", "Creation mode")}>
           <button type="button" role="tab" aria-selected="true" className="active"><ImagePlus size={14} />{tr("图片 · 视频 · 语音", "Image · Video · Speech")}</button>
           <button type="button" role="tab" aria-selected="false" onClick={onWriting}><BookOpen size={14} />{tr("写作", "Writing")}</button>
+          <button type="button" role="tab" aria-selected="false" onClick={onConstellation}><Boxes size={14} />{tr("星图", "Constellation")}</button>
         </div>
         <div className="media-topbar-actions">
           <button className="media-icon-button" disabled={refreshing} onClick={() => void refreshAll()} title={tr("刷新模型和历史", "Refresh models and history")}>
@@ -958,15 +961,20 @@ function MediaImagePreview({
 }) {
   const url = mediaAssetUrl(asset);
   const canvasRef = useRef<HTMLDivElement>(null);
+  const imageRef = useRef<HTMLImageElement>(null);
   const dragRef = useRef<{
     pointerId: number;
     startX: number;
     startY: number;
     originX: number;
     originY: number;
+    bounds: { width: number; height: number };
   } | null>(null);
+  const dragFrameRef = useRef<number | null>(null);
+  const pendingDragPointRef = useRef<PreviewPoint | null>(null);
   const [imageSize, setImageSize] = useState({ width: 0, height: 0 });
   const [view, setView] = useState<PreviewTransform>({ zoom: 1, x: 0, y: 0 });
+  const viewRef = useRef(view);
   const [dragging, setDragging] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState(false);
@@ -978,13 +986,27 @@ function MediaImagePreview({
     : undefined;
 
   useEffect(() => {
+    if (dragFrameRef.current !== null) window.cancelAnimationFrame(dragFrameRef.current);
+    dragFrameRef.current = null;
+    pendingDragPointRef.current = null;
     dragRef.current = null;
     setDragging(false);
     setImageSize({ width: 0, height: 0 });
-    setView({ zoom: 1, x: 0, y: 0 });
+    const resetView = { zoom: 1, x: 0, y: 0 };
+    viewRef.current = resetView;
+    setView(resetView);
     setExporting(false);
     setExportError(false);
   }, [asset.id]);
+
+  useEffect(() => {
+    viewRef.current = view;
+    applyPreviewTransform(imageRef.current, view);
+  }, [view]);
+
+  useEffect(() => () => {
+    if (dragFrameRef.current !== null) window.cancelAnimationFrame(dragFrameRef.current);
+  }, []);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -1006,20 +1028,22 @@ function MediaImagePreview({
   }, [imageSize.height, imageSize.width]);
 
   const applyZoom = (requestedZoom: number, anchor: PreviewPoint = { x: 0, y: 0 }) => {
-    setView((current) => {
-      const zoom = Math.min(MAX_PREVIEW_ZOOM, Math.max(MIN_PREVIEW_ZOOM, requestedZoom));
-      const ratio = zoom / current.zoom;
-      const candidate = {
-        x: anchor.x - (anchor.x - current.x) * ratio,
-        y: anchor.y - (anchor.y - current.y) * ratio,
-      };
-      const offset = constrainPreviewOffset(candidate, zoom, imageSize, canvasRef.current);
-      return { zoom, ...offset };
-    });
+    const current = viewRef.current;
+    const zoom = Math.min(MAX_PREVIEW_ZOOM, Math.max(MIN_PREVIEW_ZOOM, requestedZoom));
+    const ratio = zoom / current.zoom;
+    const candidate = {
+      x: anchor.x - (anchor.x - current.x) * ratio,
+      y: anchor.y - (anchor.y - current.y) * ratio,
+    };
+    const next = { zoom, ...constrainPreviewOffset(candidate, zoom, imageSize, canvasRef.current) };
+    viewRef.current = next;
+    setView(next);
   };
 
   const showActualSize = () => {
-    setView({ zoom: 1, x: 0, y: 0 });
+    const next = { zoom: 1, x: 0, y: 0 };
+    viewRef.current = next;
+    setView(next);
   };
 
   const fitImage = () => {
@@ -1032,19 +1056,38 @@ function MediaImagePreview({
         Math.min((bounds.width - 32) / imageSize.width, (bounds.height - 32) / imageSize.height),
       ),
     );
-    setView({ zoom, x: 0, y: 0 });
+    const next = { zoom, x: 0, y: 0 };
+    viewRef.current = next;
+    setView(next);
   };
 
   const panBy = (x: number, y: number) => {
-    setView((current) => {
-      const offset = constrainPreviewOffset(
-        { x: current.x + x, y: current.y + y },
-        current.zoom,
-        imageSize,
-        canvasRef.current,
-      );
-      return { ...current, ...offset };
-    });
+    const current = viewRef.current;
+    const offset = constrainPreviewOffset(
+      { x: current.x + x, y: current.y + y },
+      current.zoom,
+      imageSize,
+      canvasRef.current,
+    );
+    const next = { ...current, ...offset };
+    viewRef.current = next;
+    setView(next);
+  };
+
+  const updateDragPosition = (drag: NonNullable<typeof dragRef.current>, point: PreviewPoint) => {
+    const current = viewRef.current;
+    const offset = constrainPreviewOffsetToBounds(
+      {
+        x: drag.originX + point.x - drag.startX,
+        y: drag.originY + point.y - drag.startY,
+      },
+      current.zoom,
+      imageSize,
+      drag.bounds,
+    );
+    const next = { ...current, ...offset };
+    viewRef.current = next;
+    applyPreviewTransform(imageRef.current, next);
   };
 
   const beginDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -1053,12 +1096,15 @@ function MediaImagePreview({
     event.preventDefault();
     event.currentTarget.focus();
     event.currentTarget.setPointerCapture(event.pointerId);
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const current = viewRef.current;
     dragRef.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
-      originX: view.x,
-      originY: view.y,
+      originX: current.x,
+      originY: current.y,
+      bounds: { width: bounds.width, height: bounds.height },
     };
     setDragging(true);
   };
@@ -1067,26 +1113,31 @@ function MediaImagePreview({
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     event.preventDefault();
-    setView((current) => {
-      const offset = constrainPreviewOffset(
-        {
-          x: drag.originX + event.clientX - drag.startX,
-          y: drag.originY + event.clientY - drag.startY,
-        },
-        current.zoom,
-        imageSize,
-        canvasRef.current,
-      );
-      return { ...current, ...offset };
+    pendingDragPointRef.current = { x: event.clientX, y: event.clientY };
+    if (dragFrameRef.current !== null) return;
+    dragFrameRef.current = window.requestAnimationFrame(() => {
+      dragFrameRef.current = null;
+      const latestDrag = dragRef.current;
+      const point = pendingDragPointRef.current;
+      pendingDragPointRef.current = null;
+      if (latestDrag && point) updateDragPosition(latestDrag, point);
     });
   };
 
   const endDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (dragRef.current?.pointerId !== event.pointerId) return;
+    const drag = dragRef.current;
+    if (drag?.pointerId !== event.pointerId) return;
+    if (dragFrameRef.current !== null) {
+      window.cancelAnimationFrame(dragFrameRef.current);
+      dragFrameRef.current = null;
+    }
+    updateDragPosition(drag, { x: event.clientX, y: event.clientY });
+    pendingDragPointRef.current = null;
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
     dragRef.current = null;
+    setView({ ...viewRef.current });
     setDragging(false);
   };
 
@@ -1098,16 +1149,16 @@ function MediaImagePreview({
       x: event.clientX - bounds.left - bounds.width / 2,
       y: event.clientY - bounds.top - bounds.height / 2,
     };
-    applyZoom(view.zoom * (event.deltaY < 0 ? PREVIEW_ZOOM_STEP : 1 / PREVIEW_ZOOM_STEP), anchor);
+    applyZoom(viewRef.current.zoom * (event.deltaY < 0 ? PREVIEW_ZOOM_STEP : 1 / PREVIEW_ZOOM_STEP), anchor);
   };
 
   const handleCanvasKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (event.key === "+" || event.key === "=") {
       event.preventDefault();
-      applyZoom(view.zoom * PREVIEW_ZOOM_STEP);
+      applyZoom(viewRef.current.zoom * PREVIEW_ZOOM_STEP);
     } else if (event.key === "-") {
       event.preventDefault();
-      applyZoom(view.zoom / PREVIEW_ZOOM_STEP);
+      applyZoom(viewRef.current.zoom / PREVIEW_ZOOM_STEP);
     } else if (event.key === "0") {
       event.preventDefault();
       showActualSize();
@@ -1208,19 +1259,21 @@ function MediaImagePreview({
             <ArrowLeft size={21} />
           </button>
           <img
+            ref={imageRef}
             key={asset.id}
             src={url}
             alt={asset.revisedPrompt || asset.prompt}
             draggable={false}
             onLoad={(event) => {
               setImageSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight });
-              setView({ zoom: 1, x: 0, y: 0 });
+              const resetView = { zoom: 1, x: 0, y: 0 };
+              viewRef.current = resetView;
+              setView(resetView);
             }}
             style={imageReady ? {
-              width: imageSize.width * view.zoom,
-              height: imageSize.height * view.zoom,
-              left: `calc(50% + ${view.x}px)`,
-              top: `calc(50% + ${view.y}px)`,
+              width: imageSize.width,
+              height: imageSize.height,
+              transform: previewTransform(view),
             } : undefined}
           />
           <button
@@ -1265,12 +1318,30 @@ function constrainPreviewOffset(
 ): PreviewPoint {
   if (!canvas || imageSize.width <= 0 || imageSize.height <= 0) return { x: 0, y: 0 };
   const bounds = canvas.getBoundingClientRect();
+  return constrainPreviewOffsetToBounds(point, zoom, imageSize, bounds);
+}
+
+function constrainPreviewOffsetToBounds(
+  point: PreviewPoint,
+  zoom: number,
+  imageSize: { width: number; height: number },
+  bounds: { width: number; height: number },
+): PreviewPoint {
+  if (imageSize.width <= 0 || imageSize.height <= 0 || bounds.width <= 0 || bounds.height <= 0) return { x: 0, y: 0 };
   const maxX = Math.max(0, (imageSize.width * zoom - bounds.width) / 2);
   const maxY = Math.max(0, (imageSize.height * zoom - bounds.height) / 2);
   return {
     x: Math.min(maxX, Math.max(-maxX, point.x)),
     y: Math.min(maxY, Math.max(-maxY, point.y)),
   };
+}
+
+function previewTransform(view: PreviewTransform) {
+  return `translate3d(calc(-50% + ${view.x}px), calc(-50% + ${view.y}px), 0) scale(${view.zoom})`;
+}
+
+function applyPreviewTransform(image: HTMLImageElement | null, view: PreviewTransform) {
+  if (image) image.style.transform = previewTransform(view);
 }
 
 function modelKey(model: MediaModelInfo) {

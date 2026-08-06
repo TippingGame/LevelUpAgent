@@ -1,25 +1,19 @@
 <div align="center">
   <p><a href="README.md">简体中文</a> · <strong>English</strong></p>
-
-  <a href="https://levelup.mom/">
-    <img src="public/logo.png" width="112" height="112" alt="LevelUpAgent Logo" />
-  </a>
-
+  <a href="https://levelup.mom/"><img src="public/logo.png" width="96" height="96" alt="LevelUpAgent Logo" /></a>
   <h1>LevelUpAgent</h1>
-  <p><strong>One workspace. Every model.</strong></p>
-  <p>A local-first, cross-platform AI agent with a calm, unified, and reviewable desktop experience.</p>
-
+  <p><strong>One workspace for every model—and every idea.</strong></p>
+  <p>A local-first desktop AI workbench: use the Agent for complex tasks, the Creative Studio for media, and Constellation blueprints for repeatable workflows.</p>
   <p>
     <a href="#quick-start">Quick start</a> ·
-    <a href="#highlights">Highlights</a> ·
+    <a href="#capability-map">Capability map</a> ·
     <a href="#security-and-privacy">Security</a> ·
     <a href="#documentation">Docs</a> ·
     <a href="https://levelup.mom/">LevelUpAPI</a>
   </p>
-
   <p>
-<img alt="Version" src="https://img.shields.io/badge/version-1.0.17-ff5a4f?style=flat-square" />
-    <img alt="Status" src="https://img.shields.io/badge/status-stable-35a36f?style=flat-square" />
+    <img alt="Version" src="https://img.shields.io/badge/version-1.0.18-ff5a4f?style=flat-square" />
+    <img alt="Status" src="https://img.shields.io/badge/status-preview-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
   </p>
@@ -27,195 +21,124 @@
 
 ---
 
-LevelUpAgent brings model connections, project context, tool approvals, MCP, Skills, Git review, and long-running goals into one desktop workbench. It is designed around [LevelUpAPI](https://levelup.mom/) and also works with standard OpenAI Responses, OpenAI Chat Completions, Anthropic Messages, and Gemini GenerateContent services.
+## See the product
 
-> [!IMPORTANT]
-> LevelUpAgent 1.0.0 is the first stable release. Windows and Linux builds have passed real build and smoke checks. The current tag workflow focuses on Windows and protects automatic updates with Tauri signatures. Committing or backing up important work is still recommended.
+### Agent workbench
 
-## Why LevelUpAgent
+Keep project files, references, commands, MCP, Skills, Git review, and long-running goals in one traceable conversation. Every side-effecting action stays behind an explicit permission boundary.
 
-| | What you get |
-| --- | --- |
-| **One home** | Switch between OpenAI, Claude, Gemini, Grok, and compatible models without maintaining several enhancement tools. |
-| **Control by default** | Reads may run automatically; file writes, commands, MCP calls, and sub-agent patches require explicit approval. |
-| **Local first** | Conversations and run metadata stay in local SQLite. API keys are stored in the operating system credential vault. |
-| **Built for LevelUpAPI** | Native balance, usage, latency, request-id diagnostics, protocol selection, and connection failover. |
+### Creative Studio
+
+Images, video, speech, and writing have independent parameters and history. Use references, parallel prompts, outpainting, local redraw, transparent PNG masks, and reusable results.
+
+### Constellation blueprints
+
+Connect the four standard abilities—writing, image, video, and speech—into a typed DAG. Box-select any group of nodes, save it as your own blueprint, and keep editing, arranging, or reconnecting the inserted instance.
+
+![Constellation workflow with typed ports and blueprint library](docs/images/constellation-workflow.png)
+
+![Creative Studio with image parameters, references, and local history](docs/images/creative-studio.png)
+
+Read the [Creative Studio capability audit](docs/CREATIVE_STUDIO_AUDIT.md) for the Image Studio comparison and [Constellation documentation](docs/CONSTELLATION.md) for the graph contract and interactions.
 
 ## Quick start
 
-### 1. Install
+### Install
 
-Download the package for your platform from **Releases** in the repository sidebar:
+Download the package for your platform from GitHub **Releases**. The current `1.0.18` Windows x64 build has passed a local launch smoke test; the installers are not Authenticode-signed, so SmartScreen may show an unknown-publisher warning.
 
 | Platform | Package | Status |
 | --- | --- | --- |
-| Windows x64 | NSIS .exe / MSI | Built by the tag workflow with Tauri-signed updates |
-| Linux x64 | AppImage / DEB / RPM | Built and smoke-tested; not published by the current tag workflow |
-| macOS Apple Silicon / Intel | DMG / App Bundle | Not published by the current tag workflow |
+| Windows x64 | NSIS `.exe` / MSI | Built and smoke-tested |
+| Linux x64 | AppImage / DEB / RPM | Build from source |
+| macOS Intel / Apple Silicon | DMG / App Bundle | Use the dedicated build script |
 
-Checksums for the current local Windows validation artifacts are recorded in [the SHA-256 manifest](docs/SHA256SUMS_1.0.0.txt). Future public updates should use Tauri-signed GitHub Release artifacts with `.sig` files and `latest.json`.
+### Connect a model
 
-### 2. Connect a model
+1. Open **New model connection** in the lower-left corner.
+2. Configure a Base URL, API key, default text model, and generation protocol. Trusted local or LAN services can explicitly allow a missing key.
+3. Click **Detect** or enter a model ID. Standard `/v1/models` and Gemini `/v1beta/models` discovery are independent.
+4. Add more connections and assign priorities; failed requests follow health and cooldown data through automatic failover.
 
-1. Open **Model connections** in the lower-left corner.
-2. Configure each connection with its own Base URL, API key, default text model, and default generation protocol. Trusted local or LAN services can explicitly allow a missing API key.
-3. Enter a model ID directly, or select **Test**. Discovery queries both standard `/v1/models` and Gemini `/v1beta/models` independently of the default generation protocol.
-4. Add more connections as needed and assign priority to connections used for failover; one request tries at most seven fallback connections.
+LevelUpAgent supports LevelUpAPI plus OpenAI Responses, Chat Completions, Anthropic Messages, and Gemini GenerateContent-compatible services. API keys stay in the operating-system credential vault, never in web storage.
 
-A Base URL may be a service root such as <code>https://api.example.com</code>, or already include a version prefix such as <code>/v1</code> or <code>/v4</code>. LevelUpAgent previews the resolved request URL and avoids duplicated version prefixes. Local servers must expose an OpenAI-, Anthropic-, or Gemini-compatible endpoint—for example Ollama at <code>http://127.0.0.1:11434/v1</code>, not its native <code>/api/chat</code> endpoint.
+### Make your first work
 
-LevelUpAgent treats a **connection** as one Base URL plus its isolated credential, and a **model route** as connection + model ID + protocol. When the same model appears in both standard and Gemini catalogs, both routes remain available instead of overwriting one another. The main conversation uses the active connection's default text route; Writing can independently select any available text route; image, video, and speech discovery spans every connection and automatically prefers native routes for Gemini image models, Imagen, Veo, and Gemini TTS. API keys remain exclusively in the OS credential vault.
+1. Click **Open Creative Studio** and choose image, video, speech, or writing.
+2. Enter a prompt and choose ratio, quality, format, and references.
+3. For a repeatable flow, switch to **Constellation**: add abilities from the node library, connect ports by click or drag, run, and inspect results in the preview node.
+4. Box-select a group and choose **Save as blueprint**. Insert it later from the blueprint library.
 
-### 3. Start working
+## Capability map
 
-Choose a project directory, create a conversation, and describe the outcome you want. The agent reads the required context first, then handles files, commands, and external tools according to the selected permission level. You can stop generation, switch models, or inspect actual changes in the Git panel at any time.
+| Entry | Best for | Core capabilities |
+| --- | --- | --- |
+| Agent workbench | “Finish a task that needs files, tools, and judgment.” | Project context, approvals, MCP, Skills, Goals, Git review |
+| Creative Studio | “Generate, edit, and manage media quickly.” | Image/video/speech, references, parallel prompts, history, preview |
+| Constellation blueprints | “Connect steps and reuse them later.” | Typed ports, DAG execution, box select, batch move, auto-layout, import/export |
+| Writing workspace | “Keep a book, screenplay, or narrative project moving.” | Codex, reference library, Goal mode, snapshots, Yarn export |
 
-## Highlights
+### Built-in Constellation nodes
 
-### Multi-model workbench
+- **Prompt** — write once and feed any creative ability.
+- **Creative writing** — continue, rewrite, script, and prompt enhancement.
+- **Image generation** — text-to-image, image-to-image, outpainting, and masked redraw.
+- **Video / speech generation** — extend a text or image idea into motion and sound.
+- **Canvas & mask** — annotate images, paint redraw regions, and emit a real PNG mask.
+- **Preview / note** — inspect results and leave intent beside the flow.
 
-- LevelUpAPI, OpenAI-compatible, Anthropic-compatible, and Gemini-compatible connections
-- Multiple Base URLs with isolated API keys; discovery, default protocol, and actual generation routes are decoupled
-- Primary-first routing, health history, exponential cooldown, and up to seven fallback connections
-- Streaming and cancellation across four provider protocols
-- Balance, 30-day usage, latency, tokens, and request-id diagnostics
-- Safe discovery and import from Codex, Claude Code, Gemini CLI, OpenCode, and cc-switch
-
-### A project-native agent
-
-- Browse, read, search, write, and delete files, plus approved command execution
-- Default, Plan, Goal, and Ask modes
-- Project conversations, Markdown output, token accounting, and local SQLite persistence
-- Conversations without a selected project automatically use the `%LOCALAPPDATA%\\com.levelup.agent\\workspace` temporary workspace while retaining applicable Agent, MCP, Skill, and media capabilities; multiple conversations run and await approval independently
-- Managed image, text, source code, PDF, DOCX, XLSX, and PPTX context
-- Persistent Instructions with reviewable synchronization to popular CLI instruction files
-- Long-running Goals with pause/resume, completion audits, and blocked audits
-
-### AI writing and game narrative
-
-- Creative Studio opens with image, video, and speech tools first, followed by the writing workspace; novel, screenplay, and game narrative projects autosave to local SQLite independently of conversations
-- Writing remembers an independent model route selected from every configured connection and available protocol
-- Dedicated writing Goal Mode turns the deliverable, audience, word target, boundaries, and acceptance criteria into a 3-6 step AI execution plan; use Partner mode for review gates or AI Lead mode for continuous research, outlining, drafting, revision, and QA, with pause/resume and an automatic snapshot before every manuscript mutation
-- The reference library imports Markdown, text, JSON, CSV, TSV, and Yarn as sources, research, style samples, or inspiration; every reference can be disabled or explicitly pinned into the current context and travels with full-project import/export
-- Manuscripts support pause-triggered autocomplete, continue, rewrite, polish, expand, shorten, dialogue, and description; streamed completions appear as gray inline text after the caret, like a code editor, with Tab to accept and Escape to reject, plus an automatic snapshot before acceptance
-- Characters, locations, factions, items, world lore, plots, rules, and quests form a linked codex; explicit picks, document/node bindings, nearby mentions, relations, and global rules are ranked into AI context
-- The game narrative graph supports scene, dialogue, choice, condition, and ending nodes, plus variables, conditions, effects, path validation, and built-in playtesting; nodes can be freely dragged and connected/reconnected from visual ports, with pan/zoom, a minimap, auto-layout, explicit box selection and batch move/duplicate, search, focus mode, and undo/redo
-- Full projects import/export as JSON and can export to Markdown or Yarn Spinner; writing and image, video, and speech creation remain one switch apart
-
-### Multimodal creation
-
-- Automatically discovers and recommends suitable image, video, and TTS models across all configured connections; Nano Banana 2 Lite is recognized as a native Gemini image model
-- Image, video, and speech each remember their selected connection and model route across mode switches and app restarts
-- A standalone Media Studio with image references, parallel prompts, local history, previews, and Save As export
-- Conversations can call `generate_images`, `generate_videos`, and `generate_speech`; consecutive generation calls run concurrently, preserve result order, and return to the model for one summary
-- OpenAI-compatible image, speech, and Sora flows plus native Gemini image, speech, and Veo flows, with persistent video jobs and automatic polling
-
-### Starlight Echoes
-
-- A separate transparent, always-on-top echo window with built-in Yui; names and avatars come directly from Codex-compatible pet packages
-- A frame-timed state machine plays all nine atlas actions; drag the character anywhere and resize each echo independently
-- Persistent per-echo XP and levels driven by real model input and output tokens
-- Separate game-style bubbles for concurrent conversations, approvals, and background media generation
-- Double-click opens an echo-specific temporary conversation that stays out of the normal conversation database; every echo has isolated, reviewable long-term memory
-- Import, switch, and remove multiple echoes, with automatic discovery from `${CODEX_HOME}/pets`
-- `hatch-pet` and `imagegen` ship inside the app and enable automatically; with Python and a model connection available, one click starts a Goal and imports the validated result
-
-### Composable extensions
-
-- stdio and Streamable HTTP MCP clients
-- Discovery for Codex, Claude, Agents, LevelUpAgent, and project-local Skills
-- On-demand Skill body and reference loading to keep context focused
-- Sub-agents in isolated Git worktrees, with complete patch review and a second approval before application
-- Install, switch, and uninstall third-party `.levelup-theme` packages
-
-### A calm desktop experience
-
-- Tauri 2 and React for Windows, macOS, and Linux
-- A warm visual system shared with LevelUpAPI, responsive layouts, and dark mode
-- Complete Chinese and English interfaces with first-run system-language selection
-- Keyboard focus, trapped modal focus, Escape behavior, and reduced-motion support
-
-## Supported protocols
-
-| Protocol | Endpoint | Primary LevelUpAPI platforms | Best suited for |
-| --- | --- | --- | --- |
-| OpenAI Responses | <code>/v1/responses</code> | OpenAI, Anthropic, Grok | Codex, GPT/Grok reasoning, and native tool calls |
-| Chat Completions | <code>/v1/chat/completions</code> | OpenAI, Anthropic, Grok | Broad OpenAI-compatible model support |
-| Anthropic Messages | <code>/v1/messages</code> | Anthropic, OpenAI, Gemini, Antigravity, Grok | Claude Code and cross-platform Messages clients |
-| Gemini GenerateContent | <code>/v1beta/models/{model}:streamGenerateContent</code> | Gemini, Antigravity | Native Gemini models and tools |
-
-Connection settings visualize these primary compatibility relationships with the same platform colors as LevelUpAPI.
-Responses is recommended for Grok/xAI, while Chat Completions and Anthropic Messages are also available through LevelUpAPI.
-
-See [LevelUpAPI compatibility](docs/LEVELUPAPI_COMPATIBILITY.md) for automated contract evidence.
+Useful shortcuts: `Ctrl/Cmd + K` search and add a node, `Ctrl/Cmd + Enter` run, `Ctrl/Cmd + Z` undo, `Ctrl/Cmd + D` duplicate selection, `F` fit the canvas, and `Esc` stop a run.
 
 ## Security and privacy
 
-- **No keys in frontend storage:** API keys live in Windows Credential Manager, macOS Keychain, or Linux Secret Service.
-- **Approval for consequential actions:** writes, deletes, commands, MCP calls, and patch application never run silently.
-- **Workspace path boundaries:** file tools reject parent traversal, unsafe symlinks, and path-prefix escapes.
-- **Recoverable configuration writes:** external CLI changes show a redacted diff, use atomic replacement, and retain timestamped backups.
-- **Minimal request logs:** message bodies, attachments, tool arguments, and API keys are not recorded.
-- **Transparent provider boundary:** only providers you configure and select receive prepared messages and attachments.
+- API keys use Windows Credential Manager, macOS Keychain, or Linux Secret Service.
+- Writes, deletes, commands, MCP calls, and patch application never run silently; they require approval.
+- File tools stay inside the workspace and reject traversal, unsafe symlinks, and path-prefix escapes.
+- Request logs do not store message bodies, attachments, tool arguments, or API keys.
+- Only providers you configure and select receive prepared messages and attachments.
 
-Shell commands and local stdio MCP processes still run with the current operating system user's permissions. LevelUpAgent does not present them as an OS sandbox. Read the [security audit](docs/SECURITY_AUDIT.md) for the full threat model.
+Shell commands and local stdio MCP processes still run with the current OS user's permissions; LevelUpAgent does not present them as an OS sandbox. See the [security audit](docs/SECURITY_AUDIT.md) for the full boundary model.
 
 ## Run from source
 
 Requirements: Node.js 22+, pnpm 11+, Rust 1.85+, and the platform-specific [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
 
-    pnpm install
-    pnpm tauri dev
+```bash
+pnpm install
+pnpm tauri dev
+```
 
-Run <code>pnpm dev</code> for a frontend-only preview. Browser preview cannot access the credential vault, directory picker, or local tools.
+Use `pnpm dev` for a frontend-only preview. The web preview cannot access the credential vault, directory picker, or local tools.
 
 ### Validate and build
 
-    pnpm check
-    pnpm build
-    cargo test --manifest-path src-tauri/Cargo.toml
-    pnpm tauri build
+```bash
+pnpm check
+pnpm build
+cargo fmt --check
+cargo test --manifest-path src-tauri/Cargo.toml
+pnpm tauri build
+```
 
-Validate all four protocol contracts against a local LevelUpAPI checkout:
-
-    pnpm verify:levelupapi
-
-## Repository layout
-
-    LevelUpAgent/
-    ├─ src/                  React workbench and interaction state
-    ├─ src-tauri/src/        Rust agent core, protocol adapters, and system boundaries
-    ├─ src-tauri/icons/      Cross-platform application icons
-    ├─ scripts/              Build, release, and compatibility checks
-    ├─ docs/                 Architecture, security, roadmap, and release docs
-    └─ .github/workflows/    Cross-platform CI and signed-release workflow
+Use `pnpm build:macos` for macOS packages. Signed public updates additionally require repository-owned Tauri updater keys and signing certificates.
 
 ## Documentation
 
+- [Constellation graph contract and interactions](docs/CONSTELLATION.md)
+- [Creative Studio capability audit](docs/CREATIVE_STUDIO_AUDIT.md)
 - [Architecture and security boundaries](docs/ARCHITECTURE.md)
 - [Security audit](docs/SECURITY_AUDIT.md)
 - [LevelUpAPI compatibility evidence](docs/LEVELUPAPI_COMPATIBILITY.md)
-- [Starlight Echo packages, XP, memory, and hatching](docs/DESKTOP_PETS.md)
 - [Roadmap](docs/ROADMAP.md)
-- [Replacement audit](docs/REPLACEMENT_AUDIT.md)
-- [Signed releases and updates](docs/RELEASE.md)
+- [Releases and automatic updates](docs/RELEASE.md)
 - [Reference project research](docs/REFERENCE_RESEARCH.md)
-- [Third-party theme packages](docs/THEMES.md)
-- [Theme development, build, and adaptation specification](docs/THEME_DEVELOPMENT.md)
-- [Theme adaptation workflow for agents](docs/THEME_AGENT_WORKFLOW.md)
 
-## Project status
+## Current status
 
-Version 1.0.0 is LevelUpAgent's first stable milestone. It combines four protocols, connection failover, local tools, SQLite, Git review, MCP, Skills, Goals, isolated sub-agents, multi-project conversations, three permission levels, drag-and-drop context, and complete LevelUpAPI platform guidance.
-
-Windows automatic updates depend on repository-owner Tauri updater keys and physical-device validation. The current installers do not use Authenticode and may trigger SmartScreen; tag publishing for other platforms is not enabled. Follow the [roadmap](docs/ROADMAP.md) for progress.
-
-## Contributing
-
-Issues, documentation improvements, and pull requests are welcome. Before submitting code, run <code>pnpm check</code>, <code>pnpm build</code>, and the Rust test suite. Changes to protocols, credentials, file access, commands, MCP, or updates should document their security-boundary impact and validation.
+`1.0.18` is the current release milestone. It includes multi-connection model routing, the four standard creative abilities, Creative Studio, Constellation blueprints, MCP/Skills/Goal integration, and Windows x64 installers. The Windows installers are not Authenticode-signed; formal releases for other platforms remain subject to CI and signing configuration. When filing an issue, include reproduction steps, application logs, and platform details.
 
 ## License
 
-LevelUpAgent is licensed under the [GNU Lesser General Public License v3.0 only](LICENSE). The referenced GNU GPL v3 text is included in [LICENSE.GPL](LICENSE.GPL).
+LevelUpAgent is released under the [GNU Lesser General Public License v3.0 only](LICENSE). The referenced GPL v3 text is included in [LICENSE.GPL](LICENSE.GPL).
 
 Copyright © 2026 LevelUpAgent contributors.

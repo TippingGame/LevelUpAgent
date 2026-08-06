@@ -1626,6 +1626,22 @@ fn read_media_references(
         .collect()
 }
 
+fn read_media_mask(
+    app: &tauri::AppHandle,
+    request: &MediaGenerationRequest,
+) -> Result<Option<attachment::ManagedReference>, String> {
+    let Some(id) = request
+        .mask_attachment_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(None);
+    };
+    let storage = attachment_storage(app)?;
+    attachment::read_managed_reference(&storage, id).map(Some)
+}
+
 #[derive(Debug, Deserialize)]
 struct HatchJobManifest {
     #[serde(default)]
@@ -1895,10 +1911,11 @@ async fn generate_media_internal(
         Some(references) => references,
         None => read_media_references(app, &request)?,
     };
+    let mask = read_media_mask(app, &request)?;
     let storage = media_storage(app)?;
     let mut failures = Vec::new();
     for selection in &selections {
-        match media::generate_batch(
+        match media::generate_batch_with_mask(
             &state.client,
             &storage,
             database,
@@ -1906,6 +1923,7 @@ async fn generate_media_internal(
             &request,
             thread_id,
             &references,
+            mask.as_ref(),
         )
         .await
         {
@@ -5917,6 +5935,7 @@ mod tests {
             video_resolution: None,
             video_aspect_ratio: None,
             reference_attachment_ids: Vec::new(),
+            mask_attachment_id: None,
         };
         let selections = media::selection_candidates(&providers, &catalog, &request);
         let selection = selections

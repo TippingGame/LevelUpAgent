@@ -1,25 +1,19 @@
 <div align="center">
   <p><strong>简体中文</strong> · <a href="README_EN.md">English</a></p>
-
-  <a href="https://levelup.mom/">
-    <img src="public/logo.png" width="112" height="112" alt="LevelUpAgent Logo" />
-  </a>
-
+  <a href="https://levelup.mom/"><img src="public/logo.png" width="96" height="96" alt="LevelUpAgent Logo" /></a>
   <h1>LevelUpAgent</h1>
-  <p><strong>一个工作区，连接每一种模型。</strong></p>
-  <p>本地优先的跨平台 AI Agent，为多模型工作流提供统一、克制且可审查的桌面体验。</p>
-
+  <p><strong>一个工作区，连接每一种模型，也把灵感变成作品。</strong></p>
+  <p>本地优先的桌面 AI 工作台：用 Agent 处理复杂任务，用创作空间生成媒体，用星图蓝图把流程保存下来反复复用。</p>
   <p>
     <a href="#快速开始">快速开始</a> ·
-    <a href="#核心能力">核心能力</a> ·
+    <a href="#先看它在做什么">产品一览</a> ·
     <a href="#安全与隐私">安全与隐私</a> ·
     <a href="#文档">文档</a> ·
     <a href="https://levelup.mom/">LevelUpAPI</a>
   </p>
-
   <p>
-<img alt="Version" src="https://img.shields.io/badge/version-1.0.17-ff5a4f?style=flat-square" />
-    <img alt="Status" src="https://img.shields.io/badge/status-stable-35a36f?style=flat-square" />
+    <img alt="Version" src="https://img.shields.io/badge/version-1.0.18-ff5a4f?style=flat-square" />
+    <img alt="Status" src="https://img.shields.io/badge/status-可用预览-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
   </p>
@@ -27,214 +21,124 @@
 
 ---
 
-LevelUpAgent 把模型连接、项目上下文、工具审批、MCP、Skills、Git 审查和长任务执行放在同一个桌面工作台中。它优先适配 [LevelUpAPI](https://levelup.mom/)，也可连接标准 OpenAI Responses、OpenAI Chat Completions、Anthropic Messages 与 Gemini GenerateContent 服务。
+## 先看它在做什么
 
-> [!IMPORTANT]
-> LevelUpAgent 1.0.0 是首个稳定版本。Windows 与 Linux 已有真实构建和冒烟验证；当前 tag 发布流程聚焦 Windows，并使用 Tauri 签名保护自动更新。涉及重要项目时仍建议先提交或备份改动。
+### Agent 工作台
 
-## 为什么是 LevelUpAgent
+把项目文件、参考资料、命令、MCP、Skills、Git 审查和长任务放在一个可追踪的会话里。每个有副作用的动作都经过权限和审批边界。
 
-| | 你获得的体验 |
-| --- | --- |
-| **一个入口** | 在同一项目中切换 OpenAI、Claude、Gemini、Grok 及兼容模型，不再维护多套增强工具。 |
-| **默认可控** | 读取类工具可以自动执行；写文件、运行命令、调用 MCP 和应用子 Agent 补丁都需要明确批准。 |
-| **本地优先** | 会话与运行记录保存在本地 SQLite；API Key 进入系统凭据库，不写入页面存储。 |
-| **为 LevelUpAPI 而生** | 原生展示余额、用量、延迟与 request-id，并兼容多协议和备用连接故障转移。 |
+### 创作空间
+
+图片、视频、语音和写作拥有独立的参数与历史。支持参考图、多提示词并行、扩图、局部重绘、透明 PNG 蒙版和结果复用。
+
+### 星图蓝图
+
+把四项标准能力（写作、图像、视频、语音）连接成类型安全的 DAG。框选节点即可保存为自己的蓝图，插入后仍能自由拆解、重排和重连。
+
+![星图蓝图工作流：节点、端口与蓝图库](docs/images/constellation-workflow.png)
+
+![创作空间：图片参数、参考图与本地历史](docs/images/creative-studio.png)
+
+更多设计取舍和 Image Studio 对照见 [创作空间能力审计](docs/CREATIVE_STUDIO_AUDIT.md)，星图协议和交互细节见 [星图文档](docs/CONSTELLATION.md)。
 
 ## 快速开始
 
-### 1. 安装
+### 安装
 
-从仓库右侧的 **Releases** 下载与你的平台匹配的安装包：
+从 GitHub Releases 下载对应平台的安装包。当前 `1.0.18` 已在 Windows x64 本地构建并完成启动冒烟；测试包未配置 Authenticode，Windows SmartScreen 可能提示“未知发布者”。
 
-| 平台 | 安装包 | 当前状态 |
+| 平台 | 包格式 | 状态 |
 | --- | --- | --- |
-| Windows x64 | NSIS `.exe` / MSI | tag 工作流构建，Tauri 签名更新 |
-| Linux x64 | AppImage / DEB / RPM | 已构建并冒烟验证；当前 tag 工作流不发布 |
-| macOS Apple Silicon / Intel | DMG / App Bundle | 当前 tag 工作流不发布 |
+| Windows x64 | NSIS `.exe` / MSI | 已构建、已冒烟验证 |
+| Linux x64 | AppImage / DEB / RPM | 可从源码构建 |
+| macOS Intel / Apple Silicon | DMG / App Bundle | 使用专用脚本构建 |
 
-当前 Windows 本地验收产物的 SHA-256 记录见 [校验清单](docs/SHA256SUMS_1.0.0.txt)。后续正式更新以 GitHub Releases 中带 `.sig` 与 `latest.json` 的 Tauri 签名产物为准。
+### 连接模型
 
-### 2. 连接模型
+1. 打开左下角 **新增模型连接**。
+2. 为每个连接配置 Base URL、API Key、默认文字模型和生成协议；可信的本机/局域网服务可以显式允许无 Key。
+3. 点击 **检测** 或直接输入模型 ID。标准 `/v1/models` 与 Gemini `/v1beta/models` 会独立发现。
+4. 可添加多个连接并设置优先级；请求失败时会按健康记录和冷却策略自动故障转移。
 
-1. 打开左下角 **模型连接**。
-2. 每个连接分别配置 Base URL、API Key、默认文字模型与默认生成协议；可信本机/局域网服务可显式允许无 API Key。
-3. 模型 ID 可直接输入，也可点击 **检测**。检测会独立查询标准 `/v1/models` 与 Gemini `/v1beta/models`，不再由默认生成协议决定模型列表。
-4. 可继续添加其他连接，并为需要故障转移的连接设置优先级；一次请求最多尝试 7 个备用连接。
+LevelUpAgent 支持 LevelUpAPI，以及 OpenAI Responses、Chat Completions、Anthropic Messages 和 Gemini GenerateContent 兼容服务。API Key 只保存在系统凭据库，不写入网页存储。
 
-Base URL 既可以是服务根地址，例如 `https://api.example.com`，也可以包含 `/v1`、`/v4` 等版本前缀。LevelUpAgent 会显示最终请求地址并避免重复拼接版本前缀。本地服务应使用其 OpenAI、Anthropic 或 Gemini 兼容接口，例如 Ollama 的 `http://127.0.0.1:11434/v1`，而不是原生 `/api/chat`。
+### 第一次创作
 
-LevelUpAgent 将 **连接** 定义为一组 Base URL 与独立凭据，将 **模型路由** 定义为“连接 + 模型 ID + 协议”。同一模型若同时出现在标准与 Gemini 目录中，会保留两条可选路由，而不会互相覆盖。主会话使用当前连接的默认文字路由；写作空间可以独立选择任意可用文字路由；图片、视频和语音会跨全部连接发现模型，并为 Gemini 图片、Imagen、Veo 与 Gemini TTS 自动选择原生路由。API Key 始终只保存在系统凭据库中。
+1. 点击 **打开创作空间**，选择图片、视频、语音或写作。
+2. 输入提示词并选择比例、质量、格式和参考图。
+3. 需要组合流程时切换到 **星图**：从节点库添加能力，点击或拖动端口连线，运行后在作品预览节点查看结果。
+4. 框选一组节点，点击 **存为蓝图**；以后从蓝图库插入即可复用。
 
-### 3. 开始工作
+## 能力地图
 
-选择项目目录，新建会话并描述目标。Agent 会先读取必要上下文，再按当前权限等级处理文件、命令与外部工具。你可以随时停止生成、切换模型，或在 Git 面板审查实际改动。
+| 入口 | 适合的问题 | 关键能力 |
+| --- | --- | --- |
+| Agent 工作台 | “帮我完成一个需要文件、工具和判断的任务” | 项目上下文、审批、MCP、Skills、Goal、Git 审查 |
+| 创作空间 | “我想快速生成、修改并管理媒体” | 图片/视频/语音、参考图、并行提示词、历史与预览 |
+| 星图蓝图 | “我想把步骤连接起来，以后重复使用” | 类型化端口、DAG 执行、框选、批移、自动整理、蓝图导入导出 |
+| 写作工作台 | “我想持续写完一本书、剧本或叙事项目” | 设定集、参考库、目标模式、版本快照、Yarn 导出 |
 
-## 核心能力
+### 星图内置节点
 
-### 多模型工作台
+- **提示词**：一次编写，连接到任意创作能力。
+- **灵感写作**：续写、改写、脚本和提示词增强。
+- **图像生成**：文生图、图生图、扩图和蒙版重绘。
+- **视频生成 / 语音生成**：从文本或图像继续扩展作品。
+- **画板与蒙版**：标注图片、绘制局部重绘区域并输出真实 PNG mask。
+- **作品预览 / 便签**：集中查看结果，为流程留下说明。
 
-- LevelUpAPI / OpenAI-compatible / Anthropic-compatible / Gemini-compatible 连接
-- 多组 Base URL 与独立 API Key；模型发现、默认协议和实际生成路由彼此解耦
-- 主连接优先、健康记录、指数冷却和最多 7 个备用连接的故障转移
-- 四种协议的 SSE 流式输出、真实请求中断和 request-id 诊断
-- 首页余额、30 天用量、延迟与 Token 统计
-- Codex、Claude Code、Gemini CLI、OpenCode 和 cc-switch 配置扫描与安全导入
-
-### 面向项目的 Agent
-
-- 文件浏览、读取、搜索、写入、删除与命令执行
-- 默认、规划、目标、问答四种工作模式
-- 项目级会话、Markdown 响应与本地 SQLite 持久化
-- 无项目会话自动使用 `%LOCALAPPDATA%\\com.levelup.agent\\workspace` 临时工作区，并保留适用的 Agent、MCP、Skill 和媒体能力；多个会话可独立并行运行与审批
-- 图片、文本、代码、PDF、DOCX、XLSX、PPTX 托管上下文
-- 可持久化 Instructions，并可安全同步到主流 CLI 指令文件
-- Goal 持续执行、暂停/恢复、完成审计和阻塞审计
-
-### AI 写作与游戏叙事
-
-- 创作空间默认进入图片、视频与语音工作台，写作工作台排在媒体创作之后；小说、剧本和游戏剧情项目自动保存到本地 SQLite，不依赖会话生命周期
-- 写作模型可独立于主会话，从所有已配置连接与可用协议路由中选择并记住
-- 专属写作目标模式把交付物、读者、字数、边界和验收标准转成 3-6 步 AI 执行计划；可选择“合作者”逐步审阅，或让“AI 主笔”连续完成分析、大纲、草稿、修订与验收，每次改稿前自动留快照并支持暂停续跑
-- 参考资料库可导入 Markdown、文本、JSON、CSV、TSV 与 Yarn，区分原始资料、研究笔记、风格样本和灵感素材；每项资料可启停或手动固定到当前上下文，并随完整项目导入导出
-- 正文支持停笔自动补全、续写、改写、润色、扩写、精简、对白与描写；流式补全会像代码编辑器一样在光标后显示灰色待选文字，可按 Tab 接受、Esc 拒绝，接受前自动创建版本快照
-- 人物、地点、阵营、物品、世界观、剧情、规则和任务组成可关联的设定集；显式选择、文稿/节点绑定、正文提及、关系和全局规则按相关度进入 AI 上下文
-- 游戏剧情图支持场景、对白、选择、条件和结局节点，以及变量、条件、效果、路径校验和内置试玩；节点可自由拖动并从端口直接连线/重连，支持缩放平移、小地图、自动排布、显式框选与批量移动/复制、搜索、专注画布和撤销重做
-- 完整项目可导入/导出 JSON，并可导出 Markdown 或 Yarn Spinner 脚本；写作与图片、视频、语音创作可在同一空间切换
-
-### 多媒体创作
-
-- 跨全部已配置连接自动发现并推荐合适的生图、视频与 TTS 模型；Nano Banana 2 Lite 自动识别为原生 Gemini 图片模型
-- 图片、视频和语音分别记住所选连接与模型路由，切换创作类型或重启应用后无需重复选择
-- 独立“创作空间”，支持图片参考、多提示词并行生成、本地历史、预览与另存为
-- 会话可直接调用 `generate_images`、`generate_videos`、`generate_speech`；连续生成调用并行执行，结果保持原顺序后交给模型统一汇总
-- OpenAI-compatible 图片/语音/Sora 与 Gemini 原生图片/语音/Veo；视频任务持久化并自动轮询
-
-### 摇光残影
-
-- 独立透明置顶残影窗口，默认使用内置 Yui，名字与头像直接读取 Codex 兼容宠物包
-- 九种动作按图集逐帧时长由状态机播放；可直接拖动角色到任意位置，并为每个残影单独调节大小
-- 按真实模型输入/输出 Token 累积并持久保留每个残影的经验与等级
-- 多个运行中会话、待审批操作和媒体生成任务以独立游戏任务气泡显示
-- 双击残影打开不写入普通会话数据库的专属临时会话；每个残影拥有互相隔离、可审查删除的长期记忆
-- 多残影导入、切换与删除；自动发现 `${CODEX_HOME}/pets`
-- `hatch-pet` 与 `imagegen` 随应用包内置并自动启用；满足 Python 和模型连接后，一键启动 Goal 并在验证完成后自动导入
-
-### 可组合扩展
-
-- stdio 与 Streamable HTTP MCP 客户端
-- Codex、Claude、Agents、LevelUpAgent 与项目级 Skill 发现
-- Skill 正文和引用按需读取，避免无关上下文膨胀
-- 子 Agent 使用隔离 Git worktree；补丁完整可见，应用前再次批准
-- `.levelup-theme` 第三方主题包安装、切换与卸载
-
-### 克制的桌面体验
-
-- Tauri 2 + React，面向 Windows、macOS 与 Linux
-- 与 LevelUpAPI 一致的暖色视觉系统、响应式布局与深色模式
-- 完整中文 / English 界面，首次启动跟随系统语言
-- 键盘焦点、Modal 焦点约束、Escape 关闭和减少动态效果支持
-
-## 支持的协议
-
-| 协议 | 请求端点 | LevelUpAPI 主要适配平台 | 适合场景 |
-| --- | --- | --- | --- |
-| OpenAI Responses | `/v1/responses` | OpenAI、Anthropic、Grok | Codex、GPT/Grok 推理与原生工具调用 |
-| Chat Completions | `/v1/chat/completions` | OpenAI、Anthropic、Grok | 广泛的 OpenAI-compatible 模型 |
-| Anthropic Messages | `/v1/messages` | Anthropic、OpenAI、Gemini、Antigravity、Grok | Claude Code 及跨平台 Messages 接入 |
-| Gemini GenerateContent | `/v1beta/models/{model}:streamGenerateContent` | Gemini、Antigravity | Gemini 原生模型与工具调用 |
-
-连接设置会用与 LevelUpAPI 一致的平台固有色展示这些主要适配关系。Grok/xAI 推荐使用 Responses，
-同时也可通过 LevelUpAPI 使用 Chat Completions 或 Anthropic Messages。
-
-自动化验证证据见 [LevelUpAPI 兼容性文档](docs/LEVELUPAPI_COMPATIBILITY.md)。
+常用快捷键：`Ctrl/Cmd + K` 搜索并添加节点，`Ctrl/Cmd + Enter` 运行，`Ctrl/Cmd + Z` 撤销，`Ctrl/Cmd + D` 复制选中节点，`F` 适应画布，`Esc` 停止运行。
 
 ## 安全与隐私
 
-- **密钥不进入前端存储**：API Key 保存在系统 Credential Manager、Keychain 或 Secret Service。
-- **危险操作必须批准**：写入、删除、命令、MCP 与补丁应用不会静默执行。
-- **工作区路径受限**：本地文件工具拒绝父目录、符号链接和路径前缀逃逸。
-- **配置写回可恢复**：同步 CLI 前显示脱敏 diff，确认后原子写入并保留时间戳备份。
-- **请求日志最小化**：不保存消息正文、附件内容、工具参数或 API Key。
-- **Provider 边界透明**：只有你配置并选择的 Provider 会收到准备发送的消息和附件。
+- API Key 使用 Windows Credential Manager、macOS Keychain 或 Linux Secret Service 保存。
+- 写入、删除、命令、MCP 调用和补丁应用不会静默执行，均需要明确批准。
+- 文件工具限制在工作区内，拒绝父目录穿越、危险符号链接和路径前缀逃逸。
+- 请求日志不保存消息正文、附件、工具参数或 API Key。
+- 只有你配置并选择的 Provider 会收到准备发送的消息和附件。
 
-Shell 命令与本地 stdio MCP 进程仍拥有当前操作系统用户权限；LevelUpAgent 不将它们描述为系统级沙箱。完整威胁模型见 [安全审计](docs/SECURITY_AUDIT.md)。
+Shell 命令和本地 stdio MCP 进程仍拥有当前操作系统用户权限；LevelUpAgent 不把它们描述成系统级沙箱。完整边界见 [安全审计](docs/SECURITY_AUDIT.md)。
 
 ## 从源码运行
 
-需要 Node.js 22+、pnpm 11+、Rust 1.85+，以及对应平台的 [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)。
+需要 Node.js 22+、pnpm 11+、Rust 1.85+ 和平台对应的 [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)。
 
 ```bash
 pnpm install
 pnpm tauri dev
 ```
 
-只预览前端可运行 `pnpm dev`。Web 预览无法访问系统凭据库、目录选择器和本地工具。
+只预览前端可运行 `pnpm dev`；Web 预览无法访问系统凭据库、目录选择器和本地工具。
 
 ### 验证与构建
 
 ```bash
 pnpm check
 pnpm build
+cargo fmt --check
 cargo test --manifest-path src-tauri/Cargo.toml
 pnpm tauri build
 ```
 
-macOS Intel 与 Apple Silicon 安装包使用专用脚本构建：
-
-```bash
-pnpm build:macos
-```
-
-脚本会校验 DMG 内应用的架构与完整签名。没有 Developer ID 证书时只生成适合本机测试的
-ad-hoc 签名包；正式分发需在钥匙串中安装 `Developer ID Application` 证书，并设置
-`MACOS_NOTARY_PROFILE` 为 `xcrun notarytool store-credentials` 创建的钥匙串配置名，以完成
-Apple 公证与票据装订。也可用 `MACOS_SIGNING_IDENTITY` 显式选择签名证书。
-
-验证当前代码与本机 LevelUpAPI 的四协议契约：
-
-```bash
-pnpm verify:levelupapi
-```
-
-## 项目结构
-
-```text
-LevelUpAgent/
-├─ src/                  React 工作台与交互状态
-├─ src-tauri/src/        Rust Agent 内核、协议适配与系统边界
-├─ src-tauri/icons/      跨平台应用图标
-├─ scripts/              构建、发布与兼容性验证
-├─ docs/                 架构、安全、路线图与发布文档
-└─ .github/workflows/    跨平台 CI 与签名发布流程
-```
+macOS 安装包使用 `pnpm build:macos`。正式更新还需要仓库所有者配置 Tauri updater 密钥和签名证书。
 
 ## 文档
 
+- [星图协议与交互](docs/CONSTELLATION.md)
+- [创作空间能力审计](docs/CREATIVE_STUDIO_AUDIT.md)
 - [架构与安全边界](docs/ARCHITECTURE.md)
 - [安全审计](docs/SECURITY_AUDIT.md)
 - [LevelUpAPI 兼容性证据](docs/LEVELUPAPI_COMPATIBILITY.md)
-- [摇光残影包、经验、记忆与孵化契约](docs/DESKTOP_PETS.md)
 - [功能路线图](docs/ROADMAP.md)
-- [替代能力审计](docs/REPLACEMENT_AUDIT.md)
-- [签名发布与自动更新](docs/RELEASE.md)
+- [发布与自动更新](docs/RELEASE.md)
 - [参考项目研究](docs/REFERENCE_RESEARCH.md)
-- [第三方主题包](docs/THEMES.md)
-- [主题开发、构建与适配规范](docs/THEME_DEVELOPMENT.md)
-- [主题适配 Agent 工作流程](docs/THEME_AGENT_WORKFLOW.md)
 
-## 项目状态
+## 当前状态
 
-`1.0.0` 是 LevelUpAgent 的首个稳定里程碑，整合四协议、多连接故障转移、本地工具、SQLite、Git 审查、MCP、Skills、Goal、隔离子 Agent、多项目多会话、三级权限、拖拽上下文和完整的 LevelUpAPI 平台适配提示。
-
-Windows 自动更新依赖仓库所有者配置 Tauri updater 密钥并完成实体机验收。当前安装包未配置 Authenticode，可能触发 SmartScreen；其他平台的 tag 发布尚未启用。进度以 [路线图](docs/ROADMAP.md) 为准。
-
-## 参与贡献
-
-欢迎提交 Issue、文档改进和 Pull Request。提交代码前请至少运行 `pnpm check`、`pnpm build` 和 Rust 测试。涉及协议、凭据、文件系统、命令、MCP 或更新链路的改动，请同时说明安全边界变化与验证方式。
+`1.0.18` 是当前发布里程碑，已包含多连接模型路由、四项标准创作能力、创作空间、星图蓝图、MCP/Skills/Goal 集成和 Windows x64 安装包。Windows 安装包仍未配置 Authenticode，其他平台的正式发布以 CI 和签名配置为准。提交 Issue 时请附上复现步骤、应用日志和平台信息。
 
 ## 许可证
 
-LevelUpAgent 以 [GNU Lesser General Public License v3.0 only](LICENSE) 发布。LGPL v3 引用的 GNU GPL v3 正文一并收录于 [LICENSE.GPL](LICENSE.GPL)。
+LevelUpAgent 以 [GNU Lesser General Public License v3.0 only](LICENSE) 发布；引用的 GPL v3 正文收录于 [LICENSE.GPL](LICENSE.GPL)。
 
 Copyright © 2026 LevelUpAgent contributors.

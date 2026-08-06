@@ -32,6 +32,7 @@ import {
 import {
   BookOpen,
   Bot,
+  Boxes,
   Check,
   ChevronDown,
   CircleAlert,
@@ -185,6 +186,7 @@ interface WritingStudioProps {
   connectionReady: boolean;
   onConfigureConnection: () => void;
   onMedia: () => void;
+  onConstellation: () => void;
 }
 
 const ENTITY_KINDS: WritingEntityKind[] = ["character", "location", "faction", "item", "world", "plot", "rule", "quest", "custom"];
@@ -212,6 +214,7 @@ export function WritingStudio({
   connectionReady,
   onConfigureConnection,
   onMedia,
+  onConstellation,
 }: WritingStudioProps) {
   const [projects, setProjects] = useState<WritingProject[]>([]);
   const [activeProjectId, setActiveProjectId] = useState("");
@@ -1254,6 +1257,7 @@ export function WritingStudio({
         <div className="creation-mode-switch" role="tablist" aria-label={tr("创作类型", "Creation mode")}>
           <button type="button" role="tab" aria-selected="false" onClick={onMedia}><ImagePlus size={14} />{tr("图片 · 视频 · 语音", "Image · Video · Speech")}</button>
           <button type="button" role="tab" aria-selected="true" className="active"><FileText size={14} />{tr("写作", "Writing")}</button>
+          <button type="button" role="tab" aria-selected="false" onClick={onConstellation}><Boxes size={14} />{tr("星图", "Constellation")}</button>
         </div>
         <div className="writing-topbar-actions">
           <button type="button" onClick={() => importRef.current?.click()} title={tr("导入 JSON、Markdown、文本或 Yarn", "Import JSON, Markdown, text, or Yarn")}><Import size={15} /></button>

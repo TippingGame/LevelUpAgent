@@ -567,6 +567,7 @@ export interface MediaGenerationRequest {
   videoResolution?: string;
   videoAspectRatio?: string;
   referenceAttachmentIds: string[];
+  maskAttachmentId?: string;
 }
 
 export interface MediaAsset {

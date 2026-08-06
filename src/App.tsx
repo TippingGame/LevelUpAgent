@@ -67,6 +67,7 @@ import { IconButton } from "./components/IconButton";
 import { AttachmentChip } from "./components/AttachmentChip";
 import { MediaAssetCard, MediaStudio } from "./components/MediaStudio";
 import { WritingStudio } from "./components/WritingStudio";
+import { ConstellationStudio } from "./components/ConstellationStudio";
 import { PetStudio, type PetGenerationRequest } from "./components/PetStudio";
 import { PetAvatar } from "./components/PetSprite";
 import { DeclarativeLayout, type LayoutActions, type LayoutData } from "./components/DeclarativeLayout";
@@ -277,7 +278,7 @@ interface PetHatchJob {
   startedAt: number;
 }
 
-type WorkspaceView = "chat" | "writing" | "media";
+type WorkspaceView = "chat" | "writing" | "media" | "constellation";
 
 function isPetHatchThread(thread: AgentThread) {
   // Do not depend on `internal` surviving an older database/export. The
@@ -678,7 +679,9 @@ function App() {
   const [sidebarQuery, setSidebarQuery] = useState("");
   const [mode, setMode] = useState<AgentMode>("agent");
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("chat");
-  const [mediaPendingCount, setMediaPendingCount] = useState(0);
+  const [mediaStudioPendingCount, setMediaStudioPendingCount] = useState(0);
+  const [constellationPendingCount, setConstellationPendingCount] = useState(0);
+  const mediaPendingCount = mediaStudioPendingCount + constellationPendingCount;
   const [mediaCatalogRevision, setMediaCatalogRevision] = useState(0);
   const [activePetId, setActivePetId] = useState("yui");
   const [petProfiles, setPetProfiles] = useState<PetProfile[]>([]);
@@ -3375,9 +3378,10 @@ function App() {
         </div>
 
         <button
-          className={`media-nav-button${workspaceView === "writing" || workspaceView === "media" ? " active" : ""}`}
+          className={`media-nav-button${workspaceView === "writing" || workspaceView === "media" || workspaceView === "constellation" ? " active" : ""}`}
           type="button"
-          aria-current={workspaceView === "writing" || workspaceView === "media" ? "page" : undefined}
+          aria-label={tr("打开创作空间", "Open Creative Studio")}
+          aria-current={workspaceView === "writing" || workspaceView === "media" || workspaceView === "constellation" ? "page" : undefined}
           onClick={() => {
             setWorkspaceView("media");
             setProfileMenuOpen(false);
@@ -3385,7 +3389,7 @@ function App() {
           }}
         >
           <ImagePlus size={16} />
-          <span><strong>{tr("创作空间", "Creative Studio")}</strong><small>{mediaPendingCount > 0 ? tr(`${mediaPendingCount} 个结果正在后台生成`, `${mediaPendingCount} outputs generating`) : tr("图片 · 视频 · 语音 · 写作", "Image · Video · Speech · Writing")}</small></span>
+          <span><strong>{tr("创作空间", "Creative Studio")}</strong><small>{mediaPendingCount > 0 ? tr(`${mediaPendingCount} 个结果正在后台生成`, `${mediaPendingCount} outputs generating`) : tr("图片 · 视频 · 语音 · 写作 · 星图", "Image · Video · Speech · Writing · Constellation")}</small></span>
           {mediaPendingCount > 0 ? <span className="media-nav-progress" title={tr(`${mediaPendingCount} 个结果正在生成`, `${mediaPendingCount} outputs generating`)}><LoaderCircle className="spin" size={12} /><b>{mediaPendingCount}</b></span> : <Sparkles size={14} />}
         </button>
 
@@ -3532,8 +3536,9 @@ function App() {
         referenceDrop={mediaReferenceDrop}
         onReferenceDropHandled={(id) => setMediaReferenceDrop((current) => current?.id === id ? null : current)}
         onConfigureConnection={() => setSettingsOpen(true)}
-        onPendingCountChange={setMediaPendingCount}
+        onPendingCountChange={setMediaStudioPendingCount}
         onWriting={() => setWorkspaceView("writing")}
+        onConstellation={() => setWorkspaceView("constellation")}
       />
       <WritingStudio
         active={workspaceView === "writing"}
@@ -3545,6 +3550,19 @@ function App() {
         connectionReady={connectionReady}
         onConfigureConnection={() => setSettingsOpen(true)}
         onMedia={() => setWorkspaceView("media")}
+        onConstellation={() => setWorkspaceView("constellation")}
+      />
+      <ConstellationStudio
+        active={workspaceView === "constellation"}
+        locale={locale}
+        activeProfile={activeProfile}
+        profiles={profiles}
+        workspace={activeThread.workspace}
+        mediaCatalogRevision={mediaCatalogRevision}
+        onConfigureConnection={() => setSettingsOpen(true)}
+        onMedia={() => setWorkspaceView("media")}
+        onWriting={() => setWorkspaceView("writing")}
+        onPendingCountChange={setConstellationPendingCount}
       />
     </>
   );
@@ -4183,7 +4201,7 @@ function QQ2007Toolbar({
 }) {
   const items = [
     ["new-task", tr("新建任务", "New task"), onNewThread, false],
-    ["scheduled", tr("创作空间", "Studio"), onMedia, workspaceView === "writing" || workspaceView === "media"],
+    ["scheduled", tr("创作空间", "Studio"), onMedia, workspaceView === "writing" || workspaceView === "media" || workspaceView === "constellation"],
     ["groups", tr("摇光残影", "Echo"), onPet, petOpen],
     ["plugins", tr("插件", "Extensions"), onExtensions, false],
     ["sites", tr("站点", "Website"), onWebsite, false],
