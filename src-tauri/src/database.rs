@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 
 use crate::harness::types::{
     HarnessApprovalRecord, HarnessDraftRequest, HarnessOperationStarted, HarnessPendingApproval,
@@ -32,11 +32,11 @@ impl Database {
     pub fn open(path: &Path) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|error| format!("Could not create application data directory: {error}"))?;
+                .map_err(|error| storage_error("Could not create application data directory", error))?;
             crate::filesystem::restrict_directory(parent)?;
         }
         let connection = Connection::open(path)
-            .map_err(|error| format!("Could not open conversation database: {error}"))?;
+            .map_err(database_error)?;
         crate::filesystem::restrict_file(path)?;
         let database = Self::from_connection(connection)?;
         for suffix in ["-wal", "-shm"] {
@@ -202,7 +202,7 @@ impl Database {
                     error TEXT
                  );",
             )
-            .map_err(|error| format!("Could not migrate conversation database: {error}"))?;
+            .map_err(database_error)?;
         connection
             .execute_batch(crate::harness::persistence::MIGRATION_SQL)
             .map_err(|error| format!("Could not migrate harness database: {error}"))?;
@@ -2727,7 +2727,24 @@ fn serialize_json(value: &impl serde::Serialize) -> Result<String, String> {
 }
 
 fn database_error(error: rusqlite::Error) -> String {
-    format!("Conversation database error: {error}")
+    let hint = match &error {
+        rusqlite::Error::SqliteFailure(code, _)
+            if matches!(
+                code.code,
+                ErrorCode::DiskFull | ErrorCode::SystemIoFailure | ErrorCode::ReadOnly
+            ) =>
+        {
+            " Storage may be full or read-only; free disk space and verify the application data directory is writable before retrying."
+        }
+        _ => "",
+    };
+    format!("Conversation database error: {error}.{hint}")
+}
+
+fn storage_error(action: &str, error: impl std::fmt::Display) -> String {
+    format!(
+        "{action}: {error}. Storage may be full or read-only; free disk space and retry."
+    )
 }
 
 #[cfg(test)]
@@ -2770,6 +2787,20 @@ mod tests {
             input_tokens: 120,
             output_tokens: 30,
         }
+    }
+
+    #[test]
+    fn database_error_explains_storage_failures() {
+        let error = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: ErrorCode::DiskFull,
+                extended_code: 13,
+            },
+            Some("database or disk is full".to_owned()),
+        );
+        let message = database_error(error);
+        assert!(message.contains("Storage may be full or read-only"));
+        assert!(message.contains("free disk space"));
     }
 
     #[test]

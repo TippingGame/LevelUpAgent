@@ -736,6 +736,7 @@ function App() {
   const [gitStatus, setGitStatus] = useState<GitStatus | null>(null);
   const [gitDiff, setGitDiff] = useState<GitDiff | null>(null);
   const [goalState, setGoalState] = useState<GoalState | null>(null);
+  const [databasePersistenceError, setDatabasePersistenceError] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const runningThreadIdsRef = useRef<Set<string>>(new Set());
   const pendingApprovalsRef = useRef<Record<string, PendingApproval>>({});
@@ -755,6 +756,7 @@ function App() {
   const themesOpenRef = useRef(themesOpen);
   const draftAttachmentsRef = useRef(draftAttachments);
   const databaseReadyRef = useRef(false);
+  const databasePersistenceFailedRef = useRef(false);
   const persistenceQueueRef = useRef<Promise<void>>(Promise.resolve());
   const petHatchImportingRef = useRef<string | null>(null);
 
@@ -1249,7 +1251,9 @@ function App() {
 
   useEffect(() => {
     threadsRef.current = threads;
-    if (!isDesktop() || !databaseReadyRef.current) saveThreads(threads.filter((thread) => thread.kind !== "pet"));
+    // Desktop conversations are persisted in SQLite. Keeping the full thread
+    // payload in WebView localStorage can exceed its quota during hydration.
+    if (!isDesktop()) saveThreads(threads.filter((thread) => thread.kind !== "pet"));
   }, [threads]);
 
   useEffect(() => {
@@ -1258,7 +1262,7 @@ function App() {
 
   useEffect(() => {
     const selected = threadsRef.current.find((thread) => thread.id === activeThreadId);
-    if (activeThreadId && selected?.kind !== "pet" && (!isDesktop() || databaseReadyRef.current)) saveActiveThreadId(activeThreadId);
+    if (activeThreadId && selected?.kind !== "pet" && !isDesktop()) saveActiveThreadId(activeThreadId);
   }, [activeThreadId]);
 
   useEffect(() => {
@@ -1326,6 +1330,8 @@ function App() {
         }
         clearLegacyProfiles();
         clearLegacyThreads();
+        databasePersistenceFailedRef.current = false;
+        setDatabasePersistenceError(null);
         databaseReadyRef.current = true;
         const recovery = await harnessListRecovery().catch(() => [] as HarnessRecoveryItem[]);
         if (!disposed) {
@@ -1378,7 +1384,11 @@ function App() {
         setMediaCatalogRevision((current) => current + 1);
       } catch (error) {
         if (!disposed) {
-          setNotice(`${tr("会话数据库不可用", "Conversation database unavailable")}: ${error instanceof Error ? error.message : String(error)}`);
+          databasePersistenceFailedRef.current = true;
+          databaseReadyRef.current = false;
+          const message = `${tr("会话数据库不可用", "Conversation database unavailable")}: ${error instanceof Error ? error.message : String(error)}`;
+          setDatabasePersistenceError(message);
+          setNotice(message);
         }
       }
     };
@@ -1555,18 +1565,32 @@ function App() {
         await operation();
       })
       .catch((error) => {
-        setNotice(`${tr("保存失败", "Save failed")}: ${error instanceof Error ? error.message : String(error)}`);
+        databasePersistenceFailedRef.current = true;
+        databaseReadyRef.current = false;
+        const message = `${tr("保存失败", "Save failed")}: ${error instanceof Error ? error.message : String(error)}`;
+        setDatabasePersistenceError(message);
+        setNotice(message);
       });
   };
 
   const commitThread = (next: AgentThread, persist = true) => {
+    if (persist && next.kind !== "pet" && isDesktop() && !databaseReadyRef.current) {
+      setNotice(databasePersistenceFailedRef.current
+        ? tr(
+          "会话保存已暂停，请释放应用数据所在磁盘空间后重启软件",
+          "Conversation saving is paused. Free space on the application data drive and restart the app",
+        )
+        : tr("会话数据库正在初始化，请稍后重试", "The conversation database is initializing; try again shortly"));
+      return;
+    }
     const current = threadsRef.current;
     const updated = current.some((thread) => thread.id === next.id)
       ? current.map((thread) => (thread.id === next.id ? next : thread))
       : [next, ...current];
     threadsRef.current = updated;
     setThreads(updated);
-    if (persist && next.kind !== "pet" && isDesktop() && databaseReadyRef.current) {
+    if (persist && next.kind !== "pet" && isDesktop()
+      && databaseReadyRef.current && !databasePersistenceFailedRef.current) {
       enqueuePersistence(() => savePersistedThread(next));
     }
   };
@@ -2578,6 +2602,15 @@ function App() {
     const rawValue = draft;
     const value = draft.trim();
     const thread = activeThread;
+    if (isDesktop() && !databaseReadyRef.current) {
+      setNotice(databasePersistenceFailedRef.current
+        ? tr(
+          "会话保存已暂停，请释放应用数据所在磁盘空间后重启软件",
+          "Conversation saving is paused. Free space on the application data drive and restart the app",
+        )
+        : tr("会话数据库正在初始化，请稍后重试", "The conversation database is initializing; try again shortly"));
+      return;
+    }
     if (attachmentPasteRef.current) {
       setNotice(tr("请等待附件导入完成", "Wait for the attachments to finish importing"));
       return;
@@ -3995,6 +4028,19 @@ function App() {
         </div>
       )}
 
+      {databasePersistenceError && (
+        <div className="database-storage-alert" role="alert">
+          <strong>{tr("会话保存已暂停", "Conversation saving is paused")}</strong>
+          <span>{tr(
+            "应用数据目录可能已满或不可写。请释放空间后重启软件；当前不会继续提交新的会话。",
+            "The application data directory may be full or read-only. Free space and restart the app; new conversations are blocked until storage recovers.",
+          )}</span>
+          <code>{databasePersistenceError}</code>
+          <button type="button" onClick={() => void openAppLogDirectory().catch((reason) => setNotice(errorText(reason)))}>
+            {tr("打开日志目录", "Open log directory")}
+          </button>
+        </div>
+      )}
       {notice && (
         <button className="toast" onClick={() => setNotice(null)}>
           {notice}<X size={14} />

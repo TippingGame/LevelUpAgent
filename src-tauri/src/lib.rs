@@ -5012,6 +5012,9 @@ pub fn run() {
             let recovery_summary = database
                 .recover_harness_operations()
                 .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+            let database_bytes = std::fs::metadata(&database_path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
             logging::write(
                 "info",
                 "harness",
@@ -5045,7 +5048,11 @@ pub fn run() {
                 "info",
                 "app",
                 "startup_completed",
-                serde_json::json!({ "petWindowVisible": pet_visible }),
+                serde_json::json!({
+                    "petWindowVisible": pet_visible,
+                    "databasePath": database_path,
+                    "databaseBytes": database_bytes,
+                }),
             );
             Ok(())
         })

@@ -46,6 +46,24 @@ function readStorageValue(key: string): string | null {
   }
 }
 
+function writeStorageValue(key: string, value: string): boolean {
+  try {
+    localStorage.setItem(key, value);
+    return true;
+  } catch {
+    // WebView storage is best-effort. Desktop conversations live in SQLite.
+    return false;
+  }
+}
+
+function removeStorageValue(key: string) {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // Ignore unavailable or full WebView storage during recovery.
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -176,7 +194,7 @@ export function loadProfiles(): ProviderProfile[] {
 }
 
 export function saveProfiles(profiles: ProviderProfile[]) {
-  localStorage.setItem(PROFILE_KEY, JSON.stringify(profiles));
+  writeStorageValue(PROFILE_KEY, JSON.stringify(profiles));
 }
 
 export function loadActiveProfileId(profiles: ProviderProfile[]): string {
@@ -185,12 +203,12 @@ export function loadActiveProfileId(profiles: ProviderProfile[]): string {
 }
 
 export function saveActiveProfileId(profileId: string) {
-  localStorage.setItem(ACTIVE_PROFILE_KEY, profileId);
+  writeStorageValue(ACTIVE_PROFILE_KEY, profileId);
 }
 
 export function clearLegacyProfiles() {
-  localStorage.removeItem(PROFILE_KEY);
-  localStorage.removeItem(ACTIVE_PROFILE_KEY);
+  removeStorageValue(PROFILE_KEY);
+  removeStorageValue(ACTIVE_PROFILE_KEY);
 }
 
 export function loadThreads(): AgentThread[] {
@@ -200,8 +218,8 @@ export function loadThreads(): AgentThread[] {
     : [];
 }
 
-export function saveThreads(threads: AgentThread[]) {
-  localStorage.setItem(THREAD_KEY, JSON.stringify(threads.slice(0, 80)));
+export function saveThreads(threads: AgentThread[]): boolean {
+  return writeStorageValue(THREAD_KEY, JSON.stringify(threads.slice(0, 80)));
 }
 
 export function loadActiveThreadId(threads: AgentThread[]): string {
@@ -210,7 +228,7 @@ export function loadActiveThreadId(threads: AgentThread[]): string {
 }
 
 export function saveActiveThreadId(threadId: string) {
-  localStorage.setItem(ACTIVE_THREAD_KEY, threadId);
+  writeStorageValue(ACTIVE_THREAD_KEY, threadId);
 }
 
 export function loadPermissionLevel(): PermissionLevel {
@@ -219,7 +237,7 @@ export function loadPermissionLevel(): PermissionLevel {
 }
 
 export function savePermissionLevel(level: PermissionLevel) {
-  localStorage.setItem(PERMISSION_LEVEL_KEY, level);
+  writeStorageValue(PERMISSION_LEVEL_KEY, level);
 }
 
 export function loadHiddenProjectKeys(): Set<string> {
@@ -228,7 +246,7 @@ export function loadHiddenProjectKeys(): Set<string> {
 }
 
 export function saveHiddenProjectKeys(keys: Set<string>) {
-  localStorage.setItem(HIDDEN_PROJECTS_KEY, JSON.stringify([...keys]));
+  writeStorageValue(HIDDEN_PROJECTS_KEY, JSON.stringify([...keys]));
 }
 
 export function loadPinnedThreadIds(): Set<string> {
@@ -237,7 +255,7 @@ export function loadPinnedThreadIds(): Set<string> {
 }
 
 export function savePinnedThreadIds(ids: Set<string>) {
-  localStorage.setItem(PINNED_THREADS_KEY, JSON.stringify([...ids]));
+  writeStorageValue(PINNED_THREADS_KEY, JSON.stringify([...ids]));
 }
 
 export function loadActiveThemeId(): string {
@@ -245,8 +263,8 @@ export function loadActiveThemeId(): string {
 }
 
 export function saveActiveThemeId(themeId: string) {
-  if (themeId === "default") localStorage.removeItem(ACTIVE_THEME_KEY);
-  else localStorage.setItem(ACTIVE_THEME_KEY, themeId);
+  if (themeId === "default") removeStorageValue(ACTIVE_THEME_KEY);
+  else writeStorageValue(ACTIVE_THEME_KEY, themeId);
 }
 
 export function loadDiffViewSettings(): DiffViewSettings {
@@ -262,14 +280,15 @@ export function loadDiffViewSettings(): DiffViewSettings {
 }
 
 export function saveDiffViewSettings(settings: DiffViewSettings) {
-  localStorage.setItem(DIFF_VIEW_SETTINGS_KEY, JSON.stringify({
+  writeStorageValue(DIFF_VIEW_SETTINGS_KEY, JSON.stringify({
     fontFamily: settings.fontFamily,
     fontSize: Math.min(24, Math.max(10, Math.round(settings.fontSize))),
   } satisfies DiffViewSettings));
 }
 
 export function clearLegacyThreads() {
-  localStorage.removeItem(THREAD_KEY);
+  removeStorageValue(THREAD_KEY);
+  removeStorageValue(ACTIVE_THREAD_KEY);
 }
 
 export function createThread(workspace?: string): AgentThread {

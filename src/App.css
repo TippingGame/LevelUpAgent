@@ -1212,6 +1212,10 @@ button.detail-row { padding: 0; border: 0; background: transparent; text-align: 
 .skills-error { position: absolute; left: 18px; right: 18px; bottom: 70px; min-height: 34px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 10px; border: 1px solid rgba(170,70,56,.18); border-radius: 5px; background: var(--danger-soft); color: #973d32; box-shadow: 0 5px 20px rgba(55,24,20,.12); font-size: var(--font-caption); text-align: left; }
 
 .toast { position: fixed; left: 50%; bottom: 24px; z-index: 70; height: 38px; display: flex; align-items: center; gap: 10px; padding: 0 14px; transform: translateX(-50%); border: 1px solid rgba(255,255,255,.18); border-radius: 12px; background: #0f172a; color: #fff; box-shadow: 0 12px 34px rgba(15,23,42,.28); font-size: var(--font-small); cursor: pointer; }
+.database-storage-alert { position: fixed; left: 50%; bottom: 76px; z-index: 72; display: grid; gap: 8px; width: min(680px, calc(100vw - 48px)); padding: 14px 16px; transform: translateX(-50%); border: 1px solid #f59e0b; border-radius: 12px; background: #fffbeb; color: #78350f; box-shadow: 0 16px 44px rgba(120,53,15,.2); font-size: var(--font-small); }
+.database-storage-alert strong { font-size: var(--font-body); }
+.database-storage-alert code { overflow-wrap: anywhere; color: #92400e; font-size: 12px; }
+.database-storage-alert button { justify-self: start; border: 1px solid #d97706; border-radius: 8px; padding: 5px 9px; background: #fff; color: #92400e; cursor: pointer; }
 .harness-recovery-panel { position: fixed; right: 24px; bottom: 76px; z-index: 71; width: min(560px, calc(100vw - 48px)); padding: 14px; border: 1px solid rgba(148,163,184,.35); border-radius: 10px; background: var(--surface, #fff); color: var(--text, #111827); box-shadow: 0 16px 44px rgba(15,23,42,.22); }
 .harness-recovery-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 .harness-recovery-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 0; border-top: 1px solid rgba(148,163,184,.2); font-size: var(--font-small); }
