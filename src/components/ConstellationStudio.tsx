@@ -44,6 +44,7 @@ import {
   Play,
   Plus,
   Redo2,
+  RefreshCw,
   Save,
   Search,
   Settings2,
@@ -57,12 +58,16 @@ import {
 import {
   agentTurnStream,
   cancelAgentTurn,
+  exportMediaAsset,
   exportWritingFile,
   generateMedia,
   getMediaCatalog,
   getModelCatalog,
   importMediaReferences,
+  listMediaAssets,
+  mediaAssetUrl,
   selectImageReferences,
+  selectSingleImageReference,
   selectVideoReference,
 } from "../lib/bridge";
 import {
@@ -95,16 +100,19 @@ import {
   type ConstellationValue,
 } from "../lib/constellation";
 import { tr } from "../lib/i18n";
+import { mediaModelSupportsExplicitImageMask } from "../lib/mediaCapabilities";
 import { isTextGenerationModel } from "../lib/modelSelection";
 import type {
   AgentMessage,
   ImageAttachment,
+  MediaAsset,
   MediaCatalog,
   MediaGenerationRequest,
   ProviderModelInfo,
   ProviderProfile,
 } from "../lib/types";
 import { ConstellationCanvasEditor } from "./ConstellationCanvasEditor";
+import { MediaImagePreview } from "./MediaStudio";
 import {
   CONSTELLATION_NODE_TYPES,
   ConstellationNodeActionsProvider,
@@ -141,6 +149,13 @@ interface BlueprintDraft {
 interface NodeLibraryItem {
   kind: ConstellationNodeKind;
   keywords: string;
+}
+
+type ImageSourcePickerPurpose = "canvas" | "image";
+
+interface ImageSourcePickerState {
+  nodeId: string;
+  purpose: ImageSourcePickerPurpose;
 }
 
 const NODE_LIBRARY: NodeLibraryItem[] = (Object.keys(CONSTELLATION_NODE_DEFINITIONS) as ConstellationNodeKind[]).map((kind) => ({
@@ -201,6 +216,12 @@ function ConstellationStudioInner({
   const [commandQuery, setCommandQuery] = useState("");
   const [canvasInteracting, setCanvasInteracting] = useState(false);
   const [connectionType, setConnectionType] = useState<ConstellationPortType>();
+  const [spacePanActive, setSpacePanActive] = useState(false);
+  const [sourcePicker, setSourcePicker] = useState<ImageSourcePickerState>();
+  const [imageHistory, setImageHistory] = useState<MediaAsset[]>([]);
+  const [imageHistoryLoading, setImageHistoryLoading] = useState(false);
+  const [imageHistoryLoaded, setImageHistoryLoaded] = useState(false);
+  const [previewAsset, setPreviewAsset] = useState<MediaAsset>();
   const importInputRef = useRef<HTMLInputElement>(null);
   const workbenchRef = useRef<HTMLDivElement>(null);
   const compactPanelsRef = useRef<boolean | null>(null);
@@ -230,6 +251,9 @@ function ConstellationStudioInner({
   });
   const operationIdsRef = useRef(new Set<string>());
   const runtimeValuesRef = useRef(new Map<string, Partial<Record<string, ConstellationValue>>>());
+  const imageHistoryRequestRef = useRef(0);
+  const imageHistoryLoadingRef = useRef(false);
+  const spacePanRef = useRef(false);
   const { fitView, screenToFlowPosition } = useReactFlow<ConstellationNode, ConstellationEdge>();
 
   graphRef.current = { nodes, edges };
@@ -287,6 +311,26 @@ function ConstellationStudioInner({
     }
   }, []);
 
+  const loadImageHistory = useCallback(async (force = false) => {
+    if (imageHistoryLoadingRef.current || (imageHistoryLoaded && !force)) return;
+    const requestId = ++imageHistoryRequestRef.current;
+    imageHistoryLoadingRef.current = true;
+    setImageHistoryLoading(true);
+    try {
+      const page = await listMediaAssets("image", 100, 0);
+      if (requestId !== imageHistoryRequestRef.current) return;
+      setImageHistory(page.assets.filter((asset) => asset.kind === "image"));
+      setImageHistoryLoaded(true);
+    } catch (reason) {
+      if (requestId === imageHistoryRequestRef.current) setNotice(errorText(reason));
+    } finally {
+      if (requestId === imageHistoryRequestRef.current) {
+        imageHistoryLoadingRef.current = false;
+        setImageHistoryLoading(false);
+      }
+    }
+  }, [imageHistoryLoaded]);
+
   useEffect(() => {
     if (!active) return;
     void refreshCatalogs(mediaCatalog.models.length === 0 && writingModels.length === 0);
@@ -333,6 +377,21 @@ function ConstellationStudioInner({
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       const editing = Boolean(target?.closest("input, textarea, select, [contenteditable='true']"));
+      const interactive = Boolean(target?.closest("button, a, input, textarea, select, [contenteditable='true']"));
+      if (event.code === "Space") {
+        // React Flow's built-in Space activation is intentionally disabled
+        // below.  Keeping this state here means an editable node title can
+        // receive normal spaces without accidentally turning the canvas into
+        // a permanent pan gesture.
+        if (!editing && !interactive) {
+          event.preventDefault();
+          if (!event.repeat) {
+            spacePanRef.current = true;
+            setSpacePanActive(true);
+          }
+        }
+        return;
+      }
       const modifier = event.ctrlKey || event.metaKey;
       if (modifier && event.key.toLocaleLowerCase() === "k") {
         event.preventDefault();
@@ -360,8 +419,19 @@ function ConstellationStudioInner({
         void fitView({ padding: .16, duration: 280 });
       }
     };
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (event.code !== "Space") return;
+      spacePanRef.current = false;
+      setSpacePanActive(false);
+    };
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      spacePanRef.current = false;
+      setSpacePanActive(false);
+    };
   }, [active, fitView]);
 
   const checkpoint = useCallback(() => {
@@ -532,6 +602,68 @@ function ConstellationStudioInner({
     }
   }, []);
 
+  const openImageSourcePicker = useCallback((nodeId: string, purpose: ImageSourcePickerPurpose) => {
+    setSourcePicker({ nodeId, purpose });
+    // Refresh on every open so a result generated moments ago is immediately
+    // available as an explicit edit source.
+    void loadImageHistory(true);
+  }, [loadImageHistory]);
+
+  const applyImageSource = useCallback((nodeId: string, purpose: ImageSourcePickerPurpose, source: ImageAttachment) => {
+    const node = graphRef.current.nodes.find((item) => item.id === nodeId);
+    if (!node) return;
+    // A new explicit source invalidates the previous in-memory output even
+    // before React has committed the node update.
+    runtimeValuesRef.current.delete(nodeId);
+    if (purpose === "canvas") {
+      updateNode(nodeId, {
+        canvasSource: source,
+        canvasResult: undefined,
+        maskAttachment: undefined,
+        outputs: undefined,
+        status: "idle",
+        error: undefined,
+      });
+      setSourcePicker(undefined);
+      setEditorNodeId(nodeId);
+      return;
+    }
+    updateNode(nodeId, {
+      references: [source],
+      operation: node.data.operation === "generate" ? "edit" : node.data.operation,
+      outputs: undefined,
+      status: "idle",
+      error: undefined,
+    });
+    setSourcePicker(undefined);
+  }, [updateNode]);
+
+  const chooseLocalImageSource = useCallback(async () => {
+    if (!sourcePicker) return;
+    try {
+      const source = await selectSingleImageReference();
+      if (source) applyImageSource(sourcePicker.nodeId, sourcePicker.purpose, source);
+    } catch (reason) {
+      setNotice(errorText(reason));
+    }
+  }, [applyImageSource, sourcePicker]);
+
+  const chooseHistoryImageSource = useCallback(async (asset: MediaAsset) => {
+    if (!sourcePicker) return;
+    if (!asset.filePath) {
+      setNotice(tr("这张历史图片的本地文件已不存在", "The local file for this history image is no longer available"));
+      return;
+    }
+    try {
+      const imported = await importMediaReferences([asset.filePath]);
+      const source = imported.find((item) => item.kind === "image");
+      if (!source) throw new Error(tr("历史图片无法导入素材库", "The history image could not be imported"));
+      applyImageSource(sourcePicker.nodeId, sourcePicker.purpose, source);
+    } catch (reason) {
+      setNotice(errorText(reason));
+    }
+  }, [applyImageSource, sourcePicker]);
+
   const inputValues = useCallback((nodeId: string, handle: string) => {
     const current = graphRef.current;
     return current.edges
@@ -552,14 +684,47 @@ function ConstellationStudioInner({
         const asset = getInputValue(nodeId, "image")?.asset;
         if (asset?.filePath) source = (await importMediaReferences([asset.filePath]))[0];
       }
-      if (!source) source = (await selectImageReferences())[0];
-      if (!source) return;
+      if (!source) {
+        openImageSourcePicker(nodeId, "canvas");
+        return;
+      }
       updateNode(nodeId, { canvasSource: source });
       setEditorNodeId(nodeId);
     } catch (reason) {
       setNotice(errorText(reason));
     }
-  }, [getInputValue, updateNode]);
+  }, [getInputValue, openImageSourcePicker, updateNode]);
+
+  const previewableAssets = useMemo(() => {
+    const byId = new Map<string, MediaAsset>();
+    for (const asset of imageHistory) {
+      if (asset.kind === "image" && asset.status === "completed" && asset.filePath) byId.set(asset.id, asset);
+    }
+    for (const node of nodes) {
+      for (const value of Object.values(node.data.outputs ?? {})) {
+        if (value?.type === "image" && value.asset?.status === "completed" && value.asset.filePath) {
+          byId.set(value.asset.id, value.asset);
+        }
+      }
+    }
+    return [...byId.values()].sort((left, right) => right.createdAt - left.createdAt);
+  }, [imageHistory, nodes]);
+
+  const openValuePreview = useCallback((value: ConstellationValue) => {
+    if (value.type !== "image" || !value.asset?.filePath || value.asset.status !== "completed") return;
+    setPreviewAsset(value.asset);
+    void loadImageHistory();
+  }, [loadImageHistory]);
+
+  const downloadValue = useCallback(async (value: ConstellationValue) => {
+    if (!value.asset || value.asset.status !== "completed") return;
+    try {
+      const destination = await exportMediaAsset(value.asset);
+      if (destination) setNotice(tr(`图片已保存到 ${destination}`, `Image saved to ${destination}`));
+    } catch (reason) {
+      setNotice(errorText(reason));
+    }
+  }, []);
 
   const nodeActions = useMemo<ConstellationNodeActions>(() => ({
     locale,
@@ -571,9 +736,12 @@ function ConstellationStudioInner({
     runNode: (nodeId) => { void runGraph([nodeId]); },
     removeNode,
     chooseReferences: (nodeId, kind) => { void chooseReferences(nodeId, kind); },
+    openImageSourcePicker,
     openCanvas: (nodeId) => { void openCanvas(nodeId); },
+    openPreview: openValuePreview,
+    downloadValue: (value) => { void downloadValue(value); },
     getInputValue,
-  }), [chooseReferences, edges, getInputValue, locale, mediaCatalog.models, openCanvas, removeNode, running, updateNode, writingModels]);
+  }), [chooseReferences, downloadValue, edges, getInputValue, locale, mediaCatalog.models, openCanvas, openImageSourcePicker, openValuePreview, removeNode, running, updateNode, writingModels]);
 
   const updateRuntimeOutput = (
     nodeId: string,
@@ -722,14 +890,16 @@ function ConstellationStudioInner({
     const promptHandle = mediaKind === "audio" ? "text" : "prompt";
     const prompt = incoming(promptHandle).map((value) => value.text).filter(Boolean).join("\n\n") || node.data.prompt?.trim() || "";
     if (!prompt) throw new Error(tr("能力节点需要提示词或文案输入", "The ability node needs a prompt or text input"));
-    const route = resolveMediaRoute(node, mediaCatalog);
     const referenceValues = mediaKind === "image" || mediaKind === "video" ? incoming("image") : [];
     const attachments = uniqueAttachments([
       ...(node.data.references ?? []),
+      ...(mediaKind === "image" && node.data.canvasSource ? [node.data.canvasSource] : []),
       ...(await Promise.all(referenceValues.map(valueToAttachment))).filter((value): value is ImageAttachment => Boolean(value)),
     ]);
     const maskValue = incoming("mask")[0];
-    const maskAttachment = maskValue?.attachment ?? (maskValue ? await valueToAttachment(maskValue) : undefined);
+    const maskAttachment = maskValue?.attachment
+      ?? (maskValue ? await valueToAttachment(maskValue) : undefined)
+      ?? (mediaKind === "image" ? node.data.maskAttachment : undefined);
     const operation = node.data.operation ?? "generate";
     if (mediaKind === "image" && operation !== "generate" && attachments.length === 0) {
       throw new Error(operation === "outpaint"
@@ -739,6 +909,7 @@ function ConstellationStudioInner({
     if (mediaKind === "image" && operation === "inpaint" && !maskAttachment) {
       throw new Error(tr("局部重绘需要连接画板的蒙版输出", "Inpainting needs the Canvas mask output"));
     }
+    const route = resolveMediaRoute(node, mediaCatalog, Boolean(mediaKind === "image" && maskAttachment));
     const effectivePrompt = mediaKind === "image" && operation === "outpaint"
       ? `${prompt}\n\n${tr("扩展画面边界并无缝补全新增区域；保持原图主体、光线、透视、色彩和材质完全一致。", "Extend the image beyond its current boundaries and seamlessly complete the new area while preserving subject, lighting, perspective, color, and material.")}`
       : prompt;
@@ -749,7 +920,9 @@ function ConstellationStudioInner({
       protocol: route.protocol,
       prompt: effectivePrompt,
       count: Math.max(1, Math.min(mediaKind === "image" ? 8 : 4, node.data.count ?? 1)),
-      size: mediaKind === "image" ? node.data.size : mediaKind === "video" ? node.data.videoAspectRatio : undefined,
+      size: mediaKind === "image"
+        ? node.data.size && node.data.size !== "auto" ? node.data.size : undefined
+        : mediaKind === "video" ? node.data.videoAspectRatio : undefined,
       quality: mediaKind === "image" && node.data.quality !== "auto" ? node.data.quality : undefined,
       outputFormat: mediaKind === "video" ? undefined : node.data.outputFormat,
       background: mediaKind === "image" && node.data.background !== "auto" ? node.data.background : undefined,
@@ -956,7 +1129,7 @@ function ConstellationStudioInner({
           <span><Boxes size={18} /></span>
           <div><strong>{tr("星图", "Constellation")}</strong><small>{tr("把灵感连成作品", "Connect ideas into finished work")}</small></div>
         </div>
-        <input className="constellation-title-input" value={graphTitle} maxLength={120} aria-label={tr("星图名称", "Constellation name")} onChange={(event) => setGraphTitle(event.target.value)} />
+        <input className="constellation-title-input nodrag nopan" value={graphTitle} maxLength={120} aria-label={tr("星图名称", "Constellation name")} onFocus={() => { spacePanRef.current = false; setSpacePanActive(false); }} onChange={(event) => setGraphTitle(event.target.value)} />
         <div className="creation-mode-switch constellation-mode-switch" role="tablist" aria-label={tr("创作空间", "Creative Studio")}>
           <button type="button" role="tab" aria-selected="false" onClick={onMedia}><ImagePlus size={13} />{tr("媒体", "Media")}</button>
           <button type="button" role="tab" aria-selected="false" onClick={onWriting}><BookOpen size={13} />{tr("写作", "Writing")}</button>
@@ -987,7 +1160,13 @@ function ConstellationStudioInner({
           <div className="constellation-library-tip"><Sparkles size={13} /><span>{tr("拖到画布放置；框选后可存为自己的蓝图", "Drag to place; box-select to save your own blueprint")}</span></div>
         </aside>
 
-        <section className={`constellation-canvas-shell${canvasInteracting ? " interacting" : ""}${connectionType ? ` connecting-type-${connectionType}` : ""}`} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; }} onDrop={onCanvasDrop}>
+        <section className={`constellation-canvas-shell${canvasInteracting ? " interacting" : ""}${connectionType ? ` connecting-type-${connectionType}` : ""}`} onFocusCapture={(event) => {
+          const target = event.target as HTMLElement | null;
+          if (target?.closest("input, textarea, select, [contenteditable='true']")) {
+            spacePanRef.current = false;
+            setSpacePanActive(false);
+          }
+        }} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; }} onDrop={onCanvasDrop}>
           <ConstellationNodeActionsProvider value={nodeActions}>
             <ReactFlow<ConstellationNode, ConstellationEdge>
               nodes={nodes}
@@ -1024,7 +1203,9 @@ function ConstellationStudioInner({
               fitViewOptions={{ padding: .18, maxZoom: 1 }}
               selectionMode={SelectionMode.Partial}
               selectionOnDrag
-              panOnDrag={[1, 2]}
+              panActivationKeyCode={null}
+              panOnDrag={spacePanActive ? true : [1, 2]}
+              nodesDraggable={!spacePanActive}
               connectOnClick
               connectionRadius={38}
               reconnectRadius={28}
@@ -1083,6 +1264,23 @@ function ConstellationStudioInner({
       <input ref={importInputRef} type="file" accept=".json,.levelup-constellation.json" hidden onChange={(event) => void importGraph(event)} />
 
       {blueprintDialog && <BlueprintDialog value={blueprintDialog} nodeCount={selectedCount} onChange={setBlueprintDialog} onCancel={() => setBlueprintDialog(undefined)} onSave={confirmBlueprint} />}
+      {sourcePicker && <ConstellationImageSourcePicker
+        purpose={sourcePicker.purpose}
+        assets={imageHistory}
+        loading={imageHistoryLoading}
+        onRefresh={() => void loadImageHistory(true)}
+        onChooseLocal={() => void chooseLocalImageSource()}
+        onChooseHistory={(asset) => void chooseHistoryImageSource(asset)}
+        onPreview={setPreviewAsset}
+        onClose={() => setSourcePicker(undefined)}
+      />}
+      {previewAsset && <MediaImagePreview
+        asset={previewAsset}
+        locale={locale}
+        previewAssets={previewableAssets}
+        onNavigate={setPreviewAsset}
+        onClose={() => setPreviewAsset(undefined)}
+      />}
       {editorNode && editorSource && <ConstellationCanvasEditor source={editorSource} onClose={() => setEditorNodeId(undefined)} onSave={(image, mask) => {
         updateNode(editorNode.id, {
           canvasResult: image,
@@ -1159,12 +1357,85 @@ function BlueprintDialog({ value, nodeCount, onChange, onCancel, onSave }: { val
   return <div className="constellation-dialog-backdrop" role="dialog" aria-modal="true" aria-labelledby="blueprint-dialog-title" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}><section className="constellation-blueprint-dialog"><header><span><Save size={17} /></span><div><strong id="blueprint-dialog-title">{tr("保存为我的蓝图", "Save as my blueprint")}</strong><small>{tr(`${nodeCount} 个节点及其内部连线`, `${nodeCount} nodes and their internal connections`)}</small></div><button type="button" onClick={onCancel}><X size={16} /></button></header><div><label><span>{tr("蓝图名称", "Blueprint name")}</span><input autoFocus value={value.name} maxLength={80} onChange={(event) => onChange({ ...value, name: event.target.value })} /></label><label><span>{tr("用途说明", "Description")}</span><textarea value={value.description} maxLength={240} placeholder={tr("这个蓝图解决什么问题？", "What does this blueprint accomplish?")} onChange={(event) => onChange({ ...value, description: event.target.value })} /></label><label><span>{tr("标签", "Tags")}</span><input value={value.tags} placeholder={tr("例如：短片, 电商, 扩图", "For example: short film, product, outpaint")} onChange={(event) => onChange({ ...value, tags: event.target.value })} /></label><p><CircleAlert size={13} />{tr("运行结果、私有素材和临时状态不会写入蓝图；模型、参数与提示词会保留。", "Outputs, private assets, and temporary state are excluded; models, parameters, and prompts are retained.")}</p></div><footer><button type="button" onClick={onCancel}>{tr("取消", "Cancel")}</button><button type="button" className="primary" disabled={!value.name.trim()} onClick={onSave}><Save size={13} />{tr("保存蓝图", "Save blueprint")}</button></footer></section></div>;
 }
 
-function resolveMediaRoute(node: ConstellationNode, catalog: MediaCatalog) {
+function ConstellationImageSourcePicker({
+  purpose,
+  assets,
+  loading,
+  onRefresh,
+  onChooseLocal,
+  onChooseHistory,
+  onPreview,
+  onClose,
+}: {
+  purpose: ImageSourcePickerPurpose;
+  assets: MediaAsset[];
+  loading: boolean;
+  onRefresh: () => void;
+  onChooseLocal: () => void;
+  onChooseHistory: (asset: MediaAsset) => void;
+  onPreview: (asset: MediaAsset) => void;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+  const completed = assets.filter((asset) => asset.kind === "image" && asset.status === "completed" && mediaAssetUrl(asset));
+  return (
+    <div className="constellation-source-picker-backdrop" role="dialog" aria-modal="true" aria-labelledby="constellation-source-picker-title" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section className="constellation-source-picker">
+        <header>
+          <div><span><ImagePlus size={16} /></span><div><strong id="constellation-source-picker-title">{purpose === "canvas" ? tr("选择画板源图", "Choose a canvas source") : tr("选择编辑源图", "Choose an edit source")}</strong><small>{tr("可以从创作历史或本地文件指定一张图片", "Choose one image from creation history or a local file")}</small></div></div>
+          <button type="button" onClick={onClose} aria-label={tr("关闭", "Close")}><X size={17} /></button>
+        </header>
+        <div className="constellation-source-picker-actions">
+          <button type="button" className="primary" autoFocus onClick={onChooseLocal}><FolderInput size={14} />{tr("从本地选择", "Choose local file")}</button>
+          <button type="button" onClick={onRefresh} disabled={loading}><RefreshCw className={loading ? "spin" : undefined} size={14} />{tr("刷新历史", "Refresh history")}</button>
+        </div>
+        <div className="constellation-source-picker-body">
+          {loading && completed.length === 0 && <div className="constellation-source-picker-empty"><LoaderCircle className="spin" size={22} /><span>{tr("正在读取创作历史…", "Loading creation history…")}</span></div>}
+          {!loading && completed.length === 0 && <div className="constellation-source-picker-empty"><ImagePlus size={24} /><strong>{tr("还没有可用的历史图片", "No history images are available")}</strong><span>{tr("可以先从本地选择一张图片", "Choose a local image to get started")}</span></div>}
+          {completed.length > 0 && <div className="constellation-source-grid">{completed.map((asset) => <article className="constellation-source-card" key={asset.id}>
+            <button type="button" className="constellation-source-image" onClick={() => onChooseHistory(asset)} title={tr("使用这张图片", "Use this image")}>
+              <img src={mediaAssetUrl(asset)} alt={asset.revisedPrompt || asset.prompt} />
+              <span>{tr("使用此图", "Use image")}</span>
+            </button>
+            <footer><span title={asset.prompt}>{asset.prompt || tr("未命名图片", "Untitled image")}</span><button type="button" onClick={() => onPreview(asset)} title={tr("预览图片", "Preview image")}><Maximize2 size={12} /></button></footer>
+          </article>)}</div>}
+        </div>
+        <footer><span>{tr("选中的图片会作为明确源图传入后续编辑节点", "The selected image becomes the explicit source for the next edit node")}</span><button type="button" onClick={onClose}>{tr("取消", "Cancel")}</button></footer>
+      </section>
+    </div>
+  );
+}
+
+function resolveMediaRoute(node: ConstellationNode, catalog: MediaCatalog, requiresMask = false) {
   const kind = mediaKindForConstellationNode(node.data.kind);
   if (!kind) throw new Error(tr("节点不是媒体能力", "This is not a media ability node"));
   const selected = node.data.modelRoute;
-  if (selected && catalog.models.some((model) => model.kind === kind && model.profileId === selected.profileId && model.id === selected.model && model.protocol === selected.protocol)) return selected;
-  const fallback = catalog.models.find((model) => model.kind === kind && model.recommended) ?? catalog.models.find((model) => model.kind === kind);
+  const selectedModel = selected
+    ? catalog.models.find((model) => model.kind === kind && model.profileId === selected.profileId && model.id === selected.model && model.protocol === selected.protocol)
+    : undefined;
+  if (selected && selectedModel) {
+    if (requiresMask && !mediaModelSupportsExplicitImageMask(selectedModel)) {
+      throw new Error(tr(
+        `模型“${selectedModel.id}”不支持 PNG 蒙版编辑，请改为自动选择或选择支持 OpenAI Images Edit 的图像模型`,
+        `Model “${selectedModel.id}” does not support PNG mask editing. Choose automatic routing or an image model with OpenAI Images Edit support`,
+      ));
+    }
+    return selected;
+  }
+  const candidates = catalog.models.filter((model) => model.kind === kind && (!requiresMask || mediaModelSupportsExplicitImageMask(model)));
+  const fallback = candidates.find((model) => model.recommended) ?? candidates[0];
+  if (!fallback && requiresMask && catalog.models.some((model) => model.kind === kind)) {
+    throw new Error(tr(
+      "当前没有支持 PNG 蒙版编辑的图像模型，请先配置支持 OpenAI Images Edit 的模型",
+      "No configured image model supports PNG mask editing. Configure a model with OpenAI Images Edit support",
+    ));
+  }
   if (!fallback) throw new Error(tr(`没有可用的${kind === "image" ? "图像" : kind === "video" ? "视频" : "语音"}模型`, `No ${kind} model is available`));
   return { profileId: fallback.profileId, profileName: fallback.profileName, model: fallback.id, protocol: fallback.protocol };
 }

@@ -9,6 +9,7 @@ const studioSource = readFileSync(new URL("../src/components/ConstellationStudio
 const nodeSource = readFileSync(new URL("../src/components/ConstellationNodes.tsx", import.meta.url), "utf8");
 const studioCss = readFileSync(new URL("../src/components/ConstellationStudio.css", import.meta.url), "utf8");
 const mediaSource = readFileSync(new URL("../src/components/MediaStudio.tsx", import.meta.url), "utf8");
+const mediaCapabilitiesSource = readFileSync(new URL("../src/lib/mediaCapabilities.ts", import.meta.url), "utf8");
 const canvasSource = readFileSync(new URL("../src/components/ConstellationCanvasEditor.tsx", import.meta.url), "utf8");
 const compiled = ts.transpileModule(source, {
   compilerOptions: {
@@ -18,6 +19,14 @@ const compiled = ts.transpileModule(source, {
   fileName: "constellation.ts",
 }).outputText;
 const constellation = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString("base64")}`);
+const mediaCapabilitiesCompiled = ts.transpileModule(mediaCapabilitiesSource, {
+  compilerOptions: {
+    module: ts.ModuleKind.ESNext,
+    target: ts.ScriptTarget.ES2022,
+  },
+  fileName: "mediaCapabilities.ts",
+}).outputText;
+const mediaCapabilities = await import(`data:text/javascript;base64,${Buffer.from(mediaCapabilitiesCompiled).toString("base64")}`);
 
 test("typed ports reject incompatible, duplicate, and cyclic connections", () => {
   const prompt = constellation.createConstellationNode("prompt", { x: 0, y: 0 });
@@ -184,4 +193,46 @@ test("compact side panels do not cover the fitted graph or remain keyboard-focus
   assert.match(studioSource, /width <= 1_080/);
   assert.match(studioSource, /inert=\{!leftPanelOpen\}/);
   assert.match(studioSource, /inert=\{!rightPanelOpen\}/);
+});
+
+test("image editing exposes an explicit history source and reusable output preview", () => {
+  assert.match(studioSource, /listMediaAssets\("image", 100, 0\)/);
+  assert.match(studioSource, /ConstellationImageSourcePicker/);
+  assert.match(studioSource, /MediaImagePreview/);
+  assert.match(studioSource, /exportMediaAsset\(value\.asset\)/);
+  assert.match(nodeSource, /openImageSourcePicker\(id, "image"\)/);
+  assert.match(nodeSource, /constellation-preview-download/);
+  assert.match(studioSource, /node\.data\.size && node\.data\.size !== "auto"/);
+  assert.match(studioSource, /runtimeValuesRef\.current\.delete\(nodeId\)/);
+  assert.match(studioSource, /mediaModelSupportsExplicitImageMask/);
+});
+
+test("creative-space image editing submits a distinct source and PNG mask", () => {
+  assert.match(mediaSource, /STUDIO_IMAGE_MODES/);
+  assert.match(mediaSource, /selectSingleImageReference/);
+  assert.match(mediaSource, /ConstellationCanvasEditor/);
+  assert.match(mediaSource, /maskAttachmentId: kind === "image" && imageMode !== "generate"/);
+  assert.match(mediaSource, /imageEditSource \? \[imageEditSource\.id\] : \[\]/);
+  assert.match(mediaSource, /size !== "auto" \? size : undefined/);
+  assert.match(mediaSource, /onEdit=.*editImageAsset/);
+  assert.match(mediaSource, /media-image-lightbox-edit/);
+  assert.match(mediaSource, /mediaModelSupportsExplicitImageMask/);
+  assert.match(canvasSource, /expanded: padding > 0/);
+});
+
+test("explicit PNG masks avoid native Gemini and Grok image routes", () => {
+  const compatible = (id, protocol) => mediaCapabilities.mediaModelSupportsExplicitImageMask({ id, protocol });
+  assert.equal(compatible("gemini-3-pro-image", "gemini_generate_content"), false);
+  assert.equal(compatible("grok-imagine-edit", "openai_chat"), false);
+  assert.equal(compatible("models/grok-imagine-image-quality", "openai_responses"), false);
+  assert.equal(compatible("gpt-image-1", "openai_responses"), true);
+});
+
+test("Space panning is isolated from editable node controls", () => {
+  assert.match(studioSource, /panActivationKeyCode=\{null\}/);
+  assert.match(studioSource, /panOnDrag=\{spacePanActive \? true : \[1, 2\]\}/);
+  assert.match(studioSource, /onFocusCapture=\{\(event\) =>/);
+  assert.match(studioSource, /event\.code === "Space"/);
+  assert.match(studioSource, /className="constellation-title-input nodrag nopan"/);
+  assert.match(nodeSource, /event\.code === "Space" && event\.repeat/);
 });

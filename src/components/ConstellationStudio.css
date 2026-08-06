@@ -502,11 +502,18 @@
 .constellation-reference-chips button i { color: #94a3b8; font-size: .6875rem; font-style: normal; }
 .constellation-reference-chips button:hover { background: rgba(244, 63, 94, .09); color: #be123c; }
 
+.constellation-reference-chips button img { width: 18px; height: 18px; flex: 0 0 18px; border-radius: 3px; object-fit: cover; }
+
 .constellation-text-preview { overflow: hidden; max-height: 105px; padding: 7px; border: 1px solid rgba(124, 58, 237, .12); border-radius: 7px; background: #faf8ff; color: #4c3a68; font-size: .625rem; line-height: 1.45; white-space: pre-wrap; }
 .constellation-text-preview.large { max-height: 240px; font-size: .6875rem; }
 .constellation-media-preview { overflow: hidden; margin-top: 7px; border: 1px solid rgba(148, 163, 184, .16); border-radius: 8px; background: #e2e8f0; }
 .constellation-media-preview img,
 .constellation-media-preview video { width: 100%; max-height: 150px; display: block; object-fit: cover; }
+.constellation-preview-trigger { position: relative; width: 100%; display: block; overflow: hidden; padding: 0; border: 0; background: transparent; cursor: zoom-in; }
+.constellation-preview-trigger span { position: absolute; right: 6px; bottom: 6px; display: inline-flex; align-items: center; gap: 3px; padding: 3px 5px; border-radius: 5px; background: rgba(15, 23, 42, .72); color: #fff; font-size: .5625rem; opacity: 0; transition: opacity .14s ease; }
+.constellation-preview-trigger:hover span { opacity: 1; }
+.constellation-preview-download { width: 100%; min-height: 25px; display: flex; align-items: center; justify-content: center; gap: 4px; border: 0; border-top: 1px solid rgba(148, 163, 184, .14); background: rgba(255, 255, 255, .78); color: #64748b; font-size: .5625rem; cursor: pointer; }
+.constellation-preview-download:hover { background: #eff6ff; color: #0369a1; }
 .constellation-media-preview.large img,
 .constellation-media-preview.large video { max-height: 230px; object-fit: contain; }
 .constellation-audio-preview { display: flex; align-items: center; gap: 7px; margin-top: 7px; padding: 7px; border-radius: 8px; background: #ecfdf5; }
@@ -611,6 +618,40 @@
 .constellation-blueprint-dialog > footer button { height: 33px; display: flex; align-items: center; gap: 5px; padding: 0 11px; border: 1px solid #dbe2ea; border-radius: 8px; background: #fff; color: #475569; font-size: .6875rem; cursor: pointer; }
 .constellation-blueprint-dialog > footer button.primary { border-color: transparent; background: #7c3aed; color: #fff; }
 .constellation-blueprint-dialog > footer button:disabled { opacity: .45; cursor: default; }
+
+/* Explicit image source picker */
+.constellation-source-picker-backdrop { position: fixed; inset: 0; z-index: 140; display: grid; place-items: center; padding: 20px; background: rgba(15, 23, 42, .44); backdrop-filter: blur(10px); }
+.constellation-source-picker { width: min(760px, calc(100vw - 34px)); max-height: min(720px, calc(100vh - 36px)); overflow: hidden; display: grid; grid-template-rows: 64px 48px minmax(0, 1fr) 48px; border: 1px solid rgba(255, 255, 255, .7); border-radius: 16px; background: #f8fafc; box-shadow: 0 30px 90px rgba(15, 23, 42, .3); }
+.constellation-source-picker > header { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 13px; border-bottom: 1px solid rgba(148, 163, 184, .16); background: linear-gradient(135deg, #fff7ed, #eff6ff); }
+.constellation-source-picker > header > div { min-width: 0; display: flex; align-items: center; gap: 9px; }
+.constellation-source-picker > header > div > span { width: 33px; height: 33px; display: grid; place-items: center; border-radius: 9px; background: #fff; color: #ea580c; box-shadow: 0 5px 14px rgba(234, 88, 12, .12); }
+.constellation-source-picker > header > div > div { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.constellation-source-picker > header strong { color: #1e293b; font-size: var(--font-small); }
+.constellation-source-picker > header small { overflow: hidden; color: #64748b; font-size: .625rem; text-overflow: ellipsis; white-space: nowrap; }
+.constellation-source-picker > header > button { width: 30px; height: 30px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 7px; background: rgba(255, 255, 255, .72); color: #64748b; cursor: pointer; }
+.constellation-source-picker-actions { display: flex; align-items: center; gap: 7px; padding: 7px 12px; border-bottom: 1px solid rgba(148, 163, 184, .13); background: rgba(255, 255, 255, .82); }
+.constellation-source-picker-actions button { height: 32px; display: inline-flex; align-items: center; gap: 5px; padding: 0 10px; border: 1px solid #dbe2ea; border-radius: 8px; background: #fff; color: #475569; font-size: .625rem; cursor: pointer; }
+.constellation-source-picker-actions button.primary { border-color: transparent; background: linear-gradient(135deg, #f97316, #ea580c); color: #fff; }
+.constellation-source-picker-actions button:disabled { opacity: .45; cursor: default; }
+.constellation-source-picker-body { min-height: 0; overflow-y: auto; padding: 12px; }
+.constellation-source-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.constellation-source-card { min-width: 0; overflow: hidden; border: 1px solid rgba(148, 163, 184, .2); border-radius: 10px; background: #fff; box-shadow: 0 5px 14px rgba(15, 23, 42, .05); }
+.constellation-source-card:hover { border-color: rgba(234, 88, 12, .3); box-shadow: 0 8px 20px rgba(15, 23, 42, .09); }
+.constellation-source-image { position: relative; width: 100%; aspect-ratio: 4 / 3; display: block; overflow: hidden; padding: 0; border: 0; background: #e2e8f0; cursor: pointer; }
+.constellation-source-image img { width: 100%; height: 100%; display: block; object-fit: cover; transition: transform .18s ease; }
+.constellation-source-card:hover .constellation-source-image img { transform: scale(1.035); }
+.constellation-source-image span { position: absolute; inset: auto 6px 6px auto; padding: 3px 5px; border-radius: 5px; background: rgba(15, 23, 42, .7); color: #fff; font-size: .5625rem; opacity: 0; transition: opacity .14s ease; }
+.constellation-source-card:hover .constellation-source-image span { opacity: 1; }
+.constellation-source-card > footer { min-width: 0; display: flex; align-items: center; gap: 4px; padding: 6px 7px; }
+.constellation-source-card > footer > span { min-width: 0; flex: 1; overflow: hidden; color: #64748b; font-size: .5625rem; text-overflow: ellipsis; white-space: nowrap; }
+.constellation-source-card > footer > button { width: 24px; height: 24px; display: grid; place-items: center; flex: 0 0 24px; padding: 0; border: 0; border-radius: 6px; background: #f1f5f9; color: #64748b; cursor: pointer; }
+.constellation-source-card > footer > button:hover { background: #eff6ff; color: #0369a1; }
+.constellation-source-picker-empty { min-height: 210px; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 7px; color: #94a3b8; text-align: center; font-size: .6875rem; }
+.constellation-source-picker-empty strong { color: #64748b; font-size: .75rem; }
+.constellation-source-picker-empty span { max-width: 300px; line-height: 1.45; }
+.constellation-source-picker > footer { min-width: 0; display: flex; align-items: center; gap: 10px; padding: 0 12px; border-top: 1px solid rgba(148, 163, 184, .14); background: rgba(255, 255, 255, .9); }
+.constellation-source-picker > footer > span { min-width: 0; flex: 1; overflow: hidden; color: #64748b; font-size: .59375rem; text-overflow: ellipsis; white-space: nowrap; }
+.constellation-source-picker > footer > button { height: 31px; padding: 0 10px; border: 1px solid #dbe2ea; border-radius: 7px; background: #fff; color: #475569; font-size: .625rem; cursor: pointer; }
 
 /* Canvas editor */
 .constellation-canvas-modal { z-index: 130; padding: 18px; }

@@ -15,6 +15,7 @@ import {
   ChevronUp,
   CircleAlert,
   CircleCheck,
+  Download,
   FileText,
   Image as ImageIcon,
   LoaderCircle,
@@ -51,7 +52,10 @@ export interface ConstellationNodeActions {
   runNode: (nodeId: string) => void;
   removeNode: (nodeId: string) => void;
   chooseReferences: (nodeId: string, kind: "image" | "video") => void;
+  openImageSourcePicker: (nodeId: string, purpose: "canvas" | "image") => void;
   openCanvas: (nodeId: string) => void;
+  openPreview: (value: ConstellationValue) => void;
+  downloadValue: (value: ConstellationValue) => void;
   getInputValue: (nodeId: string, handle: string) => ConstellationValue | undefined;
 }
 
@@ -136,10 +140,15 @@ export function ConstellationNodeCard({ id, data, selected, isConnectable }: Nod
         <span className="constellation-node-icon"><Icon size={15} /></span>
         <div>
           <input
-            className="nodrag"
+            className="nodrag nopan"
             value={data.title}
             maxLength={64}
             aria-label={tr("节点名称", "Node name")}
+            onKeyDown={(event) => {
+              // Keep a normal single space available for names, but do not
+              // fill the field when Space is held for a canvas pan gesture.
+              if (event.code === "Space" && event.repeat) event.preventDefault();
+            }}
             onChange={(event) => actions.updateNode(id, { title: event.target.value })}
           />
           <small>{statusLabel}</small>
@@ -304,6 +313,7 @@ function ImageNodeBody({ id, data }: { id: string; data: ConstellationNodeData }
   const models = actions.mediaModels.filter((model) => model.kind === "image");
   const output = data.outputs?.image;
   const connectedPrompt = actions.edges.some((edge) => edge.target === id && edge.targetHandle === "prompt");
+  const operation = data.operation ?? "generate";
   return (
     <>
       <div className="constellation-segmented nodrag" role="radiogroup" aria-label={tr("图像操作", "Image operation")}>
@@ -316,10 +326,10 @@ function ImageNodeBody({ id, data }: { id: string; data: ConstellationNodeData }
           <button
             type="button"
             role="radio"
-            aria-checked={(data.operation ?? "generate") === value}
-            className={(data.operation ?? "generate") === value ? "active" : ""}
+            aria-checked={operation === value}
+            className={operation === value ? "active" : ""}
             key={value}
-            onClick={() => actions.updateNode(id, { operation: value })}
+            onClick={() => actions.updateNode(id, { operation: value, outputs: undefined, status: "idle", error: undefined })}
           >{label}</button>
         ))}
       </div>
@@ -351,7 +361,7 @@ function ImageNodeBody({ id, data }: { id: string; data: ConstellationNodeData }
           {["auto", "high", "medium", "2K", "4K"].map((value) => <option key={value}>{value}</option>)}
         </select></label>
       </div>
-      <ReferencePicker id={id} references={data.references ?? []} kind="image" />
+      <ReferencePicker id={id} references={data.references ?? []} kind="image" sourceOnly={operation !== "generate"} />
       {output && <ValuePreview value={output} />}
     </>
   );
@@ -475,15 +485,15 @@ function ModelSelect({
   );
 }
 
-function ReferencePicker({ id, references, kind }: { id: string; references: ImageAttachment[]; kind: "image" | "video" }) {
+function ReferencePicker({ id, references, kind, sourceOnly = false }: { id: string; references: ImageAttachment[]; kind: "image" | "video"; sourceOnly?: boolean }) {
   const actions = useNodeActions();
   return (
     <div className="constellation-reference-picker">
       <div>
-        <span>{kind === "video" ? tr("参考视频", "Reference video") : tr("本地参考", "Local references")}</span>
-        <button type="button" className="nodrag" onClick={() => actions.chooseReferences(id, kind)}>{tr("选择", "Choose")}</button>
+        <span>{sourceOnly ? tr("编辑源图", "Edit source image") : kind === "video" ? tr("参考视频", "Reference video") : tr("本地参考", "Local references")}</span>
+        <button type="button" className="nodrag" onClick={() => sourceOnly ? actions.openImageSourcePicker(id, "image") : actions.chooseReferences(id, kind)}>{sourceOnly ? tr("选择源图", "Choose source") : tr("选择", "Choose")}</button>
       </div>
-      {references.length > 0 && <div className="constellation-reference-chips">{references.map((reference) => <button type="button" className="nodrag" title={tr(`移除 ${reference.name}`, `Remove ${reference.name}`)} aria-label={tr(`移除 ${reference.name}`, `Remove ${reference.name}`)} onClick={() => actions.updateNode(id, { references: references.filter((item) => item.id !== reference.id) })} key={reference.id}><ImageIcon size={10} /><span>{reference.name}</span><i aria-hidden="true">×</i></button>)}</div>}
+      {references.length > 0 && <div className="constellation-reference-chips">{references.map((reference) => <button type="button" className="nodrag" title={tr(`移除 ${reference.name}`, `Remove ${reference.name}`)} aria-label={tr(`移除 ${reference.name}`, `Remove ${reference.name}`)} onClick={() => actions.updateNode(id, { references: references.filter((item) => item.id !== reference.id), outputs: undefined, status: "idle" })} key={reference.id}><AttachmentThumbnail attachment={reference} /><span>{reference.name}</span><i aria-hidden="true">×</i></button>)}</div>}
     </div>
   );
 }
@@ -507,10 +517,14 @@ function AttachmentThumbnail({ attachment }: { attachment: ImageAttachment }) {
 }
 
 function ValuePreview({ value, large = false, thumbnail = false }: { value: ConstellationValue; large?: boolean; thumbnail?: boolean }) {
+  const actions = useNodeActions();
   const url = useMemo(() => value.asset ? mediaAssetUrl(value.asset) : undefined, [value.asset]);
   if (value.type === "text") return thumbnail ? <FileText size={24} /> : <div className={`constellation-text-preview${large ? " large" : ""}`}>{value.text}</div>;
   if (value.attachment) return <AttachmentThumbnail attachment={value.attachment} />;
-  if (value.type === "image" && url) return <div className={`constellation-media-preview image${large ? " large" : ""}`}><img src={url} alt={value.asset?.prompt || tr("生成图片", "Generated image")} /></div>;
+  if (value.type === "image" && url) return <div className={`constellation-media-preview image${large ? " large" : ""}`}>
+    {thumbnail ? <img src={url} alt={value.asset?.prompt || tr("生成图片", "Generated image")} /> : <button type="button" className="constellation-preview-trigger nodrag" onClick={() => actions.openPreview(value)} title={tr("打开图片预览", "Open image preview")}><img src={url} alt={value.asset?.prompt || tr("生成图片", "Generated image")} /><span><Maximize2 size={12} />{tr("预览", "Preview")}</span></button>}
+    {!thumbnail && value.asset && <button type="button" className="constellation-preview-download nodrag" onClick={() => actions.downloadValue(value)} title={tr("下载图片", "Download image")}><Download size={12} />{tr("下载", "Download")}</button>}
+  </div>;
   if (value.type === "video" && url) return <div className={`constellation-media-preview video${large ? " large" : ""}`}><video src={url} controls={!thumbnail} muted={thumbnail} loop={thumbnail} /></div>;
   if (value.type === "audio" && url) return <div className={`constellation-audio-preview${large ? " large" : ""}`}><span><Volume2 size={18} /></span><audio src={url} controls={!thumbnail} /></div>;
   const Icon = value.type === "video" ? Video : value.type === "audio" ? Volume2 : ImageIcon;

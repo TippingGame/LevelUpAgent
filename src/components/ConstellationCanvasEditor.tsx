@@ -23,6 +23,7 @@ import {
 import { importClipboardImages, previewAttachment } from "../lib/bridge";
 import { tr } from "../lib/i18n";
 import type { ImageAttachment } from "../lib/types";
+import "./ConstellationStudio.css";
 
 type CanvasTool = "mask" | "erase" | "label" | "pan";
 
@@ -79,14 +80,25 @@ interface CanvasPanGesture {
   originY: number;
 }
 
+export interface CanvasEditorSaveMeta {
+  hasMask: boolean;
+  expanded: boolean;
+  hasLabels: boolean;
+  labels: string[];
+}
+
 export function ConstellationCanvasEditor({
   source,
+  title,
+  saveLabel,
   onClose,
   onSave,
 }: {
   source: ImageAttachment;
+  title?: string;
+  saveLabel?: string;
   onClose: () => void;
-  onSave: (image: ImageAttachment, mask?: ImageAttachment) => void;
+  onSave: (image: ImageAttachment, mask: ImageAttachment | undefined, meta: CanvasEditorSaveMeta) => void;
 }) {
   const imageCanvasRef = useRef<HTMLCanvasElement>(null);
   const maskCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -483,7 +495,12 @@ export function ConstellationCanvasEditor({
       }
       const imported = await importClipboardImages(files);
       if (!imported[0]) throw new Error(tr("画板结果未能保存到素材库", "The canvas result could not be saved"));
-      onSave(imported[0], imported[1]);
+      onSave(imported[0], imported[1], {
+        hasMask: Boolean(imported[1]),
+        expanded: padding > 0,
+        hasLabels: labels.length > 0,
+        labels: labels.map((label) => label.text),
+      });
     } catch (reason) {
       setError(errorText(reason));
     } finally {
@@ -497,7 +514,7 @@ export function ConstellationCanvasEditor({
     }}>
       <section>
         <header>
-          <div><span><Brush size={17} /></span><div><strong id="constellation-canvas-title">{tr("星图画板", "Constellation Canvas")}</strong><small>{source.name} · {outputSize.width} × {outputSize.height}</small></div></div>
+          <div><span><Brush size={17} /></span><div><strong id="constellation-canvas-title">{title ?? tr("星图画板", "Constellation Canvas")}</strong><small>{source.name} · {outputSize.width} × {outputSize.height}</small></div></div>
           <button type="button" onClick={onClose} aria-label={tr("关闭画板", "Close canvas")}><X size={18} /></button>
         </header>
         <div className="constellation-editor-toolbar" role="toolbar" aria-label={tr("画板工具", "Canvas tools")}>
@@ -536,7 +553,7 @@ export function ConstellationCanvasEditor({
             {error ? <span className="canvas-editor-error">{error}</span> : <span>{tr("红色区域会被模型重绘；扩边会自动生成透明外圈蒙版", "Red regions may be repainted; expansion creates an outer transparent mask")}</span>}
           </div>
           <button type="button" onClick={onClose}>{tr("取消", "Cancel")}</button>
-          <button type="button" className="primary" disabled={saving || imageSize.width === 0} onClick={() => void save()}>{saving ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}{saving ? tr("正在保存", "Saving") : tr("保存到节点", "Save to node")}</button>
+          <button type="button" className="primary" disabled={saving || imageSize.width === 0} onClick={() => void save()}>{saving ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}{saving ? tr("正在保存", "Saving") : saveLabel ?? tr("保存到节点", "Save to node")}</button>
         </footer>
       </section>
     </div>

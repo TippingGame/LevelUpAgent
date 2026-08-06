@@ -31,12 +31,12 @@ pub struct Database {
 impl Database {
     pub fn open(path: &Path) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| storage_error("Could not create application data directory", error))?;
+            std::fs::create_dir_all(parent).map_err(|error| {
+                storage_error("Could not create application data directory", error)
+            })?;
             crate::filesystem::restrict_directory(parent)?;
         }
-        let connection = Connection::open(path)
-            .map_err(database_error)?;
+        let connection = Connection::open(path).map_err(database_error)?;
         crate::filesystem::restrict_file(path)?;
         let database = Self::from_connection(connection)?;
         for suffix in ["-wal", "-shm"] {
@@ -2742,9 +2742,7 @@ fn database_error(error: rusqlite::Error) -> String {
 }
 
 fn storage_error(action: &str, error: impl std::fmt::Display) -> String {
-    format!(
-        "{action}: {error}. Storage may be full or read-only; free disk space and retry."
-    )
+    format!("{action}: {error}. Storage may be full or read-only; free disk space and retry.")
 }
 
 #[cfg(test)]

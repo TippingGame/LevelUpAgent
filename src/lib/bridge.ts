@@ -333,6 +333,17 @@ export async function selectImageReferences(): Promise<ImageAttachment[]> {
   return importAttachments(paths.slice(0, 8));
 }
 
+export async function selectSingleImageReference(): Promise<ImageAttachment | undefined> {
+  if (!isDesktop()) return undefined;
+  const selected = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "gif"] }],
+  });
+  const paths = typeof selected === "string" ? [selected] : [];
+  return (await importAttachments(paths))[0];
+}
+
 export async function selectVideoReference(): Promise<ImageAttachment[]> {
   if (!isDesktop()) return [];
   const selected = await open({

@@ -14,6 +14,7 @@ import {
   ArrowRight,
   BookOpen,
   Boxes,
+  Brush,
   Check,
   CircleAlert,
   Clock3,
@@ -46,12 +47,15 @@ import {
   importMediaReferences,
   listMediaAssets,
   mediaAssetUrl,
+  previewAttachment,
   refreshMediaAsset,
   selectImageReferences,
+  selectSingleImageReference,
   selectVideoReference,
 } from "../lib/bridge";
 import { tr } from "../lib/i18n";
 import { copyText } from "../lib/clipboard";
+import { mediaModelSupportsExplicitImageMask } from "../lib/mediaCapabilities";
 import type {
   ImageAttachment,
   MediaAsset,
@@ -61,6 +65,10 @@ import type {
   VideoGenerationMode,
 } from "../lib/types";
 import { AttachmentChip } from "./AttachmentChip";
+import {
+  ConstellationCanvasEditor,
+  type CanvasEditorSaveMeta,
+} from "./ConstellationCanvasEditor";
 
 interface PromptDraft {
   id: string;
@@ -77,6 +85,8 @@ interface MediaHistoryLoadState {
 type StudioMediaAsset = MediaAsset & {
   pendingOutput?: { index: number; total: number };
 };
+
+type StudioImageMode = "generate" | "edit" | "outpaint" | "inpaint";
 
 interface PreviewPoint {
   x: number;
@@ -133,6 +143,12 @@ const GROK_VIDEO_ASPECT_OPTIONS = ["16:9", "9:16"];
 const GROK_VIDEO_RESOLUTION_OPTIONS = ["480p", "720p"];
 const GROK_VIDEO_MODES: VideoGenerationMode[] = ["text", "image", "reference", "video"];
 const MEDIA_MODEL_ROUTES_KEY = "levelup-agent.media-model-routes.v1";
+const STUDIO_IMAGE_MODES: Array<{ value: StudioImageMode; label: string; labelEn: string }> = [
+  { value: "generate", label: "生成", labelEn: "Generate" },
+  { value: "edit", label: "编辑", labelEn: "Edit" },
+  { value: "outpaint", label: "扩图", labelEn: "Outpaint" },
+  { value: "inpaint", label: "局部重绘", labelEn: "Inpaint" },
+];
 
 export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, referenceDrop, onReferenceDropHandled, onConfigureConnection, onPendingCountChange, onWriting, onConstellation }: MediaStudioProps) {
   const rootRef = useRef<HTMLElement>(null);
@@ -145,6 +161,11 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
     { id: crypto.randomUUID(), prompt: "" },
   ]);
   const [imageReferences, setImageReferences] = useState<ImageAttachment[]>([]);
+  const [imageMode, setImageMode] = useState<StudioImageMode>("generate");
+  const [imageEditSource, setImageEditSource] = useState<ImageAttachment>();
+  const [imageEditMask, setImageEditMask] = useState<ImageAttachment>();
+  const [imageEditMeta, setImageEditMeta] = useState<CanvasEditorSaveMeta>();
+  const [imageEditorOpen, setImageEditorOpen] = useState(false);
   const [videoReferences, setVideoReferences] = useState<ImageAttachment[]>([]);
   const [videoMode, setVideoMode] = useState<VideoGenerationMode>("text");
   const [videoResolution, setVideoResolution] = useState("720p");
@@ -175,10 +196,15 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
     () => (catalog?.models ?? []).filter((model) => model.kind === kind),
     [catalog, kind],
   );
+  const requiresImageMask = kind === "image" && imageMode !== "generate" && Boolean(imageEditMask);
+  const eligibleModels = useMemo(
+    () => requiresImageMask ? models.filter(mediaModelSupportsExplicitImageMask) : models,
+    [models, requiresImageMask],
+  );
   const selectedKey = selectedModels[kind];
-  const selected = models.find((model) => modelKey(model) === selectedKey)
-    ?? models.find((model) => model.recommended)
-    ?? models[0];
+  const selected = eligibleModels.find((model) => modelKey(model) === selectedKey)
+    ?? eligibleModels.find((model) => model.recommended)
+    ?? eligibleModels[0];
   const transparentBackgroundSupported = !selected?.id.toLocaleLowerCase().includes("gpt-image-2");
   const selectedModelId = selected?.id.toLocaleLowerCase() ?? "";
   const isGrokVideo = kind === "video" && selectedModelId.startsWith("grok-imagine-video");
@@ -193,6 +219,10 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
       ? videoReferences.length > 0 && videoReferences.length <= 7 && videoReferences.every((item) => item.kind === "image")
       : videoReferences.length === 1 && videoReferences[0]?.kind === (activeVideoMode === "video" ? "video" : "image")
   );
+  const imageEditReady = imageMode === "generate"
+    || Boolean(imageEditSource
+      && (imageMode !== "inpaint" || imageEditMask)
+      && (imageMode !== "outpaint" || imageEditMask && imageEditMeta?.expanded));
   const visibleAssets = assets.filter((asset) => asset.kind === kind);
   const visiblePendingAssets = pendingAssets.filter((asset) => asset.kind === kind);
   const displayedAssets: StudioMediaAsset[] = [...visiblePendingAssets, ...visibleAssets];
@@ -388,6 +418,74 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
     }
   };
 
+  const replaceImageEditSource = async (
+    source: ImageAttachment | undefined,
+    mask?: ImageAttachment,
+    meta?: CanvasEditorSaveMeta,
+  ) => {
+    const retainedIds = new Set([source?.id, mask?.id].filter((id): id is string => Boolean(id)));
+    const discarded = [imageEditSource, imageEditMask]
+      .filter((item): item is ImageAttachment => item !== undefined)
+      .filter((item) => !retainedIds.has(item.id));
+    setImageEditSource(source);
+    setImageEditMask(mask);
+    setImageEditMeta(meta);
+    await Promise.all(discarded.map((item) => deleteImageAttachment(item.id).catch(() => false)));
+  };
+
+  const acceptImageEditSource = async (incoming: ImageAttachment[], openEditor = false) => {
+    const source = incoming.find((item) => item.kind === "image");
+    const discarded = incoming.filter((item) => item.id !== source?.id);
+    await Promise.all(discarded.map((item) => deleteImageAttachment(item.id).catch(() => false)));
+    if (!source) {
+      setError(tr("图片编辑需要一张有效图片", "Image editing needs a valid image"));
+      return;
+    }
+    await replaceImageEditSource(source);
+    setKind("image");
+    setImageMode("edit");
+    setError(null);
+    if (openEditor) setImageEditorOpen(true);
+  };
+
+  const chooseImageEditSource = async () => {
+    try {
+      const selectedImage = await selectSingleImageReference();
+      if (!selectedImage) return;
+      await acceptImageEditSource([selectedImage], true);
+    } catch (reason) {
+      setError(errorText(reason));
+    }
+  };
+
+  const editImageAsset = async (asset: MediaAsset) => {
+    if (asset.kind !== "image" || asset.status !== "completed" || !asset.filePath) return;
+    setError(null);
+    try {
+      await acceptImageEditSource(await importMediaReferences([asset.filePath]), true);
+    } catch (reason) {
+      setError(errorText(reason));
+    }
+  };
+
+  const applyCanvasEdit = async (
+    image: ImageAttachment,
+    mask: ImageAttachment | undefined,
+    meta: CanvasEditorSaveMeta,
+  ) => {
+    const labels = [...new Set([...(imageEditMeta?.labels ?? []), ...meta.labels])];
+    const nextMeta = { ...meta, hasLabels: labels.length > 0, labels };
+    await replaceImageEditSource(image, mask, nextMeta);
+    setImageMode(meta.expanded ? "outpaint" : mask ? "inpaint" : "edit");
+    setImageEditorOpen(false);
+    setError(null);
+  };
+
+  const changeImageMode = (nextMode: StudioImageMode) => {
+    setImageMode(nextMode);
+    setError(null);
+  };
+
   const changeVideoMode = (nextMode: VideoGenerationMode) => {
     if (isGrokVideo15 && nextMode !== "image") return;
     setVideoMode(nextMode);
@@ -453,6 +551,10 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
       await acceptVideoReferences(imported, targetMode);
       return;
     }
+    if (kind === "image" && imageMode !== "generate") {
+      await acceptImageEditSource(await importAttachments(paths.slice(0, 12)), true);
+      return;
+    }
     const available = Math.max(0, 8 - imageReferences.length);
     if (available === 0) {
       setError(tr("最多添加 8 张参考图", "You can add up to 8 reference images"));
@@ -466,8 +568,9 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
     const targetVideoMode = kind === "video" && isGrokVideo
       ? isGrokVideo15 || !matchesImageVideoMode(activeVideoMode) ? "image" : activeVideoMode
       : null;
-    const maximum = targetVideoMode === "reference" ? 7 : targetVideoMode ? 1 : 8;
-    const existing = targetVideoMode ? videoReferences.length : imageReferences.length;
+    const targetImageEdit = kind === "image" && imageMode !== "generate";
+    const maximum = targetVideoMode === "reference" ? 7 : targetVideoMode || targetImageEdit ? 1 : 8;
+    const existing = targetVideoMode ? videoReferences.length : targetImageEdit ? 0 : imageReferences.length;
     const available = Math.max(0, maximum - existing);
     if (available === 0) {
       setError(tr("当前参考素材数量已达上限", "The reference limit has been reached"));
@@ -479,6 +582,7 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
     try {
       const imported = await importClipboardImages(selectedFiles);
       if (targetVideoMode) await acceptVideoReferences(imported, targetVideoMode);
+      else if (targetImageEdit) await acceptImageEditSource(imported, true);
       else await acceptImageReferences(imported);
       if (selectedFiles.length < files.length) {
         setError(tr("超出数量上限的图片未粘贴", "Images beyond the reference limit were not pasted"));
@@ -518,7 +622,7 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
     };
     window.addEventListener("paste", handlePaste);
     return () => window.removeEventListener("paste", handlePaste);
-  }, [active, pastingReferences, kind, isGrokVideo, isGrokVideo15, activeVideoMode, imageReferences, videoReferences]);
+  }, [active, pastingReferences, kind, isGrokVideo, isGrokVideo15, activeVideoMode, imageMode, imageReferences, videoReferences]);
 
   const removeImageReference = async (attachment: ImageAttachment) => {
     setImageReferences((current) => current.filter((item) => item.id !== attachment.id));
@@ -532,7 +636,25 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
 
   const generate = async () => {
     const activePrompts = prompts.map((item) => item.prompt.trim()).filter(Boolean);
-    if (!selected || activePrompts.length === 0) return;
+    if (activePrompts.length === 0) return;
+    if (kind === "image" && imageMode !== "generate" && !imageEditSource) {
+      setError(tr("请先选择一张编辑源图", "Choose an edit source image first"));
+      return;
+    }
+    if (kind === "image" && imageMode === "inpaint" && !imageEditMask) {
+      setError(tr("局部重绘需要先在画板涂抹蒙版", "Inpainting needs a mask painted in the canvas first"));
+      return;
+    }
+    if (kind === "image" && imageMode === "outpaint" && (!imageEditMask || !imageEditMeta?.expanded)) {
+      setError(tr("扩图需要先在画板设置扩边范围", "Outpainting needs an expanded canvas area first"));
+      return;
+    }
+    if (!selected) {
+      setError(requiresImageMask
+        ? tr("当前没有支持 PNG 蒙版编辑的图像模型，请配置支持 OpenAI Images Edit 的模型", "No configured image model supports PNG mask editing. Configure a model with OpenAI Images Edit support")
+        : tr("当前没有可用的生成模型", "No generation model is available"));
+      return;
+    }
     if (!videoReferenceReady) {
       setError(videoReferenceRequirement(activeVideoMode));
       return;
@@ -546,7 +668,9 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
       model: selected.id,
       protocol: selected.protocol,
       count,
-      size: kind === "image" || (kind === "video" && !isGrokVideo) ? size : undefined,
+      size: kind === "image"
+        ? size !== "auto" ? size : undefined
+        : kind === "video" && !isGrokVideo ? size : undefined,
       quality: kind === "image" && quality !== "auto" ? quality : undefined,
       outputFormat: kind === "video" ? undefined : outputFormat,
       background: kind === "image" && background !== "auto" ? background : undefined,
@@ -557,12 +681,18 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
       videoResolution: grokVideoHasOutputControls ? videoResolution : undefined,
       videoAspectRatio: grokVideoHasOutputControls ? videoAspectRatio : undefined,
       referenceAttachmentIds: kind === "image"
-        ? imageReferences.map((item) => item.id)
+        ? imageMode === "generate"
+          ? imageReferences.map((item) => item.id)
+          : imageEditSource ? [imageEditSource.id] : []
         : kind === "video" && isGrokVideo && activeVideoMode !== "text"
           ? videoReferences.map((item) => item.id)
           : [],
+      maskAttachmentId: kind === "image" && imageMode !== "generate" ? imageEditMask?.id : undefined,
     };
-    const tasks = activePrompts.map((prompt) => {
+    const requestPrompts = kind === "image"
+      ? activePrompts.map((prompt) => studioImagePrompt(prompt, imageMode, imageEditMeta))
+      : activePrompts;
+    const tasks = requestPrompts.map((prompt) => {
       const pendingBatchId = `pending-${crypto.randomUUID()}`;
       const createdAt = Date.now();
       const placeholders: StudioMediaAsset[] = Array.from({ length: count }, (_, index) => ({
@@ -623,6 +753,7 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
       await acceptImageReferences(imported);
 
       setKind("image");
+      setImageMode("generate");
       setPrompts((current) => [{ id: current[0]?.id ?? crypto.randomUUID(), prompt: asset.prompt }]);
       rememberSelectedModel("image", `${asset.providerId}::${asset.model}`);
       setCount(clampMediaCount(asset.count));
@@ -651,7 +782,7 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
       {dropActive && (
         <div className="media-drop-overlay" role="status" aria-live="polite">
           <span>{kind === "video" && activeVideoMode === "video" ? <Video size={28} /> : <ImagePlus size={28} />}</span>
-          <strong>{mediaDropTitle(kind, activeVideoMode)}</strong>
+          <strong>{mediaDropTitle(kind, activeVideoMode, imageMode)}</strong>
           <small>{tr("素材会添加到当前创作任务，不会进入会话附件", "References are added to Media Studio, not to the conversation")}</small>
         </div>
       )}
@@ -692,15 +823,52 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
                 onChange={(event) => rememberSelectedModel(kind, event.target.value)}
               >
                 {models.length === 0 && <option value="">{tr("未发现可用模型", "No model discovered")}</option>}
+                {requiresImageMask && models.length > 0 && eligibleModels.length === 0 && <option value="">{tr("没有支持 PNG 蒙版的模型", "No model supports PNG masks")}</option>}
                 {models.map((model) => (
-                  <option value={modelKey(model)} key={modelKey(model)}>
-                    {model.recommended ? `★ ${tr("推荐", "Recommended")} · ` : ""}{model.id} · {model.profileName}
+                  <option value={modelKey(model)} disabled={requiresImageMask && !mediaModelSupportsExplicitImageMask(model)} key={modelKey(model)}>
+                    {model.recommended ? `★ ${tr("推荐", "Recommended")} · ` : ""}{model.id} · {model.profileName}{requiresImageMask && !mediaModelSupportsExplicitImageMask(model) ? tr(" · 不支持蒙版", " · No mask support") : ""}
                   </option>
                 ))}
               </select>
             </label>
-            {selected?.recommended && <span className="recommended-model"><Sparkles size={12} />{tr("已自动选择推荐模型", "Recommended model selected automatically")}</span>}
+            {requiresImageMask && selected
+              ? <span className="recommended-model"><Check size={12} />{tr("当前模型支持 PNG 蒙版编辑", "The current model supports PNG mask editing")}</span>
+              : selected?.recommended && <span className="recommended-model"><Sparkles size={12} />{tr("已自动选择推荐模型", "Recommended model selected automatically")}</span>}
           </div>
+
+          {kind === "image" && <div className="media-image-mode-control">
+            <span>{tr("创作方式", "Image mode")}</span>
+            <div role="radiogroup" aria-label={tr("图片创作方式", "Image creation mode")}>{STUDIO_IMAGE_MODES.map((mode) => <button
+              type="button"
+              role="radio"
+              aria-checked={imageMode === mode.value}
+              className={imageMode === mode.value ? "active" : ""}
+              onClick={() => changeImageMode(mode.value)}
+              key={mode.value}
+            >{tr(mode.label, mode.labelEn)}</button>)}</div>
+            <small>{imageModeDescription(imageMode)}</small>
+          </div>}
+
+          {kind === "image" && imageMode !== "generate" && <section className="media-image-edit-panel">
+            <header>
+              <div><span><Brush size={15} /></span><div><strong>{tr("编辑源图", "Edit source")}</strong><small>{tr("可从本地选择，或点击右侧历史图片的画笔按钮", "Choose a local image or use the brush button on a history image")}</small></div></div>
+              <em className={imageEditSource ? "ready" : ""}>{imageEditSource ? tr("源图已就绪", "Source ready") : tr("需要源图", "Source required")}</em>
+            </header>
+            {imageEditSource ? <div className="media-image-edit-source">
+              <MediaImageEditSource attachment={imageEditSource} onOpen={() => setImageEditorOpen(true)} onRemove={() => void replaceImageEditSource(undefined)} />
+              <div className="media-image-edit-actions">
+                <button type="button" onClick={() => void chooseImageEditSource()}><ImagePlus size={13} />{tr("更换源图", "Replace source")}</button>
+                <button type="button" className="primary" onClick={() => setImageEditorOpen(true)}><Brush size={13} />{tr("打开标注画板", "Open annotation canvas")}</button>
+              </div>
+            </div> : <button type="button" className="media-image-edit-empty" onClick={() => void chooseImageEditSource()}><ImagePlus size={21} /><span><strong>{tr("选择一张图片开始编辑", "Choose an image to edit")}</strong><small>{tr("支持标注标签、涂抹蒙版和向外扩图", "Add labels, paint a mask, or expand the canvas")}</small></span></button>}
+            {imageEditSource && <div className="media-image-edit-status">
+              <span className="ready">{tr("源图", "Source")}</span>
+              {imageEditMeta?.hasLabels && <span className="ready">{tr("标签已合成", "Labels applied")}</span>}
+              <span className={imageEditMask ? "ready" : ""}>{imageEditMask ? tr("PNG 蒙版已就绪", "PNG mask ready") : tr("尚无蒙版", "No mask")}</span>
+              {imageEditMeta?.expanded && <span className="ready">{tr("扩边已设置", "Expansion set")}</span>}
+            </div>}
+            {requiresImageMask && eligibleModels.length === 0 && <p className="media-image-mask-warning"><CircleAlert size={13} />{tr("已生成 PNG 蒙版，但当前连接里没有兼容模型；请配置支持 OpenAI Images Edit 的模型", "A PNG mask is ready, but no compatible model is configured. Add a model with OpenAI Images Edit support")}</p>}
+          </section>}
 
           {isGrokVideo && (
             <div className="media-video-mode-control">
@@ -731,11 +899,11 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
           <div className="media-prompt-list">
             {prompts.map((item, index) => (
               <article className="media-prompt-card" key={item.id}>
-                <div><span>{tr("提示词", "Prompt")} {prompts.length > 1 ? index + 1 : ""}</span>{prompts.length > 1 && <button onClick={() => removePrompt(item.id)} title={tr("删除提示词", "Remove prompt")}><X size={13} /></button>}</div>
+                <div><span>{kind === "image" && imageMode !== "generate" ? tr("修改要求", "Edit instruction") : tr("提示词", "Prompt")} {prompts.length > 1 ? index + 1 : ""}</span>{prompts.length > 1 && <button onClick={() => removePrompt(item.id)} title={tr("删除提示词", "Remove prompt")}><X size={13} /></button>}</div>
                 <textarea
                   value={item.prompt}
                   maxLength={32_000}
-                  placeholder={promptPlaceholder(kind)}
+                  placeholder={promptPlaceholder(kind, imageMode)}
                   onChange={(event) => updatePrompt(item.id, event.target.value)}
                 />
               </article>
@@ -779,7 +947,7 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
 
           {kind === "audio" && <label className="media-wide-field"><span>{tr("演绎要求", "Delivery instructions")}</span><input value={instructions} placeholder={tr("例如：温暖、自然、稍慢", "For example: warm, natural, slightly slower")} onChange={(event) => setInstructions(event.target.value)} /></label>}
 
-          {kind === "image" && (
+          {kind === "image" && imageMode === "generate" && (
             <div className="media-reference-row">
               <div className="media-reference-heading">
                 <span>{tr("参考图", "References")}<small>{pastingReferences ? tr("正在粘贴图片…", "Pasting images…") : tr("可拖拽、选择，或按 Ctrl+V 粘贴外部图片", "Drop, choose, or press Ctrl+V to paste images")}</small></span>
@@ -808,9 +976,9 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
           {models.length === 0 && !loading ? (
             <button className="media-configure-button" onClick={onConfigureConnection}><Settings2 size={15} />{tr("配置支持生成能力的模型连接", "Configure a media-capable model connection")}</button>
           ) : (
-            <button className="media-generate-button" disabled={pastingReferences || loading || !selected || !videoReferenceReady || !prompts.some((item) => item.prompt.trim())} onClick={() => void generate()}>
+            <button className="media-generate-button" disabled={pastingReferences || loading || !selected || !videoReferenceReady || !imageEditReady || !prompts.some((item) => item.prompt.trim())} onClick={() => void generate()}>
               {pastingReferences ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}
-              {pastingReferences ? tr("正在添加参考素材", "Adding references") : tr("开始生成", "Generate")}
+              {pastingReferences ? tr("正在添加参考素材", "Adding references") : mediaGenerateLabel(kind, imageMode)}
             </button>
           )}
         </section>
@@ -826,7 +994,7 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
           {currentHistoryState.loading && !currentHistoryState.loaded ? <div className="media-empty"><LoaderCircle className="spin" size={24} /><span>{tr("正在读取首段历史", "Loading recent history")}</span></div>
             : displayedAssets.length === 0 ? <div className="media-empty"><KindIcon kind={kind} /><strong>{tr("还没有作品", "No creations yet")}</strong><span>{tr("输入提示词后，结果会自动出现在这里", "Generated outputs will appear here automatically")}</span></div>
               : <>
-                <div className="media-gallery-grid">{displayedAssets.map((asset) => <MediaAssetCard asset={asset} locale={locale} onDelete={asset.pendingOutput ? undefined : () => void removeAsset(asset)} onPreview={asset.kind === "image" && asset.status === "completed" ? () => setPreviewAsset(asset) : undefined} onReuse={asset.kind === "image" && asset.status === "completed" && Boolean(asset.filePath) ? () => reuseImage(asset) : undefined} key={asset.id} />)}</div>
+                <div className="media-gallery-grid">{displayedAssets.map((asset) => <MediaAssetCard asset={asset} locale={locale} onDelete={asset.pendingOutput ? undefined : () => void removeAsset(asset)} onPreview={asset.kind === "image" && asset.status === "completed" ? () => setPreviewAsset(asset) : undefined} onReuse={asset.kind === "image" && asset.status === "completed" && Boolean(asset.filePath) ? () => reuseImage(asset) : undefined} onEdit={asset.kind === "image" && asset.status === "completed" && Boolean(asset.filePath) ? () => editImageAsset(asset) : undefined} key={asset.id} />)}</div>
                 {currentHistoryState.hasMore && <div className="media-history-pagination">
                   <button type="button" disabled={currentHistoryState.loadingMore} onClick={() => void loadHistory(kind)}>
                     {currentHistoryState.loadingMore && <LoaderCircle className="spin" size={14} />}
@@ -841,16 +1009,54 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
         locale={locale}
         previewAssets={previewableAssets}
         onNavigate={(nextAsset) => setPreviewAsset(nextAsset)}
+        onEdit={(asset) => {
+          setPreviewAsset(null);
+          return editImageAsset(asset);
+        }}
         onClose={() => setPreviewAsset(null)}
+      />}
+      {active && imageEditorOpen && imageEditSource && <ConstellationCanvasEditor
+        source={imageEditSource}
+        title={tr("图片编辑画板", "Image editing canvas")}
+        saveLabel={tr("应用到图片编辑", "Apply to image edit")}
+        onClose={() => setImageEditorOpen(false)}
+        onSave={(image, mask, meta) => void applyCanvasEdit(image, mask, meta)}
       />}
     </main>
   );
 }
 
-export function MediaAssetCard({ asset, locale, onDelete, onPreview, onReuse }: { asset: StudioMediaAsset; locale: string; onDelete?: () => void; onPreview?: () => void; onReuse?: () => Promise<void> | void }) {
+function MediaImageEditSource({ attachment, onOpen, onRemove }: { attachment: ImageAttachment; onOpen: () => void; onRemove: () => void }) {
+  const [url, setUrl] = useState<string>();
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let disposed = false;
+    setUrl(undefined);
+    setLoading(true);
+    void previewAttachment(attachment).then((preview) => {
+      if (!disposed && preview.kind === "image" && preview.dataBase64) {
+        setUrl(`data:${preview.mimeType};base64,${preview.dataBase64}`);
+      }
+    }).catch(() => undefined).finally(() => {
+      if (!disposed) setLoading(false);
+    });
+    return () => { disposed = true; };
+  }, [attachment.id]);
+  return <div className="media-image-edit-source-card">
+    <button type="button" className="media-image-edit-thumbnail" onClick={onOpen} title={tr("打开标注画板", "Open annotation canvas")}>
+      {url ? <img src={url} alt={attachment.name} /> : loading ? <LoaderCircle className="spin" size={18} /> : <Image size={19} />}
+      <span><Brush size={11} />{tr("编辑", "Edit")}</span>
+    </button>
+    <div><strong title={attachment.name}>{attachment.name}</strong><small>{attachment.mimeType.replace("image/", "").toUpperCase()} · {formatAttachmentBytes(attachment.sizeBytes)}</small></div>
+    <button type="button" onClick={onRemove} aria-label={tr("移除编辑源图", "Remove edit source")} title={tr("移除编辑源图", "Remove edit source")}><X size={13} /></button>
+  </div>;
+}
+
+export function MediaAssetCard({ asset, locale, onDelete, onPreview, onReuse, onEdit }: { asset: StudioMediaAsset; locale: string; onDelete?: () => void; onPreview?: () => void; onReuse?: () => Promise<void> | void; onEdit?: () => Promise<void> | void }) {
   const url = mediaAssetUrl(asset);
   const [exporting, setExporting] = useState(false);
   const [reusing, setReusing] = useState(false);
+  const [editing, setEditing] = useState(false);
   const [promptExpanded, setPromptExpanded] = useState(false);
   const [promptCopyStatus, setPromptCopyStatus] = useState<"idle" | "copied" | "error">("idle");
   const [exportFeedback, setExportFeedback] = useState<{ error: boolean; text: string } | null>(null);
@@ -858,6 +1064,7 @@ export function MediaAssetCard({ asset, locale, onDelete, onPreview, onReuse }: 
   const canExport = asset.status === "completed" && Boolean(asset.filePath && asset.fileName);
   const canPreview = asset.status === "completed" && asset.kind === "image" && Boolean(url && onPreview);
   const canReuse = asset.status === "completed" && asset.kind === "image" && Boolean(onReuse);
+  const canEdit = asset.status === "completed" && asset.kind === "image" && Boolean(onEdit);
   const canExpandPrompt = asset.prompt.trim().length > 42;
   const previewRatio = asset.kind === "video" ? videoRatio ?? mediaAssetAspectRatio(asset) ?? 16 / 9 : 4 / 3;
 
@@ -899,8 +1106,18 @@ export function MediaAssetCard({ asset, locale, onDelete, onPreview, onReuse }: 
     }
   };
 
+  const editAsset = async () => {
+    if (!canEdit || !onEdit || editing) return;
+    setEditing(true);
+    try {
+      await onEdit();
+    } finally {
+      setEditing(false);
+    }
+  };
+
   return (
-    <article className={`media-asset-card kind-${asset.kind} status-${asset.status} ${canExport || canReuse || onDelete ? "has-actions" : ""}`}>
+    <article className={`media-asset-card kind-${asset.kind} status-${asset.status} ${canExport || canReuse || canEdit || onDelete ? "has-actions" : ""}`}>
       <div className="media-preview" style={{ aspectRatio: previewRatio }}>
         {asset.status === "completed" && url && asset.kind === "image" && (canPreview ? (
           <button className="media-preview-trigger" type="button" onClick={onPreview} aria-label={tr("打开大图预览", "Open large image preview")}>
@@ -937,7 +1154,8 @@ export function MediaAssetCard({ asset, locale, onDelete, onPreview, onReuse }: 
         {asset.error && <em title={asset.error}>{mediaErrorSummary(asset.error)}</em>}
         {exportFeedback && <em className={exportFeedback.error ? "media-export-error" : "media-export-success"} title={exportFeedback.text}>{exportFeedback.error ? <CircleAlert size={11} /> : <Check size={11} />}{exportFeedback.text}</em>}
       </div>
-      {(canExport || canReuse || onDelete) && <div className="media-asset-actions">
+      {(canExport || canReuse || canEdit || onDelete) && <div className="media-asset-actions">
+        {canEdit && <button className="media-edit-asset" disabled={editing} onClick={() => void editAsset()} title={tr("编辑此图", "Edit this image")} aria-label={tr("编辑此图", "Edit this image")}>{editing ? <LoaderCircle className="spin" size={13} /> : <Brush size={13} />}</button>}
         {canReuse && <button className="media-reuse-asset" disabled={reusing} onClick={() => void reuseAsset()} title={tr("复用图片与参数", "Reuse image and parameters")} aria-label={tr("复用图片与参数", "Reuse image and parameters")}>{reusing ? <LoaderCircle className="spin" size={13} /> : <RefreshCw size={13} />}</button>}
         {canExport && <button className="media-export-asset" disabled={exporting} onClick={() => void exportAsset()} title={tr("另存为", "Save as")} aria-label={tr("另存为", "Save as")}>{exporting ? <LoaderCircle className="spin" size={13} /> : <Download size={13} />}</button>}
         {onDelete && <button className="media-delete-asset" onClick={onDelete} title={tr("删除作品", "Delete creation")} aria-label={tr("删除作品", "Delete creation")}><Trash2 size={13} /></button>}
@@ -946,17 +1164,19 @@ export function MediaAssetCard({ asset, locale, onDelete, onPreview, onReuse }: 
   );
 }
 
-function MediaImagePreview({
+export function MediaImagePreview({
   asset,
   locale,
   previewAssets,
   onNavigate,
+  onEdit,
   onClose,
 }: {
   asset: MediaAsset;
   locale: string;
   previewAssets: MediaAsset[];
   onNavigate: (asset: MediaAsset) => void;
+  onEdit?: (asset: MediaAsset) => Promise<void> | void;
   onClose: () => void;
 }) {
   const url = mediaAssetUrl(asset);
@@ -1216,6 +1436,13 @@ function MediaImagePreview({
             <p title={asset.prompt}>{asset.prompt}</p>
           </div>
           <div className="media-image-lightbox-actions">
+            {onEdit && asset.filePath && <button
+              className="media-image-lightbox-edit"
+              type="button"
+              onClick={() => void onEdit(asset)}
+              aria-label={tr("编辑此图", "Edit this image")}
+              title={tr("编辑此图", "Edit this image")}
+            ><Brush size={17} /></button>}
             <button
               className={`media-image-lightbox-download${exportError ? " error" : ""}`}
               type="button"
@@ -1408,8 +1635,39 @@ function videoReferenceRequirement(mode: VideoGenerationMode) {
   return tr("请先添加一张首帧图", "Add one first-frame image first");
 }
 
-function mediaDropTitle(kind: MediaKind, videoMode: VideoGenerationMode) {
-  if (kind !== "video") return tr("拖入即可作为参考图", "Drop to add image references");
+function imageModeDescription(mode: StudioImageMode) {
+  if (mode === "edit") return tr("修改整张图片，可先在画板添加标签", "Modify the whole image and optionally add labels in the canvas");
+  if (mode === "outpaint") return tr("在画板扩展边界后，让模型无缝补全新区域", "Expand the canvas and let the model seamlessly fill the new area");
+  if (mode === "inpaint") return tr("在画板涂红需要修改的区域，再进行精准重绘", "Paint the area to change in red, then regenerate it precisely");
+  return tr("从提示词生成新图片，参考图为可选", "Generate a new image from a prompt, with optional references");
+}
+
+function studioImagePrompt(prompt: string, mode: StudioImageMode, meta?: CanvasEditorSaveMeta) {
+  const instructions: string[] = [];
+  if (mode === "outpaint") {
+    instructions.push(tr("扩展画面边界并无缝补全新增区域；保持原图主体、光线、透视、色彩和材质完全一致。", "Extend the image beyond its current boundaries and seamlessly complete the new area while preserving subject, lighting, perspective, color, and material."));
+  }
+  if (meta?.labels.length) {
+    instructions.push(tr(
+      `图中的彩色标签是编辑定位提示（${meta.labels.join("、")}），请理解其指向后在最终图片中移除这些标签文字和标记。`,
+      `Colored labels in the source are editing guides (${meta.labels.join(", ")}); use their locations as guidance, then remove the label text and markers from the final image.`,
+    ));
+  }
+  return instructions.length > 0 ? `${prompt}\n\n${instructions.join("\n")}` : prompt;
+}
+
+function mediaGenerateLabel(kind: MediaKind, imageMode: StudioImageMode) {
+  if (kind !== "image" || imageMode === "generate") return tr("开始生成", "Generate");
+  if (imageMode === "outpaint") return tr("开始扩图", "Start outpainting");
+  if (imageMode === "inpaint") return tr("开始局部重绘", "Start inpainting");
+  return tr("提交图片编辑", "Submit image edit");
+}
+
+function mediaDropTitle(kind: MediaKind, videoMode: VideoGenerationMode, imageMode: StudioImageMode) {
+  if (kind === "image") return imageMode === "generate"
+    ? tr("拖入即可作为参考图", "Drop to add image references")
+    : tr("拖入图片并打开标注画板", "Drop an image and open the annotation canvas");
+  if (kind !== "video") return tr("当前模式不使用图片参考", "This mode does not use image references");
   if (videoMode === "video") return tr("拖入 MP4 作为源视频", "Drop an MP4 source video");
   if (videoMode === "reference") return tr("拖入图片作为视频参考", "Drop image references for the video");
   return tr("拖入图片作为首帧", "Drop an image as the first frame");
@@ -1452,6 +1710,12 @@ function normalizeImageBackground(value: string | undefined) {
   return value && ["auto", "transparent", "opaque"].includes(value) ? value : "auto";
 }
 
+function formatAttachmentBytes(bytes: number) {
+  if (bytes < 1_024) return `${bytes} B`;
+  if (bytes < 1_048_576) return `${(bytes / 1_024).toFixed(1)} KB`;
+  return `${(bytes / 1_048_576).toFixed(1)} MB`;
+}
+
 function mergeAssets(current: MediaAsset[], incoming: MediaAsset[]) {
   const byId = new Map(current.map((asset) => [asset.id, asset]));
   for (const asset of incoming) byId.set(asset.id, asset);
@@ -1479,7 +1743,8 @@ function pendingAssetDetail(asset: StudioMediaAsset) {
   return asset.progress === undefined ? tr("请求已发送", "Request sent") : `${asset.progress}%`;
 }
 
-function promptPlaceholder(kind: MediaKind) {
+function promptPlaceholder(kind: MediaKind, imageMode: StudioImageMode) {
+  if (kind === "image" && imageMode !== "generate") return tr("描述要修改什么，以及必须保留的主体、构图、光线与材质…", "Describe what to change and what subject, composition, lighting, and materials must remain…");
   if (kind === "image") return tr("描述主体、构图、光线、材质、风格和需要避免的元素…", "Describe subject, composition, lighting, materials, style, and exclusions…");
   if (kind === "video") return tr("描述镜头、主体动作、环境变化、摄影机运动和节奏…", "Describe shot, subject motion, environment changes, camera movement, and timing…");
   return tr("输入要朗读的文本…", "Enter the exact text to speak…");
