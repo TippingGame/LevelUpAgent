@@ -12,3 +12,18 @@ If future changes copy a substantial upstream source fragment instead of
 reimplementing the interface, keep the upstream copyright and license text
 next to that file and add a prominent modification notice as required by the
 applicable license.
+
+## Text encoding dependency
+
+- [`encoding_rs` 0.8.35](https://github.com/hsivonen/encoding_rs):
+  `(Apache-2.0 OR MIT) AND BSD-3-Clause`, Copyright © Mozilla contributors.
+  LevelUpAgent uses its public codec tables and
+  strict encode/decode APIs for GBK, GB18030, Big5, Shift-JIS, and Windows-1252
+  workspace boundaries. No upstream detector or application code is copied; the
+  detection policy and file-editing layer are a clean-room implementation in
+  [`src/text_encoding.rs`](src/text_encoding.rs).
+- [`chardetng` 1.0.0](https://github.com/hsivonen/chardetng): MIT OR Apache-2.0,
+  Copyright © Mozilla contributors. LevelUpAgent uses the public
+  `EncodingDetector` API as a secondary signal for no-BOM legacy text. No
+  upstream source is copied; ambiguous short inputs are rejected and require an
+  explicit encoding hint.

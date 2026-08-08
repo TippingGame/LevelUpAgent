@@ -255,9 +255,11 @@ const RISKY_COMMAND_PATTERNS = [
   /\b(format|diskpart|shutdown|restart-computer|stop-computer|reboot|halt)\b/i,
   /\b(stop-process|taskkill|kill|pkill)\b/i,
   /\bgit\s+(reset\s+--hard|clean\b|restore\b|checkout\s+--|push\b|fetch\b|pull\b|clone\b|remote\b|submodule\b|rebase\b)/i,
+  /\b(?:git\s+(?:apply|am|commit|merge|cherry-pick|revert|mv|rm)\b|set-content|out-file|add-content|tee-object|export-csv|copy-item|move-item|rename-item|new-item)\b/i,
   /\b(sudo|runas|invoke-expression|iex|start-process|reg(?:\.exe)?\s+(?:add|delete)|sc(?:\.exe)?\s+(?:create|delete|stop)|setx)\b/i,
   /\b(curl|wget|invoke-webrequest|invoke-restmethod|start-bitstransfer|certutil|ssh|scp|ftp|gh\b|az\b|aws\b|gcloud\b)/i,
   /\b(python|python3|node|ruby|perl|powershell|pwsh|cmd|bash|sh)\b[^\r\n]*(?:\s-c\b|\s-e\b|\/c\b|\/command\b)/i,
+  /\b(?:sed\s+-i|perl\s+-i|rustfmt|cargo\s+fmt|dotnet\s+format|clang-format\s+-i)\b/i,
   /\b(npm|pnpm|yarn|bun|pip|pipx|cargo|gem|composer)\s+(install|add|remove|uninstall|publish|update)\b/i,
   /\b(docker|podman)\s+(system\s+prune|rm\b|rmi\b|volume\s+rm)\b/i,
   /(?:^|\s)(?:[a-z]:\\|\\\\|\/(?:etc|usr|var|home|root)\/|~\/)/i,
@@ -378,13 +380,63 @@ function normalizeHatchProviderToolCalls(
 
 function commandNeedsAgentApproval(call: ToolCall) {
   const command = typeof call.arguments.command === "string" ? call.arguments.command.trim() : "";
-  return !command || RISKY_COMMAND_PATTERNS.some((pattern) => pattern.test(command));
+  return !command
+    || containsUnquotedRedirection(command)
+    || containsIndirectWriterInvocation(command)
+    || RISKY_COMMAND_PATTERNS.some((pattern) => pattern.test(command));
+}
+
+function containsIndirectWriterInvocation(command: string) {
+  return command
+    .split(/[|;&\r\n{}]/)
+    .some((segment) => {
+      const tokens = segment.trimStart().replace(/^\(+/, "").split(/\s+/);
+      const executable = (tokens[0]?.toLowerCase() ?? "")
+        .replace(/^['"]|['"]$/g, "")
+        .split(/[\\/]/)
+        .pop() ?? "";
+      if (/^(?:tee|sc|ac|powershell(?:\.exe)?|pwsh(?:\.exe)?|cmd(?:\.exe)?|bash|sh|zsh|fish)$/.test(executable)) {
+        return true;
+      }
+      if (!/^(?:python3?|py|node|ruby|perl)(?:\.exe)?$/.test(executable)) return false;
+      return tokens.slice(1).some((argument) => (
+        /^(?:-|-[ce].*|--eval|--print)$/.test(argument)
+        || (/^perl(?:\.exe)?$/.test(executable) && /^-\S*i\S*$/.test(argument))
+      ));
+    });
+}
+
+function containsUnquotedRedirection(command: string) {
+  let quote: "single" | "double" | null = null;
+  let escaped = false;
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (quote === null) {
+      if (character === "'") quote = "single";
+      else if (character === '"') quote = "double";
+      else if (character === ">" || character === "<") return true;
+    } else if (quote === "single") {
+      if (character === "'") {
+        if (command[index + 1] === "'") index += 1;
+        else quote = null;
+      }
+    } else if (character === '"') {
+      quote = null;
+    } else if (character === "`") {
+      escaped = true;
+    }
+  }
+  return false;
 }
 
 function toolNeedsApproval(call: ToolCall, level: PermissionLevel) {
   if (READ_ONLY_TOOLS.has(call.name) || level === "full") return false;
   if (level === "request") return true;
-  if (call.name === "write_file" || call.name === "delegate_task") return false;
+  if (call.name === "write_file" || call.name === "edit_file" || call.name === "delegate_task") return false;
   if (call.name === "run_command") return commandNeedsAgentApproval(call);
   return true;
 }
@@ -6767,6 +6819,7 @@ function toolIcon(call: ToolCall) {
   if (call.name.startsWith("mcp_")) return <Network size={15} />;
   if (call.name === "run_command") return <TerminalSquare size={15} />;
   if (call.name === "write_file") return <FileCode2 size={15} />;
+  if (call.name === "edit_file") return <Pencil size={15} />;
   if (call.name === "delete_file") return <Trash2 size={15} />;
   if (call.name === "read_file") return <Code2 size={15} />;
   return <Folder size={15} />;
@@ -6778,6 +6831,7 @@ function toolLabel(call: ToolCall) {
     read_file: tr("读取文件", "Read file"),
     search_files: tr("搜索项目", "Search project"),
     write_file: tr("写入文件", "Write file"),
+    edit_file: tr("编辑文件（保留编码）", "Edit file (preserve encoding)"),
     delete_file: tr("删除文件", "Delete file"),
     run_command: tr("运行命令", "Run command"),
     read_skill: tr("读取 Skill", "Read Skill"),

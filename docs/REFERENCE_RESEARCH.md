@@ -10,10 +10,35 @@
 | claude-code-best/claude-code | `75e2b3b` | Agent 循环、Goal、工具与工作流 | 仅供学习研究，未提供可复用项目许可证 |
 | farion1231/cc-switch | `f39d463` | 多供应商配置、备份、代理与用量 | MIT |
 | BigPizzaV3/CodexPlusPlus | `b9393b1` | Codex 中转注入、配置同步与诊断 | AGPL-3.0-only |
+| openai/codex | `572954683910` | `apply_patch` 的精确上下文编辑与失败边界 | Apache-2.0 |
+| Anthropic Text Editor | 在线规范 | `old_string`/`new_string` 精确替换、唯一匹配和编辑前校验 | 官方工具规范 |
+| Mozilla `encoding_rs` | `0.8.35` | 常见中文/东亚代码页的严格编解码 | `(Apache-2.0 OR MIT) AND BSD-3-Clause` |
+| Mozilla `chardetng` | `1.0.0` | 无 BOM 旧编码的第二路统计检测信号 | MIT OR Apache-2.0 |
 | LevelUpAPI | 本地 `main` | 实际网关协议、鉴权和模型能力 | 本地项目约束 |
 
 LevelUpAgent 采用 clean-room 实现：参考产品边界、公开协议和交互模式，不复制受限项目源码，
 也不链接 CodexPlusPlus 的 AGPL 代码。
+
+## 编码与文件编辑方案
+
+这次乱码修复组合了四个公开、可验证的设计边界：
+
+- [OpenAI Codex `apply-patch`](https://github.com/openai/codex/tree/main/codex-rs/apply-patch)
+  证明代码 Agent 应发送精确上下文补丁，而不是让模型重写整份文件。
+- [Anthropic Text Editor tool](https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/text-editor-tool)
+  使用唯一 `old_string`/`new_string` 替换，并在多匹配时要求模型补充上下文或明确 `replace_all`。
+- [Mozilla `encoding_rs`](https://github.com/hsivonen/encoding_rs) 提供经过长期维护的
+  编码表和“无法表示字符就报错”的 API；LevelUpAgent 在其之上实现 BOM、换行、二进制拒绝、
+  原子写入与工作区路径约束。
+- [Mozilla `chardetng`](https://github.com/hsivonen/chardetng) 用于无 BOM 旧编码的辅助判断。
+  它只提供第二路检测信号；短文本仍会报告歧义，避免把 GBK、Big5 和 Shift-JIS 的合法
+  字节静默解释成错误中文。复审还覆盖了混合中日文样本：检测结果与解码脚本冲突时同样要求
+  显式编码，并禁止 `encoding` 提示把含非 ASCII 字符且已经有效的 UTF-8 文件重新解释成旧代码页。
+  纯 ASCII 文件是安全例外：各受支持旧代码页的已有字节与字符相同，允许提示项目约定，以免首次新增中文时默认改成 UTF-8。
+
+这些项目的代码没有直接复制进仓库；实现位于 `src-tauri/src/text_encoding.rs`、
+`src-tauri/src/tools.rs` 和 Git/sub-Agent 边界，第三方归属和许可证见
+[`THIRD_PARTY_NOTICES.md`](../src-tauri/THIRD_PARTY_NOTICES.md)。
 
 ## Anybox
 

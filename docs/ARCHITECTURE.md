@@ -17,8 +17,9 @@ Rust host |-- OS credential vault
           |     `-- Gemini GenerateContent
           |-- workspace guard
           |-- local tools
-          |     |-- list/read/search
-          |     |-- write file
+          |     |-- list/read/search (encoding-aware text boundary)
+          |     |-- edit file (exact replacement, format-preserving)
+          |     |-- write file (new/full replacement, format-preserving)
           |     `-- run command
           |-- MCP manager (rmcp)
           |     |-- stdio child process
@@ -98,9 +99,10 @@ AI 写作使用写作空间独立选择的文字模型路由，并复用既有�
 | 工具 | 默认策略 | 限制 |
 | --- | --- | --- |
 | `list_files` | 自动 | 忽略依赖、构建和 Git 目录，最多 400 项 |
-| `read_file` | 自动 | UTF-8，单文件最多 256 KiB |
-| `search_files` | 自动 | 最多 100 条结果 |
-| `write_file` | 询问 | 只能写入已选择工作区 |
+| `read_file` | 自动 | 自动识别 UTF-8/UTF-16/GBK/GB18030/Big5/Shift-JIS/Windows-1252；模型侧统一 LF；单文件最多 256 KiB |
+| `search_files` | 自动 | 使用同一编码边界搜索；短旧编码可传 `encoding`；最多 100 条结果 |
+| `write_file` | 询问 | 新文件默认为无 BOM UTF-8/LF；已有文本文件保留检测到的编码、BOM 和主导换行风格；写入最多 1 MiB |
+| `edit_file` | 询问 | 精确 `old_string` → `new_string` 替换；默认只接受唯一匹配，保留编码、BOM 和主导换行风格；同目录原子替换 |
 | `delete_file` | 询问 | 只删除工作区内非符号链接普通文件 |
 | `run_command` | 询问 | 工作目录固定为工作区，120 秒超时 |
 | `delegate_task` | 询问 | 干净仓库的隔离工作树，最多 8 个子回合，无 shell |
@@ -110,6 +112,34 @@ AI 写作使用写作空间独立选择的文字模型路由，并复用既有�
 | `get_goal` / `update_goal` | 自动 | 只读状态或本地状态迁移，不扩大工作区权限 |
 
 规划模式只向模型公布前三个只读工具。问答模式不公布任何工具。
+
+## 文件编码与编辑边界
+
+工作区工具把“模型传输文本”和“磁盘字节”分成两个明确阶段。读取时，带 BOM 的 UTF-8/UTF-16
+按 BOM 解码；没有 BOM 时先严格尝试 UTF-8，再使用 `encoding_rs` 编解码和 Mozilla `chardetng` 辅助判断
+常见中文/东亚 Windows 编码（GBK、GB18030、Big5、Shift-JIS，最后才是 Windows-1252）。读取结果只把换行规范化为 LF 提供给模型，避免模型因为
+CRLF 复制差异而找不到编辑上下文。
+
+已有文件的 `edit_file` 和 `write_file` 会使用原文件的编码与 BOM 重新编码，并恢复检测到的主导换行
+风格；如果 `write_file` 的规范化内容没有变化则直接保持原始字节不写回，真正写入前还会复核整份原始字节没有被并发编辑。新文件默认使用 UTF-8（无 BOM、LF；显式选择 UTF-16 时写入对应 BOM）；零字节已有文件没有可保留的编码信号，显式选择 UTF-16 后同样补写对应 BOM。目标编码无法表示新字符时直接报错，二进制、UTF-32、
+损坏或无法可靠解码的文件拒绝作为文本编辑，因此不会用 `?` 或替换字符静默破坏中文。疑似二进制的
+文件也会被拒绝。`edit_file`
+要求精确的非空 `old_string`，默认必须唯一匹配，并在写入前重新读取字节确认文件没有被编辑器或其他
+Agent 改动；内容先写入同目录临时文件、刷盘后原子替换，并尽量保留原权限。
+
+无 BOM 的短旧编码文件在信息论上可能无法唯一判断。`read_file`、`write_file` 和 `edit_file` 都接受
+可选的 `encoding`（`utf-8`、`utf-16le`、`utf-16be`、`gbk`/`gb2312`、`gb18030`、`big5`、`shift-jis`、
+`windows-1252`）作为严格覆盖；覆盖与 BOM 冲突时拒绝操作，也不能把含非 ASCII 字符且已经有效的 UTF-8 文本重新解释为旧代码页。
+纯 ASCII 字节在所支持的旧代码页中含义一致，因此已知工程采用 GBK 等旧编码时允许提示其项目约定，确保首次新增中文仍按该编码落盘。
+GBK/Big5 中混入日文假名、只有汉字的 Shift-JIS，以及缺少明显交错 NUL 特征的无 BOM UTF-16 都会保守地要求
+显式编码，不会用统计猜测直接进入写路径。
+
+PowerShell、Python 和本地命令输出统一请求 UTF-8；如果命令仍返回旧代码页，主机沿用同一编码探测
+边界解码。Git 快照和 diff 保留命令返回的原始字节，只在展示边界按当前文件编码解码；隔离子 Agent
+补丁也以原始 `Vec<u8>` 暂存并直接交给 `git apply`，不会先经过替换字符。文件附件、Skill 和布局 JSON
+仍遵循各自的 UTF-8 契约，不与工作区代码文件的兼容范围混用。`agent` 权限下，shell 重定向、嵌套 shell、
+`Set-Content`/`Out-File` 及其常见写入别名、`git apply`、格式化器等明显可能改写文件的命令会转为需要批准，避免绕过上述
+编码边界；显式批准或 `full` 权限仍由用户承担命令本身的编码责任。
 
 ## 工作区边界
 
@@ -229,8 +259,8 @@ Goal 与普通会话分离持久化，状态为 Active、Paused、Auditing、Com
 固定为 `subagent`：只公布浏览、读取、搜索、写入和删除普通文件工具，不公布 shell、MCP、Skill、
 Goal 或委派工具。文件操作仍受隔离工作树 canonical path 约束。
 
-子 Agent 结束后，Rust 以 `git add -N` 加 `git diff --binary` 捕获新增、修改和删除文件，补丁超过
-120,000 字符会拒绝并要求缩小任务。临时 worktree 随后立即移除；主工作树尚未改变。完整补丁作为
+子 Agent 结束后，Rust 以 `git add -N` 加 `git diff --binary` 捕获新增、修改和删除文件，原始补丁超过
+120,000 字节会拒绝并要求缩小任务。临时 worktree 随后立即移除；主工作树尚未改变。完整补丁作为
 可展开工具结果交给用户和父 Agent 审查。只有单独的 `apply_subagent_patch` 调用再次获得用户批准，
 并确认仓库根、干净状态及 HEAD 与委派时一致后，才使用 `git apply --binary` 写入未暂存变更；任何
 冲突均保持待审补丁并拒绝部分应用。待审补丁只在内存保留一小时，最多 32 份。

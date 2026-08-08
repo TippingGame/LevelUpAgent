@@ -396,7 +396,7 @@ manifest 另外记录 Provider/model、capability 来源、预算各项、已选
 | Permission | 自动允许 | 必须批准 |
 | --- | --- | --- |
 | `request` | 只读、无外部副作用工具 | 写入、删除、命令、MCP、媒体、委派、patch 等其余调用 |
-| `agent` | 只读、受限 `write_file`、隔离 worktree 中的 `delegate_task` | 删除、shell、外部服务、付费媒体、patch 和未列入 allowlist 的调用 |
+| `agent` | 只读、受限 `edit_file`/`write_file`、隔离 worktree 中的 `delegate_task` | 删除、shell、外部服务、付费媒体、patch 和未列入 allowlist 的调用 |
 | `full` | 通过硬安全 gate 后的已暴露工具 | 仅产品定义的不可自动批准动作 |
 
 `full` 仍不能绕过 canonical workspace、schema、大小/超时限制、凭据隔离、Provider capability、Goal 审计或 subagent patch 完整性检查。新安装、缺失值和非法值均使用 `request`；升级后已有 `full` 需要一次显式重新确认。
@@ -818,7 +818,7 @@ pnpm verify:levelupapi
 
 - capability catalog 的发布来源、版本策略和缓存失效周期。
 - `full` 权限重新确认的作用域是单次、thread、workspace 还是固定期限；安全默认建议 workspace + 有效期。
-- 哪些 `write_file` 参数组合可在 `agent` 自动允许，以及文件大小和路径 glob 上限。
+- 哪些 `edit_file`/`write_file` 参数组合可在 `agent` 自动允许，以及文件大小和路径 glob 上限。
 - JSONL/HTML 导出格式是否兼容外部工具，或只承诺 LevelUpAgent 自身 round trip。
 - LLM compaction 是否复用主 Provider、使用独立 profile，或保持本地确定性策略。
 - artifact、event、unknown tool record 和 memory 的默认保留期限与用户删除入口。

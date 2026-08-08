@@ -15,6 +15,7 @@ mod pet;
 mod process;
 mod skill;
 mod subagent;
+mod text_encoding;
 mod theme;
 mod tools;
 
@@ -414,7 +415,7 @@ fn attach_subagent_tools(request: &mut AgentTurnRequest) {
     request.available_tools.extend([
         AgentToolDefinition {
             name: "delegate_task".to_owned(),
-            description: "Delegate one bounded implementation task to a child Agent in a temporary isolated Git worktree. The child may read, search, and write UTF-8 files but cannot run commands. The main worktree remains unchanged until a separate apply_subagent_patch approval.".to_owned(),
+            description: "Delegate one bounded implementation task to a child Agent in a temporary isolated Git worktree. The child may read, search, and use encoding-aware file edits but cannot run commands. The main worktree remains unchanged until a separate apply_subagent_patch approval.".to_owned(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -3543,7 +3544,7 @@ where
     let mut history = vec![AgentMessage {
         role: "user".to_owned(),
         content: format!(
-            "Work as a bounded child Agent inside an isolated Git worktree. Inspect the current repository state, implement the task with focused UTF-8 file edits, and finish with a concise summary of changed files and unresolved validation. You cannot run commands; do not claim tests ran. Stay within the optional scope when provided.\n\nTask:\n{}\n\nScope:\n{}",
+            "Work as a bounded child Agent inside an isolated Git worktree. Inspect the current repository state, implement the task with focused encoding-aware file edits (prefer edit_file for existing files), and finish with a concise summary of changed files and unresolved validation. You cannot run commands; do not claim tests ran. Stay within the optional scope when provided.\n\nTask:\n{}\n\nScope:\n{}",
             delegated.task,
             delegated
                 .scope
@@ -3604,7 +3605,12 @@ where
         for call in tool_calls {
             let result = if matches!(
                 call.name.as_str(),
-                "list_files" | "read_file" | "search_files" | "write_file" | "delete_file"
+                "list_files"
+                    | "read_file"
+                    | "search_files"
+                    | "write_file"
+                    | "edit_file"
+                    | "delete_file"
             ) {
                 tools::execute(ToolExecutionRequest {
                     call_id: Some(call.id.clone()),
@@ -3715,9 +3721,18 @@ async fn delegate_task(
     };
     let captured = subagent::capture_patch(&worktree).await;
     let cleanup = subagent::cleanup_worktree(&worktree).await;
-    let (patch, stat) = captured?;
-    cleanup?;
-    if patch.trim().is_empty() {
+    let (patch, stat) = match (captured, cleanup) {
+        (Ok(captured), Ok(())) => captured,
+        (Err(error), Ok(())) => return Err(error),
+        (Ok(_), Err(error)) => return Err(error),
+        (Err(capture_error), Err(cleanup_error)) => {
+            return Err(format!(
+                "{capture_error}; cleanup also failed: {cleanup_error}"
+            ));
+        }
+    };
+    let patch_preview = text_encoding::decode_command_output(&patch);
+    if patch.is_empty() {
         return Ok(format!(
             "Sub-Agent completed in isolation and made no file changes.\n\nSummary:\n{summary}"
         ));
@@ -3737,7 +3752,7 @@ async fn delegate_task(
         } else {
             stat.trim()
         },
-        patch,
+        patch_preview,
     ))
 }
 

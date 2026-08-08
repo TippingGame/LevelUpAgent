@@ -12,7 +12,7 @@ use crate::models::{
     GatewayDiagnostics, ImageAttachment, ModelInfo, ProviderProfile, ProviderProtocol, ToolCall,
 };
 
-const SYSTEM_PROMPT: &str = "You are LevelUpAgent, a precise local development agent. Work only inside the selected workspace. Inspect before editing, keep changes focused, explain consequential decisions, and never claim a tool action succeeded until its result is returned. Use tools whenever local evidence is needed.";
+const SYSTEM_PROMPT: &str = "You are LevelUpAgent, a precise local development agent. Work only inside the selected workspace. Inspect before editing, keep changes focused, explain consequential decisions, and never claim a tool action succeeded until its result is returned. Use tools whenever local evidence is needed. For existing text/code files, prefer edit_file with a small exact old_string/new_string change; it preserves the file's detected encoding, BOM, and line endings. If a legacy file is ambiguous, including a pure-ASCII file in a project known to use a legacy code page, pass its explicit encoding (utf-8, utf-16le, utf-16be, gbk/gb2312, gb18030, big5, shift-jis, or windows-1252). Use write_file for new files or deliberate full replacements only, and do not use shell commands to rewrite text files when a file tool can do the job.";
 
 const CONTEXT_MAX_CHARS: usize = 240_000;
 const CONTEXT_MAX_MESSAGES: usize = 160;
@@ -1971,23 +1971,49 @@ fn tool_specs() -> Vec<(&'static str, &'static str, Value)> {
         ),
         (
             "read_file",
-            "Read a UTF-8 text file from the workspace.",
+            "Read a text file with automatic UTF-8/UTF-16/GBK/GB18030/Big5/Shift-JIS/Windows-1252 decoding. Line endings are normalized to LF for reliable edit_file matching. Pass encoding (gbk or gb2312 are equivalent aliases) when a legacy file is ambiguous, including an ASCII-only file in a known legacy project.",
             json!({
-                "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"]
+                "type": "object", "properties": {
+                    "path": { "type": "string" },
+                    "encoding": { "type": "string", "enum": ["utf-8", "utf-16le", "utf-16be", "gbk", "gb2312", "gb18030", "big5", "shift-jis", "windows-1252"] }
+                }, "required": ["path"]
             }),
         ),
         (
             "search_files",
-            "Search workspace file names and contents.",
+            "Search workspace file names and contents with the same encoding-aware boundary as read_file. Pass encoding (gbk or gb2312 are equivalent aliases) when a short legacy file is ambiguous.",
             json!({
-                "type": "object", "properties": { "query": { "type": "string" }, "glob": { "type": "string" } }, "required": ["query"]
+                "type": "object", "properties": {
+                    "query": { "type": "string" },
+                    "glob": { "type": "string" },
+                    "encoding": { "type": "string", "enum": ["utf-8", "utf-16le", "utf-16be", "gbk", "gb2312", "gb18030", "big5", "shift-jis", "windows-1252"] }
+                }, "required": ["query"]
             }),
         ),
         (
             "write_file",
-            "Create or replace a UTF-8 text file in the workspace, subject to the selected permission level.",
+            "Create a new text file or deliberately replace a whole file. Existing files keep their detected encoding (UTF-8/UTF-16/GBK/GB18030/Big5/Shift-JIS/Windows-1252), BOM, and line-ending style; prefer edit_file for ordinary code changes. Pass encoding (gbk or gb2312) for an ambiguous legacy file, including ASCII-only content in a known legacy project.",
             json!({
-                "type": "object", "properties": { "path": { "type": "string" }, "content": { "type": "string" } }, "required": ["path", "content"]
+                "type": "object", "properties": {
+                    "path": { "type": "string" },
+                    "content": { "type": "string" },
+                    "encoding": { "type": "string", "enum": ["utf-8", "utf-16le", "utf-16be", "gbk", "gb2312", "gb18030", "big5", "shift-jis", "windows-1252"] }
+                }, "required": ["path", "content"]
+            }),
+        ),
+        (
+            "edit_file",
+            "Safely edit an existing text/code file by replacing an exact non-empty old_string with new_string. The host decodes the original bytes and writes them back in the same encoding, BOM, and line-ending style; it rejects ambiguous matches unless replace_all is true. Pass encoding (gbk or gb2312) when a legacy file is ambiguous, including ASCII-only content in a known legacy project.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "old_string": { "type": "string", "description": "Exact existing text; include enough surrounding context to match once" },
+                    "new_string": { "type": "string" },
+                    "encoding": { "type": "string", "enum": ["utf-8", "utf-16le", "utf-16be", "gbk", "gb2312", "gb18030", "big5", "shift-jis", "windows-1252"] },
+                    "replace_all": { "type": "boolean", "default": false }
+                },
+                "required": ["path", "old_string", "new_string"]
             }),
         ),
         (
@@ -1999,7 +2025,7 @@ fn tool_specs() -> Vec<(&'static str, &'static str, Value)> {
         ),
         (
             "run_command",
-            "Run a shell command in the workspace, subject to the selected permission level.",
+            "Run a shell command in the workspace, subject to the selected permission level. For text/code changes use edit_file or write_file instead: shell redirection and editor defaults can change a file's encoding or line endings.",
             json!({
                 "type": "object", "properties": { "command": { "type": "string" } }, "required": ["command"]
             }),
@@ -2025,7 +2051,12 @@ fn allowed_tool_specs(
                 } else if mode == "subagent" {
                     matches!(
                         *name,
-                        "list_files" | "read_file" | "search_files" | "write_file" | "delete_file"
+                        "list_files"
+                            | "read_file"
+                            | "search_files"
+                            | "write_file"
+                            | "edit_file"
+                            | "delete_file"
                     )
                 } else {
                     true
@@ -2514,11 +2545,9 @@ mod tests {
     fn plan_mode_only_exposes_read_tools() {
         let tools = allowed_tool_specs("plan", true, false, &[]);
         assert_eq!(tools.len(), 3);
-        assert!(
-            tools
-                .iter()
-                .all(|(name, _, _)| !matches!(name.as_str(), "write_file" | "run_command"))
-        );
+        assert!(tools.iter().all(|(name, _, _)| {
+            !matches!(name.as_str(), "write_file" | "edit_file" | "run_command")
+        }));
     }
 
     #[test]
@@ -2528,6 +2557,7 @@ mod tests {
             .map(|item| item.0)
             .collect::<Vec<_>>();
         assert!(tools.contains(&"write_file".to_owned()));
+        assert!(tools.contains(&"edit_file".to_owned()));
         assert!(tools.contains(&"delete_file".to_owned()));
         assert!(!tools.contains(&"run_command".to_owned()));
     }

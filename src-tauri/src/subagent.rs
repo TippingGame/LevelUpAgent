@@ -8,8 +8,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::process::hide_console_window;
+use crate::text_encoding;
 
-const MAX_PATCH_CHARS: usize = 120_000;
+const MAX_PATCH_BYTES: usize = 120_000;
 const MAX_PENDING_PATCHES: usize = 32;
 const PATCH_TTL: Duration = Duration::from_secs(60 * 60);
 
@@ -18,7 +19,10 @@ pub struct PendingPatch {
     pub run_id: String,
     pub workspace: PathBuf,
     pub base_commit: String,
-    pub patch: String,
+    /// Raw bytes from `git diff --binary`.  Keeping this as bytes is required
+    /// for GBK/Big5/Shift-JIS files; a lossy UTF-8 conversion would make
+    /// `git apply` reject the patch or write U+FFFD into the source file.
+    pub patch: Vec<u8>,
     pub stat: String,
     pub summary: String,
     created_at: Instant,
@@ -98,7 +102,7 @@ pub async fn create_worktree(storage: &Path, workspace: &Path) -> Result<Isolate
     if !output.status.success() {
         return Err(format!(
             "Could not create isolated Git worktree: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            text_encoding::decode_command_output(&output.stderr).trim()
         ));
     }
     let path = std::fs::canonicalize(&path)
@@ -111,19 +115,30 @@ pub async fn create_worktree(storage: &Path, workspace: &Path) -> Result<Isolate
     })
 }
 
-pub async fn capture_patch(worktree: &IsolatedWorktree) -> Result<(String, String), String> {
+pub async fn capture_patch(worktree: &IsolatedWorktree) -> Result<(Vec<u8>, String), String> {
     git_stdout(&worktree.path, &["add", "-N", "--", "."]).await?;
     let patch = git_stdout_raw(
         &worktree.path,
-        &["diff", "--binary", "--no-ext-diff", "--", "."],
+        &[
+            "diff",
+            "--binary",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--",
+            ".",
+        ],
     )
     .await?;
-    if patch.chars().count() > MAX_PATCH_CHARS {
+    if patch.len() > MAX_PATCH_BYTES {
         return Err(format!(
-            "Sub-Agent patch exceeds {MAX_PATCH_CHARS} characters; delegate a smaller task"
+            "Sub-Agent patch exceeds {MAX_PATCH_BYTES} bytes; delegate a smaller task"
         ));
     }
-    let stat = git_stdout(&worktree.path, &["diff", "--stat", "--", "."]).await?;
+    let stat = git_stdout(
+        &worktree.path,
+        &["diff", "--stat", "--no-textconv", "--", "."],
+    )
+    .await?;
     Ok((patch, stat))
 }
 
@@ -151,14 +166,14 @@ pub async fn cleanup_worktree(worktree: &IsolatedWorktree) -> Result<(), String>
     } else {
         Err(format!(
             "Could not remove isolated Git worktree: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            text_encoding::decode_command_output(&output.stderr).trim()
         ))
     }
 }
 
 pub fn pending_patch(
     worktree: &IsolatedWorktree,
-    patch: String,
+    patch: Vec<u8>,
     stat: String,
     summary: String,
 ) -> PendingPatch {
@@ -194,7 +209,7 @@ pub async fn apply_patch(pending: &PendingPatch) -> Result<String, String> {
         .stdin
         .take()
         .ok_or_else(|| "Could not open Git patch input".to_owned())?
-        .write_all(pending.patch.as_bytes())
+        .write_all(&pending.patch)
         .await
         .map_err(|error| format!("Could not write Git patch input: {error}"))?;
     let output = child
@@ -204,7 +219,7 @@ pub async fn apply_patch(pending: &PendingPatch) -> Result<String, String> {
     if !output.status.success() {
         return Err(format!(
             "Sub-Agent patch no longer applies cleanly: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            text_encoding::decode_command_output(&output.stderr).trim()
         ));
     }
     Ok(pending.stat.clone())
@@ -234,10 +249,14 @@ async fn ensure_clean_repository(workspace: &Path) -> Result<PathBuf, String> {
 }
 
 async fn git_stdout(cwd: &Path, args: &[&str]) -> Result<String, String> {
-    Ok(git_stdout_raw(cwd, args).await?.trim().to_owned())
+    Ok(
+        text_encoding::decode_command_output(&git_stdout_raw(cwd, args).await?)
+            .trim()
+            .to_owned(),
+    )
 }
 
-async fn git_stdout_raw(cwd: &Path, args: &[&str]) -> Result<String, String> {
+async fn git_stdout_raw(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     let mut command = Command::new("git");
     command.current_dir(cwd).args(args);
     hide_console_window(&mut command);
@@ -255,10 +274,10 @@ async fn git_stdout_raw(cwd: &Path, args: &[&str]) -> Result<String, String> {
     if !output.status.success() {
         return Err(format!(
             "Git command failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            text_encoding::decode_command_output(&output.stderr).trim()
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(output.stdout)
 }
 
 fn validate_run_id(run_id: &str) -> Result<(), String> {
@@ -283,7 +302,7 @@ mod tests {
         assert!(
             output.status.success(),
             "{}",
-            String::from_utf8_lossy(&output.stderr)
+            text_encoding::decode_command_output(&output.stderr)
         );
     }
 
@@ -306,8 +325,9 @@ mod tests {
         std::fs::write(worktree.path.join("existing.txt"), "after\n").unwrap();
         std::fs::write(worktree.path.join("new.txt"), "new file\n").unwrap();
         let (patch, stat) = capture_patch(&worktree).await.unwrap();
-        assert!(patch.contains("existing.txt"));
-        assert!(patch.contains("new.txt"));
+        let patch_text = text_encoding::decode_command_output(&patch);
+        assert!(patch_text.contains("existing.txt"));
+        assert!(patch_text.contains("new.txt"));
         assert!(stat.contains("2 files changed"));
         let pending = pending_patch(&worktree, patch, stat, "updated files".to_owned());
         cleanup_worktree(&worktree).await.unwrap();
@@ -330,6 +350,50 @@ mod tests {
             "new file\n"
         );
         manager.remove(&pending.run_id);
+
+        let _ = std::fs::remove_dir_all(storage);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn applies_legacy_encoded_patch_as_raw_bytes() {
+        let root =
+            std::env::temp_dir().join(format!("levelup-subagent-gbk-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init"]);
+        git(&root, &["config", "user.email", "levelup@example.test"]);
+        git(&root, &["config", "user.name", "LevelUpAgent Test"]);
+        git(&root, &["config", "core.autocrlf", "false"]);
+        let path = root.join("legacy.txt");
+        let (before, _, before_errors) =
+            encoding_rs::GBK.encode("这是一个较长的中文基线内容，用于 patch 测试\n");
+        assert!(!before_errors);
+        std::fs::write(&path, before.as_ref()).unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-m", "initial"]);
+
+        let storage = root
+            .parent()
+            .unwrap()
+            .join(format!("levelup-subagents-gbk-{}", uuid::Uuid::new_v4()));
+        let worktree = create_worktree(&storage, &root).await.unwrap();
+        let (after, _, after_errors) =
+            encoding_rs::GBK.encode("这是一个较长的中文修改内容，用于 patch 测试\n");
+        assert!(!after_errors);
+        std::fs::write(worktree.path.join("legacy.txt"), after.as_ref()).unwrap();
+        let (patch, stat) = capture_patch(&worktree).await.unwrap();
+        assert!(
+            patch
+                .windows(after.len())
+                .any(|window| window == after.as_ref())
+        );
+        let preview = text_encoding::decode_command_output(&patch);
+        assert!(preview.contains("中文修改内容"));
+        assert!(!preview.contains('\u{fffd}'));
+        let pending = pending_patch(&worktree, patch, stat, "legacy update".to_owned());
+        cleanup_worktree(&worktree).await.unwrap();
+        apply_patch(&pending).await.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), after.as_ref());
 
         let _ = std::fs::remove_dir_all(storage);
         let _ = std::fs::remove_dir_all(root);

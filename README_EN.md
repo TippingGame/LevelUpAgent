@@ -12,7 +12,7 @@
     <a href="https://levelup.mom/">LevelUpAPI</a>
   </p>
   <p>
-    <img alt="Version" src="https://img.shields.io/badge/version-1.0.19-ff5a4f?style=flat-square" />
+    <img alt="Version" src="https://img.shields.io/badge/version-1.0.20-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-preview-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -45,7 +45,7 @@ Read the [Creative Studio capability audit](docs/CREATIVE_STUDIO_AUDIT.md) for t
 
 ### Install
 
-Download the package for your platform from GitHub **Releases**. The current `1.0.19` Windows x64 package has passed local build validation; the installers are not Authenticode-signed, so SmartScreen may show an unknown-publisher warning.
+Download the package for your platform from GitHub **Releases**. The current `1.0.20` Windows x64 package has passed local build validation; the installers are not Authenticode-signed, so SmartScreen may show an unknown-publisher warning.
 
 | Platform | Package | Status |
 | --- | --- | --- |
@@ -110,6 +110,25 @@ pnpm tauri dev
 
 Use `pnpm dev` for a frontend-only preview. The web preview cannot access the credential vault, directory picker, or local tools.
 
+### Chinese and legacy-encoded source files
+
+Workspace `read_file` and `search_files` decode UTF-8, UTF-16, GBK (the GB2312/CP936 family), GB18030, Big5, Shift-JIS, and Windows-1252 text.
+For existing files, the Agent should prefer the exact `edit_file` replacement tool: the host keeps the
+source encoding, BOM, and dominant line-ending style, and refuses binary files or characters that the
+original encoding cannot represent. New files default to UTF-8; pass an explicit `encoding` for short,
+ambiguous legacy files, including mixed East-Asian code pages or BOM-less UTF-16 without a strong NUL
+pattern. An ASCII-only file in a project known to use a legacy code page should also be hinted when first adding Chinese text;
+those existing bytes are identical across the supported ASCII-compatible encodings. A hint still cannot reinterpret valid
+non-ASCII UTF-8. The boundary follows the public design
+of [Codex apply-patch](https://github.com/openai/codex/tree/main/codex-rs/apply-patch),
+[Claude Text Editor](https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/text-editor-tool),
+Mozilla [`encoding_rs`](https://github.com/hsivonen/encoding_rs), and
+[`chardetng`](https://github.com/hsivonen/chardetng); see the [research notes](docs/REFERENCE_RESEARCH.md)
+and [`THIRD_PARTY_NOTICES.md`](src-tauri/THIRD_PARTY_NOTICES.md) for attribution.
+With `agent` automatic permission, obvious file-rewriting shell commands (including nested-shell redirection,
+PowerShell content-writer aliases, `git apply`, and formatter write-back) require approval first; explicitly approved commands still retain
+the encoding behavior of the invoked tool.
+
 ### Validate and build
 
 ```bash
@@ -135,7 +154,7 @@ Use `pnpm build:macos` for macOS packages. Signed public updates additionally re
 
 ## Current status
 
-`1.0.19` is the current release milestone. It includes multi-connection model routing, the four standard creative abilities, Creative Studio image editing and masks, Constellation blueprints, MCP/Skills/Goal integration, and Windows x64 installers. The Windows installers are not Authenticode-signed; formal releases for other platforms remain subject to CI and signing configuration. When filing an issue, include reproduction steps, application logs, and platform details.
+`1.0.20` is the current release milestone. It adds encoding-aware Chinese/legacy-source editing, exact replacements, and safe format-preserving writes, alongside multi-connection model routing, the four standard creative abilities, Creative Studio image editing and masks, Constellation blueprints, MCP/Skills/Goal integration, and Windows x64 installers. The Windows installers are not Authenticode-signed; formal releases for other platforms remain subject to CI and signing configuration. When filing an issue, include reproduction steps, application logs, and platform details.
 
 ## License
 

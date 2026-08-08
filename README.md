@@ -12,7 +12,7 @@
     <a href="https://levelup.mom/">LevelUpAPI</a>
   </p>
   <p>
-    <img alt="Version" src="https://img.shields.io/badge/version-1.0.19-ff5a4f?style=flat-square" />
+    <img alt="Version" src="https://img.shields.io/badge/version-1.0.20-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-可用预览-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -45,7 +45,7 @@
 
 ### 安装
 
-从 GitHub Releases 下载对应平台的安装包。当前 `1.0.19` 已完成 Windows x64 本地构建验证；测试包未配置 Authenticode，Windows SmartScreen 可能提示“未知发布者”。
+从 GitHub Releases 下载对应平台的安装包。当前 `1.0.20` 已完成 Windows x64 本地构建验证；测试包未配置 Authenticode，Windows SmartScreen 可能提示“未知发布者”。
 
 | 平台 | 包格式 | 状态 |
 | --- | --- | --- |
@@ -110,6 +110,22 @@ pnpm tauri dev
 
 只预览前端可运行 `pnpm dev`；Web 预览无法访问系统凭据库、目录选择器和本地工具。
 
+### 中文代码与旧编码文件
+
+工作区 `read_file`、`search_files` 会自动处理 UTF-8、UTF-16、GBK（GB2312）、GB18030、Big5、Shift-JIS、Windows-1252
+等常见文本编码；编辑已有文件时，优先让 Agent 使用 `edit_file` 的精确替换。主机将保留原文件的
+编码、BOM 和主导换行风格，并在目标编码无法表示新字符或文件疑似二进制时拒绝写入。新文件默认
+使用 UTF-8；无 BOM 的旧编码（包括混合中日文代码页和缺少 NUL 特征的 UTF-16）无法唯一判断时，可给工具传
+`encoding` 明确指定；已知采用旧代码页的工程中，纯 ASCII 文件也应在首次加入中文时显式指定。ASCII 在这些
+编码中的原始字节相同，因此该提示不会重解释已有字符；含非 ASCII 字符且有效的 UTF-8 文件仍不能被提示改判。这个边界借鉴了
+[Codex apply-patch](https://github.com/openai/codex/tree/main/codex-rs/apply-patch)、
+[Claude Text Editor](https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/text-editor-tool)
+、Mozilla [`encoding_rs`](https://github.com/hsivonen/encoding_rs) 以及
+[`chardetng`](https://github.com/hsivonen/chardetng) 的公开设计；实现与许可证说明见
+[参考项目研究](docs/REFERENCE_RESEARCH.md) 和 [`THIRD_PARTY_NOTICES.md`](src-tauri/THIRD_PARTY_NOTICES.md)。
+在 `agent` 自动权限下，明显会通过 shell 重定向（包括嵌套 shell）、`Set-Content`/`sc`/`ac`/`tee`、`git apply` 或格式化器改写文件的命令会先要求批准；
+显式批准的命令仍由用户自行承担其工具默认编码。
+
 ### 验证与构建
 
 ```bash
@@ -135,7 +151,7 @@ macOS 安装包使用 `pnpm build:macos`。正式更新还需要仓库所有者�
 
 ## 当前状态
 
-`1.0.19` 是当前发布里程碑，已包含多连接模型路由、四项标准创作能力、创作空间图片编辑与蒙版、星图蓝图、MCP/Skills/Goal 集成和 Windows x64 安装包。Windows 安装包仍未配置 Authenticode，其他平台的正式发布以 CI 和签名配置为准。提交 Issue 时请附上复现步骤、应用日志和平台信息。
+`1.0.20` 是当前发布里程碑，已包含编码感知的中文/旧编码文件编辑、精确替换与安全写回，以及多连接模型路由、四项标准创作能力、创作空间图片编辑与蒙版、星图蓝图、MCP/Skills/Goal 集成和 Windows x64 安装包。Windows 安装包仍未配置 Authenticode，其他平台的正式发布以 CI 和签名配置为准。提交 Issue 时请附上复现步骤、应用日志和平台信息。
 
 ## 许可证
 

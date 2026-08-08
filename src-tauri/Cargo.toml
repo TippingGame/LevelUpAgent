@@ -1,6 +1,6 @@
 [package]
 name = "levelup-agent"
-version = "1.0.19"
+version = "1.0.20"
 description = "A local-first, multi-model AI agent for LevelUpAPI"
 authors = ["LevelUpAgent contributors"]
 license = "LGPL-3.0-only"
@@ -44,6 +44,8 @@ json5 = "0.4"
 base64 = "0.22"
 http = "1"
 imagesize = "0.14"
+encoding_rs = "0.8.35"
+chardetng = "1.0.0"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rmcp = { version = "2.2.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 lopdf = "0.36"
