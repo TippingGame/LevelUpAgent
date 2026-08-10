@@ -281,6 +281,10 @@ interface PetHatchJob {
   startedAt: number;
 }
 
+interface OpenPetConversationOptions {
+  openPetInterface?: boolean;
+}
+
 type WorkspaceView = "chat" | "writing" | "media" | "constellation";
 
 function isPetHatchThread(thread: AgentThread) {
@@ -2169,7 +2173,7 @@ function App() {
     setWorkspaceView("chat");
   };
 
-  const openPetConversation = useCallback(async (petId: string) => {
+  const openPetConversation = useCallback(async (petId: string, options: OpenPetConversationOptions = {}) => {
     try {
       const runtime = await getPetRuntime();
       const dashboard = runtime.dashboard.activePetId === petId
@@ -2213,7 +2217,9 @@ function App() {
       setActivePetId(petId);
       setPetProfiles(dashboard.pets);
       setWorkspaceView("chat");
-      setPetOpen(false);
+      // The desktop-overlay entry point can request both the chat and the
+      // echo workspace; the in-workspace chat button keeps the modal closed.
+      setPetOpen(options.openPetInterface === true);
       setDraft("");
       setDraftAttachments([]);
     } catch (error) {
@@ -2228,7 +2234,7 @@ function App() {
     void import("@tauri-apps/api/event")
       .then(({ listen }) => listen<{ petId?: string }>("pet://open-chat", (event) => {
         const petId = event.payload?.petId;
-        if (petId) void openPetConversation(petId);
+        if (petId) void openPetConversation(petId, { openPetInterface: true });
       }))
       .then((stop) => {
         if (disposed) stop();
