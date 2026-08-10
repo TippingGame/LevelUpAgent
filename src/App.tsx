@@ -180,6 +180,7 @@ import {
 } from "./lib/storage";
 import { getAppLocale, setAppLocale, tr, type AppLocale } from "./lib/i18n";
 import { executeCallsWithParallelMedia } from "./lib/mediaConcurrency";
+import { isConversationNearBottom, shouldFollowConversationUpdate } from "./lib/conversationScroll";
 import { preferredDetectedModel } from "./lib/modelSelection";
 import {
   createHatchExecutionState,
@@ -789,7 +790,12 @@ function App() {
   const [gitDiff, setGitDiff] = useState<GitDiff | null>(null);
   const [goalState, setGoalState] = useState<GoalState | null>(null);
   const [databasePersistenceError, setDatabasePersistenceError] = useState<string | null>(null);
+  const [conversationNearBottom, setConversationNearBottom] = useState(true);
+  const [conversationHasNewMessages, setConversationHasNewMessages] = useState(false);
+  const conversationRef = useRef<HTMLElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  const followConversationRef = useRef(true);
+  const conversationSnapshotRef = useRef<{ threadId: string; messages: AgentMessage[] }>({ threadId: "", messages: [] });
   const runningThreadIdsRef = useRef<Set<string>>(new Set());
   const pendingApprovalsRef = useRef<Record<string, PendingApproval>>({});
   const operationIdsRef = useRef<Map<string, string>>(new Map());
@@ -816,6 +822,10 @@ function App() {
     profiles.find((profile) => profile.id === activeProfileId) ?? profiles[0];
   const activeThread =
     threads.find((thread) => thread.id === activeThreadId) ?? threads[0];
+  const visibleConversationMessages = useMemo(
+    () => activeThread.messages.filter((item) => !item.internal || item.status),
+    [activeThread.messages],
+  );
   activeThreadIdRef.current = activeThread.id;
   workspaceViewRef.current = workspaceView;
   activePetIdRef.current = activePetId;
@@ -853,8 +863,6 @@ function App() {
         })
         .filter((project) => project.threads.length > 0)
     : displayedProjectGroups;
-  const lastMessageLength =
-    activeThread.messages[activeThread.messages.length - 1]?.content.length ?? 0;
   const activePetProfile = petProfiles.find((profile) => profile.id === activeThread.petId);
   const petActivities = useMemo(
     () => buildPetActivities(threads, runningThreadIds, pendingApprovals, mediaPendingCount, petProfiles, locale),
@@ -1602,12 +1610,46 @@ function App() {
     };
   }, [activeThread.workspace, running]);
 
+  const scrollConversationToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
+    followConversationRef.current = true;
+    setConversationHasNewMessages(false);
+    endRef.current?.scrollIntoView({ behavior, block: "end" });
+  }, []);
+
+  const handleConversationScroll = useCallback(() => {
+    const element = conversationRef.current;
+    if (!element) return;
+    const nearBottom = isConversationNearBottom(element);
+    followConversationRef.current = nearBottom;
+    setConversationNearBottom((current) => current === nearBottom ? current : nearBottom);
+    if (nearBottom) setConversationHasNewMessages(false);
+  }, []);
+
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [activeThread.messages.length, lastMessageLength, running, pending]);
+    const previous = conversationSnapshotRef.current;
+    const threadChanged = previous.threadId !== activeThread.id;
+    const messagesChanged = !threadChanged && (
+      previous.messages.length !== visibleConversationMessages.length
+      || visibleConversationMessages.some((item, index) => item !== previous.messages[index])
+    );
+    const messageAdded = messagesChanged && visibleConversationMessages.length > previous.messages.length;
+    const userMessageAdded = messageAdded
+      && visibleConversationMessages.slice(previous.messages.length).some((item) => item.role === "user");
+    conversationSnapshotRef.current = { threadId: activeThread.id, messages: visibleConversationMessages };
+
+    if (workspaceView !== "chat" || threadChanged) return;
+    if (shouldFollowConversationUpdate(followConversationRef.current, userMessageAdded)) {
+      scrollConversationToBottom(messageAdded ? "smooth" : "auto");
+    } else if (messagesChanged) {
+      setConversationHasNewMessages(true);
+    }
+  }, [activeThread.id, pending, running, scrollConversationToBottom, visibleConversationMessages, workspaceView]);
 
   useLayoutEffect(() => {
     if (workspaceView !== "chat") return;
+    followConversationRef.current = true;
+    setConversationNearBottom(true);
+    setConversationHasNewMessages(false);
     endRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
   }, [workspaceView, activeThread.id]);
 
@@ -3758,34 +3800,46 @@ function App() {
           </div>
         </header>
 
-        <section className="conversation">
-          {activeThread.messages.length === 0 ? (
-            <EmptyState
-              workspace={activeThread.workspace}
-              temporaryWorkspace={activeUsesDefaultWorkspace}
-              connectionNeedsSetup={connectionNeedsSetup}
-              onChooseWorkspace={chooseWorkspace}
-              onConfigureConnection={() => setSettingsOpen(true)}
-            />
-          ) : (
-            <div className="message-stream">
-              {groupConversationMessages(activeThread.messages.filter((item) => !item.internal || item.status)).map((block) => block.kind === "user" ? (
-                <MessageRow key={block.item.id} item={block.item} />
-              ) : (
-                <AssistantMessageGroup
-                  key={block.items[0]?.id ?? "assistant"}
-                  items={block.items}
-                  pending={pending}
-                  activeReconnectMessageId={activeReconnectMessageId}
-                  pet={activePetProfile}
-                  onReviewChanges={reviewChangeSet}
-                />
-              ))}
-              {running && latestConnectionStatus !== "reconnecting" && <ThinkingRow />}
-              <div ref={endRef} />
-            </div>
+        <div className="conversation-stage">
+          <section className="conversation" ref={conversationRef} onScroll={handleConversationScroll}>
+            {activeThread.messages.length === 0 ? (
+              <EmptyState
+                workspace={activeThread.workspace}
+                temporaryWorkspace={activeUsesDefaultWorkspace}
+                connectionNeedsSetup={connectionNeedsSetup}
+                onChooseWorkspace={chooseWorkspace}
+                onConfigureConnection={() => setSettingsOpen(true)}
+              />
+            ) : (
+              <div className="message-stream">
+                {groupConversationMessages(visibleConversationMessages).map((block) => block.kind === "user" ? (
+                  <MessageRow key={block.item.id} item={block.item} />
+                ) : (
+                  <AssistantMessageGroup
+                    key={block.items[0]?.id ?? "assistant"}
+                    items={block.items}
+                    pending={pending}
+                    activeReconnectMessageId={activeReconnectMessageId}
+                    pet={activePetProfile}
+                    onReviewChanges={reviewChangeSet}
+                  />
+                ))}
+                {running && latestConnectionStatus !== "reconnecting" && <ThinkingRow />}
+                <div ref={endRef} />
+              </div>
+            )}
+          </section>
+          {!conversationNearBottom && visibleConversationMessages.length > 0 && (
+            <button
+              className={`conversation-jump-button${conversationHasNewMessages ? " has-new" : ""}`}
+              type="button"
+              onClick={() => scrollConversationToBottom("smooth")}
+            >
+              <ChevronDown size={14} />
+              <span>{conversationHasNewMessages ? tr("有新消息", "New messages") : tr("回到底部", "Jump to latest")}</span>
+            </button>
           )}
-        </section>
+        </div>
 
         {pending && (
           <div className="approval-bar">
@@ -4766,7 +4820,9 @@ function AssistantMessageSegment({
     );
   }
   if (item.role === "tool") {
-    const firstLine = item.content.split("\n")[0] || tr("工具已完成", "Tool completed");
+    const firstLineBreak = item.content.indexOf("\n");
+    const firstLine = (firstLineBreak >= 0 ? item.content.slice(0, firstLineBreak) : item.content).replace(/\r$/, "")
+      || tr("工具已完成", "Tool completed");
     if (item.content.startsWith("Sub-Agent completed in an isolated worktree.")) {
       const runId = item.content.match(/Run ID: ([0-9a-f]{32})/)?.[1];
       return (
@@ -4794,11 +4850,16 @@ function AssistantMessageSegment({
         </div>
       );
     }
+    const expandedContent = firstLineBreak >= 0 ? item.content.slice(firstLineBreak + 1) : item.content;
     return (
-      <div className={`tool-result ${item.isError ? "error" : ""}`}>
-        {item.isError ? <X size={14} /> : <Check size={14} />}
-        <span>{firstLine}</span>
-      </div>
+      <details className={`tool-result ${item.isError ? "error" : ""}`}>
+        <summary title={firstLine.length > 300 ? `${firstLine.slice(0, 300)}…` : firstLine}>
+          {item.isError ? <X size={14} /> : <Check size={14} />}
+          <span>{firstLine}</span>
+          <ChevronDown className="tool-result-chevron" size={14} />
+        </summary>
+        <pre>{expandedContent || firstLine}</pre>
+      </details>
     );
   }
   return (
