@@ -12,7 +12,7 @@
     <a href="https://levelup.mom/">LevelUpAPI</a>
   </p>
   <p>
-    <img alt="Version" src="https://img.shields.io/badge/version-1.0.23-ff5a4f?style=flat-square" />
+    <img alt="Version" src="https://img.shields.io/badge/version-1.0.24-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-preview-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -45,7 +45,7 @@ Read the [Creative Studio capability audit](docs/CREATIVE_STUDIO_AUDIT.md) for t
 
 ### Install
 
-Download the package for your platform from GitHub **Releases**. The current `1.0.23` Windows x64 package has passed local build validation; the installers are not Authenticode-signed, so SmartScreen may show an unknown-publisher warning.
+Download the package for your platform from GitHub **Releases**. The current `1.0.24` Windows x64 package has passed local build validation; the installers are not Authenticode-signed, so SmartScreen may show an unknown-publisher warning.
 
 | Platform | Package | Status |
 | --- | --- | --- |
@@ -154,7 +154,7 @@ Use `pnpm build:macos` for macOS packages. Signed public updates additionally re
 
 ## Current status
 
-`1.0.23` is the current release milestone. It fixes one-click Yaoguang Canying hatching when preparation and status checks were incorrectly stopped by Harness approval, while narrowing the app-owned bootstrap path to validated hatch-pet manifests, references, and the two required scripts. Forged metadata, unrelated scripts, and shell composition remain behind the normal approval boundary. The autonomous curiosity path introduced in `1.0.22` is unchanged and still runs without starting shared study. The Windows installers are not Authenticode-signed; formal releases for other platforms remain subject to CI and signing configuration. When filing an issue, include reproduction steps, application logs, and platform details.
+`1.0.24` is the current release milestone. It fixes one-click Yaoguang Canying hatching in production Windows environments, where backslash-based script paths were not recognized by bootstrap metadata and were therefore rejected by the safety boundary. The change only completes trusted Windows path parsing; the least-privilege allowlist introduced in `1.0.23` remains intact, so relative paths, unrelated scripts, forged metadata, and shell composition cannot bypass approval. Autonomous curiosity still runs without starting shared study. The Windows installers are not Authenticode-signed; formal releases for other platforms remain subject to CI and signing configuration. When filing an issue, include reproduction steps, application logs, and platform details.
 
 ## License
 

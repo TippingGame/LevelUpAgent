@@ -397,8 +397,8 @@ export function hatchStatusCommand(history: AgentMessage[]) {
  * those trusted values discoverable from provider-authored shell text.
  */
 export function hatchBootstrapMetadata(command: string) {
-  const prepare = command.match(/(?:^|[\/])prepare_pet_run\.py(?=['"\s]|$)/i);
-  const status = command.match(/(?:^|[\/])pet_job_status\.py(?=['"\s]|$)/i);
+  const prepare = command.match(/(?:^|[\\/])prepare_pet_run\.py(?=['"\s]|$)/i);
+  const status = command.match(/(?:^|[\\/])pet_job_status\.py(?=['"\s]|$)/i);
   const kind = prepare ? "prepare" : status ? "status" : null;
   if (!kind) return null;
 

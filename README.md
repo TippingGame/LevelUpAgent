@@ -12,7 +12,7 @@
     <a href="https://levelup.mom/">LevelUpAPI</a>
   </p>
   <p>
-    <img alt="Version" src="https://img.shields.io/badge/version-1.0.23-ff5a4f?style=flat-square" />
+    <img alt="Version" src="https://img.shields.io/badge/version-1.0.24-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-可用预览-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -45,7 +45,7 @@
 
 ### 安装
 
-从 GitHub Releases 下载对应平台的安装包。当前 `1.0.23` 已完成 Windows x64 本地构建验证；测试包未配置 Authenticode，Windows SmartScreen 可能提示“未知发布者”。
+从 GitHub Releases 下载对应平台的安装包。当前 `1.0.24` 已完成 Windows x64 本地构建验证；测试包未配置 Authenticode，Windows SmartScreen 可能提示“未知发布者”。
 
 | 平台 | 包格式 | 状态 |
 | --- | --- | --- |
@@ -151,7 +151,7 @@ macOS 安装包使用 `pnpm build:macos`。正式更新还需要仓库所有者�
 
 ## 当前状态
 
-`1.0.23` 是当前发布里程碑，修复“摇光残影”一键孵化准备与状态检查被 Harness 审批错误拦截的问题，并将应用自有 bootstrap 收紧到经过校验的 hatch-pet 清单、参考文档和两个必要脚本；伪造元数据、其他脚本及 Shell 拼接仍会进入正常审批边界。`1.0.22` 引入的自主求知链路保持不变，无需开始共学。Windows 安装包仍未配置 Authenticode，其他平台的正式发布以 CI 和签名配置为准。提交 Issue 时请附上复现步骤、应用日志和平台信息。
+`1.0.24` 是当前发布里程碑，修复 Windows 正式运行环境中反斜杠脚本路径未被 bootstrap metadata 识别，导致“摇光残影”一键孵化仍被安全边界误拒绝的问题。修复仅补全可信 Windows 路径解析，`1.0.23` 建立的最小权限白名单保持不变：相对路径、其他脚本、伪造 metadata 与 Shell 拼接仍不能绕过审批。自主求知链路无需开始共学。Windows 安装包仍未配置 Authenticode，其他平台的正式发布以 CI 和签名配置为准。提交 Issue 时请附上复现步骤、应用日志和平台信息。
 
 ## 许可证
 

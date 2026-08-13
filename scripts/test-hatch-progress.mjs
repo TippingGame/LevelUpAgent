@@ -221,6 +221,22 @@ test("hatch bootstrap metadata requires quoted canonical script and run paths", 
     hatchBootstrapMetadata("python 'C:/skill/scripts/prepare_pet_run.py' --output-dir 'C:/run' --force"),
     { kind: "prepare", scriptPath: "C:/skill/scripts/prepare_pet_run.py", runDirectory: "C:/run" },
   );
+  assert.deepEqual(
+    hatchBootstrapMetadata("python 'G:\\LevelUpAgent\\resources\\skills\\hatch-pet\\scripts\\prepare_pet_run.py' --output-dir 'C:\\Users\\owner\\AppData\\Roaming\\com.levelup.agent\\pet-hatch\\echo-run' --force"),
+    {
+      kind: "prepare",
+      scriptPath: "G:\\LevelUpAgent\\resources\\skills\\hatch-pet\\scripts\\prepare_pet_run.py",
+      runDirectory: "C:\\Users\\owner\\AppData\\Roaming\\com.levelup.agent\\pet-hatch\\echo-run",
+    },
+  );
+  assert.deepEqual(
+    hatchBootstrapMetadata("python 'G:\\LevelUpAgent\\resources\\skills\\hatch-pet\\scripts\\pet_job_status.py' --run-dir 'C:\\Users\\owner\\AppData\\Roaming\\com.levelup.agent\\pet-hatch\\echo-run'"),
+    {
+      kind: "status",
+      scriptPath: "G:\\LevelUpAgent\\resources\\skills\\hatch-pet\\scripts\\pet_job_status.py",
+      runDirectory: "C:\\Users\\owner\\AppData\\Roaming\\com.levelup.agent\\pet-hatch\\echo-run",
+    },
+  );
   assert.equal(hatchBootstrapMetadata("python prepare_pet_run.py --output-dir C:/run"), null);
   assert.equal(hatchBootstrapMetadata("python 'C:/skill/scripts/finalize_pet_run.py' --run-dir 'C:/run'"), null);
 });
