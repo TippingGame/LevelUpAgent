@@ -8,6 +8,7 @@
 //! over legacy guesses, then handles BOM-marked UTF-16 and common legacy
 //! encodings through the Mozilla `encoding_rs` implementation.
 
+use std::cmp::Reverse;
 use std::fmt;
 use std::ops::Range;
 
@@ -917,7 +918,7 @@ fn decode_legacy(bytes: &[u8]) -> Result<DecodedText, TextEncodingError> {
             "File is not valid UTF-8/UTF-16 or a supported Chinese/legacy text encoding; binary files cannot be edited as text".to_owned(),
         ));
     }
-    candidates.sort_by(|left, right| right.score.cmp(&left.score));
+    candidates.sort_by_key(|candidate| Reverse(candidate.score));
 
     let distinct_texts = candidates
         .iter()
