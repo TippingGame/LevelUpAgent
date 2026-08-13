@@ -95,7 +95,7 @@ const browserPetDashboard: PetDashboard = {
   overlayVisible: true,
   scale: 0.75,
   life: {
-    version: 5,
+    version: 6,
     needs: { energy: 86, focus: 68, curiosity: 64, social: 72, mood: 82 },
     behavior: { state: "idle", reason: "browser-preview", message: "I am here, taking in the day.", since: Date.now(), nextDecisionAt: Date.now() + 120_000 },
     settings: { autonomyEnabled: true, learningEnabled: true, movementEnabled: true, dailyPlanEnabled: true, remindersEnabled: true, launchAtLogin: false, studyGoalMinutes: 120, knowledgeGoal: 2, quietStartMinute: 1320, quietEndMinute: 480, patrolSpeed: 1 },
@@ -103,6 +103,7 @@ const browserPetDashboard: PetDashboard = {
     tasks: [],
     knowledge: [],
     learningQuests: [],
+    recentObservations: [],
     rewards: [],
     activityLog: [],
     history: [],

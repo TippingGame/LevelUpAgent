@@ -7317,7 +7317,7 @@ function petConversationPrompt(
     `Today's plan: ${life.today.schedule.slice(0, 10).map((item) => `${minuteLabel(item.startMinute)} ${item.title} [${item.status}]`).join("; ") || "not generated yet"}.`,
     `Pending shared tasks: ${life.tasks.filter((task) => task.status !== "completed").slice(0, 8).map((task) => task.title).join("; ") || "none"}.`,
     `Recent learned knowledge: ${life.knowledge.slice(-12).map((item) => item.title).join("; ") || "none yet"}.`,
-    `Self-formed Agent questions: ${life.learningQuests.slice(0, 6).map((quest) => `${quest.question} [${quest.status}]`).join("; ") || "none yet"}.`,
+    `Self-formed Agent questions: ${life.learningQuests.filter((quest) => quest.question).slice(0, 6).map((quest) => `${quest.question} [${quest.status}]`).join("; ") || "none yet"}.`,
   ].join("\n") : "The current life-state snapshot is unavailable for this turn.";
   return [
     `You are ${profile.displayName}, one of the user's LevelUpAgent Starlight Echoes.`,

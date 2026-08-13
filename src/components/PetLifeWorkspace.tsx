@@ -335,16 +335,17 @@ export function PetLifeWorkspace({
         <div className="pet-learning-quest-list">
           {dashboard.life.learningQuests.slice(0, 8).map((quest) => (
             <article className={quest.status} key={quest.id}>
-              <span>{quest.status === "asking" ? <LoaderCircle className="spin" size={13} /> : quest.status === "completed" ? <CircleCheck size={13} /> : quest.status === "failed" ? <CircleAlert size={13} /> : <Clock3 size={13} />}</span>
+              <span>{["formulating", "asking"].includes(quest.status) ? <LoaderCircle className="spin" size={13} /> : quest.status === "completed" ? <CircleCheck size={13} /> : ["failed", "formation-failed"].includes(quest.status) ? <CircleAlert size={13} /> : <Clock3 size={13} />}</span>
               <div>
-                <strong>{quest.question}</strong>
+                <strong>{quest.question || learningQuestPlaceholder(quest.status, locale)}</strong>
                 <small>{learningQuestMeta(quest, locale)}</small>
+                {quest.rationale && <p>{text("缘起：", "Why: ")}{quest.rationale}</p>}
                 {quest.answerTitle && <p>{text("学会：", "Learned: ")}{quest.answerTitle}</p>}
                 {quest.error && !quest.answerTitle && <p>{quest.error}</p>}
               </div>
             </article>
           ))}
-          {dashboard.life.learningQuests.length === 0 && <p className="pet-compact-empty">{text("他会在清醒、有精力且模型可用时，自己形成问题并询问 Agent", "When awake, energized, and connected, the echo will form its own questions and ask Agent")}</p>}
+          {dashboard.life.learningQuests.length === 0 && <p className="pet-compact-empty">{text("他会观察主人最近的输入、今天的计划与行为，发现真实的知识缺口后再向 Agent 求解；没有值得问的，也不会硬问。", "The echo observes recent owner input, today's plans, and behavior, then asks Agent only when it finds a real knowledge gap.")}</p>}
         </div>
       </section>
       <section className="pet-knowledge-form">
@@ -372,16 +373,36 @@ export function PetLifeWorkspace({
 function learningQuestMeta(quest: PetDashboard["life"]["learningQuests"][number], locale: AppLocale) {
   const text = (zh: string, en: string) => locale === "zh-CN" ? zh : en;
   const states: Record<string, string> = {
+    "formation-pending": text("等待梳理观察", "Waiting to reflect"),
+    formulating: text("正在形成问题", "Forming a question"),
+    "formation-retrying": text("稍后重新思考", "Will reflect again"),
+    "formation-failed": text("未能形成可靠问题", "No grounded question formed"),
+    deferred: text("此刻不强行提问", "No question needed now"),
     pending: text("准备提问", "Ready to ask"),
     asking: text("正在询问 Agent", "Asking Agent"),
     retrying: text("等待重试", "Waiting to retry"),
     completed: text("已经学会", "Learned"),
     failed: text("未得到可靠答案", "No reliable answer"),
   };
-  const details = [states[quest.status] ?? quest.status, `${text("尝试", "attempts")} ${quest.attempts}`];
+  const details = [states[quest.status] ?? quest.status];
+  if (quest.formationAttempts > 0) details.push(`${text("成问", "formation")} ${quest.formationAttempts}`);
+  if (quest.attempts > 0) details.push(`${text("求解", "answer")} ${quest.attempts}`);
+  if (quest.questionProviderId) details.push(`${text("成问 Agent", "question Agent")}: ${quest.questionProviderId}`);
   if (quest.providerId) details.push(`Agent: ${quest.providerId}`);
   if (quest.nextRetryAt) details.push(`${text("重试", "retry")} ${formatTime(quest.nextRetryAt, locale)}`);
   return details.join(" · ");
+}
+
+function learningQuestPlaceholder(status: string, locale: AppLocale) {
+  const text = (zh: string, en: string) => locale === "zh-CN" ? zh : en;
+  const messages: Record<string, string> = {
+    "formation-pending": text("正在从最近的经历里寻找值得理解的未知点", "Looking for a worthwhile gap in recent context"),
+    formulating: text("正在从最近的经历里寻找值得理解的未知点", "Looking for a worthwhile gap in recent context"),
+    "formation-retrying": text("保留观察，稍后重新思考", "Keeping these observations to reconsider later"),
+    "formation-failed": text("这次未能形成可靠问题", "No grounded question could be formed this time"),
+    deferred: text("这次没有需要强行提出的问题", "There was no question worth forcing this time"),
+  };
+  return messages[status] ?? text("问题内容暂不可用", "Question unavailable");
 }
 
 function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (checked: boolean) => void }) {

@@ -827,16 +827,25 @@ export interface PetLearningQuest {
   id: string;
   question: string;
   topic: string;
-  status: "pending" | "asking" | "retrying" | "completed" | "failed" | string;
+  status: "formation-pending" | "formulating" | "formation-retrying" | "formation-failed" | "deferred" | "pending" | "asking" | "retrying" | "completed" | "failed" | string;
   createdAt: number;
   startedAt?: number;
   completedAt?: number;
   nextRetryAt?: number;
   attempts: number;
+  formationAttempts: number;
+  rationale?: string;
+  questionProviderId?: string;
   answerTitle?: string;
   knowledgeId?: string;
   providerId?: string;
   error?: string;
+}
+
+export interface PetUserObservation {
+  id: string;
+  text: string;
+  createdAt: number;
 }
 
 export interface PetStudySession {
@@ -882,6 +891,7 @@ export interface PetLifeSnapshot {
   tasks: PetTask[];
   knowledge: PetKnowledge[];
   learningQuests: PetLearningQuest[];
+  recentObservations: PetUserObservation[];
   activeSession?: PetStudySession;
   rewards: PetReward[];
   activityLog: PetActivityLogEntry[];

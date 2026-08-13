@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 use crate::pet_life::{
-    PetKnowledgeInput, PetLearningQuest, PetLifeSettings, PetLifeSnapshot, StoredPetLife,
+    PetKnowledgeInput, PetLearningQuest, PetLearningQuestionInput, PetLifeSettings,
+    PetLifeSnapshot, StoredPetLife,
 };
 
 const DEFAULT_PET_ID: &str = "yui";
@@ -493,6 +494,26 @@ impl PetManager {
     }
 
     pub fn claim_learning_quest(&self, pet_id: &str) -> Result<Option<PetLearningQuest>, String> {
+        self.claim_learning_work(pet_id, |life, now| life.claim_learning_quest(now))
+    }
+
+    pub fn claim_learning_question_formation(
+        &self,
+        pet_id: &str,
+    ) -> Result<Option<PetLearningQuest>, String> {
+        self.claim_learning_work(pet_id, |life, now| {
+            life.claim_learning_question_formation(now)
+        })
+    }
+
+    fn claim_learning_work<F>(
+        &self,
+        pet_id: &str,
+        claim: F,
+    ) -> Result<Option<PetLearningQuest>, String>
+    where
+        F: FnOnce(&mut StoredPetLife, i64) -> Option<PetLearningQuest>,
+    {
         validate_pet_id(pet_id)?;
         let pets = self.list_profiles()?;
         let profile = pets
@@ -511,13 +532,56 @@ impl PetManager {
                 .entry(pet_id.to_owned())
                 .or_insert_with(|| StoredPetLife::new(now));
             life.tick(now, &profile.display_name, &memories);
-            let claimed = life.claim_learning_quest(now);
+            let claimed = claim(life, now);
             if claimed.is_some() {
                 save_state(&self.state_path, &state)?;
             }
             claimed
         };
         Ok(claimed)
+    }
+
+    pub fn complete_learning_question_formation(
+        &self,
+        pet_id: &str,
+        quest_id: &str,
+        input: PetLearningQuestionInput<'_>,
+    ) -> Result<PetDashboard, String> {
+        self.mutate_life(pet_id, |life, now, _, _| {
+            life.complete_learning_question_formation(now, quest_id, input)?;
+            Ok(())
+        })
+    }
+
+    pub fn defer_learning_question_formation(
+        &self,
+        pet_id: &str,
+        quest_id: &str,
+        rationale: &str,
+        provider_id: Option<&str>,
+    ) -> Result<PetDashboard, String> {
+        self.mutate_life(pet_id, |life, now, _, _| {
+            if life.defer_learning_question_formation(now, quest_id, rationale, provider_id) {
+                Ok(())
+            } else {
+                Err("The autonomous question-forming request is no longer active".to_owned())
+            }
+        })
+    }
+
+    pub fn fail_learning_question_formation(
+        &self,
+        pet_id: &str,
+        quest_id: &str,
+        error: &str,
+    ) -> Result<PetDashboard, String> {
+        self.mutate_life(pet_id, |life, now, _, _| {
+            if life.fail_learning_question_formation(now, quest_id, error) {
+                Ok(())
+            } else {
+                Err("The autonomous question-forming request is no longer active".to_owned())
+            }
+        })
     }
 
     pub fn complete_learning_quest(
@@ -770,33 +834,37 @@ impl PetManager {
 
     pub fn learn_from_message(&self, pet_id: &str, text: &str) -> Result<Vec<PetMemory>, String> {
         validate_pet_id(pet_id)?;
-        let Some((memory_text, kind, confidence)) = memory_candidate(text) else {
-            return self.memories(pet_id);
-        };
-        let canonical = canonical_memory(&memory_text);
         let now = now_millis();
         let mut state = self
             .state
             .lock()
             .map_err(|_| "Could not lock desktop pet state".to_owned())?;
+        state
+            .life
+            .entry(pet_id.to_owned())
+            .or_insert_with(|| StoredPetLife::new(now))
+            .observe_user_input(now, text);
         let memories = state.memories.entry(pet_id.to_owned()).or_default();
-        if let Some(existing) = memories
-            .iter_mut()
-            .find(|memory| canonical_memory(&memory.text) == canonical)
-        {
-            existing.evidence_count = existing.evidence_count.saturating_add(1);
-            existing.confidence = (existing.confidence + 0.12).min(1.0);
-            existing.updated_at = now;
-        } else {
-            memories.push(PetMemory {
-                id: uuid::Uuid::new_v4().to_string(),
-                text: memory_text,
-                kind,
-                confidence,
-                evidence_count: 1,
-                created_at: now,
-                updated_at: now,
-            });
+        if let Some((memory_text, kind, confidence)) = memory_candidate(text) {
+            let canonical = canonical_memory(&memory_text);
+            if let Some(existing) = memories
+                .iter_mut()
+                .find(|memory| canonical_memory(&memory.text) == canonical)
+            {
+                existing.evidence_count = existing.evidence_count.saturating_add(1);
+                existing.confidence = (existing.confidence + 0.12).min(1.0);
+                existing.updated_at = now;
+            } else {
+                memories.push(PetMemory {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    text: memory_text,
+                    kind,
+                    confidence,
+                    evidence_count: 1,
+                    created_at: now,
+                    updated_at: now,
+                });
+            }
         }
         if memories.len() > MAX_MEMORIES_PER_PET {
             let remove = memories.len() - MAX_MEMORIES_PER_PET;
@@ -805,14 +873,6 @@ impl PetManager {
         let output = memories.clone();
         save_state(&self.state_path, &state)?;
         Ok(output)
-    }
-
-    pub fn memories(&self, pet_id: &str) -> Result<Vec<PetMemory>, String> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| "Could not lock desktop pet state".to_owned())?;
-        Ok(state.memories.get(pet_id).cloned().unwrap_or_default())
     }
 
     pub fn delete_memory(&self, pet_id: &str, memory_id: &str) -> Result<bool, String> {

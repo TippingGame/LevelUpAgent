@@ -5,11 +5,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::pet::PetMemory;
 
-pub const PET_LIFE_VERSION: u32 = 5;
+pub const PET_LIFE_VERSION: u32 = 6;
 const MAX_DAYS: usize = 180;
 const MAX_TASKS: usize = 240;
 const MAX_KNOWLEDGE: usize = 400;
 const MAX_LEARNING_QUESTS: usize = 120;
+const MAX_RECENT_OBSERVATIONS: usize = 32;
 const MAX_REWARDS: usize = 240;
 const MAX_ACTIVITY_LOG: usize = 500;
 const MAX_TICK_MINUTES: f64 = 360.0;
@@ -17,6 +18,7 @@ const PERSIST_TICK_INTERVAL_MS: i64 = 60_000;
 const AUTONOMOUS_LEARNING_MIN_INTERVAL_MS: i64 = 90 * 60_000;
 const AUTONOMOUS_LEARNING_RETRY_BASE_MS: i64 = 20 * 60_000;
 const AUTONOMOUS_LEARNING_STALE_MS: i64 = 10 * 60_000;
+const RECENT_OBSERVATION_TTL_MS: i64 = 72 * 60 * 60_000;
 const PATROL_INTERVAL_MS: i64 = 6 * 60_000;
 const CHECK_IN_SLOTS: [u32; 5] = [9 * 60, 12 * 60, 15 * 60, 18 * 60, 21 * 60];
 const STUDY_LAUNCH_GRACE_MS: i64 = 10 * 60_000;
@@ -226,10 +228,31 @@ pub struct PetLearningQuest {
     pub completed_at: Option<i64>,
     pub next_retry_at: Option<i64>,
     pub attempts: u32,
+    #[serde(default)]
+    pub formation_attempts: u32,
+    #[serde(default)]
+    pub rationale: Option<String>,
+    #[serde(default)]
+    pub question_provider_id: Option<String>,
     pub answer_title: Option<String>,
     pub knowledge_id: Option<String>,
     pub provider_id: Option<String>,
     pub error: Option<String>,
+}
+
+pub struct PetLearningQuestionInput<'a> {
+    pub question: &'a str,
+    pub topic: &'a str,
+    pub rationale: &'a str,
+    pub provider_id: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PetUserObservation {
+    pub id: String,
+    pub text: String,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -286,6 +309,8 @@ pub struct StoredPetLife {
     #[serde(default)]
     pub learning_quests: Vec<PetLearningQuest>,
     #[serde(default)]
+    pub recent_observations: Vec<PetUserObservation>,
+    #[serde(default)]
     pub study_sessions: Vec<PetStudySession>,
     #[serde(default)]
     pub rewards: Vec<PetReward>,
@@ -314,6 +339,7 @@ impl StoredPetLife {
             tasks: Vec::new(),
             knowledge: Vec::new(),
             learning_quests: Vec::new(),
+            recent_observations: Vec::new(),
             study_sessions: Vec::new(),
             rewards: Vec::new(),
             activity_log: Vec::new(),
@@ -376,6 +402,28 @@ impl StoredPetLife {
         for quest in &mut self.learning_quests {
             quest.question = shorten(quest.question.trim(), 280);
             quest.topic = shorten(quest.topic.trim(), 90);
+            quest.rationale = quest
+                .rationale
+                .as_deref()
+                .map(|value| shorten(value.trim(), 240))
+                .filter(|value| !value.is_empty());
+            quest.question_provider_id = quest
+                .question_provider_id
+                .as_deref()
+                .map(|value| shorten(value.trim(), 120))
+                .filter(|value| !value.is_empty());
+            if quest.status == "formulating"
+                && quest.started_at.is_some_and(|started| {
+                    now.saturating_sub(started) >= AUTONOMOUS_LEARNING_STALE_MS
+                })
+            {
+                quest.status = "formation-retrying".to_owned();
+                quest.next_retry_at = Some(now);
+                quest.error = Some(
+                    "The previous question-forming request was interrupted; I will reflect again."
+                        .to_owned(),
+                );
+            }
             if quest.status == "asking"
                 && quest.started_at.is_some_and(|started| {
                     now.saturating_sub(started) >= AUTONOMOUS_LEARNING_STALE_MS
@@ -389,6 +437,14 @@ impl StoredPetLife {
             }
         }
         trim_oldest(&mut self.learning_quests, MAX_LEARNING_QUESTS);
+        self.recent_observations.retain(|observation| {
+            !observation.text.trim().is_empty()
+                && now.saturating_sub(observation.created_at) <= RECENT_OBSERVATION_TTL_MS
+        });
+        for observation in &mut self.recent_observations {
+            observation.text = shorten(observation.text.trim(), 360);
+        }
+        trim_oldest(&mut self.recent_observations, MAX_RECENT_OBSERVATIONS);
         self.rewards
             .retain(|reward| matches!(reward.kind.as_str(), "focus" | "knowledge" | "together"));
         trim_oldest(&mut self.rewards, MAX_REWARDS);
@@ -452,7 +508,7 @@ impl StoredPetLife {
         self.reconcile_check_ins(now);
         self.reconcile_study_launch(now);
         self.reconcile_task_reminders(now);
-        self.reconcile_autonomous_learning(now, pet_name, memories);
+        self.reconcile_autonomous_learning(now);
         self.finish_autonomous_review(now);
         self.maybe_wake_with_dream(now, pet_name, was_sleeping);
         self.choose_behavior(now, pet_name);
@@ -463,6 +519,7 @@ impl StoredPetLife {
             || self.days != before.days
             || self.knowledge != before.knowledge
             || self.learning_quests != before.learning_quests
+            || self.recent_observations != before.recent_observations
             || self.study_sessions != before.study_sessions
             || self.rewards != before.rewards
             || self.activity_log != before.activity_log;
@@ -515,6 +572,13 @@ impl StoredPetLife {
                 .take(30)
                 .cloned()
                 .collect(),
+            recent_observations: self
+                .recent_observations
+                .iter()
+                .rev()
+                .take(20)
+                .cloned()
+                .collect(),
             active_session,
             rewards: self.rewards.iter().rev().take(40).cloned().collect(),
             activity_log: self.activity_log.iter().rev().take(60).cloned().collect(),
@@ -525,6 +589,31 @@ impl StoredPetLife {
             born_at: self.born_at,
             last_tick_at: self.last_tick_at,
         }
+    }
+
+    pub fn observe_user_input(&mut self, now: i64, text: &str) -> bool {
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let text = shorten(text.trim(), 360);
+        if text.chars().count() < 2 || learning_question_is_sensitive(&text) {
+            return false;
+        }
+        let canonical_text = canonical(&text);
+        if let Some(existing) = self
+            .recent_observations
+            .iter_mut()
+            .rev()
+            .find(|observation| canonical(&observation.text) == canonical_text)
+        {
+            existing.created_at = now;
+            return true;
+        }
+        self.recent_observations.push(PetUserObservation {
+            id: uuid::Uuid::new_v4().to_string(),
+            text,
+            created_at: now,
+        });
+        trim_oldest(&mut self.recent_observations, MAX_RECENT_OBSERVATIONS);
+        true
     }
 
     pub fn generate_daily_plan(
@@ -1072,6 +1161,203 @@ impl StoredPetLife {
         Some(claimed)
     }
 
+    pub fn claim_learning_question_formation(&mut self, now: i64) -> Option<PetLearningQuest> {
+        if !self.settings.autonomy_enabled
+            || !self.settings.learning_enabled
+            || self.needs.energy < 30.0
+            || minute_in_wrapped_range(
+                local_minute(now),
+                self.settings.quiet_start_minute,
+                self.settings.quiet_end_minute,
+            )
+        {
+            return None;
+        }
+        let quest = self.learning_quests.iter_mut().find(|quest| {
+            quest.status == "formation-pending"
+                || quest.status == "formation-retrying"
+                    && quest.next_retry_at.is_none_or(|retry_at| now >= retry_at)
+        })?;
+        quest.status = "formulating".to_owned();
+        quest.started_at = Some(now);
+        quest.next_retry_at = None;
+        quest.formation_attempts = quest.formation_attempts.saturating_add(1);
+        quest.error = None;
+        let claimed = quest.clone();
+        self.set_behavior(
+            now,
+            "learning",
+            "autonomous-question-forming",
+            "I am looking across what happened today to find something I genuinely do not understand yet.",
+            5 * 60_000,
+            None,
+        );
+        Some(claimed)
+    }
+
+    pub fn complete_learning_question_formation(
+        &mut self,
+        now: i64,
+        quest_id: &str,
+        input: PetLearningQuestionInput<'_>,
+    ) -> Result<PetLearningQuest, String> {
+        let quest_index = self
+            .learning_quests
+            .iter()
+            .position(|quest| quest.id == quest_id && quest.status == "formulating")
+            .ok_or_else(|| {
+                "The autonomous question-forming request is no longer active".to_owned()
+            })?;
+        let mut question = input
+            .question
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !question.ends_with(['?', '？']) {
+            question.push('？');
+        }
+        let question_length = question.chars().count();
+        if !(12..=280).contains(&question_length) || learning_question_is_sensitive(&question) {
+            return Err("Agent formed an invalid or sensitive autonomous question".to_owned());
+        }
+        if self
+            .learning_quests
+            .iter()
+            .enumerate()
+            .any(|(index, existing)| {
+                index != quest_index
+                    && !existing.question.is_empty()
+                    && questions_too_similar(&question, &existing.question)
+            })
+        {
+            return Err("Agent repeated a recent autonomous question".to_owned());
+        }
+        let topic = shorten(input.topic.trim(), 90);
+        let rationale = shorten(input.rationale.trim(), 240);
+        if topic.chars().count() < 2
+            || rationale.chars().count() < 4
+            || learning_question_is_sensitive(&topic)
+            || learning_question_is_sensitive(&rationale)
+        {
+            return Err("Agent did not explain the autonomous question clearly".to_owned());
+        }
+        let quest = &mut self.learning_quests[quest_index];
+        quest.question = question;
+        quest.topic = topic;
+        quest.rationale = Some(rationale);
+        quest.question_provider_id = input
+            .provider_id
+            .map(|value| shorten(value.trim(), 120))
+            .filter(|value| !value.is_empty());
+        quest.status = "pending".to_owned();
+        quest.started_at = None;
+        quest.next_retry_at = None;
+        quest.error = None;
+        let formed = quest.clone();
+        self.set_behavior(
+            now,
+            "learning",
+            "autonomous-question-formed",
+            &format!(
+                "I found something I genuinely want to understand: {}",
+                formed.question
+            ),
+            90_000,
+            None,
+        );
+        self.log(
+            now,
+            "question",
+            &format!(
+                "我根据最近发生的事形成了一个问题：{} || I formed a question from recent context: {}",
+                formed.question, formed.question
+            ),
+        );
+        Ok(formed)
+    }
+
+    pub fn defer_learning_question_formation(
+        &mut self,
+        now: i64,
+        quest_id: &str,
+        rationale: &str,
+        provider_id: Option<&str>,
+    ) -> bool {
+        if learning_question_is_sensitive(rationale) {
+            return false;
+        }
+        let Some(quest) = self
+            .learning_quests
+            .iter_mut()
+            .find(|quest| quest.id == quest_id && quest.status == "formulating")
+        else {
+            return false;
+        };
+        quest.status = "deferred".to_owned();
+        quest.started_at = None;
+        quest.completed_at = Some(now);
+        quest.next_retry_at = None;
+        quest.rationale = Some(shorten(rationale.trim(), 240));
+        quest.question_provider_id = provider_id
+            .map(|value| shorten(value.trim(), 120))
+            .filter(|value| !value.is_empty());
+        quest.error = None;
+        self.set_behavior(
+            now,
+            "idle",
+            "autonomous-no-question",
+            "I reflected on the latest context, but I do not need to force a question right now.",
+            2 * 60_000,
+            None,
+        );
+        true
+    }
+
+    pub fn fail_learning_question_formation(
+        &mut self,
+        now: i64,
+        quest_id: &str,
+        error: &str,
+    ) -> bool {
+        let Some(quest) = self
+            .learning_quests
+            .iter_mut()
+            .find(|quest| quest.id == quest_id && quest.status == "formulating")
+        else {
+            return false;
+        };
+        let will_retry = quest.formation_attempts < 3;
+        quest.status = if will_retry {
+            "formation-retrying"
+        } else {
+            "formation-failed"
+        }
+        .to_owned();
+        quest.started_at = None;
+        quest.error = Some(shorten(error, 180));
+        quest.next_retry_at = will_retry.then(|| {
+            let multiplier = 1_i64 << quest.formation_attempts.saturating_sub(1).min(2);
+            now.saturating_add(AUTONOMOUS_LEARNING_RETRY_BASE_MS.saturating_mul(multiplier))
+        });
+        self.set_behavior(
+            now,
+            "resting",
+            if will_retry {
+                "autonomous-question-retry"
+            } else {
+                "autonomous-question-failed"
+            },
+            if will_retry {
+                "I could not form a grounded question this time. I will reflect again later."
+            } else {
+                "I stopped after repeated unclear attempts instead of inventing a question."
+            },
+            3 * 60_000,
+            None,
+        );
+        true
+    }
+
     pub fn complete_learning_quest(
         &mut self,
         now: i64,
@@ -1584,7 +1870,7 @@ impl StoredPetLife {
         }
     }
 
-    fn reconcile_autonomous_learning(&mut self, now: i64, pet_name: &str, memories: &[PetMemory]) {
+    fn reconcile_autonomous_learning(&mut self, now: i64) {
         if !self.settings.autonomy_enabled
             || !self.settings.learning_enabled
             || self.needs.energy < 30.0
@@ -1597,11 +1883,17 @@ impl StoredPetLife {
         {
             return;
         }
-        if self
-            .learning_quests
-            .iter()
-            .any(|quest| matches!(quest.status.as_str(), "pending" | "asking" | "retrying"))
-        {
+        if self.learning_quests.iter().any(|quest| {
+            matches!(
+                quest.status.as_str(),
+                "formation-pending"
+                    | "formulating"
+                    | "formation-retrying"
+                    | "pending"
+                    | "asking"
+                    | "retrying"
+            )
+        }) {
             return;
         }
         let date = local_date_key(now);
@@ -1627,80 +1919,25 @@ impl StoredPetLife {
         {
             return;
         }
-        let question = self.autonomous_learning_question(now, pet_name, memories, completed_today);
-        let topic = question
-            .trim_end_matches(['?', '？'])
-            .chars()
-            .take(72)
-            .collect::<String>();
         self.learning_quests.push(PetLearningQuest {
             id: uuid::Uuid::new_v4().to_string(),
-            question,
-            topic,
-            status: "pending".to_owned(),
+            question: String::new(),
+            topic: String::new(),
+            status: "formation-pending".to_owned(),
             created_at: now,
             started_at: None,
             completed_at: None,
             next_retry_at: None,
             attempts: 0,
+            formation_attempts: 0,
+            rationale: None,
+            question_provider_id: None,
             answer_title: None,
             knowledge_id: None,
             provider_id: None,
             error: None,
         });
         trim_oldest(&mut self.learning_quests, MAX_LEARNING_QUESTS);
-    }
-
-    fn autonomous_learning_question(
-        &self,
-        now: i64,
-        pet_name: &str,
-        memories: &[PetMemory],
-        completed_today: u32,
-    ) -> String {
-        let seed = local_datetime(now)
-            .map(|value| value.ordinal0() as usize)
-            .unwrap_or_default()
-            .saturating_add(completed_today as usize)
-            .saturating_add(self.learning_quests.len());
-        if seed.is_multiple_of(3)
-            && let Some(task) = self.tasks.iter().find(|task| task.status != "completed")
-        {
-            return format!(
-                "为了更好地陪伴用户完成“{}”，我应该先理解哪一个可靠、可实践的核心原则？",
-                shorten(&task.title, 52)
-            );
-        }
-        if seed % 3 == 1
-            && let Some(memory) = memories
-                .iter()
-                .rev()
-                .find(|memory| memory.confidence >= 0.65)
-        {
-            return format!(
-                "关于我记得的“{}”，有哪些重要边界或反例值得我理解，才能避免想当然？",
-                shorten(&memory.text, 60)
-            );
-        }
-        if let Some(knowledge) = self
-            .knowledge
-            .iter()
-            .filter(|item| item.source_kind != "discovery")
-            .min_by_key(|item| (item.review_count, item.last_reviewed_at.unwrap_or(0)))
-        {
-            return format!(
-                "我已经知道“{}”。它还能和哪个更深的概念建立可靠联系，实际应用时又该警惕什么？",
-                shorten(&knowledge.title, 52)
-            );
-        }
-        let seeds = [
-            "怎样区分真正有效的休息与只是逃避困难，让我能更体贴地陪伴长期专注？",
-            "人形成稳定习惯时，环境提示、行动门槛和即时反馈分别起什么作用？",
-            "当信息看起来可信时，应该用哪些简单步骤检查证据、适用范围和不确定性？",
-            "怎样提一个边界清晰的问题，才能让 Agent 给出更可靠、可验证而不是空泛的答案？",
-            "陪伴者如何在提醒与尊重自主之间保持分寸，既不冷漠也不制造压力？",
-        ];
-        format!("{pet_name} 想知道：{}", seeds[seed % seeds.len()])
     }
 
     fn reconcile_check_ins(&mut self, now: i64) {
@@ -2371,6 +2608,7 @@ impl StoredPetLife {
         trim_oldest(&mut self.tasks, MAX_TASKS);
         trim_oldest(&mut self.knowledge, MAX_KNOWLEDGE);
         trim_oldest(&mut self.learning_quests, MAX_LEARNING_QUESTS);
+        trim_oldest(&mut self.recent_observations, MAX_RECENT_OBSERVATIONS);
         trim_oldest(&mut self.rewards, MAX_REWARDS);
         trim_oldest(&mut self.activity_log, MAX_ACTIVITY_LOG);
         while self.days.len() > MAX_DAYS {
@@ -2393,6 +2631,7 @@ pub struct PetLifeSnapshot {
     pub tasks: Vec<PetTask>,
     pub knowledge: Vec<PetKnowledge>,
     pub learning_quests: Vec<PetLearningQuest>,
+    pub recent_observations: Vec<PetUserObservation>,
     pub active_session: Option<PetStudySession>,
     pub rewards: Vec<PetReward>,
     pub activity_log: Vec<PetActivityLogEntry>,
@@ -2598,6 +2837,42 @@ fn canonical(value: &str) -> String {
         .collect()
 }
 
+fn learning_question_is_sensitive(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    [
+        "api key",
+        "apikey",
+        "access token",
+        "password",
+        "passwd",
+        "secret",
+        "bearer ",
+        "http://",
+        "https://",
+        "密钥",
+        "密码",
+        "令牌",
+    ]
+    .iter()
+    .any(|pattern| lower.contains(pattern))
+        || lower.contains(":\\")
+}
+
+fn questions_too_similar(left: &str, right: &str) -> bool {
+    let left = canonical(left);
+    let right = canonical(right);
+    if left.is_empty() || right.is_empty() {
+        return false;
+    }
+    if left == right || left.contains(&right) || right.contains(&left) {
+        return true;
+    }
+    let left_chars = left.chars().collect::<BTreeSet<_>>();
+    let right_chars = right.chars().collect::<BTreeSet<_>>();
+    let union = left_chars.union(&right_chars).count();
+    union > 0 && left_chars.intersection(&right_chars).count() * 100 / union >= 82
+}
+
 fn stable_daily_id(date: &str, kind: &str, index: usize) -> String {
     format!("{date}:{kind}:{index}")
 }
@@ -2667,6 +2942,7 @@ mod tests {
                 "lastPersistedAt",
                 "lastTickAt",
                 "needs",
+                "recentObservations",
                 "rewards",
                 "settings",
                 "studySessions",
@@ -2721,6 +2997,7 @@ mod tests {
                 "lastTickAt",
                 "needs",
                 "prompt",
+                "recentObservations",
                 "rewards",
                 "settings",
                 "stats",
@@ -2890,15 +3167,35 @@ mod tests {
         assert!(life.study_sessions.is_empty());
         life.tick(now, "Yui", &[]);
         assert_eq!(life.learning_quests.len(), 1);
-        assert_eq!(life.learning_quests[0].status, "pending");
+        assert_eq!(life.learning_quests[0].status, "formation-pending");
         assert!(life.study_sessions.is_empty());
 
-        let quest = life.claim_learning_quest(now + 1_000).unwrap();
+        assert!(life.claim_learning_quest(now + 1_000).is_none());
+        let forming = life.claim_learning_question_formation(now + 1_000).unwrap();
+        assert_eq!(forming.status, "formulating");
+        let formed = life
+            .complete_learning_question_formation(
+                now + 2_000,
+                &forming.id,
+                PetLearningQuestionInput {
+                    question: "怎样判断一个学习问题是否足够具体并且能够验证？",
+                    topic: "可靠提问",
+                    rationale: "主人今天正在整理复杂任务，我还不清楚怎样界定可验证的问题。",
+                    provider_id: Some("question-provider"),
+                },
+            )
+            .unwrap();
+        assert_eq!(formed.status, "pending");
+        assert_eq!(
+            formed.question_provider_id.as_deref(),
+            Some("question-provider")
+        );
+        let quest = life.claim_learning_quest(now + 3_000).unwrap();
         assert_eq!(quest.status, "asking");
         assert_eq!(life.behavior.reason, "autonomous-agent-question");
         let knowledge = life
             .complete_learning_quest(
-                now + 2_000,
+                now + 4_000,
                 &quest.id,
                 PetKnowledgeInput {
                     title: "可靠提问的边界",
@@ -2930,11 +3227,119 @@ mod tests {
         let mut life = StoredPetLife::new(now - 60_000);
         life.born_at = now - 60_000;
         life.tick(now, "Yui", &[]);
-        let quest = life.claim_learning_quest(now + 1_000).unwrap();
-        assert!(life.fail_learning_quest(now + 2_000, &quest.id, "invalid answer"));
+        let forming = life.claim_learning_question_formation(now + 1_000).unwrap();
+        life.complete_learning_question_formation(
+            now + 2_000,
+            &forming.id,
+            PetLearningQuestionInput {
+                question: "什么方法能验证长期计划中的假设是否仍然成立？",
+                topic: "计划验证",
+                rationale: "今天的计划包含长期事项，需要知道怎样检查旧假设。",
+                provider_id: Some("question-provider"),
+            },
+        )
+        .unwrap();
+        let quest = life.claim_learning_quest(now + 3_000).unwrap();
+        assert!(life.fail_learning_quest(now + 4_000, &quest.id, "invalid answer"));
         assert_eq!(life.learning_quests[0].status, "retrying");
         assert!(life.learning_quests[0].next_retry_at.is_some());
         assert!(life.knowledge.is_empty());
+    }
+
+    #[test]
+    fn recent_owner_input_is_temporary_bounded_and_sensitive_safe() {
+        let now = local_time(2026, 8, 12, 10, 10);
+        let mut life = StoredPetLife::new(now);
+        assert!(life.observe_user_input(now, "今天我在重构桌宠的学习状态机"));
+        assert!(!life.observe_user_input(now + 1, "请记住 API key 是 sk-secret-value"));
+        assert_eq!(life.recent_observations.len(), 1);
+        assert_eq!(
+            life.recent_observations[0].text,
+            "今天我在重构桌宠的学习状态机"
+        );
+        life.normalize(now + RECENT_OBSERVATION_TTL_MS + 1);
+        assert!(life.recent_observations.is_empty());
+    }
+
+    #[test]
+    fn curiosity_can_decide_not_to_force_a_question() {
+        let now = local_time(2026, 8, 12, 10, 10);
+        let mut life = StoredPetLife::new(now - 60_000);
+        life.born_at = now - 60_000;
+        life.tick(now, "Yui", &[]);
+        let forming = life.claim_learning_question_formation(now + 1_000).unwrap();
+        assert!(life.defer_learning_question_formation(
+            now + 2_000,
+            &forming.id,
+            "今天没有新的、值得求解的知识缺口。",
+            Some("question-provider"),
+        ));
+        assert_eq!(life.learning_quests[0].status, "deferred");
+        assert_eq!(life.behavior.reason, "autonomous-no-question");
+        assert!(life.claim_learning_quest(now + 3_000).is_none());
+        life.tick(now + 4_000, "Yui", &[]);
+        assert_eq!(life.learning_quests.len(), 1);
+    }
+
+    #[test]
+    fn question_formation_rejects_duplicates_and_sensitive_rationale() {
+        let now = local_time(2026, 8, 12, 10, 10);
+        let mut life = StoredPetLife::new(now - 60_000);
+        life.born_at = now - 60_000;
+        life.tick(now, "Yui", &[]);
+        let first = life.claim_learning_question_formation(now + 1_000).unwrap();
+        life.complete_learning_question_formation(
+            now + 2_000,
+            &first.id,
+            PetLearningQuestionInput {
+                question: "如何验证任务拆分是否真的降低了行动门槛？",
+                topic: "任务拆分",
+                rationale: "主人今天安排了多个任务，我想理解拆分是否有效。",
+                provider_id: None,
+            },
+        )
+        .unwrap();
+        life.learning_quests[0].status = "completed".to_owned();
+        life.learning_quests.push(PetLearningQuest {
+            id: "second".to_owned(),
+            question: String::new(),
+            topic: String::new(),
+            status: "formulating".to_owned(),
+            created_at: now + AUTONOMOUS_LEARNING_MIN_INTERVAL_MS,
+            started_at: Some(now + AUTONOMOUS_LEARNING_MIN_INTERVAL_MS),
+            completed_at: None,
+            next_retry_at: None,
+            attempts: 0,
+            formation_attempts: 1,
+            rationale: None,
+            question_provider_id: None,
+            answer_title: None,
+            knowledge_id: None,
+            provider_id: None,
+            error: None,
+        });
+        let duplicate = life.complete_learning_question_formation(
+            now + AUTONOMOUS_LEARNING_MIN_INTERVAL_MS + 1,
+            "second",
+            PetLearningQuestionInput {
+                question: "如何验证任务拆分是否真的降低了行动门槛？",
+                topic: "任务拆分",
+                rationale: "想再问一次相同的问题。",
+                provider_id: None,
+            },
+        );
+        assert!(duplicate.is_err());
+        let sensitive = life.complete_learning_question_formation(
+            now + AUTONOMOUS_LEARNING_MIN_INTERVAL_MS + 2,
+            "second",
+            PetLearningQuestionInput {
+                question: "怎样验证一个任务拆分方法的实际效果？",
+                topic: "任务拆分",
+                rationale: "参考 password=secret 继续思考。",
+                provider_id: None,
+            },
+        );
+        assert!(sensitive.is_err());
     }
 
     #[test]
