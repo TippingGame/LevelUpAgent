@@ -69,6 +69,11 @@ import type {
   PermissionLevel,
 } from "./types";
 import { localDateKey } from "./petAutonomy";
+import {
+  createHatchBootstrapToolRequest,
+  createToolExecutionRequest,
+  type HatchBootstrapToolOptions,
+} from "./toolExecutionRequest";
 
 export const isDesktop = () => "__TAURI_INTERNALS__" in window;
 
@@ -878,11 +883,8 @@ export async function executeTool(
   approvalGranted = false,
 ): Promise<ToolExecutionResponse> {
   return invoke<ToolExecutionResponse>("execute_tool", {
-    request: {
-      name: call.name,
-      callId: call.id,
-      operationId,
-      arguments: call.arguments,
+    request: createToolExecutionRequest({
+      call,
       workspace,
       threadId,
       profile,
@@ -892,8 +894,17 @@ export async function executeTool(
       hatchBootstrap,
       mode,
       permissionLevel,
+      operationId,
       approvalGranted,
-    },
+    }),
+  });
+}
+
+export async function executeHatchBootstrapTool(
+  options: HatchBootstrapToolOptions,
+): Promise<ToolExecutionResponse> {
+  return invoke<ToolExecutionResponse>("execute_tool", {
+    request: createHatchBootstrapToolRequest(options),
   });
 }
 

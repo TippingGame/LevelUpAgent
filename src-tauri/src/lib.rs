@@ -4074,9 +4074,19 @@ async fn harness_run_loop(
                     let tool_name = tool_request.name.clone();
                     let tool_started = Instant::now();
                     log_tool_started(&tool_name, Some(&operation_id), Some(&call.id), Some(round));
-                    let tool_result =
-                        execute_tool_inner(app, state, database, manager, subagents, tool_request)
-                            .await;
+                    let pet_manager = app
+                        .try_state::<pet::PetManager>()
+                        .ok_or_else(|| "Pet manager is unavailable".to_owned())?;
+                    let tool_result = execute_tool_inner(
+                        app,
+                        state,
+                        database,
+                        manager,
+                        &pet_manager,
+                        subagents,
+                        tool_request,
+                    )
+                    .await;
                     log_tool_result(
                         &tool_name,
                         Some(&operation_id),
@@ -5049,6 +5059,298 @@ fn hatch_command_is_observation(arguments: &serde_json::Value) -> bool {
         .any(|marker| normalized.starts_with(marker.trim()) || normalized.contains(marker))
 }
 
+fn path_equals(left: &Path, right: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
+}
+
+fn command_token_at(command: &str, start: usize) -> Option<(&str, usize)> {
+    let bytes = command.as_bytes();
+    let mut index = start;
+    while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index += 1;
+    }
+    if index >= bytes.len() {
+        return None;
+    }
+
+    let token_start;
+    let token_end;
+    match bytes[index] {
+        b'\'' | b'"' => {
+            let quote = bytes[index];
+            index += 1;
+            token_start = index;
+            while index < bytes.len() {
+                if bytes[index] != quote {
+                    index += 1;
+                    continue;
+                }
+                // PowerShell escapes a quote inside a quoted literal by
+                // doubling it. App-authored values use the same convention.
+                if bytes.get(index + 1) == Some(&quote) {
+                    index += 2;
+                    continue;
+                }
+                break;
+            }
+            if index >= bytes.len() {
+                return None;
+            }
+            token_end = index;
+            index += 1;
+            if bytes
+                .get(index)
+                .is_some_and(|byte| !byte.is_ascii_whitespace())
+            {
+                return None;
+            }
+        }
+        _ => {
+            token_start = index;
+            while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
+                index += 1;
+            }
+            token_end = index;
+        }
+    }
+    Some((&command[token_start..token_end], index))
+}
+
+fn decode_powershell_literal(value: &str) -> String {
+    value.replace("''", "'").replace("\"\"", "\"")
+}
+
+struct BootstrapPythonInvocation<'a> {
+    script: &'a str,
+    arguments: Vec<&'a str>,
+}
+
+fn bootstrap_python_invocation(command: &str) -> Option<BootstrapPythonInvocation<'_>> {
+    // Application-authored commands never contain shell operators. Rejecting
+    // them here prevents a forged bootstrap marker from appending a payload.
+    if command.bytes().any(|byte| {
+        matches!(
+            byte,
+            b'\r' | b'\n' | b';' | b'|' | b'&' | b'<' | b'>' | b'`'
+        )
+    }) {
+        return None;
+    }
+
+    let mut cursor = 0;
+    let (first, next) = command_token_at(command, cursor)?;
+    cursor = next;
+    let executable = Path::new(first)
+        .file_name()?
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    let (script, next_cursor) = if matches!(
+        executable.as_str(),
+        "python" | "python.exe" | "python3" | "python3.exe"
+    ) {
+        command_token_at(command, cursor)?
+    } else if matches!(executable.as_str(), "py" | "py.exe") {
+        let (next_token, next_cursor) = command_token_at(command, cursor)?;
+        if next_token == "-3" {
+            command_token_at(command, next_cursor)?
+        } else {
+            (next_token, next_cursor)
+        }
+    } else {
+        return None;
+    };
+    cursor = next_cursor;
+    let mut arguments = Vec::new();
+    while let Some((argument, next_cursor)) = command_token_at(command, cursor) {
+        arguments.push(argument);
+        cursor = next_cursor;
+    }
+    Some(BootstrapPythonInvocation { script, arguments })
+}
+
+fn canonical_inside(root: &Path, raw: &str, must_exist: bool) -> bool {
+    let candidate = PathBuf::from(raw);
+    if !candidate.is_absolute() {
+        return false;
+    }
+    if must_exist {
+        return std::fs::canonicalize(candidate).is_ok_and(|path| path.starts_with(root));
+    }
+    let Some(parent) = candidate.parent() else {
+        return false;
+    };
+    std::fs::canonicalize(parent).is_ok_and(|path| path.starts_with(root))
+}
+
+fn prepare_bootstrap_arguments_allowed(arguments: &[&str], work_root: &Path) -> bool {
+    let mut index = 0;
+    let mut output_dir = false;
+    while index < arguments.len() {
+        match arguments[index] {
+            "--force" => index += 1,
+            "--pet-name" | "--pet-id" | "--description" | "--pet-notes" | "--style-notes"
+            | "--chroma-key" => {
+                if arguments.get(index + 1).is_none() {
+                    return false;
+                }
+                index += 2;
+            }
+            "--output-dir" => {
+                let Some(path) = arguments.get(index + 1) else {
+                    return false;
+                };
+                if !canonical_inside(work_root, path, false) {
+                    return false;
+                }
+                output_dir = true;
+                index += 2;
+            }
+            // App-owned prepare calls intentionally omit --reference; user
+            // attachments remain managed media IDs until the base image job.
+            _ => return false,
+        }
+    }
+    output_dir
+}
+
+fn status_bootstrap_arguments_allowed(arguments: &[&str], work_root: &Path) -> bool {
+    matches!(arguments, ["--run-dir", run_dir] if canonical_inside(work_root, run_dir, true))
+}
+
+fn bundled_hatch_bootstrap_call_allowed(
+    request: &ToolExecutionRequest,
+    manager: &pet::PetManager,
+) -> bool {
+    if !request.hatch || !request.hatch_bootstrap {
+        return false;
+    }
+    if request.name == "read_skill" {
+        let environment = manager.hatch_environment();
+        let Some(skill_root) = environment.hatch_skill_path else {
+            return false;
+        };
+        let manifest = Path::new(&skill_root).join("SKILL.md");
+        let expected_id = skill::id_for_path(&manifest);
+        if request
+            .arguments
+            .get("skillId")
+            .and_then(serde_json::Value::as_str)
+            != Some(expected_id.as_str())
+        {
+            return false;
+        }
+        return matches!(
+            request
+                .arguments
+                .get("path")
+                .and_then(serde_json::Value::as_str),
+            None | Some("references/animation-rows.md")
+                | Some("references/codex-pet-contract.md")
+                | Some("references/qa-rubric.md")
+        );
+    }
+    if request.name != "run_command" {
+        return false;
+    }
+
+    let Some(command) = request
+        .arguments
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    let Some(bootstrap) = request.arguments.get("hatchBootstrap") else {
+        return false;
+    };
+    let Some(kind) = bootstrap.get("kind").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let Some(expected_script) = bootstrap
+        .get("scriptPath")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    let Some(expected_run_dir) = bootstrap
+        .get("runDirectory")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    let Some(invocation) = bootstrap_python_invocation(command.trim()) else {
+        return false;
+    };
+    let decoded_script = decode_powershell_literal(invocation.script);
+    if !path_equals(Path::new(&decoded_script), Path::new(expected_script)) {
+        return false;
+    }
+    let script = PathBuf::from(decoded_script);
+    if !script.is_absolute() {
+        return false;
+    }
+    let Ok(script) = std::fs::canonicalize(script) else {
+        return false;
+    };
+    let environment = manager.hatch_environment();
+    let Some(skill_root) = environment.hatch_skill_path else {
+        return false;
+    };
+    let Ok(work_root) = std::fs::canonicalize(environment.work_directory) else {
+        return false;
+    };
+    for (expected_kind, name, arguments_allowed) in [
+        (
+            "prepare",
+            "prepare_pet_run.py",
+            prepare_bootstrap_arguments_allowed as fn(&[&str], &Path) -> bool,
+        ),
+        (
+            "status",
+            "pet_job_status.py",
+            status_bootstrap_arguments_allowed,
+        ),
+    ] {
+        if kind != expected_kind {
+            continue;
+        }
+        let Ok(allowed) = std::fs::canonicalize(Path::new(&skill_root).join("scripts").join(name))
+        else {
+            continue;
+        };
+        if path_equals(&script, &allowed) {
+            let run_dir_allowed = if kind == "prepare" {
+                canonical_inside(&work_root, expected_run_dir, false)
+            } else {
+                canonical_inside(&work_root, expected_run_dir, true)
+            };
+            return run_dir_allowed
+                && arguments_allowed(&invocation.arguments, &work_root)
+                && invocation.arguments.windows(2).any(|pair| {
+                    matches!(pair, ["--output-dir" | "--run-dir", value] if path_equals(Path::new(value), Path::new(expected_run_dir)))
+                });
+        }
+    }
+    false
+}
+
+fn hatch_bootstrap_boundary_error(
+    request: &ToolExecutionRequest,
+    manager: &pet::PetManager,
+) -> Option<&'static str> {
+    (request.hatch_bootstrap && !bundled_hatch_bootstrap_call_allowed(request, manager)).then_some(
+        "The requested hatch bootstrap tool is outside the bundled application startup boundary.",
+    )
+}
+
 fn hatch_tool_policy_error(request: &ToolExecutionRequest) -> Option<&'static str> {
     if !request.hatch {
         return None;
@@ -5086,6 +5388,7 @@ async fn execute_tool(
     state: tauri::State<'_, AppState>,
     database: tauri::State<'_, database::Database>,
     manager: tauri::State<'_, mcp::McpManager>,
+    pet_manager: tauri::State<'_, pet::PetManager>,
     subagents: tauri::State<'_, subagent::SubagentManager>,
     request: ToolExecutionRequest,
 ) -> Result<ToolExecutionResponse, String> {
@@ -5094,7 +5397,16 @@ async fn execute_tool(
     let call_id = request.call_id.clone();
     let started = Instant::now();
     log_tool_started(&name, operation_id.as_deref(), call_id.as_deref(), None);
-    let result = execute_tool_inner(&app, &state, &database, &manager, &subagents, request).await;
+    let result = execute_tool_inner(
+        &app,
+        &state,
+        &database,
+        &manager,
+        &pet_manager,
+        &subagents,
+        request,
+    )
+    .await;
     log_tool_result(
         &name,
         operation_id.as_deref(),
@@ -5168,6 +5480,7 @@ async fn execute_tool_inner(
     state: &AppState,
     database: &database::Database,
     manager: &mcp::McpManager,
+    pet_manager: &pet::PetManager,
     subagents: &subagent::SubagentManager,
     mut request: ToolExecutionRequest,
 ) -> Result<ToolExecutionResponse, String> {
@@ -5182,6 +5495,13 @@ async fn execute_tool_inner(
     {
         request.hatch = true;
     }
+    if let Some(output) = hatch_bootstrap_boundary_error(&request, pet_manager) {
+        return Ok(ToolExecutionResponse {
+            output: output.to_owned(),
+            is_error: true,
+        });
+    }
+    let hatch_bootstrap_allowed = request.hatch_bootstrap;
     if let Some(output) = hatch_tool_policy_error(&request) {
         return Ok(ToolExecutionResponse {
             output: output.to_owned(),
@@ -5207,7 +5527,7 @@ async fn execute_tool_inner(
         policy_decision,
         crate::harness::types::PolicyDecision::NeedsApproval
     ) && request.approval_granted
-        && !request.hatch_bootstrap
+        && !hatch_bootstrap_allowed
         && !request.hatch
     {
         match (request.operation_id.as_deref(), request.call_id.as_deref()) {
@@ -5224,7 +5544,7 @@ async fn execute_tool_inner(
             policy_decision,
             crate::harness::types::PolicyDecision::NeedsApproval
         ) && !approval_is_consumed
-            && !request.hatch_bootstrap)
+            && !hatch_bootstrap_allowed)
     {
         let output = if matches!(policy_decision, crate::harness::types::PolicyDecision::Deny) {
             format!(
@@ -6392,6 +6712,143 @@ mod tests {
         request.hatch = false;
         request.name = "get_goal".to_owned();
         assert!(hatch_tool_policy_error(&request).is_none());
+    }
+
+    #[test]
+    fn hatch_bootstrap_only_bypasses_approval_for_bundled_reads_and_scripts() {
+        let root = std::env::temp_dir().join(format!(
+            "levelup-hatch-bootstrap-policy-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let app_data = root.join("app");
+        let home = root.join("home");
+        let skills = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("skills");
+        let manager = pet::PetManager::open_with_skills(&app_data, &home, Some(&skills)).unwrap();
+        let work_root = app_data.join("pet-hatch");
+        std::fs::create_dir_all(&work_root).unwrap();
+        let run_dir = work_root.join("noct-run");
+        let hatch_root = skills.join("hatch-pet");
+        let manifest_id = skill::id_for_path(&hatch_root.join("SKILL.md"));
+        let prepare = hatch_root.join("scripts").join("prepare_pet_run.py");
+        let status = hatch_root.join("scripts").join("pet_job_status.py");
+        let mut request = ToolExecutionRequest {
+            call_id: Some("hatch-bootstrap-policy".to_owned()),
+            operation_id: None,
+            name: "read_skill".to_owned(),
+            arguments: serde_json::json!({ "skillId": manifest_id }),
+            workspace: root.to_string_lossy().into_owned(),
+            thread_id: Some("hatch-thread".to_owned()),
+            profile: None,
+            fallback_profiles: Vec::new(),
+            hatch: true,
+            hatch_skill_loaded: false,
+            hatch_bootstrap: true,
+            mode: Some("agent".to_owned()),
+            permission_level: Some("request".to_owned()),
+            approval_granted: false,
+        };
+
+        assert!(bundled_hatch_bootstrap_call_allowed(&request, &manager));
+        request.arguments = serde_json::json!({
+            "skillId": request.arguments["skillId"],
+            "path": "references/qa-rubric.md"
+        });
+        assert!(bundled_hatch_bootstrap_call_allowed(&request, &manager));
+        request.arguments["path"] = serde_json::json!("scripts/prepare_pet_run.py");
+        assert!(!bundled_hatch_bootstrap_call_allowed(&request, &manager));
+
+        request.name = "run_command".to_owned();
+        request.arguments = serde_json::json!({
+            "command": format!("python '{}' --output-dir '{}'", prepare.display(), run_dir.display()),
+            "hatchBootstrap": {
+                "kind": "prepare",
+                "scriptPath": prepare.to_string_lossy(),
+                "runDirectory": run_dir.to_string_lossy()
+            }
+        });
+        assert!(bundled_hatch_bootstrap_call_allowed(&request, &manager));
+        request.arguments["hatchBootstrap"]["scriptPath"] =
+            serde_json::json!(status.to_string_lossy());
+        assert!(!bundled_hatch_bootstrap_call_allowed(&request, &manager));
+        request.arguments["hatchBootstrap"]["scriptPath"] =
+            serde_json::json!(prepare.to_string_lossy());
+        request.arguments["hatchBootstrap"]["runDirectory"] =
+            serde_json::json!(root.join("outside-run").to_string_lossy());
+        assert!(!bundled_hatch_bootstrap_call_allowed(&request, &manager));
+        request.arguments["hatchBootstrap"]["runDirectory"] =
+            serde_json::json!(run_dir.to_string_lossy());
+        std::fs::create_dir_all(&run_dir).unwrap();
+        request.arguments = serde_json::json!({
+            "command": format!("py -3 '{}' --run-dir '{}'", status.display(), run_dir.display()),
+            "hatchBootstrap": {
+                "kind": "status",
+                "scriptPath": status.to_string_lossy(),
+                "runDirectory": run_dir.to_string_lossy()
+            }
+        });
+        assert!(bundled_hatch_bootstrap_call_allowed(&request, &manager));
+
+        for command in [
+            "python prepare_pet_run.py --output-dir run".to_owned(),
+            format!(
+                "python '{}' --output-dir '{}'",
+                prepare.display(),
+                root.join("outside-run").display()
+            ),
+            format!(
+                "python '{}' --output-dir '{}' --reference '{}'",
+                prepare.display(),
+                run_dir.display(),
+                root.join("reference.png").display()
+            ),
+            format!(
+                "python '{}' --run-dir '{}' --unknown value",
+                status.display(),
+                run_dir.display()
+            ),
+            format!("python '{}' --help; Write-Output forged", prepare.display()),
+            format!("python '{}' --help | Out-File forged.txt", status.display()),
+            format!(
+                "python '{}'",
+                hatch_root
+                    .join("scripts")
+                    .join("finalize_pet_run.py")
+                    .display()
+            ),
+        ] {
+            request.arguments = serde_json::json!({
+                "command": command,
+                "hatchBootstrap": {
+                    "kind": "prepare",
+                    "scriptPath": prepare.to_string_lossy(),
+                    "runDirectory": run_dir.to_string_lossy()
+                }
+            });
+            assert!(
+                !bundled_hatch_bootstrap_call_allowed(&request, &manager),
+                "forged bootstrap command was accepted: {}",
+                request.arguments["command"]
+            );
+        }
+        request.name = "delete_file".to_owned();
+        request.arguments = serde_json::json!({ "path": "anything" });
+        assert!(!bundled_hatch_bootstrap_call_allowed(&request, &manager));
+        assert!(hatch_bootstrap_boundary_error(&request, &manager).is_some());
+        request.name = "run_command".to_owned();
+        request.arguments = serde_json::json!({
+            "command": format!("python '{}'", prepare.display()),
+            "hatchBootstrap": {
+                "kind": "prepare",
+                "scriptPath": prepare.to_string_lossy(),
+                "runDirectory": run_dir.to_string_lossy()
+            }
+        });
+        request.hatch_bootstrap = false;
+        assert!(!bundled_hatch_bootstrap_call_allowed(&request, &manager));
+        assert!(hatch_bootstrap_boundary_error(&request, &manager).is_none());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

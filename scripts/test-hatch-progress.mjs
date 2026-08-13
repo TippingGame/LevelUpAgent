@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -8,6 +9,7 @@ import {
   hatchObservationFingerprint,
   hatchObservationHistory,
   hatchSkillManifestWasRead,
+  hatchBootstrapMetadata,
   hatchPrepareCommandFromHistory,
   hatchRunDirectoryFromHistory,
   normalizeHatchPrepareCall,
@@ -23,6 +25,7 @@ import {
   hatchSourcePathsFromHistory,
   normalizeHatchRecordCall,
 } from "../src/lib/hatchProgress.ts";
+import { createHatchBootstrapToolRequest } from "../src/lib/toolExecutionRequest.ts";
 
 const call = (id, name, args = {}) => ({ id, name, arguments: args });
 const state = () => ({ count: 0, fingerprints: new Map() });
@@ -177,6 +180,49 @@ test("the application bootstrap marker survives without a tool exchange", () => 
     toolCalls: [],
   }];
   assert.equal(hatchSkillManifestWasRead(history), true);
+});
+
+test("application-owned hatch prepare and status calls always carry bootstrap semantics", () => {
+  for (const [id, command] of [
+    ["prepare", "python 'C:/skill/scripts/prepare_pet_run.py' --output-dir 'C:/run'"],
+    ["status", "python 'C:/skill/scripts/pet_job_status.py' --run-dir 'C:/run'"],
+  ]) {
+    const request = createHatchBootstrapToolRequest({
+      call: call(id, "run_command", { command }),
+      workspace: "C:/workspace",
+      threadId: "hatch-thread",
+      fallbackProfiles: [],
+      hatchSkillLoaded: true,
+    });
+    assert.equal(request.hatch, true);
+    assert.equal(request.hatchBootstrap, true);
+    assert.equal(request.hatchSkillLoaded, true);
+    assert.equal(request.mode, "agent");
+    assert.equal(request.permissionLevel, "request");
+    assert.equal(request.approvalGranted, false);
+    assert.deepEqual(request.arguments.hatchBootstrap, {
+      kind: id,
+      scriptPath: `C:/skill/scripts/${id === "prepare" ? "prepare_pet_run.py" : "pet_job_status.py"}`,
+      runDirectory: "C:/run",
+    });
+  }
+
+  const appSource = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+  const bootstrapSource = appSource.slice(
+    appSource.indexOf("async function bootstrapHatchHistory"),
+    appSource.indexOf("function modelProviderBrand", appSource.indexOf("async function bootstrapHatchHistory")),
+  );
+  assert.doesNotMatch(bootstrapSource, /\bexecuteTool\s*\(/);
+  assert.equal(bootstrapSource.match(/\bexecuteHatchBootstrapTool\s*\(/g)?.length, 4);
+});
+
+test("hatch bootstrap metadata requires quoted canonical script and run paths", () => {
+  assert.deepEqual(
+    hatchBootstrapMetadata("python 'C:/skill/scripts/prepare_pet_run.py' --output-dir 'C:/run' --force"),
+    { kind: "prepare", scriptPath: "C:/skill/scripts/prepare_pet_run.py", runDirectory: "C:/run" },
+  );
+  assert.equal(hatchBootstrapMetadata("python prepare_pet_run.py --output-dir C:/run"), null);
+  assert.equal(hatchBootstrapMetadata("python 'C:/skill/scripts/finalize_pet_run.py' --run-dir 'C:/run'"), null);
 });
 
 test("hatch execution restores the canonical prepare command after provider shortening", () => {

@@ -88,6 +88,7 @@ import {
   deletePersistedThread,
   deleteApiKey,
   deleteImageAttachment,
+  executeHatchBootstrapTool,
   executeTool,
   fetchModels,
   getGitDiff,
@@ -7536,16 +7537,14 @@ async function bootstrapHatchHistory(
   if (!hatchSkillManifestWasRead(nextHistory)) {
     ensureCurrent();
     const readCall = hatchBootstrapCall("read_skill", { skillId: hatchSkill.id });
-    const readResult = await executeTool(
-      readCall,
+    const readResult = await executeHatchBootstrapTool({
+      call: readCall,
       workspace,
       threadId,
       profile,
       fallbackProfiles,
-      true,
-      false,
-      true,
-    );
+      hatchSkillLoaded: false,
+    });
     ensureCurrent();
     nextHistory = appendHatchToolExchange(nextHistory, readCall, readResult);
     if (readResult.isError || !/^Skill:\s*hatch-pet\b/im.test(readResult.output.trimStart())) {
@@ -7571,16 +7570,14 @@ async function bootstrapHatchHistory(
       skillId: hatchSkill.id,
       path: referencePath,
     });
-    const referenceResult = await executeTool(
-      referenceCall,
+    const referenceResult = await executeHatchBootstrapTool({
+      call: referenceCall,
       workspace,
       threadId,
       profile,
       fallbackProfiles,
-      true,
-      true,
-      true,
-    );
+      hatchSkillLoaded: true,
+    });
     ensureCurrent();
     nextHistory = appendHatchToolExchange(nextHistory, referenceCall, referenceResult);
     if (referenceResult.isError || !/^Skill:\s*hatch-pet\b/im.test(referenceResult.output.trimStart())) {
@@ -7603,15 +7600,14 @@ async function bootstrapHatchHistory(
     && /[\"']?run_dir[\"']?\s*:/i.test(item.content))) {
     ensureCurrent();
     const prepareCall = hatchBootstrapCall("run_command", { command: prepareCommand });
-    const prepareResult = await executeTool(
-      prepareCall,
+    const prepareResult = await executeHatchBootstrapTool({
+      call: prepareCall,
       workspace,
       threadId,
       profile,
       fallbackProfiles,
-      true,
-      true,
-    );
+      hatchSkillLoaded: true,
+    });
     ensureCurrent();
     nextHistory = appendHatchToolExchange(nextHistory, prepareCall, prepareResult);
     if (prepareResult.isError
@@ -7633,15 +7629,14 @@ async function bootstrapHatchHistory(
     );
   }
   const statusCall = hatchBootstrapCall("run_command", { command: statusCommand });
-  const statusResult = await executeTool(
-    statusCall,
+  const statusResult = await executeHatchBootstrapTool({
+    call: statusCall,
     workspace,
     threadId,
     profile,
     fallbackProfiles,
-    true,
-    true,
-  );
+    hatchSkillLoaded: true,
+  });
   ensureCurrent();
   nextHistory = appendHatchToolExchange(nextHistory, statusCall, statusResult);
   if (statusResult.isError || !/run_dir/i.test(statusResult.output)) {

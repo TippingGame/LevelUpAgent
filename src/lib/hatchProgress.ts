@@ -392,6 +392,29 @@ export function hatchStatusCommand(history: AgentMessage[]) {
   return `${pythonInvocation} ${powershellLiteral(`${skillDirectory}\\scripts\\pet_job_status.py`)} --run-dir ${powershellLiteral(runDirectory)}`;
 }
 
+/**
+ * Give the native bootstrap boundary explicit script/run paths without making
+ * those trusted values discoverable from provider-authored shell text.
+ */
+export function hatchBootstrapMetadata(command: string) {
+  const prepare = command.match(/(?:^|[\/])prepare_pet_run\.py(?=['"\s]|$)/i);
+  const status = command.match(/(?:^|[\/])pet_job_status\.py(?=['"\s]|$)/i);
+  const kind = prepare ? "prepare" : status ? "status" : null;
+  if (!kind) return null;
+
+  const scriptPattern = kind === "prepare" ? "prepare_pet_run\\.py" : "pet_job_status\\.py";
+  const scriptMatch = command.match(new RegExp(`['\"]([^'\"\\r\\n]*[\\\\/]${scriptPattern})['\"]`, "i"));
+  if (!scriptMatch?.[1]) return null;
+  const directoryFlag = kind === "prepare" ? "output-dir" : "run-dir";
+  const directoryMatch = command.match(new RegExp(`--${directoryFlag}\\s+['\"]([^'\"\\r\\n]+)['\"]`, "i"));
+  if (!directoryMatch?.[1]) return null;
+  return {
+    kind,
+    scriptPath: scriptMatch[1],
+    runDirectory: directoryMatch[1],
+  } as const;
+}
+
 /** Replace a provider's shortened prepare call with the app-authored command. */
 export function normalizeHatchPrepareCall(call: ToolCall, history: AgentMessage[]) {
   if (call.name !== "run_command" || typeof call.arguments?.command !== "string") return call;
