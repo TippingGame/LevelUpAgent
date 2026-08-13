@@ -78,25 +78,42 @@ def remove_chroma_background(
     return rgba
 
 
-def fit_to_cell(image: Image.Image) -> Image.Image:
-    bbox = image.getbbox()
-    target = Image.new("RGBA", (CELL_WIDTH, CELL_HEIGHT), (0, 0, 0, 0))
-    if bbox is None:
-        return target
+def fit_frames_consistently(
+    frames: list[tuple[Image.Image, int] | None],
+) -> list[Image.Image]:
+    """Fit one row with a shared scale while preserving source vertical motion."""
 
-    sprite = image.crop(bbox)
-    max_width = CELL_WIDTH - 10
-    max_height = CELL_HEIGHT - 10
-    scale = min(max_width / sprite.width, max_height / sprite.height, 1.0)
-    if scale != 1.0:
-        sprite = sprite.resize(
-            (max(1, round(sprite.width * scale)), max(1, round(sprite.height * scale))),
-            Image.Resampling.LANCZOS,
-        )
-    left = (CELL_WIDTH - sprite.width) // 2
-    top = (CELL_HEIGHT - sprite.height) // 2
-    target.alpha_composite(sprite, (left, top))
-    return target
+    visible = [frame for frame in frames if frame is not None]
+    if not visible:
+        return [Image.new("RGBA", (CELL_WIDTH, CELL_HEIGHT)) for _ in frames]
+
+    max_width = max(image.width for image, _top in visible)
+    min_top = min(top for _image, top in visible)
+    max_bottom = max(top + image.height for image, top in visible)
+    row_height = max(1, max_bottom - min_top)
+    scale = min(
+        (CELL_WIDTH - 10) / max(1, max_width),
+        (CELL_HEIGHT - 10) / row_height,
+        1.0,
+    )
+    fitted_height = max(1, round(row_height * scale))
+    row_top = (CELL_HEIGHT - fitted_height) // 2
+    output: list[Image.Image] = []
+    for frame in frames:
+        target = Image.new("RGBA", (CELL_WIDTH, CELL_HEIGHT), (0, 0, 0, 0))
+        if frame is None:
+            output.append(target)
+            continue
+        sprite, source_top = frame
+        width = max(1, round(sprite.width * scale))
+        height = max(1, round(sprite.height * scale))
+        if sprite.size != (width, height):
+            sprite = sprite.resize((width, height), Image.Resampling.LANCZOS)
+        left = (CELL_WIDTH - sprite.width) // 2
+        top = row_top + round((source_top - min_top) * scale)
+        target.alpha_composite(sprite, (left, top))
+        output.append(target)
+    return output
 
 
 def connected_components(image: Image.Image) -> list[dict[str, object]]:
@@ -165,7 +182,7 @@ def component_group_image(
     source: Image.Image,
     components: list[dict[str, object]],
     padding: int = 4,
-) -> Image.Image:
+) -> tuple[Image.Image, int]:
     width, height = source.size
     min_x = max(0, min(component["bbox"][0] for component in components) - padding)
     min_y = max(0, min(component["bbox"][1] for component in components) - padding)
@@ -180,7 +197,7 @@ def component_group_image(
             x = pixel_index % width
             y = pixel_index // width
             output_pixels[x - min_x, y - min_y] = source_pixels[x, y]
-    return output
+    return output, min_y
 
 
 def extract_component_frames(strip: Image.Image, frame_count: int) -> list[Image.Image] | None:
@@ -215,18 +232,19 @@ def extract_component_frames(strip: Image.Image, frame_count: int) -> list[Image
         )
         groups[nearest_index].append(component)
 
-    return [fit_to_cell(component_group_image(strip, group)) for group in groups]
+    return fit_frames_consistently([component_group_image(strip, group) for group in groups])
 
 
 def extract_slot_frames(strip: Image.Image, frame_count: int) -> list[Image.Image]:
     slot_width = strip.width / frame_count
-    frames = []
+    frames: list[tuple[Image.Image, int] | None] = []
     for index in range(frame_count):
         left = round(index * slot_width)
         right = round((index + 1) * slot_width)
         crop = strip.crop((left, 0, right, strip.height))
-        frames.append(fit_to_cell(crop))
-    return frames
+        bbox = crop.getbbox()
+        frames.append(None if bbox is None else (crop.crop(bbox), bbox[1]))
+    return fit_frames_consistently(frames)
 
 
 def extract_state(
@@ -262,7 +280,12 @@ def extract_state(
         output = state_dir / f"{index:02d}.png"
         frame.save(output)
         outputs.append(str(output))
-    return {"state": state, "frames": outputs, "method": used_method}
+    return {
+        "state": state,
+        "frames": outputs,
+        "method": used_method,
+        "normalization": "shared-row-transform",
+    }
 
 
 def main() -> None:

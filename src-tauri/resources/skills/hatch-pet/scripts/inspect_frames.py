@@ -122,6 +122,7 @@ def inspect_state(
     areas: list[int] = []
     manifest_row = manifest_rows.get(state, {})
     method = manifest_row.get("method")
+    normalization = manifest_row.get("normalization")
 
     if len(files) != expected_count:
         row_errors.append(f"expected {expected_count} frame files for {state}, found {len(files)}")
@@ -133,6 +134,10 @@ def inspect_state(
     elif method and method != "components":
         row_warnings.append(
             f"{state} used extraction method {method}; component extraction is preferred"
+        )
+    if method and normalization != "shared-row-transform":
+        row_errors.append(
+            f"{state} used legacy per-frame normalization; re-extract with a shared row transform"
         )
 
     for index, frame_path in enumerate(files[:expected_count]):
@@ -193,6 +198,7 @@ def inspect_state(
         "expected_frames": expected_count,
         "actual_frames": len(files),
         "extraction_method": method,
+        "normalization": normalization,
         "ok": not row_errors,
         "errors": row_errors,
         "warnings": row_warnings,

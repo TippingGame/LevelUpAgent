@@ -1,22 +1,29 @@
 use std::collections::BTreeMap;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::{
     Mutex,
-    atomic::{AtomicU32, Ordering},
+    atomic::{AtomicBool, AtomicU32, Ordering},
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
+use crate::pet_life::{
+    PetKnowledgeInput, PetLearningQuest, PetLifeSettings, PetLifeSnapshot, StoredPetLife,
+};
+
 const DEFAULT_PET_ID: &str = "yui";
-const STATE_VERSION: u32 = 2;
+const STATE_VERSION: u32 = 3;
 const SPRITESHEET_WIDTH: usize = 1_536;
 const SPRITESHEET_HEIGHT: usize = 1_872;
 const MAX_SPRITESHEET_BYTES: u64 = 24 * 1024 * 1024;
 const MAX_SEEN_USAGE_IDS: usize = 20_000;
 const MAX_MEMORIES_PER_PET: usize = 100;
+const PET_BACKUP_VERSION: u32 = 1;
+const MAX_BACKUP_JSON_BYTES: u64 = 8 * 1024 * 1024;
 const PET_WINDOW_WIDTH: f64 = 430.0;
 const PET_WINDOW_HEIGHT: f64 = 580.0;
 const DEFAULT_PET_SCALE: f64 = 0.75;
@@ -24,6 +31,7 @@ const MIN_PET_SCALE: f64 = 0.55;
 const MAX_PET_SCALE: f64 = 1.45;
 const PET_SCALE_UNITS: f64 = 1_000.0;
 static ACTIVE_PET_SCALE: AtomicU32 = AtomicU32::new(750);
+static PET_PROMPT_VISIBLE: AtomicBool = AtomicBool::new(false);
 const DEFAULT_MANIFEST: &[u8] = include_bytes!("../resources/pets/yui/pet.json");
 const DEFAULT_SPRITESHEET: &[u8] = include_bytes!("../resources/pets/yui/spritesheet.webp");
 
@@ -88,6 +96,8 @@ struct StoredPetState {
     memories: BTreeMap<String, Vec<PetMemory>>,
     #[serde(default)]
     scales: BTreeMap<String, f64>,
+    #[serde(default)]
+    life: BTreeMap<String, StoredPetLife>,
 }
 
 impl Default for StoredPetState {
@@ -100,6 +110,7 @@ impl Default for StoredPetState {
             seen_usage_ids: Vec::new(),
             memories: BTreeMap::new(),
             scales: BTreeMap::new(),
+            life: BTreeMap::new(),
         }
     }
 }
@@ -126,6 +137,28 @@ pub struct PetDashboard {
     pub memories: Vec<PetMemory>,
     pub overlay_visible: bool,
     pub scale: f64,
+    pub life: PetLifeSnapshot,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PetBackupData {
+    version: u32,
+    exported_at: i64,
+    pet_id: String,
+    progress: StoredPetProgress,
+    memories: Vec<PetMemory>,
+    scale: f64,
+    life: StoredPetLife,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PetBackupResult {
+    pub pet_id: String,
+    pub destination: String,
+    pub exported_at: i64,
+    pub bytes: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -271,6 +304,24 @@ impl PetManager {
             .get(&active_pet_id)
             .cloned()
             .unwrap_or_default();
+        let display_name = pets
+            .iter()
+            .find(|pet| pet.id == active_pet_id)
+            .map(|pet| pet.display_name.as_str())
+            .unwrap_or("Starlight Echo");
+        let now = now_millis();
+        let (life, life_changed) = {
+            let life = state
+                .life
+                .entry(active_pet_id.clone())
+                .or_insert_with(|| StoredPetLife::new(now));
+            let changed = life.tick(now, display_name, &memories);
+            (life.snapshot(now), changed)
+        };
+        PET_PROMPT_VISIBLE.store(life.prompt.is_some(), Ordering::Relaxed);
+        if life_changed {
+            save_state(&self.state_path, &state)?;
+        }
         let scale = scale_for(&state, &active_pet_id);
         update_runtime_pet_scale(scale);
         Ok(PetDashboard {
@@ -280,6 +331,7 @@ impl PetManager {
             memories,
             overlay_visible: state.overlay_visible,
             scale,
+            life,
         })
     }
 
@@ -329,6 +381,350 @@ impl PetManager {
             if state.active_pet_id == pet_id {
                 update_runtime_pet_scale(scale);
             }
+            save_state(&self.state_path, &state)?;
+        }
+        self.dashboard()
+    }
+
+    pub fn regenerate_daily_plan(&self, pet_id: &str) -> Result<PetDashboard, String> {
+        self.mutate_life(pet_id, |life, now, display_name, memories| {
+            life.generate_daily_plan(now, display_name, memories, true);
+            Ok(())
+        })
+    }
+
+    pub fn toggle_study(&self, pet_id: &str, source: &str) -> Result<PetDashboard, String> {
+        let source = source.trim().chars().take(40).collect::<String>();
+        self.mutate_life(pet_id, |life, now, _, _| {
+            life.toggle_study(now, &source);
+            Ok(())
+        })
+    }
+
+    pub fn add_task(
+        &self,
+        pet_id: &str,
+        title: &str,
+        notes: &str,
+        due_date: Option<&str>,
+        recurrence: Option<&str>,
+        priority: u8,
+    ) -> Result<PetDashboard, String> {
+        self.mutate_life(pet_id, |life, now, _, _| {
+            life.add_task(now, title, notes, due_date, recurrence, priority)?;
+            Ok(())
+        })
+    }
+
+    pub fn set_task_completed(
+        &self,
+        pet_id: &str,
+        task_id: &str,
+        completed: bool,
+    ) -> Result<PetDashboard, String> {
+        self.mutate_life(pet_id, |life, now, _, _| {
+            if life.set_task_completed(now, task_id, completed) {
+                Ok(())
+            } else {
+                Err("The selected echo task was not found".to_owned())
+            }
+        })
+    }
+
+    pub fn delete_task(&self, pet_id: &str, task_id: &str) -> Result<PetDashboard, String> {
+        self.mutate_life(pet_id, |life, now, _, _| {
+            if life.delete_task(now, task_id) {
+                Ok(())
+            } else {
+                Err("The selected echo task was not found".to_owned())
+            }
+        })
+    }
+
+    pub fn complete_schedule_item(
+        &self,
+        pet_id: &str,
+        item_id: &str,
+        completed: bool,
+    ) -> Result<PetDashboard, String> {
+        self.mutate_life(pet_id, |life, now, _, _| {
+            if life.complete_schedule_item(now, item_id, completed) {
+                Ok(())
+            } else {
+                Err("The selected schedule item was not found".to_owned())
+            }
+        })
+    }
+
+    pub fn check_in(&self, pet_id: &str) -> Result<PetDashboard, String> {
+        self.mutate_life(pet_id, |life, now, _, _| {
+            life.check_in(now)?;
+            Ok(())
+        })
+    }
+
+    pub fn bond_with_user(&self, pet_id: &str) -> Result<PetDashboard, String> {
+        self.mutate_life(pet_id, |life, now, _, _| {
+            life.bond_with_user(now);
+            Ok(())
+        })
+    }
+
+    pub fn respond_to_prompt(
+        &self,
+        pet_id: &str,
+        prompt_id: &str,
+        action: &str,
+    ) -> Result<PetDashboard, String> {
+        self.mutate_life(pet_id, |life, now, _, _| {
+            life.respond_to_prompt(now, prompt_id, action)
+        })
+    }
+
+    pub fn record_knowledge(
+        &self,
+        pet_id: &str,
+        input: PetKnowledgeInput<'_>,
+    ) -> Result<PetDashboard, String> {
+        self.mutate_life(pet_id, |life, now, _, _| {
+            life.record_knowledge(now, input)?;
+            Ok(())
+        })
+    }
+
+    pub fn claim_learning_quest(&self, pet_id: &str) -> Result<Option<PetLearningQuest>, String> {
+        validate_pet_id(pet_id)?;
+        let pets = self.list_profiles()?;
+        let profile = pets
+            .iter()
+            .find(|pet| pet.id == pet_id)
+            .ok_or_else(|| "The selected Starlight Echo is not installed".to_owned())?;
+        let now = now_millis();
+        let claimed = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "Could not lock Starlight Echo state".to_owned())?;
+            let memories = state.memories.get(pet_id).cloned().unwrap_or_default();
+            let life = state
+                .life
+                .entry(pet_id.to_owned())
+                .or_insert_with(|| StoredPetLife::new(now));
+            life.tick(now, &profile.display_name, &memories);
+            let claimed = life.claim_learning_quest(now);
+            if claimed.is_some() {
+                save_state(&self.state_path, &state)?;
+            }
+            claimed
+        };
+        Ok(claimed)
+    }
+
+    pub fn complete_learning_quest(
+        &self,
+        pet_id: &str,
+        quest_id: &str,
+        input: PetKnowledgeInput<'_>,
+        provider_id: Option<&str>,
+    ) -> Result<PetDashboard, String> {
+        self.mutate_life(pet_id, |life, now, _, _| {
+            life.complete_learning_quest(now, quest_id, input, provider_id)?;
+            Ok(())
+        })
+    }
+
+    pub fn fail_learning_quest(
+        &self,
+        pet_id: &str,
+        quest_id: &str,
+        error: &str,
+    ) -> Result<PetDashboard, String> {
+        self.mutate_life(pet_id, |life, now, _, _| {
+            if life.fail_learning_quest(now, quest_id, error) {
+                Ok(())
+            } else {
+                Err("The autonomous learning question is no longer active".to_owned())
+            }
+        })
+    }
+
+    pub fn delete_knowledge(
+        &self,
+        pet_id: &str,
+        knowledge_id: &str,
+    ) -> Result<PetDashboard, String> {
+        self.mutate_life(pet_id, |life, now, _, _| {
+            if life.delete_knowledge(now, knowledge_id) {
+                Ok(())
+            } else {
+                Err("The selected knowledge entry was not found".to_owned())
+            }
+        })
+    }
+
+    pub fn settle_day(&self, pet_id: &str, reflection: &str) -> Result<PetDashboard, String> {
+        self.mutate_life(pet_id, |life, now, _, _| {
+            life.settle_day(now, reflection);
+            Ok(())
+        })
+    }
+
+    pub fn update_life_settings(
+        &self,
+        pet_id: &str,
+        settings: PetLifeSettings,
+    ) -> Result<PetDashboard, String> {
+        self.mutate_life(pet_id, |life, _, _, _| {
+            life.update_settings(settings);
+            Ok(())
+        })
+    }
+
+    pub fn set_window_position(&self, pet_id: &str, x: f64, y: f64) -> Result<(), String> {
+        self.mutate_life(pet_id, |life, _, _, _| {
+            if life.set_window_position(x, y) {
+                Ok(())
+            } else {
+                Err("Starlight Echo window position must be finite".to_owned())
+            }
+        })?;
+        Ok(())
+    }
+
+    pub fn export_backup(
+        &self,
+        pet_id: &str,
+        destination: &Path,
+    ) -> Result<PetBackupResult, String> {
+        validate_pet_id(pet_id)?;
+        let package = self.root.join(pet_id);
+        let (manifest, manifest_bytes, spritesheet) = validate_package(&package)?;
+        if manifest.id != pet_id {
+            return Err("The selected echo package ID does not match its directory".to_owned());
+        }
+        let now = now_millis();
+        let backup = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "Could not lock Starlight Echo state".to_owned())?;
+            let memories = state.memories.get(pet_id).cloned().unwrap_or_default();
+            let life = state
+                .life
+                .entry(pet_id.to_owned())
+                .or_insert_with(|| StoredPetLife::new(now));
+            life.normalize(now);
+            PetBackupData {
+                version: PET_BACKUP_VERSION,
+                exported_at: now,
+                pet_id: pet_id.to_owned(),
+                progress: state.progress.get(pet_id).cloned().unwrap_or_default(),
+                memories,
+                scale: scale_for(&state, pet_id),
+                life: state
+                    .life
+                    .get(pet_id)
+                    .cloned()
+                    .unwrap_or_else(|| StoredPetLife::new(now)),
+            }
+        };
+        write_pet_backup(
+            destination,
+            &backup,
+            &manifest.spritesheet_path,
+            &manifest_bytes,
+            &spritesheet,
+        )?;
+        let bytes = std::fs::metadata(destination)
+            .map(|metadata| metadata.len())
+            .unwrap_or_default();
+        Ok(PetBackupResult {
+            pet_id: pet_id.to_owned(),
+            destination: destination.display().to_string(),
+            exported_at: now,
+            bytes,
+        })
+    }
+
+    pub fn import_backup(&self, source: &Path) -> Result<PetProfile, String> {
+        let extracted = read_pet_backup(source)?;
+        if extracted.backup.pet_id != extracted.manifest.id {
+            return Err("The backup data and package IDs do not match".to_owned());
+        }
+        validate_pet_id(&extracted.backup.pet_id)?;
+        let profile = if extracted.manifest.id == DEFAULT_PET_ID {
+            let package = self.root.join(DEFAULT_PET_ID);
+            let (manifest, _, _) = validate_package(&package)?;
+            profile_from_manifest(&package, manifest, false)?
+        } else {
+            let transaction = uuid::Uuid::new_v4().simple().to_string();
+            let staging = self.root.join(format!(".import-{transaction}.tmp"));
+            std::fs::create_dir(&staging)
+                .map_err(|error| format!("Could not stage Starlight Echo backup: {error}"))?;
+            crate::filesystem::restrict_directory(&staging)?;
+            let staged_manifest = staging.join("pet.json");
+            let staged_sheet = staging.join(&extracted.manifest.spritesheet_path);
+            let stage_result = (|| {
+                std::fs::write(&staged_manifest, &extracted.manifest_bytes)
+                    .map_err(|error| format!("Could not stage backup manifest: {error}"))?;
+                std::fs::write(&staged_sheet, &extracted.spritesheet_bytes)
+                    .map_err(|error| format!("Could not stage backup spritesheet: {error}"))?;
+                crate::filesystem::restrict_file(&staged_manifest)?;
+                crate::filesystem::restrict_file(&staged_sheet)?;
+                self.install_package(&staging, true)
+            })();
+            let _ = std::fs::remove_dir_all(&staging);
+            stage_result?
+        };
+        {
+            let mut life = extracted.backup.life;
+            life.normalize(now_millis());
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "Could not lock Starlight Echo state".to_owned())?;
+            let pet_id = extracted.backup.pet_id;
+            state
+                .progress
+                .insert(pet_id.clone(), extracted.backup.progress);
+            state
+                .memories
+                .insert(pet_id.clone(), extracted.backup.memories);
+            state.scales.insert(
+                pet_id.clone(),
+                extracted.backup.scale.clamp(MIN_PET_SCALE, MAX_PET_SCALE),
+            );
+            state.life.insert(pet_id.clone(), life);
+            state.active_pet_id = pet_id;
+            save_state(&self.state_path, &state)?;
+        }
+        Ok(profile)
+    }
+
+    fn mutate_life<F>(&self, pet_id: &str, mutation: F) -> Result<PetDashboard, String>
+    where
+        F: FnOnce(&mut StoredPetLife, i64, &str, &[PetMemory]) -> Result<(), String>,
+    {
+        validate_pet_id(pet_id)?;
+        let pets = self.list_profiles()?;
+        let profile = pets
+            .iter()
+            .find(|pet| pet.id == pet_id)
+            .ok_or_else(|| "The selected Starlight Echo is not installed".to_owned())?;
+        let now = now_millis();
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "Could not lock Starlight Echo state".to_owned())?;
+            let memories = state.memories.get(pet_id).cloned().unwrap_or_default();
+            let life = state
+                .life
+                .entry(pet_id.to_owned())
+                .or_insert_with(|| StoredPetLife::new(now));
+            life.tick(now, &profile.display_name, &memories);
+            mutation(life, now, &profile.display_name, &memories)?;
+            life.tick(now, &profile.display_name, &memories);
             save_state(&self.state_path, &state)?;
         }
         self.dashboard()
@@ -749,7 +1145,11 @@ fn install_mouse_passthrough(window: &WebviewWindow) -> Result<(), String> {
                         ..=(PET_WINDOW_WIDTH / 2.0 + character_half_width))
                         .contains(&x)
                         && (character_top..=(PET_WINDOW_HEIGHT - 28.0)).contains(&y);
-                    let next_ignored = !over_character;
+                    let over_prompt = PET_PROMPT_VISIBLE.load(Ordering::Relaxed)
+                        && (55.0..=(PET_WINDOW_WIDTH - 55.0)).contains(&x)
+                        && ((character_top - 128.0).max(24.0)..=(character_top + 24.0).max(152.0))
+                            .contains(&y);
+                    let next_ignored = !(over_character || over_prompt);
                     if ignored != Some(next_ignored) {
                         if window.set_ignore_cursor_events(next_ignored).is_err() {
                             break;
@@ -819,15 +1219,235 @@ fn load_state(path: &Path) -> Result<StoredPetState, String> {
     for scale in state.scales.values_mut() {
         *scale = scale.clamp(MIN_PET_SCALE, MAX_PET_SCALE);
     }
+    let now = now_millis();
+    state
+        .life
+        .retain(|pet_id, _| validate_pet_id(pet_id).is_ok());
+    for life in state.life.values_mut() {
+        life.normalize(now);
+    }
     Ok(state)
 }
 
 fn save_state(path: &Path, state: &StoredPetState) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(state)
         .map_err(|error| format!("Could not serialize desktop pet state: {error}"))?;
-    std::fs::write(path, bytes)
-        .map_err(|error| format!("Could not save desktop pet state: {error}"))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Desktop pet state has no parent directory".to_owned())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("Could not create desktop pet state directory: {error}"))?;
+    let transaction = uuid::Uuid::new_v4().simple().to_string();
+    let temporary = parent.join(format!(".pet-state.{transaction}.tmp"));
+    let backup = parent.join(format!(".pet-state.{transaction}.old"));
+    std::fs::write(&temporary, bytes)
+        .map_err(|error| format!("Could not stage desktop pet state: {error}"))?;
+    crate::filesystem::restrict_file(&temporary)?;
+    let had_previous = path.is_file();
+    if had_previous && let Err(error) = std::fs::rename(path, &backup) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(format!(
+            "Could not prepare desktop pet state update: {error}"
+        ));
+    }
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        if had_previous {
+            let _ = std::fs::rename(&backup, path);
+        }
+        let _ = std::fs::remove_file(&temporary);
+        return Err(format!("Could not commit desktop pet state: {error}"));
+    }
+    if had_previous {
+        let _ = std::fs::remove_file(&backup);
+    }
     crate::filesystem::restrict_file(path)
+}
+
+struct ExtractedPetBackup {
+    backup: PetBackupData,
+    manifest: PetManifest,
+    manifest_bytes: Vec<u8>,
+    spritesheet_bytes: Vec<u8>,
+}
+
+fn write_pet_backup(
+    destination: &Path,
+    backup: &PetBackupData,
+    spritesheet_name: &str,
+    manifest_bytes: &[u8],
+    spritesheet: &Path,
+) -> Result<(), String> {
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| "The Starlight Echo backup needs a destination directory".to_owned())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("Could not create backup destination: {error}"))?;
+    let transaction = uuid::Uuid::new_v4().simple().to_string();
+    let temporary = parent.join(format!(".levelup-echo.{transaction}.tmp"));
+    let backup_path = parent.join(format!(".levelup-echo.{transaction}.old"));
+    let backup_json = serde_json::to_vec_pretty(backup)
+        .map_err(|error| format!("Could not serialize Starlight Echo backup: {error}"))?;
+    let source_bytes = std::fs::read(spritesheet)
+        .map_err(|error| format!("Could not read Starlight Echo spritesheet: {error}"))?;
+    if source_bytes.len() as u64 > MAX_SPRITESHEET_BYTES {
+        return Err("The Starlight Echo spritesheet exceeds the backup size limit".to_owned());
+    }
+    let write_result = (|| {
+        let file = std::fs::File::create(&temporary)
+            .map_err(|error| format!("Could not create Starlight Echo backup: {error}"))?;
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .unix_permissions(0o600);
+        for (name, bytes) in [
+            ("backup.json", backup_json.as_slice()),
+            ("pet.json", manifest_bytes),
+            ("spritesheet.bin", source_bytes.as_slice()),
+        ] {
+            writer.start_file(name, options).map_err(|error| {
+                format!("Could not add {name} to Starlight Echo backup: {error}")
+            })?;
+            writer.write_all(bytes).map_err(|error| {
+                format!("Could not write {name} to Starlight Echo backup: {error}")
+            })?;
+        }
+        writer.set_comment(format!(
+            "LevelUpAgent Starlight Echo backup: {spritesheet_name}"
+        ));
+        writer
+            .finish()
+            .map_err(|error| format!("Could not finalize Starlight Echo backup: {error}"))?;
+        crate::filesystem::restrict_file(&temporary)
+    })();
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    let had_previous = destination.is_file();
+    if had_previous && let Err(error) = std::fs::rename(destination, &backup_path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(format!(
+            "Could not prepare existing backup for replacement: {error}"
+        ));
+    }
+    if let Err(error) = std::fs::rename(&temporary, destination) {
+        if had_previous {
+            let _ = std::fs::rename(&backup_path, destination);
+        }
+        let _ = std::fs::remove_file(&temporary);
+        return Err(format!("Could not commit Starlight Echo backup: {error}"));
+    }
+    if had_previous {
+        let _ = std::fs::remove_file(&backup_path);
+    }
+    crate::filesystem::restrict_file(destination)
+}
+
+fn read_pet_backup(source: &Path) -> Result<ExtractedPetBackup, String> {
+    let metadata = std::fs::symlink_metadata(source)
+        .map_err(|error| format!("Could not inspect Starlight Echo backup: {error}"))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("Starlight Echo backups must be regular files".to_owned());
+    }
+    let file = std::fs::File::open(source)
+        .map_err(|error| format!("Could not open Starlight Echo backup: {error}"))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|error| {
+        format!("The selected file is not a valid Starlight Echo backup: {error}")
+    })?;
+    if archive.len() != 3 {
+        return Err("Starlight Echo backups must contain exactly three files".to_owned());
+    }
+    let mut names = BTreeMap::new();
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index(index)
+            .map_err(|error| format!("Could not inspect backup entry: {error}"))?;
+        if entry.is_dir() || entry.enclosed_name().is_none() {
+            return Err(
+                "Starlight Echo backups cannot contain directories or unsafe paths".to_owned(),
+            );
+        }
+        let name = entry.name().to_owned();
+        if !matches!(
+            name.as_str(),
+            "backup.json" | "pet.json" | "spritesheet.bin"
+        ) || names.insert(name, index).is_some()
+        {
+            return Err("Starlight Echo backup contains unexpected or duplicate files".to_owned());
+        }
+    }
+    let backup_bytes = read_zip_entry(&mut archive, "backup.json", MAX_BACKUP_JSON_BYTES)?;
+    let manifest_bytes = read_zip_entry(&mut archive, "pet.json", 64 * 1024)?;
+    let spritesheet_bytes = read_zip_entry(&mut archive, "spritesheet.bin", MAX_SPRITESHEET_BYTES)?;
+    let backup: PetBackupData = serde_json::from_slice(&backup_bytes)
+        .map_err(|error| format!("Starlight Echo backup state is invalid: {error}"))?;
+    if backup.version != PET_BACKUP_VERSION {
+        return Err(format!(
+            "Unsupported Starlight Echo backup version {}; expected {PET_BACKUP_VERSION}",
+            backup.version
+        ));
+    }
+    let manifest: PetManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|error| format!("Starlight Echo backup pet.json is invalid: {error}"))?;
+    validate_manifest(&manifest)?;
+    if spritesheet_bytes.is_empty() {
+        return Err("Starlight Echo backup spritesheet is empty".to_owned());
+    }
+    let temporary_root = std::env::temp_dir().join(format!(
+        "levelup-echo-backup-validation-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir(&temporary_root)
+        .map_err(|error| format!("Could not stage backup validation: {error}"))?;
+    let temporary_sheet = temporary_root.join(&manifest.spritesheet_path);
+    let validation = (|| {
+        std::fs::write(&temporary_sheet, &spritesheet_bytes)
+            .map_err(|error| format!("Could not stage backup spritesheet validation: {error}"))?;
+        let size = imagesize::size(&temporary_sheet)
+            .map_err(|error| format!("Could not read backup spritesheet dimensions: {error}"))?;
+        if size.width != SPRITESHEET_WIDTH || size.height != SPRITESHEET_HEIGHT {
+            return Err(format!(
+                "Backup spritesheet must be {SPRITESHEET_WIDTH}x{SPRITESHEET_HEIGHT}; found {}x{}",
+                size.width, size.height
+            ));
+        }
+        Ok::<(), String>(())
+    })();
+    let _ = std::fs::remove_dir_all(&temporary_root);
+    validation?;
+    Ok(ExtractedPetBackup {
+        backup,
+        manifest,
+        manifest_bytes,
+        spritesheet_bytes,
+    })
+}
+
+fn read_zip_entry<R: Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    name: &str,
+    max_bytes: u64,
+) -> Result<Vec<u8>, String> {
+    let entry = archive
+        .by_name(name)
+        .map_err(|error| format!("Starlight Echo backup is missing {name}: {error}"))?;
+    if entry.size() > max_bytes {
+        return Err(format!(
+            "Starlight Echo backup entry {name} exceeds its size limit"
+        ));
+    }
+    let mut bytes = Vec::with_capacity(entry.size().min(max_bytes) as usize);
+    entry
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("Could not read Starlight Echo backup entry {name}: {error}"))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(format!(
+            "Starlight Echo backup entry {name} exceeds its size limit"
+        ));
+    }
+    Ok(bytes)
 }
 
 fn package_directory(source: &Path) -> Result<PathBuf, String> {
@@ -1417,6 +2037,174 @@ mod tests {
         manager.set_active("test-companion").unwrap();
         assert!(manager.remove_package("test-companion").unwrap());
         assert_eq!(manager.dashboard().unwrap().active_pet_id, "yui");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn full_echo_backup_restores_package_progress_memory_and_life() {
+        let root =
+            std::env::temp_dir().join(format!("levelup-pet-backup-test-{}", uuid::Uuid::new_v4()));
+        let app_data = root.join("app");
+        let home = root.join("home");
+        let source = root.join("source");
+        let backup = root.join("my-echo.levelup-echo");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(
+            source.join("pet.json"),
+            br#"{
+              "id": "my-echo",
+              "displayName": "My Echo",
+              "description": "A backup lifecycle fixture.",
+              "spritesheetPath": "spritesheet.webp"
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(source.join("spritesheet.webp"), DEFAULT_SPRITESHEET).unwrap();
+
+        let manager = PetManager::open(&app_data, &home).unwrap();
+        manager.install_package(&source, false).unwrap();
+        manager.set_active("my-echo").unwrap();
+        manager
+            .record_usage("my-echo", "backup-usage", 12_000, 3_000)
+            .unwrap();
+        manager
+            .learn_from_message("my-echo", "请记住这是不可替代的共同记忆")
+            .unwrap();
+        manager
+            .add_task("my-echo", "Keep the promise", "", None, Some("daily"), 3)
+            .unwrap();
+        manager
+            .record_knowledge(
+                "my-echo",
+                PetKnowledgeInput {
+                    title: "A durable lesson",
+                    summary: "Backups should preserve identity and experience together.",
+                    source: "Test fixture",
+                    source_kind: "document",
+                    source_ref: Some("fixture:backup"),
+                    tags: vec!["backup".to_owned()],
+                    confidence: 0.95,
+                },
+            )
+            .unwrap();
+        manager
+            .record_knowledge(
+                "my-echo",
+                PetKnowledgeInput {
+                    title: "A private constellation",
+                    summary: "Two remembered ideas may belong together; this remains a tentative discovery.",
+                    source: "Autonomous reflection",
+                    source_kind: "discovery",
+                    source_ref: Some("discovery:backup-fixture"),
+                    tags: vec!["self-discovery".to_owned()],
+                    confidence: 0.62,
+                },
+            )
+            .unwrap();
+        manager.set_scale("my-echo", 1.2).unwrap();
+        let reminder_at = now_millis();
+        let reminder_date = crate::pet_life::local_date_key(reminder_at);
+        let original_born_at = reminder_at.saturating_sub(42 * 86_400_000);
+        {
+            let mut state = manager.state.lock().unwrap();
+            let life = state.life.get_mut("my-echo").unwrap();
+            life.born_at = original_born_at;
+            assert!(life.set_window_position(0.37, 0.64));
+            life.activity_log
+                .push(crate::pet_life::PetActivityLogEntry {
+                    id: "dream:backup-fixture".to_owned(),
+                    kind: "dream".to_owned(),
+                    message: "I kept a small dream for tomorrow.".to_owned(),
+                    created_at: reminder_at,
+                });
+            life.days
+                .get_mut(&reminder_date)
+                .unwrap()
+                .study_launches
+                .insert(
+                    "morning".to_owned(),
+                    crate::pet_life::PetStudyLaunch {
+                        period: "morning".to_owned(),
+                        available_at: reminder_at.saturating_sub(10 * 60_000),
+                        prompted_at: Some(reminder_at),
+                        snoozed_until: Some(reminder_at.saturating_add(10 * 60_000)),
+                        last_reminder_at: Some(reminder_at),
+                        reminder_count: 2,
+                        completed_at: None,
+                        skipped_at: None,
+                        source: None,
+                        supervision_tier: "firm".to_owned(),
+                    },
+                );
+            save_state(&manager.state_path, &state).unwrap();
+        }
+
+        let exported = manager.export_backup("my-echo", &backup).unwrap();
+        assert_eq!(exported.pet_id, "my-echo");
+        assert!(exported.bytes > DEFAULT_SPRITESHEET.len() as u64 / 2);
+        assert!(backup.is_file());
+
+        manager.remove_package("my-echo").unwrap();
+        {
+            let mut state = manager.state.lock().unwrap();
+            state.progress.remove("my-echo");
+            state.memories.remove("my-echo");
+            state.scales.remove("my-echo");
+            state.life.remove("my-echo");
+            save_state(&manager.state_path, &state).unwrap();
+        }
+        let restored_profile = manager.import_backup(&backup).unwrap();
+        assert_eq!(restored_profile.id, "my-echo");
+        let restored = manager.dashboard().unwrap();
+        assert_eq!(restored.active_pet_id, "my-echo");
+        assert_eq!(restored.progress.total_tokens, 15_000);
+        assert_eq!(restored.memories.len(), 1);
+        assert_eq!(restored.scale, 1.2);
+        assert_eq!(restored.life.born_at, original_born_at);
+        let restored_position = restored.life.window_position.as_ref().unwrap();
+        assert!((restored_position.x - 0.37).abs() < f64::EPSILON);
+        assert!((restored_position.y - 0.64).abs() < f64::EPSILON);
+        assert!(
+            restored
+                .life
+                .activity_log
+                .iter()
+                .any(|entry| entry.id == "dream:backup-fixture" && entry.kind == "dream")
+        );
+        let recurring = restored
+            .life
+            .tasks
+            .iter()
+            .find(|task| task.title == "Keep the promise")
+            .unwrap();
+        assert_eq!(recurring.recurrence.as_deref(), Some("daily"));
+        assert!(
+            recurring
+                .series_id
+                .as_deref()
+                .is_some_and(|id| !id.is_empty())
+        );
+        let restored_launch = &restored.life.today.study_launches["morning"];
+        assert_eq!(restored_launch.prompted_at, Some(reminder_at));
+        assert_eq!(
+            restored_launch.snoozed_until,
+            Some(reminder_at.saturating_add(10 * 60_000))
+        );
+        assert_eq!(restored_launch.reminder_count, 2);
+        assert_eq!(restored_launch.supervision_tier, "firm");
+        assert!(
+            restored
+                .life
+                .knowledge
+                .iter()
+                .any(|item| item.title == "A durable lesson")
+        );
+        assert!(restored.life.knowledge.iter().any(|item| {
+            item.title == "A private constellation"
+                && item.source_kind == "discovery"
+                && (item.confidence - 0.62).abs() < f64::EPSILON
+        }));
+        assert!(validate_package(&manager.root.join("my-echo")).is_ok());
         let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 from PIL import Image
@@ -29,8 +30,20 @@ ROW_SPECS = [
 IMAGE_SUFFIXES = {".png", ".webp", ".jpg", ".jpeg"}
 
 
+def frame_sort_key(path: Path) -> tuple[int, int, str]:
+    """Prefer the numeric frame index over filesystem/lexical ordering."""
+
+    match = re.search(r"(\d+)$", path.stem)
+    if match:
+        return (0, int(match.group(1)), path.name)
+    return (1, 0, path.name)
+
+
 def image_files(path: Path) -> list[Path]:
-    return sorted(p for p in path.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES)
+    return sorted(
+        (p for p in path.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES),
+        key=frame_sort_key,
+    )
 
 
 def find_row_frames(root: Path, state: str, row_index: int) -> list[Path]:
@@ -54,7 +67,7 @@ def find_row_frames(root: Path, state: str, row_index: int) -> list[Path]:
     files: list[Path] = []
     for pattern in globs:
         files.extend(p for p in root.glob(pattern) if p.suffix.lower() in IMAGE_SUFFIXES)
-    return sorted(set(files))
+    return sorted(set(files), key=frame_sort_key)
 
 
 def paste_centered(atlas: Image.Image, source: Image.Image, row: int, column: int) -> None:

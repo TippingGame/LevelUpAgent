@@ -709,6 +709,210 @@ export interface PetMemory {
   updatedAt: number;
 }
 
+export interface PetNeeds {
+  energy: number;
+  focus: number;
+  curiosity: number;
+  social: number;
+  mood: number;
+}
+
+export interface PetBehavior {
+  state: "idle" | "wandering" | "resting" | "sleeping" | "studying" | "learning" | "planning" | "waiting" | "celebrating" | "discovering" | "dreaming" | string;
+  reason: string;
+  message: string;
+  since: number;
+  nextDecisionAt: number;
+  direction?: "left" | "right" | string;
+}
+
+export interface PetLifeSettings {
+  autonomyEnabled: boolean;
+  learningEnabled: boolean;
+  movementEnabled: boolean;
+  dailyPlanEnabled: boolean;
+  remindersEnabled: boolean;
+  launchAtLogin: boolean;
+  studyGoalMinutes: number;
+  knowledgeGoal: number;
+  quietStartMinute: number;
+  quietEndMinute: number;
+  patrolSpeed: number;
+}
+
+export interface PetScheduleItem {
+  id: string;
+  title: string;
+  detail: string;
+  startMinute: number;
+  durationMinutes: number;
+  kind: "plan" | "focus" | "learn" | "wander" | "reflect" | string;
+  status: "planned" | "active" | "completed" | "missed" | "skipped" | string;
+  source: string;
+  createdAt: number;
+  completedAt?: number;
+}
+
+export interface PetCheckIn {
+  slot: string;
+  status: "checked" | "missed" | string;
+  respondedAt?: number;
+}
+
+export interface PetDayRecord {
+  date: string;
+  planGeneratedAt: number;
+  planReason: string;
+  schedule: PetScheduleItem[];
+  checkIns: Record<string, PetCheckIn>;
+  reflection: string;
+  settledAt?: number;
+  taskReminders: Record<string, number>;
+  chatterSlots: Record<string, number>;
+  studyLaunches: Record<string, PetStudyLaunch>;
+}
+
+export interface PetStudyLaunch {
+  period: "morning" | "afternoon" | "evening" | string;
+  availableAt: number;
+  promptedAt?: number;
+  snoozedUntil?: number;
+  lastReminderAt?: number;
+  reminderCount: number;
+  completedAt?: number;
+  skippedAt?: number;
+  source?: string;
+  supervisionTier: "playful" | "firm" | "angry" | "final" | string;
+}
+
+export interface PetTask {
+  id: string;
+  title: string;
+  notes: string;
+  dueDate?: string;
+  recurrence?: "daily" | "weekdays" | "weekly" | string;
+  priority: number;
+  status: "pending" | "completed" | string;
+  createdAt: number;
+  completedAt?: number;
+  seriesId?: string;
+  occurrenceDate?: string;
+}
+
+export interface PetPrompt {
+  id: string;
+  kind: "check-in" | "study-launch" | "task-reminder" | string;
+  message: string;
+  period?: string;
+  tier?: "playful" | "firm" | "angry" | "final" | string;
+  actions: Array<"check-in" | "start" | "snooze" | "skip" | "open" | "dismiss" | string>;
+}
+
+export interface PetKnowledge {
+  id: string;
+  title: string;
+  summary: string;
+  source: string;
+  sourceKind: "agent" | "conversation" | "task" | "memory" | "document" | "web" | "reflection" | "discovery" | "other" | string;
+  sourceRef?: string;
+  tags: string[];
+  confidence: number;
+  createdAt: number;
+  updatedAt: number;
+  lastReviewedAt?: number;
+  reviewCount: number;
+}
+
+export interface PetLearningQuest {
+  id: string;
+  question: string;
+  topic: string;
+  status: "pending" | "asking" | "retrying" | "completed" | "failed" | string;
+  createdAt: number;
+  startedAt?: number;
+  completedAt?: number;
+  nextRetryAt?: number;
+  attempts: number;
+  answerTitle?: string;
+  knowledgeId?: string;
+  providerId?: string;
+  error?: string;
+}
+
+export interface PetStudySession {
+  id: string;
+  source: string;
+  startedAt: number;
+  endedAt?: number;
+}
+
+export interface PetReward {
+  id: string;
+  kind: string;
+  title: string;
+  date: string;
+  earnedAt: number;
+}
+
+export interface PetActivityLogEntry {
+  id: string;
+  kind: string;
+  message: string;
+  createdAt: number;
+}
+
+export interface PetLifeStats {
+  todayStudyMs: number;
+  totalStudyMs: number;
+  knowledgeCount: number;
+  todayKnowledgeCount: number;
+  completedTasks: number;
+  checkedIn: number;
+  missedCheckIns: number;
+  rewardCount: number;
+  streakDays: number;
+}
+
+export interface PetLifeSnapshot {
+  version: number;
+  needs: PetNeeds;
+  behavior: PetBehavior;
+  settings: PetLifeSettings;
+  today: PetDayRecord;
+  tasks: PetTask[];
+  knowledge: PetKnowledge[];
+  learningQuests: PetLearningQuest[];
+  activeSession?: PetStudySession;
+  rewards: PetReward[];
+  activityLog: PetActivityLogEntry[];
+  stats: PetLifeStats;
+  history: PetDaySummary[];
+  windowPosition?: { x: number; y: number };
+  prompt?: PetPrompt;
+  bornAt: number;
+  lastTickAt: number;
+}
+
+export interface PetDaySummary {
+  date: string;
+  studyMs: number;
+  checkedIn: number;
+  missedCheckIns: number;
+  completedSchedule: number;
+  scheduleCount: number;
+  completedTasks: number;
+  knowledgeCount: number;
+  rewardCount: number;
+  reflection: string;
+}
+
+export interface PetBackupResult {
+  petId: string;
+  destination: string;
+  exportedAt: number;
+  bytes: number;
+}
+
 export interface PetDashboard {
   pets: PetProfile[];
   activePetId: string;
@@ -716,6 +920,7 @@ export interface PetDashboard {
   memories: PetMemory[];
   overlayVisible: boolean;
   scale: number;
+  life: PetLifeSnapshot;
 }
 
 export type PetActivityState = "working" | "generating" | "waiting";

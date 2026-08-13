@@ -16,6 +16,7 @@
     "opener:default",
     "opener:allow-open-path",
     "process:allow-restart",
+    "autostart:default",
     "updater:default"
   ]
 }

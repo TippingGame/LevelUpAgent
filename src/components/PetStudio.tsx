@@ -1,11 +1,17 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { listen } from "@tauri-apps/api/event";
 import {
+  ArchiveRestore,
   BrainCircuit,
+  CalendarDays,
   Check,
   CircleAlert,
+  Download,
   Eye,
   EyeOff,
+  HeartPulse,
   ImagePlus,
+  Lightbulb,
   LoaderCircle,
   MessageCircle,
   PawPrint,
@@ -21,18 +27,23 @@ import {
 } from "lucide-react";
 import { IconButton } from "./IconButton";
 import { getPixelAlignedPetSize, PetAvatar, PetSprite, type PetSpriteState } from "./PetSprite";
+import { PetLifeWorkspace, type PetLifeView } from "./PetLifeWorkspace";
+import { petBehaviorLabel, petBehaviorSprite } from "../lib/petAutonomy";
 import {
   configurePetHatch,
   deleteImageAttachment,
   deletePetMemory,
+  exportPetBackup,
   getPetRuntime,
   importHatchedPets,
   removePet,
   selectAndInstallPet,
   selectImageReferences,
+  selectAndImportPetBackup,
   selectPet,
   setPetOverlayVisible,
   setPetScale,
+  isDesktop,
 } from "../lib/bridge";
 import type {
   HatchEnvironment,
@@ -57,6 +68,7 @@ interface PetStudioProps {
   activities: PetActivity[];
   connectionReady: boolean;
   revision: number;
+  panelRequest?: { view: PetLifeView; nonce: number };
   onActivePetChange: (petId: string) => void;
   onOpenConversation: (petId: string) => void;
   onGenerate: (request: PetGenerationRequest) => Promise<void>;
@@ -87,6 +99,7 @@ export function PetStudio({
   activities,
   connectionReady,
   revision,
+  panelRequest,
   onActivePetChange,
   onOpenConversation,
   onGenerate,
@@ -96,7 +109,7 @@ export function PetStudio({
   const [environment, setEnvironment] = useState<HatchEnvironment | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
-  const [panel, setPanel] = useState<"hatch" | "memory" | "preview">("hatch");
+  const [panel, setPanel] = useState<"hatch" | "memory" | "preview" | PetLifeView>(panelRequest?.view ?? "life");
   const [previewState, setPreviewState] = useState<PetSpriteState | null>(null);
   const [petName, setPetName] = useState("");
   const [description, setDescription] = useState("");
@@ -124,6 +137,26 @@ export function PetStudio({
     void refresh(true);
   }, [active, revision]);
 
+  useEffect(() => {
+    if (panelRequest) setPanel(panelRequest.view);
+  }, [panelRequest?.nonce]);
+
+  useEffect(() => {
+    if (!active || !isDesktop()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<PetDashboard>("pet://refresh", (event) => {
+      if (!disposed) setDashboard(event.payload);
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [active]);
+
   useEffect(() => () => {
     if (scaleTimerRef.current !== null) window.clearTimeout(scaleTimerRef.current);
   }, []);
@@ -133,8 +166,8 @@ export function PetStudio({
     if (activities.some((item) => item.state === "waiting")) return "waiting";
     if (activities.some((item) => item.state === "generating")) return "running";
     if (activities.length > 0) return "review";
-    return "idle";
-  }, [activities]);
+    return dashboard ? petBehaviorSprite(dashboard.life.behavior) : "idle";
+  }, [activities, dashboard?.life.behavior]);
   const displayedSpriteState = previewState ?? spriteState;
   const missing = [
     ...(environment?.missing ?? []),
@@ -176,6 +209,33 @@ export function PetStudio({
       onNotice(`${text("已导入摇光残影", "Starlight Echo imported")}: ${imported.displayName}`);
     } catch (error) {
       onNotice(`${text("无法导入摇光残影", "Could not import Starlight Echo")}: ${formatError(error)}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const exportBackup = async () => {
+    if (!dashboard || !activePet) return;
+    setBusy("export-backup");
+    try {
+      const result = await exportPetBackup(activePet.id, activePet.displayName);
+      if (result) onNotice(`${text("摇光残影已完整导出", "Starlight Echo backup exported")}: ${result.destination}`);
+    } catch (error) {
+      onNotice(`${text("无法导出摇光残影", "Could not export Starlight Echo")}: ${formatError(error)}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const restoreBackup = async () => {
+    setBusy("restore-backup");
+    try {
+      const restored = await selectAndImportPetBackup();
+      if (!restored) return;
+      await refresh();
+      onNotice(`${text("摇光残影已完整恢复", "Starlight Echo backup restored")}: ${restored.displayName}`);
+    } catch (error) {
+      onNotice(`${text("无法恢复摇光残影", "Could not restore Starlight Echo")}: ${formatError(error)}`);
     } finally {
       setBusy(null);
     }
@@ -293,6 +353,12 @@ export function PetStudio({
           <IconButton label={text("导入残影包", "Import echo package")} onClick={() => void importPackage()} disabled={busy === "import"}>
             <Upload size={17} />
           </IconButton>
+          <IconButton label={text("完整导出当前残影", "Export complete echo backup")} onClick={() => void exportBackup()} disabled={busy === "export-backup"}>
+            {busy === "export-backup" ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}
+          </IconButton>
+          <IconButton label={text("恢复残影备份", "Restore echo backup")} onClick={() => void restoreBackup()} disabled={busy === "restore-backup"}>
+            {busy === "restore-backup" ? <LoaderCircle className="spin" size={17} /> : <ArchiveRestore size={17} />}
+          </IconButton>
           <button className="primary-button pet-chat-button" type="button" onClick={() => onOpenConversation(activePet.id)}>
             <MessageCircle size={15} />{text("残影会话", "Echo chat")}
           </button>
@@ -326,7 +392,7 @@ export function PetStudio({
         <section className="pet-stage-section">
           <div className="pet-stage-toolbar">
             <div><strong>{activePet.displayName}</strong><small>{activePet.description}</small></div>
-            <span className={`pet-live-status${activities.length ? " busy" : ""}`}><i />{previewState ? text("动画预览", "Animation preview") : activities.length ? text("工作中", "Working") : text("空闲", "Idle")}</span>
+            <span className={`pet-live-status${activities.length || dashboard.life.behavior.state !== "idle" ? " busy" : ""}`}><i />{previewState ? text("动画预览", "Animation preview") : activities.length ? text("工作中", "Working") : petBehaviorLabel(dashboard.life.behavior.state, locale)}</span>
           </div>
           <div className="pet-stage" style={stageStyle} onDoubleClick={() => onOpenConversation(activePet.id)}>
             <div className="pet-activity-stack" aria-live="polite">
@@ -365,12 +431,23 @@ export function PetStudio({
 
         <aside className="pet-control-panel">
           <div className="pet-control-tabs" role="tablist">
-            <button type="button" role="tab" aria-selected={panel === "hatch"} className={panel === "hatch" ? "active" : ""} onClick={() => setPanel("hatch")}><Sparkles size={14} />{text("孵化", "Hatch")}</button>
+            <button type="button" role="tab" aria-selected={panel === "life"} className={panel === "life" ? "active" : ""} onClick={() => setPanel("life")}><HeartPulse size={14} />{text("生命", "Life")}</button>
+            <button type="button" role="tab" aria-selected={panel === "plan"} className={panel === "plan" ? "active" : ""} onClick={() => setPanel("plan")}><CalendarDays size={14} />{text("日程", "Plan")}</button>
+            <button type="button" role="tab" aria-selected={panel === "knowledge"} className={panel === "knowledge" ? "active" : ""} onClick={() => setPanel("knowledge")}><Lightbulb size={14} />{text("知识", "Knowledge")}</button>
             <button type="button" role="tab" aria-selected={panel === "memory"} className={panel === "memory" ? "active" : ""} onClick={() => setPanel("memory")}><BrainCircuit size={14} />{text("记忆", "Memory")}</button>
             <button type="button" role="tab" aria-selected={panel === "preview"} className={panel === "preview" ? "active" : ""} onClick={() => setPanel("preview")}><Play size={14} />{text("动画", "Animations")}</button>
+            <button type="button" role="tab" aria-selected={panel === "hatch"} className={panel === "hatch" ? "active" : ""} onClick={() => setPanel("hatch")}><Sparkles size={14} />{text("孵化", "Hatch")}</button>
           </div>
 
-          {panel === "hatch" ? (
+          {panel === "life" || panel === "plan" || panel === "knowledge" ? (
+            <PetLifeWorkspace
+              view={panel}
+              dashboard={dashboard}
+              locale={locale}
+              onDashboard={setDashboard}
+              onNotice={onNotice}
+            />
+          ) : panel === "hatch" ? (
             <div className="pet-hatch-panel">
               <div className="pet-hatch-status">
                 <span className={missing.length === 0 ? "ready" : "needs-attention"}>{missing.length === 0 ? <Check size={15} /> : <CircleAlert size={15} />}</span>

@@ -1,40 +1,20 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import type { PetProfile } from "../lib/types";
 import { petAssetUrl } from "../lib/bridge";
+import {
+  animationDuration,
+  animationFrameAtTime,
+  PET_ANIMATIONS,
+  type PetSpriteState,
+} from "../lib/petAnimation";
 import "./PetSprite.css";
 
-export type PetSpriteState =
-  | "idle"
-  | "running-right"
-  | "running-left"
-  | "waving"
-  | "jumping"
-  | "failed"
-  | "waiting"
-  | "running"
-  | "review";
-
-interface PetAnimationDefinition {
-  row: number;
-  frameDurations: readonly number[];
-}
+export type { PetSpriteState } from "../lib/petAnimation";
 
 const PET_SPRITE_WIDTH = 192;
 const PET_SPRITE_HEIGHT = 208;
 const PET_SPRITE_COLUMNS = 8;
 const PET_SPRITE_ROWS = 9;
-
-export const PET_ANIMATIONS: Record<PetSpriteState, PetAnimationDefinition> = {
-  idle: { row: 0, frameDurations: [280, 110, 110, 140, 140, 320] },
-  "running-right": { row: 1, frameDurations: [120, 120, 120, 120, 120, 120, 120, 220] },
-  "running-left": { row: 2, frameDurations: [120, 120, 120, 120, 120, 120, 120, 220] },
-  waving: { row: 3, frameDurations: [140, 140, 140, 280] },
-  jumping: { row: 4, frameDurations: [140, 140, 140, 140, 280] },
-  failed: { row: 5, frameDurations: [140, 140, 140, 140, 140, 140, 140, 240] },
-  waiting: { row: 6, frameDurations: [150, 150, 150, 150, 150, 260] },
-  running: { row: 7, frameDurations: [120, 120, 120, 120, 120, 220] },
-  review: { row: 8, frameDurations: [150, 150, 150, 150, 150, 280] },
-};
 
 type SpriteStyle = CSSProperties & Record<`--${string}`, string | number>;
 
@@ -62,36 +42,27 @@ export function PetSprite({
     setFrame(0);
     let cancelled = false;
     let currentFrame = 0;
-    let timer = 0;
-    const cycleDuration = animation.frameDurations.reduce((total, duration) => total + duration, 0);
-    let nextFrameAt = performance.now() + animation.frameDurations[0];
-    const advanceFrame = () => {
+    let frameId = 0;
+    const cycleDuration = animationDuration(animation.frameDurations);
+    const startedAt = performance.now();
+    const advanceFrame = (now: number) => {
       if (cancelled) return;
-      const now = performance.now();
-      if (loop && now - nextFrameAt > cycleDuration) {
-        nextFrameAt += Math.floor((now - nextFrameAt) / cycleDuration) * cycleDuration;
+      const elapsed = Math.max(0, now - startedAt);
+      if (!loop && elapsed >= cycleDuration) {
+        completionRef.current?.(state);
+        return;
       }
-      let advanced = false;
-      while (now >= nextFrameAt) {
-        if (currentFrame + 1 >= animation.frameDurations.length) {
-          if (!loop) {
-            completionRef.current?.(state);
-            return;
-          }
-          currentFrame = 0;
-        } else {
-          currentFrame += 1;
-        }
-        advanced = true;
-        nextFrameAt += animation.frameDurations[currentFrame];
+      const nextFrame = animationFrameAtTime(animation.frameDurations, elapsed);
+      if (nextFrame !== currentFrame) {
+        currentFrame = nextFrame;
+        setFrame(nextFrame);
       }
-      if (advanced) setFrame(currentFrame);
-      timer = window.setTimeout(advanceFrame, Math.max(0, nextFrameAt - performance.now()));
+      frameId = window.requestAnimationFrame(advanceFrame);
     };
-    timer = window.setTimeout(advanceFrame, animation.frameDurations[0]);
+    frameId = window.requestAnimationFrame(advanceFrame);
     return () => {
       cancelled = true;
-      window.clearTimeout(timer);
+      window.cancelAnimationFrame(frameId);
     };
   }, [animation, loop, profile.id, state]);
 
@@ -119,7 +90,7 @@ export function PetSprite({
 }
 
 export function petAnimationDuration(state: PetSpriteState) {
-  return PET_ANIMATIONS[state].frameDurations.reduce((total, duration) => total + duration, 0);
+  return animationDuration(PET_ANIMATIONS[state].frameDurations);
 }
 
 export function getPixelAlignedPetSize(scale = 1) {

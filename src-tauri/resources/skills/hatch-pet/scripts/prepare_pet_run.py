@@ -58,6 +58,7 @@ STATE_REQUIREMENTS = {
     ],
     "jumping": [
         "Show the jump through pose and vertical body position only: anticipation, lift, airborne peak, descent, settle.",
+        "Keep one constant character scale and preserve the vertical arc in the shared slot coordinate system; do not recenter or resize each pose independently.",
         "Do not draw ground shadows, contact shadows, drop shadows, oval shadows, landing marks, dust, smears, bounce pads, or motion marks under the pet.",
         "Keep the background outside the pet perfectly flat chroma key with no darker key-colored patches.",
     ],
@@ -72,10 +73,12 @@ STATE_REQUIREMENTS = {
     ],
     "running-right": [
         "Show locomotion through body, limb, and prop movement only.",
+        "Keep one constant character scale, a stable torso/head motion arc, and ground-contact feet on one consistent baseline across the gait.",
         "Do not draw speed lines, dust clouds, floor shadows, motion trails, or detached motion effects.",
     ],
     "running-left": [
         "Show locomotion through body, limb, and prop movement only.",
+        "Keep one constant character scale, a stable torso/head motion arc, and ground-contact feet on one consistent baseline across the gait.",
         "Do not draw speed lines, dust clouds, floor shadows, motion trails, or detached motion effects.",
     ],
     "running": [
@@ -449,6 +452,8 @@ def row_prompt(
 
 Use the attached reference image(s) for pet identity and the attached base pet image as the canonical design. Use the attached layout guide image only for frame count, slot spacing, centering, and safe padding. Simplify any high-resolution reference details into the Codex digital pet sprite style. Do not simply copy the still reference pose. Generate distinct animation poses that create a readable cycle.
 
+Temporal frame contract (mandatory): the output columns are a time sequence, not a pose collage. Column 0 is the first frame shown by the player. Columns 1 through {frames - 1} are the next consecutive phases in time, and the player will always play them left-to-right as `0, 1, 2, ... {frames - 1}` before looping. Do not reorder frames by visual similarity, do not start with a later pose, and make the final pose settle or connect naturally back to column 0. For directional running, column 0 is the first contact/take-off phase and the middle columns form one continuous gait cycle.
+
 Identity lock:
 - Do not redesign the pet. Only change pose/action for the `{state}` animation.
 - Preserve the exact head shape, ear/horn/limb shape, face design, markings, palette, outline weight, body proportions, prop design, and overall silhouette from the canonical base pet.
@@ -473,6 +478,7 @@ Layout requirements:
 - The attached layout guide shows the {frames} frame boxes and inner safe area for this row. Follow its slot count, spacing, centering, and padding.
 - Do not reproduce the layout guide itself: no visible boxes, guide lines, center marks, labels, guide colors, or guide background may appear in the output.
 - Treat the image as {frames} equal-width invisible frame slots. Fill every slot: each requested slot must contain exactly one complete full-body pose.
+- Treat all slots as one shared coordinate system. Keep the character at one consistent apparent scale and preserve intentional vertical motion; never zoom, crop-tight, or recenter each pose independently.
 - Spread the {frames} poses evenly across the whole image width. Do not leave any requested slot blank or create large empty gaps between poses.
 - Center one complete pose in each slot. No pose may cross into the neighboring slot.
 - Use a perfectly flat pure {chroma_name} {chroma_key} chroma-key background across the whole image.

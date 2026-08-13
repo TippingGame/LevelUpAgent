@@ -13,6 +13,42 @@ reimplementing the interface, keep the upstream copyright and license text
 next to that file and add a prominent modification notice as required by the
 applicable license.
 
+## XiaoLu
+
+The Starlight Echo life, study-rhythm, reminder, patrol, and journal
+features were informed by the open-source XiaoLu project:
+
+- Project: https://github.com/UniqueYu8988/XiaoLu
+- Reviewed revision: `73b361ecd3ced7e24835802cc30250afe381187c`
+- License: MIT
+- Copyright (c) 2026 UniqueYu8988
+
+LevelUpAgent reimplements and extends those behaviors in its Tauri and Rust
+architecture. XiaoLu's Electron shell, installer, character art, fonts, icons,
+recorded voice clips, and manual imagery are not bundled here.
+
+MIT License
+
+Copyright (c) 2026 UniqueYu8988
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 ## Text encoding dependency
 
 - [`encoding_rs` 0.8.35](https://github.com/hsivonen/encoding_rs):

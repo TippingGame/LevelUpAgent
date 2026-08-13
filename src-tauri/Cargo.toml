@@ -1,6 +1,6 @@
 [package]
 name = "levelup-agent"
-version = "1.0.20"
+version = "1.0.21"
 description = "A local-first, multi-model AI agent for LevelUpAPI"
 authors = ["LevelUpAgent contributors"]
 license = "LGPL-3.0-only"
@@ -51,6 +51,7 @@ rmcp = { version = "2.2.0", default-features = false, features = ["client", "tra
 lopdf = "0.36"
 quick-xml = "0.37"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
+tauri-plugin-autostart = "2"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

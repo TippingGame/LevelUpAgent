@@ -48,6 +48,8 @@ import type {
   HatchEnvironment,
   PetActivity,
   PetDashboard,
+  PetBackupResult,
+  PetLifeSettings,
   PetMemory,
   PetProfile,
   PetProgress,
@@ -66,6 +68,7 @@ import type {
   WritingProjectRecord,
   PermissionLevel,
 } from "./types";
+import { localDateKey } from "./petAutonomy";
 
 export const isDesktop = () => "__TAURI_INTERNALS__" in window;
 
@@ -91,6 +94,22 @@ const browserPetDashboard: PetDashboard = {
   memories: [],
   overlayVisible: true,
   scale: 0.75,
+  life: {
+    version: 5,
+    needs: { energy: 86, focus: 68, curiosity: 64, social: 72, mood: 82 },
+    behavior: { state: "idle", reason: "browser-preview", message: "I am here, taking in the day.", since: Date.now(), nextDecisionAt: Date.now() + 120_000 },
+    settings: { autonomyEnabled: true, learningEnabled: true, movementEnabled: true, dailyPlanEnabled: true, remindersEnabled: true, launchAtLogin: false, studyGoalMinutes: 120, knowledgeGoal: 2, quietStartMinute: 1320, quietEndMinute: 480, patrolSpeed: 1 },
+    today: { date: localDateKey(), planGeneratedAt: Date.now(), planReason: "Browser preview", schedule: [], checkIns: {}, reflection: "", taskReminders: {}, chatterSlots: {}, studyLaunches: {} },
+    tasks: [],
+    knowledge: [],
+    learningQuests: [],
+    rewards: [],
+    activityLog: [],
+    history: [],
+    stats: { todayStudyMs: 0, totalStudyMs: 0, knowledgeCount: 0, todayKnowledgeCount: 0, completedTasks: 0, checkedIn: 0, missedCheckIns: 0, rewardCount: 0, streakDays: 0 },
+    bornAt: Date.now(),
+    lastTickAt: Date.now(),
+  },
 };
 
 export async function getPetRuntime(): Promise<PetRuntimeSnapshot> {
@@ -190,6 +209,13 @@ export async function updatePetActivities(activities: PetActivity[]): Promise<Pe
 export async function openPetChat(petId: string): Promise<void> {
   if (!isDesktop()) return;
   await invoke("open_pet_chat", { petId });
+}
+
+export type PetWorkspaceView = "life" | "plan" | "knowledge";
+
+export async function openPetWorkspace(petId: string, view: PetWorkspaceView = "life"): Promise<void> {
+  if (!isDesktop()) return;
+  await invoke("open_pet_workspace", { petId, view });
 }
 
 export function petAssetUrl(path: string): string {
@@ -331,6 +357,129 @@ export async function selectImageReferences(): Promise<ImageAttachment[]> {
   });
   const paths = typeof selected === "string" ? [selected] : Array.isArray(selected) ? selected : [];
   return importAttachments(paths.slice(0, 8));
+}
+
+export async function regeneratePetDailyPlan(petId: string): Promise<PetDashboard> {
+  if (!isDesktop()) return browserPetDashboard;
+  return invoke<PetDashboard>("regenerate_pet_daily_plan", { petId });
+}
+
+export async function togglePetStudy(petId: string, source = "manual"): Promise<PetDashboard> {
+  if (!isDesktop()) return browserPetDashboard;
+  return invoke<PetDashboard>("toggle_pet_study", { petId, source });
+}
+
+export async function addPetTask(input: {
+  petId: string;
+  title: string;
+  notes?: string;
+  dueDate?: string;
+  recurrence?: "daily" | "weekdays" | "weekly";
+  priority?: number;
+}): Promise<PetDashboard> {
+  if (!isDesktop()) return browserPetDashboard;
+  return invoke<PetDashboard>("add_pet_task", {
+    petId: input.petId,
+    title: input.title,
+    notes: input.notes ?? "",
+    dueDate: input.dueDate || null,
+    recurrence: input.recurrence || null,
+    priority: input.priority ?? 2,
+  });
+}
+
+export async function setPetTaskCompleted(petId: string, taskId: string, completed: boolean): Promise<PetDashboard> {
+  if (!isDesktop()) return browserPetDashboard;
+  return invoke<PetDashboard>("set_pet_task_completed", { petId, taskId, completed });
+}
+
+export async function deletePetTask(petId: string, taskId: string): Promise<PetDashboard> {
+  if (!isDesktop()) return browserPetDashboard;
+  return invoke<PetDashboard>("delete_pet_task", { petId, taskId });
+}
+
+export async function completePetScheduleItem(petId: string, itemId: string, completed: boolean): Promise<PetDashboard> {
+  if (!isDesktop()) return browserPetDashboard;
+  return invoke<PetDashboard>("complete_pet_schedule_item", { petId, itemId, completed });
+}
+
+export async function checkInPet(petId: string): Promise<PetDashboard> {
+  if (!isDesktop()) return browserPetDashboard;
+  return invoke<PetDashboard>("check_in_pet", { petId });
+}
+
+export async function bondWithPet(petId: string): Promise<PetDashboard> {
+  if (!isDesktop()) return browserPetDashboard;
+  return invoke<PetDashboard>("bond_with_pet", { petId });
+}
+
+export async function respondToPetPrompt(petId: string, promptId: string, action: string): Promise<PetDashboard> {
+  if (!isDesktop()) return browserPetDashboard;
+  return invoke<PetDashboard>("respond_to_pet_prompt", { petId, promptId, action });
+}
+
+export async function recordPetKnowledge(input: {
+  petId: string;
+  title: string;
+  summary: string;
+  source?: string;
+  sourceKind?: string;
+  sourceRef?: string;
+  tags?: string[];
+  confidence?: number;
+}): Promise<PetDashboard> {
+  if (!isDesktop()) return browserPetDashboard;
+  return invoke<PetDashboard>("record_pet_knowledge", {
+    petId: input.petId,
+    title: input.title,
+    summary: input.summary,
+    source: input.source ?? "Manual note",
+    sourceKind: input.sourceKind ?? "other",
+    sourceRef: input.sourceRef ?? null,
+    tags: input.tags ?? [],
+    confidence: input.confidence ?? 0.85,
+  });
+}
+
+export async function deletePetKnowledge(petId: string, knowledgeId: string): Promise<PetDashboard> {
+  if (!isDesktop()) return browserPetDashboard;
+  return invoke<PetDashboard>("delete_pet_knowledge", { petId, knowledgeId });
+}
+
+export async function settlePetDay(petId: string, reflection: string): Promise<PetDashboard> {
+  if (!isDesktop()) return browserPetDashboard;
+  return invoke<PetDashboard>("settle_pet_day", { petId, reflection });
+}
+
+export async function updatePetLifeSettings(petId: string, settings: PetLifeSettings): Promise<PetDashboard> {
+  if (!isDesktop()) return { ...browserPetDashboard, life: { ...browserPetDashboard.life, settings } };
+  return invoke<PetDashboard>("update_pet_life_settings", { petId, settings });
+}
+
+export async function setPetWindowPosition(petId: string, x: number, y: number): Promise<void> {
+  if (!isDesktop()) return;
+  await invoke("set_pet_window_position", { petId, x, y });
+}
+
+export async function exportPetBackup(petId: string, displayName: string): Promise<PetBackupResult | null> {
+  if (!isDesktop()) return null;
+  const destination = await save({
+    defaultPath: `${displayName.replace(/[\\/:*?\"<>|]/g, "-") || petId}.levelup-echo`,
+    filters: [{ name: "LevelUpAgent Starlight Echo", extensions: ["levelup-echo"] }],
+  });
+  if (typeof destination !== "string") return null;
+  return invoke<PetBackupResult>("export_pet_backup", { petId, destination });
+}
+
+export async function selectAndImportPetBackup(): Promise<PetProfile | null> {
+  if (!isDesktop()) return null;
+  const source = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: "LevelUpAgent Starlight Echo", extensions: ["levelup-echo"] }],
+  });
+  if (typeof source !== "string") return null;
+  return invoke<PetProfile>("import_pet_backup", { source });
 }
 
 export async function selectSingleImageReference(): Promise<ImageAttachment | undefined> {

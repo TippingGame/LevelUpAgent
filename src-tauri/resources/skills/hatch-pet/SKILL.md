@@ -160,7 +160,9 @@ python "$SKILL_DIR/scripts/derive_running_left_from_running_right.py" \
 
 If there is any asymmetric side-specific marking, readable text, non-mirrored logo, handed prop, one-sided accessory, lighting cue, or direction-specific pose that would become wrong when flipped, do not mirror. Generate `running-left` with `$imagegen` using its row prompt and all listed grounding images, including `decoded/running-right.png` as a gait reference.
 
-When deriving a mirrored row, mirror each frame in place and preserve the original left-to-right frame order so the animation phase is not reversed.
+When deriving a mirrored row, mirror each frame in place and preserve the original left-to-right frame order so the animation phase is not reversed. The atlas composer also sorts extracted frame files by their numeric frame index, never by an incidental lexical filename order.
+
+All generated row strips obey the temporal frame contract in `references/animation-rows.md`: column 0 is the first displayed pose, later columns are consecutive time phases, and the runtime plays numeric columns left-to-right without reordering. A geometry-clean strip with shuffled or reversed pose timing is still invalid.
 
 For the built-in path, record the selected source image from `$CODEX_HOME/generated_images/.../ig_*.png`. Do not record files from the run directory, `tmp/`, hand-made fixtures, deterministic row folders, or post-processed copies as visual job sources.
 
