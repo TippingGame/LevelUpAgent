@@ -25,6 +25,7 @@ import type {
   HarnessPolicyDecision,
   HarnessToolPolicyRequest,
   HarnessRunRequest,
+  HarnessRunOutcome,
   HarnessRuntimeEvent,
   HarnessApprovalRecord,
   HarnessPendingApproval,
@@ -920,6 +921,10 @@ export async function harnessStart(
   return invoke<HarnessSubmission>("harness_start", { request });
 }
 
+export async function harnessLatestHatchRunDir(threadId: string): Promise<string | null> {
+  return invoke<string | null>("harness_latest_hatch_run_dir", { threadId });
+}
+
 export async function harnessCheckTool(
   request: HarnessToolPolicyRequest,
 ): Promise<HarnessPolicyDecision> {
@@ -1013,10 +1018,10 @@ export async function harnessForkSession(
 export async function harnessRun(
   request: HarnessRunRequest,
   onEvent: (event: HarnessRuntimeEvent) => void,
-): Promise<void> {
+): Promise<HarnessRunOutcome> {
   const channel = new Channel<HarnessRuntimeEvent>();
   channel.onmessage = onEvent;
-  await invoke("harness_run", {
+  return invoke<HarnessRunOutcome>("harness_run", {
     request: {
       ...request,
       messages: request.messages.filter((message) => !message.status),

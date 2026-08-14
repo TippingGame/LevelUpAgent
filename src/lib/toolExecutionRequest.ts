@@ -28,6 +28,7 @@ export interface HatchBootstrapToolOptions {
   profile?: ProviderProfile;
   fallbackProfiles?: ProviderProfile[];
   hatchSkillLoaded: boolean;
+  operationId?: string;
 }
 
 /** Build the camelCase payload consumed by the Tauri execute_tool command. */
@@ -82,6 +83,7 @@ export function createHatchBootstrapToolRequest(options: HatchBootstrapToolOptio
     hatchBootstrap: true,
     mode: "agent",
     permissionLevel: "request",
+    operationId: options.operationId,
     approvalGranted: false,
   });
 }

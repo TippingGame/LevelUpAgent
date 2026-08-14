@@ -636,6 +636,10 @@ pub struct StoredThread {
     pub id: String,
     pub title: String,
     pub workspace: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub pet_id: Option<String>,
     pub messages: Vec<StoredMessage>,
     pub updated_at: i64,
     pub input_tokens: u64,

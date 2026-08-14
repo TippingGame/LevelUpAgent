@@ -12,7 +12,7 @@
     <a href="https://levelup.mom/">LevelUpAPI</a>
   </p>
   <p>
-    <img alt="Version" src="https://img.shields.io/badge/version-1.0.24-ff5a4f?style=flat-square" />
+    <img alt="Version" src="https://img.shields.io/badge/version-1.0.25-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-可用预览-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -45,7 +45,7 @@
 
 ### 安装
 
-从 GitHub Releases 下载对应平台的安装包。当前 `1.0.24` 已完成 Windows x64 本地构建验证；测试包未配置 Authenticode，Windows SmartScreen 可能提示“未知发布者”。
+从 GitHub Releases 下载对应平台的安装包。当前 `1.0.25` Windows x64 安装包由 GitHub Actions 构建并通过 Tauri updater 签名；未配置 Authenticode，Windows SmartScreen 可能提示“未知发布者”。
 
 | 平台 | 包格式 | 状态 |
 | --- | --- | --- |
@@ -151,7 +151,7 @@ macOS 安装包使用 `pnpm build:macos`。正式更新还需要仓库所有者�
 
 ## 当前状态
 
-`1.0.24` 是当前发布里程碑，修复 Windows 正式运行环境中反斜杠脚本路径未被 bootstrap metadata 识别，导致“摇光残影”一键孵化仍被安全边界误拒绝的问题。修复仅补全可信 Windows 路径解析，`1.0.23` 建立的最小权限白名单保持不变：相对路径、其他脚本、伪造 metadata 与 Shell 拼接仍不能绕过审批。自主求知链路无需开始共学。Windows 安装包仍未配置 Authenticode，其他平台的正式发布以 CI 和签名配置为准。提交 Issue 时请附上复现步骤、应用日志和平台信息。
+`1.0.25` 是当前发布里程碑。桌面端普通聊天、宠物聊天、主题生成和“摇光残影”孵化统一使用持久化 Durable Harness；历史会话恢复时会创建新的 operation/snapshot，避免旧 operation 失效，并在重启后恢复审批、Goal 用量和孵化运行目录状态。旧的桌面 React 递归执行链路已移除，孵化命令继续受到包内脚本、来源证明和重复执行熔断等最小权限约束。Windows 安装包使用 Tauri updater 签名但仍未配置 Authenticode，SmartScreen 可能提示“未知发布者”。提交 Issue 时请附上复现步骤、应用日志和平台信息。
 
 ## 许可证
 

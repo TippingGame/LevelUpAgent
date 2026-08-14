@@ -102,6 +102,14 @@ pub struct HarnessDraftRequest {
     pub permission_level: PermissionLevel,
     pub requested_profile_id: Option<String>,
     pub workspace: Option<String>,
+    /// Marks the bundled hatch-pet workflow. Hatch remains a normal durable
+    /// Harness operation; this flag only selects its stricter policy/catalog.
+    #[serde(default)]
+    pub hatch: bool,
+    /// Canonical per-run hatch directory. Persisted in the immutable snapshot
+    /// so provider/bootstrap tools cannot switch to a different manifest.
+    #[serde(default)]
+    pub hatch_run_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -195,6 +203,12 @@ pub struct HarnessRuntimeEvent {
     pub payload: Value,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessRunOutcome {
+    pub state: RuntimeState,
+}
+
 impl HarnessRuntimeEvent {
     pub fn new(operation_id: &str, sequence: u64, kind: &str, payload: Value) -> Self {
         Self {
@@ -236,6 +250,11 @@ pub struct HarnessPendingApproval {
     pub call_id: String,
     pub tool_name: String,
     pub arguments: Value,
+    pub mode: HarnessMode,
+    pub permission_level: PermissionLevel,
+    pub requested_profile_id: Option<String>,
+    #[serde(default)]
+    pub hatch: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

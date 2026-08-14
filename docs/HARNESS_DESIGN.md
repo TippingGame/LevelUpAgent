@@ -15,7 +15,7 @@
 
 本文讨论运行时契约，不讨论用户提示词的文案润色。实现必须保留用户原文，并让派生内容、权限决策、Provider 请求和工具副作用可追溯、可测试、可恢复。
 
-当前工作树已完成 Harness 的核心迁移：标准桌面会话由 Rust `harness_run` 独占 agent loop，React 通过事件 Channel 做状态投影；审批、Provider attempt、context manifest、队列、session node、工具账本和恢复状态均写入 SQLite。宠物孵化保留旧链路作为隔离兼容路径，普通标准会话不再由 React `runAgent()` 递归驱动。
+当前工作树已完成 Harness 的核心迁移：所有桌面会话（包括宠物聊天、主题生成和残影孵化）均由 Rust `harness_run` 独占 agent loop，React 通过事件 Channel 做状态投影；审批、Provider attempt、context manifest、队列、session node、工具账本和恢复状态均写入 SQLite。历史消息仍保留，但旧的桌面兼容运行链路不再使用；恢复历史会创建新的正式 Harness operation。
 
 ## 1. 结论摘要
 
@@ -71,7 +71,7 @@ flowchart LR
 
 当前实现事实：
 
-- [`src/App.tsx`](../src/App.tsx) 中的标准桌面 `send()` 先调用 Harness 预检和启动，再由 `harnessRun()` 订阅 Rust 事件；旧 `runAgent()` 只保留给宠物孵化兼容路径。
+- [`src/App.tsx`](../src/App.tsx) 中的桌面 `send()` 先调用 Harness 预检和启动，再由 `harnessRun()` 订阅 Rust 事件；旧的 React 递归 loop 仅作为无 Rust runtime 的浏览器预览实现。
 - [`src/lib/storage.ts`](../src/lib/storage.ts) 的新用户权限缺省回退为 `request`；Rust `execute_tool` 会再次按 mode/permission 做最终裁决。
 - [`src-tauri/src/agent.rs`](../src-tauri/src/agent.rs) 在协议适配前调用共享 Context Manager 按 Token 预算筛选原子消息单元，再使用 240,000 字符、160 条消息及单字段上限做 UTF-8 安全裁剪，并保护 tool call/result 配对。
 - [`src-tauri/src/lib.rs`](../src-tauri/src/lib.rs) 负责请求入口、failover、工具 command 和凭据读取；`execute_tool` 已接收 mode、permission、operation/call ID，并在 Rust 侧执行最终策略裁决；协议适配实现在 `agent.rs`。
@@ -81,10 +81,10 @@ flowchart LR
 
 | 优先级 | 缺口 | 直接风险 |
 | --- | --- | --- |
-| P0 | 标准会话的 Rust runtime、事件投影和审批恢复 | 已完成；宠物孵化保留隔离兼容路径 |
+| P0 | 所有桌面会话的 Rust runtime、事件投影和审批恢复 | 已完成；历史会话恢复时重建 Harness operation |
 | P0 | approval/event 投影和结果不明对账 | 已完成；token 一次性消费，unknown 提供人工界面 |
 | P1 | Provider/auth/model 预检仍需覆盖更多 capability/预算边界 | 复杂发送失败路径与草稿生命周期仍需继续解耦 |
-| P1 | agent loop 位于 React 递归 | 标准桌面会话已迁移到 Rust；宠物路径仍保留兼容递归 |
+| P1 | agent loop 位于 React 递归 | 所有桌面会话已迁移到 Rust；React 递归只用于浏览器预览 |
 | P1 | 上下文主要按字符预算 | Harness Context Manager 已先按 Token 预算筛选原子单元，再沿用 UTF-8 安全裁剪 |
 | P1 | 工具结果缺少统一信任与错误 envelope | 注入边界和模型恢复行为不稳定 |
 | P1 | 无 project instruction 分层和来源记录 | 指令冲突不可解释 |
@@ -645,7 +645,7 @@ export_round_trip_rate
 
 - 新增 operation、snapshot、event、attempt、approval 和 tool execution 表。
 - 实现单一 Rust loop、operation lock、save point、事件重放和 cancellation token。
-- React 改为消费事件；旧 `runAgent()` 只保留 feature flag 回滚路径。
+- React 改为消费事件；浏览器预览才保留明确命名的本地 loop，桌面路径没有兼容 fallback。
 - 恢复 `AwaitingApproval`，将其他未提交运行态标记为 `Interrupted`。
 
 退出条件：崩溃、重复事件、重复审批和 failover 边界测试通过；副作用不自动重放。
@@ -855,7 +855,7 @@ pnpm verify:levelupapi
 | Rust 工具闸门与执行账本 | `src-tauri/src/lib.rs`、`database.rs` | `execute_tool` 重新解析 mode/permission，拒绝越权调用，并按 `(operation_id, call_id)` 记录 running 与有界结果 |
 | 许可证边界 | `src-tauri/THIRD_PARTY_NOTICES.md` | 只适配算法/接口边界，不复制 TUI、Provider 或凭据实现 |
 
-这些模块以确定性单元测试、迁移测试和 Windows release 构建验证。标准发送链路调用 `harness_preflight`/`harness_start` 后进入 `harness_run`；审批、完成、取消、失败、中断、provider attempt、context manifest、队列和工具执行账本均写回 operation。宠物孵化仍使用原有隔离递归路径，以避免破坏已有 hatch 专用状态机。
+这些模块以确定性单元测试、迁移测试和 Windows release 构建验证。所有桌面会话发送链路（普通聊天、宠物聊天、主题生成和宠物孵化）调用 `harness_preflight`/`harness_start` 后进入 `harness_run`；审批、完成、取消、失败、中断、provider attempt、context manifest、队列和工具执行账本均写回 operation。孵化的专用状态作为 Harness 上的严格 policy/snapshot，不再是绕过 Harness 的另一条 loop。
 
 ## 22. 本次实现验证结果
 

@@ -283,6 +283,10 @@ export interface HarnessRuntimeEvent {
   payload: unknown;
 }
 
+export interface HarnessRunOutcome {
+  state: HarnessOperationState;
+}
+
 export interface HarnessApprovalResolution {
   operationId: string;
   token: string;
@@ -306,6 +310,10 @@ export interface HarnessPendingApproval {
   callId: string;
   toolName: string;
   arguments: Record<string, unknown>;
+  mode: AgentMode;
+  permissionLevel: PermissionLevel;
+  requestedProfileId?: string;
+  hatch: boolean;
 }
 
 export interface HarnessRecoveryItem {
@@ -427,6 +435,10 @@ export interface HarnessDraftRequest {
   permissionLevel?: PermissionLevel;
   requestedProfileId?: string;
   workspace?: string;
+  /** True for the bundled hatch-pet workflow. The operation is still durable. */
+  hatch?: boolean;
+  /** Canonical per-hatch run directory persisted into the operation snapshot. */
+  hatchRunDir?: string;
 }
 
 export interface HarnessPreflightReport {

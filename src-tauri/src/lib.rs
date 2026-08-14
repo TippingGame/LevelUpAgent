@@ -200,7 +200,7 @@ async fn attach_mcp_tools(
     manager: &mcp::McpManager,
     request: &mut AgentTurnRequest,
 ) -> Result<(), String> {
-    if !matches!(request.mode.as_str(), "agent" | "goal") {
+    if request.hatch || !matches!(request.mode.as_str(), "agent" | "goal") {
         return Ok(());
     }
     for server in database
@@ -410,7 +410,10 @@ fn attach_custom_instructions(
 }
 
 fn attach_subagent_tools(request: &mut AgentTurnRequest) {
-    if !matches!(request.mode.as_str(), "agent" | "goal") || request.workspace.is_none() {
+    if request.hatch
+        || !matches!(request.mode.as_str(), "agent" | "goal")
+        || request.workspace.is_none()
+    {
         return;
     }
     request.available_tools.extend([
@@ -517,6 +520,24 @@ fn attach_media_tools(request: &mut AgentTurnRequest) {
             read_only: true,
         },
     ]);
+    if request.hatch {
+        request
+            .available_tools
+            .retain(|tool| matches!(tool.name.as_str(), "generate_images"));
+    }
+}
+
+fn enforce_hatch_tool_catalog(request: &mut AgentTurnRequest) {
+    if !request.hatch {
+        return;
+    }
+    // The bundled hatch adapter has a deliberately narrow execution surface:
+    // deterministic scripts plus one grounded image job at a time. No file
+    // browser, generic writers, subagents, MCP, video, speech, or media polling
+    // is exposed to the provider.
+    request
+        .available_tools
+        .retain(|tool| matches!(tool.name.as_str(), "generate_images" | "update_goal"));
 }
 
 fn attachment_storage(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
@@ -3175,6 +3196,7 @@ async fn agent_turn(
         attach_media_tools(&mut request);
         attach_skills(&app, &database, &mut request)?;
         attach_mcp_tools(&database, &manager, &mut request).await?;
+        enforce_hatch_tool_catalog(&mut request);
         let goal_thread = (request.mode == "goal")
             .then(|| request.thread_id.clone())
             .flatten();
@@ -3297,6 +3319,7 @@ async fn agent_turn_stream_inner(
     attach_media_tools(&mut request);
     attach_skills(&app, &database, &mut request)?;
     attach_mcp_tools(&database, &manager, &mut request).await?;
+    enforce_hatch_tool_catalog(&mut request);
     let goal_thread = (request.mode == "goal")
         .then(|| request.thread_id.clone())
         .flatten();
@@ -3560,7 +3583,7 @@ async fn harness_run(
     subagents: tauri::State<'_, subagent::SubagentManager>,
     request: crate::harness::types::HarnessRunRequest,
     on_event: Channel<crate::harness::types::HarnessRuntimeEvent>,
-) -> Result<(), String> {
+) -> Result<crate::harness::types::HarnessRunOutcome, String> {
     let operation_id = request.operation_id.clone();
     let thread_id = request.thread_id.clone();
     let started = Instant::now();
@@ -3577,13 +3600,14 @@ async fn harness_run(
     let result =
         harness_run_inner(app, state, database, manager, subagents, request, on_event).await;
     match &result {
-        Ok(()) => logging::write(
+        Ok(outcome) => logging::write(
             "info",
             "harness",
             "operation_completed",
             serde_json::json!({
                 "operationId": operation_id,
                 "threadId": thread_id,
+                "state": outcome.state,
                 "latencyMs": started.elapsed().as_millis().min(u64::MAX as u128) as u64,
             }),
         ),
@@ -3618,8 +3642,41 @@ async fn harness_run_inner(
     subagents: tauri::State<'_, subagent::SubagentManager>,
     request: crate::harness::types::HarnessRunRequest,
     on_event: Channel<crate::harness::types::HarnessRuntimeEvent>,
-) -> Result<(), String> {
+) -> Result<crate::harness::types::HarnessRunOutcome, String> {
     let operation_id = request.operation_id.clone();
+    let operation_hatch = database.harness_operation_hatch(&operation_id)?;
+    if operation_hatch != request.hatch {
+        return Err("Harness run hatch mode does not match its persisted snapshot".to_owned());
+    }
+    if operation_hatch {
+        let snapshot_run_dir = database
+            .harness_operation_hatch_run_dir(&operation_id)?
+            .ok_or_else(|| "Hatch operation snapshot has no run directory".to_owned())?;
+        let workspace = request
+            .workspace
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "Hatch operation has no workspace".to_owned())?;
+        let workspace = std::fs::canonicalize(workspace)
+            .map_err(|error| format!("Hatch workspace is unavailable: {error}"))?;
+        let run_dir = Path::new(&snapshot_run_dir);
+        if !run_dir.is_absolute() {
+            return Err("Hatch operation snapshot run directory is not absolute".to_owned());
+        }
+        let run_boundary = if run_dir.exists() {
+            std::fs::canonicalize(run_dir).ok()
+        } else {
+            run_dir
+                .parent()
+                .and_then(|parent| std::fs::canonicalize(parent).ok())
+        }
+        .ok_or_else(|| "Hatch operation snapshot run directory is unavailable".to_owned())?;
+        if !run_boundary.starts_with(&workspace) {
+            return Err(
+                "Hatch operation snapshot run directory is outside its workspace".to_owned(),
+            );
+        }
+    }
     let cancellation = CancellationToken::new();
     {
         let mut active = state
@@ -3663,10 +3720,12 @@ async fn harness_run_loop(
     request: crate::harness::types::HarnessRunRequest,
     on_event: Channel<crate::harness::types::HarnessRuntimeEvent>,
     cancellation: CancellationToken,
-) -> Result<(), String> {
+) -> Result<crate::harness::types::HarnessRunOutcome, String> {
     let operation_id = request.operation_id.clone();
     let mut history = request.messages.clone();
     let mut round = 0usize;
+    let mut hatch_status_requires_action =
+        request.hatch && database.harness_hatch_status_requires_action(&operation_id)?;
     loop {
         if round >= 64 {
             database.update_harness_operation_state(
@@ -3791,6 +3850,7 @@ async fn harness_run_loop(
         attach_media_tools(&mut turn_request);
         attach_skills(app, database, &mut turn_request)?;
         attach_mcp_tools(database, manager, &mut turn_request).await?;
+        enforce_hatch_tool_catalog(&mut turn_request);
         let attempt_id = database.start_harness_provider_attempt(
             &operation_id,
             &snapshot_id,
@@ -3890,6 +3950,13 @@ async fn harness_run_loop(
                     }),
                 );
                 database.finish_harness_provider_attempt(&attempt_id, Some(&response), None)?;
+                if matches!(request.mode, crate::harness::types::HarnessMode::Goal) {
+                    database.record_goal_usage(
+                        &request.thread_id,
+                        response.input_tokens.unwrap_or(0),
+                        response.output_tokens.unwrap_or(0),
+                    )?;
+                }
                 let response_payload = serde_json::to_value(&response)
                     .map_err(|error| format!("Could not encode provider response: {error}"))?;
                 let sequence = database.append_harness_event(
@@ -3912,6 +3979,53 @@ async fn harness_run_loop(
                     attachments: Vec::new(),
                 });
                 if response.tool_calls.is_empty() {
+                    let goal = if matches!(request.mode, crate::harness::types::HarnessMode::Goal) {
+                        database.get_goal(&request.thread_id)?
+                    } else {
+                        None
+                    };
+                    if goal.as_ref().is_some_and(|goal| {
+                        matches!(
+                            goal.status,
+                            models::GoalStatus::Active | models::GoalStatus::Auditing
+                        )
+                    }) {
+                        let auditing = goal.as_ref().is_some_and(|goal| {
+                            matches!(goal.status, models::GoalStatus::Auditing)
+                        });
+                        history.push(AgentMessage {
+                            role: "user".to_owned(),
+                            content: if request.hatch {
+                                if auditing {
+                                    "Continue the hatch completion audit using the existing run outputs. Run the final validation or packaging command needed to prove completion, then update the Goal with concrete evidence. Do not reread the Skill manifest, Goal, or workspace metadata."
+                                } else {
+                                    "The persistent hatch Goal is still active. Take the next concrete hatch action now. The bundled Skill, Goal, target, and canonical run directory are already attached; do not reread them or browse the workspace. Run a deterministic hatch command or generate the next ready manifest image, then update the Goal only when evidence supports it."
+                                }
+                            } else if auditing {
+                                "The persistent Goal is still auditing. Continue the completion audit and verify every requirement against authoritative current-state evidence before updating the Goal."
+                            } else {
+                                "The persistent Goal is still active. Continue working toward it and take the next concrete action; do not stop with a progress summary."
+                            }
+                            .to_owned(),
+                            tool_calls: Vec::new(),
+                            tool_call_id: None,
+                            internal: true,
+                            attachments: Vec::new(),
+                        });
+                        logging::write(
+                            "info",
+                            "harness",
+                            "goal_continuation_injected",
+                            serde_json::json!({
+                                "operationId": &operation_id,
+                                "threadId": &request.thread_id,
+                                "round": round,
+                                "auditing": auditing,
+                                "hatch": request.hatch,
+                            }),
+                        );
+                        continue;
+                    }
                     logging::write(
                         "info",
                         "harness",
@@ -3940,7 +4054,9 @@ async fn harness_run_loop(
                         "operation_completed",
                         payload,
                     ));
-                    return Ok(());
+                    return Ok(crate::harness::types::HarnessRunOutcome {
+                        state: crate::harness::types::RuntimeState::Completed,
+                    });
                 }
                 state
                     .harness_phases
@@ -3948,6 +4064,55 @@ async fn harness_run_loop(
                     .map_err(|_| "Could not lock harness phase state".to_owned())?
                     .insert(operation_id.clone(), HarnessPhase::Tool);
                 for call in response.tool_calls {
+                    let mut call = call;
+                    if request.hatch && call.name == "generate_images" {
+                        let expected_run_dir = database
+                            .harness_operation_hatch_run_dir(&operation_id)?
+                            .ok_or_else(|| {
+                                "Hatch operation snapshot has no run directory".to_owned()
+                            })?;
+                        let arguments = call.arguments.as_object_mut().ok_or_else(|| {
+                            "Hatch image generation arguments must be an object".to_owned()
+                        })?;
+                        arguments.insert(
+                            "hatchRunDir".to_owned(),
+                            serde_json::Value::String(expected_run_dir),
+                        );
+                    }
+                    let hatch_command_kind = if request.hatch && call.name == "run_command" {
+                        let expected_run_dir = database
+                            .harness_operation_hatch_run_dir(&operation_id)?
+                            .ok_or_else(|| {
+                                "Hatch operation snapshot has no run directory".to_owned()
+                            })?;
+                        let pet_manager = app
+                            .try_state::<pet::PetManager>()
+                            .ok_or_else(|| "Pet manager is unavailable".to_owned())?;
+                        hatch_provider_command_kind(
+                            &call.arguments,
+                            &pet_manager,
+                            &expected_run_dir,
+                        )
+                    } else {
+                        None
+                    };
+                    if request.hatch && hatch_status_requires_action {
+                        let concrete = call.name == "generate_images"
+                            || hatch_command_kind == Some("action")
+                            || call.name == "update_goal";
+                        if !concrete {
+                            database.update_harness_operation_state(
+                                &operation_id,
+                                &crate::harness::types::RuntimeState::Failed,
+                            )?;
+                            if matches!(request.mode, crate::harness::types::HarnessMode::Goal) {
+                                let _ = database.set_goal_status(&request.thread_id, "pause");
+                            }
+                            return Ok(crate::harness::types::HarnessRunOutcome {
+                                state: crate::harness::types::RuntimeState::Failed,
+                            });
+                        }
+                    }
                     let policy_call = ToolCall {
                         id: call.id.clone(),
                         name: call.name.clone(),
@@ -3987,7 +4152,12 @@ async fn harness_run_loop(
                             &operation_id,
                             &crate::harness::types::RuntimeState::Failed,
                         )?;
-                        return Ok(());
+                        if matches!(request.mode, crate::harness::types::HarnessMode::Goal) {
+                            let _ = database.set_goal_status(&request.thread_id, "pause");
+                        }
+                        return Ok(crate::harness::types::HarnessRunOutcome {
+                            state: crate::harness::types::RuntimeState::Failed,
+                        });
                     }
                     if matches!(
                         decision,
@@ -4041,7 +4211,9 @@ async fn harness_run_loop(
                             "approval_required",
                             payload,
                         ));
-                        return Ok(());
+                        return Ok(crate::harness::types::HarnessRunOutcome {
+                            state: crate::harness::types::RuntimeState::AwaitingApproval,
+                        });
                     }
                     let tool_request = ToolExecutionRequest {
                         call_id: Some(call.id.clone()),
@@ -4125,6 +4297,16 @@ async fn harness_run_loop(
                         internal: false,
                         attachments: Vec::new(),
                     });
+                    if request.hatch {
+                        hatch_status_requires_action =
+                            hatch_command_kind == Some("status") && !tool_result.is_error;
+                        if call.name == "generate_images"
+                            || hatch_command_kind == Some("action")
+                            || call.name == "update_goal"
+                        {
+                            hatch_status_requires_action = false;
+                        }
+                    }
                 }
                 logging::write(
                     "info",
@@ -4286,6 +4468,14 @@ fn harness_start(
         .as_deref()
         .ok_or_else(|| "Harness preflight did not select a Provider profile".to_owned())?;
     database.start_harness_operation(&request, &workspace.to_string_lossy(), profile_id)
+}
+
+#[tauri::command]
+fn harness_latest_hatch_run_dir(
+    database: tauri::State<'_, database::Database>,
+    thread_id: String,
+) -> Result<Option<String>, String> {
+    database.latest_harness_hatch_run_dir_for_thread(&thread_id)
 }
 
 #[tauri::command]
@@ -5136,6 +5326,13 @@ struct BootstrapPythonInvocation<'a> {
 fn bootstrap_python_invocation(command: &str) -> Option<BootstrapPythonInvocation<'_>> {
     // Application-authored commands never contain shell operators. Rejecting
     // them here prevents a forged bootstrap marker from appending a payload.
+    // A single leading PowerShell call operator is allowed for a quoted
+    // absolute Python executable; it cannot compose a second command.
+    let command = command.trim();
+    let command = command
+        .strip_prefix('&')
+        .map(str::trim_start)
+        .unwrap_or(command);
     if command.bytes().any(|byte| {
         matches!(
             byte,
@@ -5342,6 +5539,135 @@ fn bundled_hatch_bootstrap_call_allowed(
     false
 }
 
+fn provider_hatch_arguments_allowed(
+    script_name: &str,
+    arguments: &[&str],
+    canonical_run_dir: &Path,
+) -> bool {
+    let mut index = 0;
+    let mut saw_run_dir = false;
+    while index < arguments.len() {
+        match arguments[index] {
+            "--run-dir" => {
+                let Some(value) = arguments.get(index + 1) else {
+                    return false;
+                };
+                if !path_equals(Path::new(value), canonical_run_dir) {
+                    return false;
+                }
+                saw_run_dir = true;
+                index += 2;
+            }
+            "--job-id" | "--source" | "--decision-note" | "--review" | "--package-dir"
+            | "--ffmpeg" => {
+                if arguments.get(index + 1).is_none() {
+                    return false;
+                }
+                index += 2;
+            }
+            "--confirm-appropriate-mirror"
+            | "--force"
+            | "--allow-slot-extraction"
+            | "--skip-videos"
+            | "--skip-package"
+            | "--repair-on-warnings" => index += 1,
+            // Test-only and external-generation escape hatches are never
+            // exposed to a provider-owned hatch command.
+            "--allow-synthetic-test-source"
+            | "--allow-synthetic-test-sources"
+            | "--model"
+            | "--states"
+            | "--size"
+            | "--skip-base" => return false,
+            _ => return false,
+        }
+    }
+    saw_run_dir
+        && match script_name {
+            "pet_job_status.py" => arguments.len() == 2,
+            "record_imagegen_result.py" => {
+                arguments.windows(2).any(|pair| pair[0] == "--job-id")
+                    && arguments.windows(2).any(|pair| pair[0] == "--source")
+            }
+            "derive_running_left_from_running_right.py" => {
+                arguments.contains(&"--confirm-appropriate-mirror")
+                    && arguments
+                        .windows(2)
+                        .any(|pair| pair[0] == "--decision-note")
+            }
+            "finalize_pet_run.py" | "queue_pet_repairs.py" => true,
+            _ => false,
+        }
+}
+
+fn validate_record_imagegen_source(
+    database: &database::Database,
+    operation_id: &str,
+    arguments: &[&str],
+) -> Result<(), String> {
+    let Some(source) = arguments
+        .windows(2)
+        .find_map(|pair| (pair[0] == "--source").then_some(pair[1]))
+    else {
+        return Err("record_imagegen_result.py requires --source".to_owned());
+    };
+    if !Path::new(source).is_absolute() {
+        return Err("record_imagegen_result.py source must be an absolute adapter path".to_owned());
+    }
+    if !database.harness_operation_has_hatch_source(operation_id, source)? {
+        return Err(
+            "record_imagegen_result.py source was not returned by generate_images in this Harness operation"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_bundled_hatch_provider_command(
+    request: &ToolExecutionRequest,
+    manager: &pet::PetManager,
+    database: &database::Database,
+    operation_id: &str,
+    canonical_run_dir: &str,
+) -> Result<(), String> {
+    let command = request
+        .arguments
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "Hatch run_command requires a command".to_owned())?;
+    let invocation = bootstrap_python_invocation(command.trim()).ok_or_else(|| {
+        "Hatch run_command only accepts one direct bundled Python script invocation; shell composition is unavailable"
+            .to_owned()
+    })?;
+    let script = PathBuf::from(decode_powershell_literal(invocation.script));
+    let script = std::fs::canonicalize(script)
+        .map_err(|_| "Hatch run_command script is unavailable".to_owned())?;
+    let skill_root = manager
+        .hatch_environment()
+        .hatch_skill_path
+        .ok_or_else(|| "Bundled hatch-pet Skill is unavailable".to_owned())?;
+    let scripts_root = std::fs::canonicalize(Path::new(&skill_root).join("scripts"))
+        .map_err(|_| "Bundled hatch-pet scripts are unavailable".to_owned())?;
+    if !script.starts_with(&scripts_root) {
+        return Err("Hatch run_command script is outside the bundled hatch-pet Skill".to_owned());
+    }
+    let script_name = script
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "Hatch run_command script name is invalid".to_owned())?;
+    let run_dir = Path::new(canonical_run_dir);
+    if !provider_hatch_arguments_allowed(script_name, &invocation.arguments, run_dir) {
+        return Err(
+            "Hatch run_command arguments are outside the bundled deterministic workflow or do not match the durable run directory"
+                .to_owned(),
+        );
+    }
+    if script_name == "record_imagegen_result.py" {
+        validate_record_imagegen_source(database, operation_id, &invocation.arguments)?;
+    }
+    Ok(())
+}
+
 fn hatch_bootstrap_boundary_error(
     request: &ToolExecutionRequest,
     manager: &pet::PetManager,
@@ -5380,6 +5706,65 @@ fn hatch_tool_policy_error(request: &ToolExecutionRequest) -> Option<&'static st
             "read_skill is application-owned during pet hatching and is unavailable to provider turns. Run prepare_pet_run.py or the next concrete hatch command.",
         )
     }
+}
+
+fn hatch_provider_command_kind(
+    arguments: &serde_json::Value,
+    manager: &pet::PetManager,
+    canonical_run_dir: &str,
+) -> Option<&'static str> {
+    let command = arguments.get("command")?.as_str()?;
+    let invocation = bootstrap_python_invocation(command.trim())?;
+    let script =
+        std::fs::canonicalize(PathBuf::from(decode_powershell_literal(invocation.script))).ok()?;
+    let skill_root = manager.hatch_environment().hatch_skill_path?;
+    let scripts_root = std::fs::canonicalize(Path::new(&skill_root).join("scripts")).ok()?;
+    if !script.starts_with(scripts_root) {
+        return None;
+    }
+    let script_name = script.file_name()?.to_str()?;
+    provider_hatch_arguments_allowed(
+        script_name,
+        &invocation.arguments,
+        Path::new(canonical_run_dir),
+    )
+    .then_some(match script_name {
+        "pet_job_status.py" => "status",
+        _ => "action",
+    })
+}
+
+const HATCH_MAX_IDENTICAL_COMMANDS: usize = 3;
+
+fn hatch_command_kind(arguments: &serde_json::Value) -> Option<&'static str> {
+    let command = arguments.get("command")?.as_str()?.to_ascii_lowercase();
+    if command.contains("pet_job_status.py") {
+        Some("status")
+    } else if command.contains("prepare_pet_run.py") {
+        Some("prepare")
+    } else {
+        None
+    }
+}
+
+fn hatch_repeated_command_error(
+    database: &database::Database,
+    operation_id: &str,
+    request: &ToolExecutionRequest,
+) -> Result<Option<&'static str>, String> {
+    let Some(kind) = hatch_command_kind(&request.arguments) else {
+        return Ok(None);
+    };
+    let repeats = database.harness_recent_hatch_command_kinds(
+        operation_id,
+        request.call_id.as_deref().unwrap_or_default(),
+        HATCH_MAX_IDENTICAL_COMMANDS,
+    )?;
+    Ok((repeats.len() >= HATCH_MAX_IDENTICAL_COMMANDS
+        && repeats.iter().all(|previous| previous == kind))
+    .then_some(
+        "Pet hatching was paused because the provider repeated the same hatch command without advancing the manifest.",
+    ))
 }
 
 #[tauri::command]
@@ -5484,6 +5869,49 @@ async fn execute_tool_inner(
     subagents: &subagent::SubagentManager,
     mut request: ToolExecutionRequest,
 ) -> Result<ToolExecutionResponse, String> {
+    let mut durable_hatch_run_dir = None;
+    if let Some(operation_id) = request.operation_id.as_deref() {
+        let operation_hatch = database.harness_operation_hatch(operation_id)?;
+        if request.hatch && !operation_hatch {
+            return Err("Tool hatch mode does not match its durable Harness operation".to_owned());
+        }
+        // The immutable operation snapshot is authoritative. This also lets
+        // approval records created by an older frontend recover the hatch bit
+        // without reopening the legacy standalone executor.
+        request.hatch = operation_hatch;
+        if operation_hatch {
+            let expected_run_dir = database
+                .harness_operation_hatch_run_dir(operation_id)?
+                .ok_or_else(|| "Hatch operation snapshot has no run directory".to_owned())?;
+            if let Some(actual_run_dir) = request
+                .arguments
+                .get("hatchRunDir")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    request
+                        .arguments
+                        .get("hatchBootstrap")
+                        .and_then(|value| value.get("runDirectory"))
+                        .and_then(serde_json::Value::as_str)
+                })
+                && !path_equals(Path::new(actual_run_dir), Path::new(&expected_run_dir))
+            {
+                return Err(
+                    "Hatch tool run directory does not match its durable snapshot".to_owned(),
+                );
+            }
+            if request.name == "generate_images" {
+                let arguments = request.arguments.as_object_mut().ok_or_else(|| {
+                    "Hatch image generation arguments must be an object".to_owned()
+                })?;
+                arguments.insert(
+                    "hatchRunDir".to_owned(),
+                    serde_json::Value::String(expected_run_dir.clone()),
+                );
+            }
+            durable_hatch_run_dir = Some(expected_run_dir);
+        }
+    }
     // Older clients did not persist the hatch flag on every tool request.
     // Recover it from the durable Goal before applying the tool policy so a
     // resumed legacy thread cannot re-expose read_skill/get_goal or bypass
@@ -5495,14 +5923,57 @@ async fn execute_tool_inner(
     {
         request.hatch = true;
     }
+    if request.hatch && request.operation_id.is_none() {
+        return Err(
+            "Hatch tools require an operation created by harness_start; legacy standalone hatch execution has been removed"
+                .to_owned(),
+        );
+    }
     if let Some(output) = hatch_bootstrap_boundary_error(&request, pet_manager) {
         return Ok(ToolExecutionResponse {
             output: output.to_owned(),
             is_error: true,
         });
     }
+    if request.hatch && request.name == "run_command" && !request.hatch_bootstrap {
+        let operation_id = request
+            .operation_id
+            .as_deref()
+            .ok_or_else(|| "Durable hatch command has no operation ID".to_owned())?;
+        let run_dir = durable_hatch_run_dir
+            .as_deref()
+            .ok_or_else(|| "Durable hatch command has no canonical run directory".to_owned())?;
+        validate_bundled_hatch_provider_command(
+            &request,
+            pet_manager,
+            database,
+            operation_id,
+            run_dir,
+        )?;
+    }
     let hatch_bootstrap_allowed = request.hatch_bootstrap;
     if let Some(output) = hatch_tool_policy_error(&request) {
+        return Ok(ToolExecutionResponse {
+            output: output.to_owned(),
+            is_error: true,
+        });
+    }
+    if request.hatch
+        && request.name == "run_command"
+        && !request.hatch_bootstrap
+        && let Some(operation_id) = request.operation_id.as_deref()
+        && let Some(output) = hatch_repeated_command_error(database, operation_id, &request)?
+    {
+        if request.mode.as_deref() == Some("goal") {
+            let _ = request
+                .thread_id
+                .as_deref()
+                .map(|thread_id| database.set_goal_status(thread_id, "pause"));
+        }
+        database.update_harness_operation_state(
+            operation_id,
+            &crate::harness::types::RuntimeState::Failed,
+        )?;
         return Ok(ToolExecutionResponse {
             output: output.to_owned(),
             is_error: true,
@@ -5528,7 +5999,6 @@ async fn execute_tool_inner(
         crate::harness::types::PolicyDecision::NeedsApproval
     ) && request.approval_granted
         && !hatch_bootstrap_allowed
-        && !request.hatch
     {
         match (request.operation_id.as_deref(), request.call_id.as_deref()) {
             (Some(operation_id), Some(call_id)) => {
@@ -5567,6 +6037,10 @@ async fn execute_tool_inner(
             .to_string_lossy()
             .into_owned();
     }
+    // Every desktop workflow, including hatch bootstrap/provider calls, is
+    // attached to an operation created by harness_start. Application-owned
+    // bootstrap calls therefore use the same durable tool ledger and snapshot
+    // as the provider turns that follow them.
     let ledger_key = request.operation_id.clone().zip(request.call_id.clone());
     if let Some((operation_id, call_id)) = ledger_key.as_ref() {
         let risk = serde_json::to_string(&crate::harness::policy::classify_tool(&request.name))
@@ -6369,6 +6843,7 @@ pub fn run() {
             fetch_models,
             harness_preflight,
             harness_start,
+            harness_latest_hatch_run_dir,
             harness_check_tool,
             harness_update_state,
             harness_run,
@@ -6848,6 +7323,50 @@ mod tests {
         request.hatch_bootstrap = false;
         assert!(!bundled_hatch_bootstrap_call_allowed(&request, &manager));
         assert!(hatch_bootstrap_boundary_error(&request, &manager).is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn hatch_provider_commands_are_single_bundled_scripts_with_the_snapshot_run_dir() {
+        let root = std::env::temp_dir().join(format!(
+            "levelup-hatch-provider-policy-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let app_data = root.join("app");
+        let home = root.join("home");
+        let skills = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("skills");
+        let manager = pet::PetManager::open_with_skills(&app_data, &home, Some(&skills)).unwrap();
+        let run_dir = app_data.join("pet-hatch").join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let status = skills
+            .join("hatch-pet")
+            .join("scripts")
+            .join("pet_job_status.py");
+        let command = serde_json::json!({
+            "command": format!("python '{}' --run-dir '{}'", status.display(), run_dir.display())
+        });
+        assert_eq!(
+            hatch_provider_command_kind(&command, &manager, &run_dir.to_string_lossy()),
+            Some("status")
+        );
+
+        let outside = root.join("outside");
+        let wrong_run = serde_json::json!({
+            "command": format!("python '{}' --run-dir '{}'", status.display(), outside.display())
+        });
+        assert_eq!(
+            hatch_provider_command_kind(&wrong_run, &manager, &run_dir.to_string_lossy()),
+            None
+        );
+        let composed = serde_json::json!({
+            "command": format!("python '{}' --run-dir '{}'; Write-Output forged", status.display(), run_dir.display())
+        });
+        assert_eq!(
+            hatch_provider_command_kind(&composed, &manager, &run_dir.to_string_lossy()),
+            None
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

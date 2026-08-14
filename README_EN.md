@@ -12,7 +12,7 @@
     <a href="https://levelup.mom/">LevelUpAPI</a>
   </p>
   <p>
-    <img alt="Version" src="https://img.shields.io/badge/version-1.0.24-ff5a4f?style=flat-square" />
+    <img alt="Version" src="https://img.shields.io/badge/version-1.0.25-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-preview-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -45,7 +45,7 @@ Read the [Creative Studio capability audit](docs/CREATIVE_STUDIO_AUDIT.md) for t
 
 ### Install
 
-Download the package for your platform from GitHub **Releases**. The current `1.0.24` Windows x64 package has passed local build validation; the installers are not Authenticode-signed, so SmartScreen may show an unknown-publisher warning.
+Download the package for your platform from GitHub **Releases**. The current `1.0.25` Windows x64 installers are built by GitHub Actions and signed with the Tauri updater key; they are not Authenticode-signed, so SmartScreen may show an unknown-publisher warning.
 
 | Platform | Package | Status |
 | --- | --- | --- |
@@ -154,7 +154,7 @@ Use `pnpm build:macos` for macOS packages. Signed public updates additionally re
 
 ## Current status
 
-`1.0.24` is the current release milestone. It fixes one-click Yaoguang Canying hatching in production Windows environments, where backslash-based script paths were not recognized by bootstrap metadata and were therefore rejected by the safety boundary. The change only completes trusted Windows path parsing; the least-privilege allowlist introduced in `1.0.23` remains intact, so relative paths, unrelated scripts, forged metadata, and shell composition cannot bypass approval. Autonomous curiosity still runs without starting shared study. The Windows installers are not Authenticode-signed; formal releases for other platforms remain subject to CI and signing configuration. When filing an issue, include reproduction steps, application logs, and platform details.
+`1.0.25` is the current release milestone. Desktop chat, pet chat, theme generation, and Yaoguang Canying hatching now use the persistent Durable Harness. Restoring a historical conversation creates a fresh operation/snapshot instead of reusing an expired operation, and approvals, Goal usage, and hatching run-directory state survive restarts. The legacy desktop React recursive execution path has been removed; hatching commands remain constrained by package-local scripts, provenance checks, and duplicate-run circuit breakers. Windows installers use Tauri updater signatures but are not Authenticode-signed, so SmartScreen may show an unknown-publisher warning. When filing an issue, include reproduction steps, application logs, and platform details.
 
 ## License
 

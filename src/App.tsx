@@ -102,6 +102,7 @@ import {
   getProviderSettings,
   harnessPreflight,
   harnessStart,
+  harnessLatestHatchRunDir,
   harnessRun,
   harnessEnqueue,
   harnessCancelQueue,
@@ -191,6 +192,7 @@ import {
   gateHatchToolCall,
   hatchPrepareCommandFromHistory,
   hatchPetId,
+  hatchRunDirectoryFromHistory,
   hatchStatusCommand,
   hatchCommandIsObservation,
   normalizeHatchCommandCall,
@@ -852,7 +854,7 @@ function App() {
   const queuedItems = harnessQueueItems[activeThread.id] ?? [];
   const latestChangeSet = [...activeThread.messages].reverse().find((item) => item.changeSet)?.changeSet ?? null;
   const visibleChangeSet = reviewedChangeSet ?? latestChangeSet;
-  const persistentThreads = threads.filter((thread) => thread.kind !== "pet");
+  const persistentThreads = threads;
   const projectGroups = groupThreadsByWorkspace(persistentThreads, pinnedThreadIds, defaultWorkspace);
   const displayedProjectGroups = projectGroups.filter((project) => !project.workspace || !hiddenProjectKeys.has(project.key));
   const activeProjectKey = workspaceKey(activeThread.workspace);
@@ -1079,7 +1081,6 @@ function App() {
     };
     const runProfile = activeProfile;
     const runFallbackProfiles = profiles.filter((profile) => profile.id !== runProfile.id);
-    const runStartedAt = Date.now();
     setMode("agent");
     setWorkspaceView("chat");
     setThemesOpen(false);
@@ -1087,8 +1088,41 @@ function App() {
     setNotice(skillWarning
       ? `${tr("已在会话中开始生成主题", "Theme generation started in the conversation")} · ${skillWarning}`
       : tr("已在会话中开始生成主题，完成后会自动导入", "Theme generation started in the conversation; it will be imported automatically when complete"));
-    void runAgent(nextThread, nextThread.messages, 0, "agent", permissionLevel, runStartedAt, runProfile, runFallbackProfiles)
-      .catch((error) => setNotice(`${tr("主题生成失败", "Theme generation failed")}: ${errorText(error)}`));
+    void (async () => {
+      try {
+        // Persist the generated user turn before harness_start validates the
+        // thread foreign key. This is the same durable submission boundary as
+        // the normal composer path.
+        await savePersistedThread(nextThread);
+        const harnessRequest = {
+          threadId: nextThread.id,
+          rawUserInput: request,
+          attachmentIds: [],
+          mode: "agent" as const,
+          permissionLevel,
+          requestedProfileId: runProfile.id,
+          workspace,
+          hatch: false,
+        };
+        const report = await harnessPreflight(harnessRequest);
+        if (!report.ok) throw new Error(report.errors.join("; ") || "Harness preflight blocked");
+        const submission = await harnessStart(harnessRequest);
+        if (submission.disposition !== "started") {
+          throw new Error("Theme generation was unexpectedly queued behind another operation");
+        }
+        await runHarnessAgent(
+          nextThread,
+          nextThread.messages,
+          "agent",
+          permissionLevel,
+          runProfile,
+          runFallbackProfiles,
+          submission.value.operationId,
+        );
+      } catch (error) {
+        setNotice(`${tr("主题生成失败", "Theme generation failed")}: ${errorText(error)}`);
+      }
+    })();
     setThemeGeneration({
       threadId: nextThread.id,
       sourcePath: workspacePath(workspace, relativePath),
@@ -1196,7 +1230,31 @@ function App() {
     setNotice(tr("正在准备残影孵化工具链", "Preparing the echo hatch toolchain"));
     void (async () => {
       let handedOffToAgent = false;
+      let operationId: string | undefined;
       try {
+        // The thread/Goal predate the operation by design, but bootstrap must
+        // not execute until the durable snapshot exists.
+        await savePersistedThread(nextThread);
+        const harnessRequest = {
+          threadId: nextThread.id,
+          rawUserInput: summary,
+          attachmentIds: request.references.map((attachment) => attachment.id),
+          mode: "goal" as const,
+          permissionLevel,
+          requestedProfileId: runProfile.id,
+          workspace: nextThread.workspace,
+          hatch: true,
+          hatchRunDir: hatchRunDirectory,
+        };
+        const report = await harnessPreflight(harnessRequest);
+        if (!report.ok) throw new Error(report.errors.join("; ") || "Harness preflight blocked");
+        const submission = await harnessStart(harnessRequest);
+        if (submission.disposition !== "started") {
+          throw new Error("Hatch operation was unexpectedly queued behind another operation");
+        }
+        operationId = submission.value.operationId;
+        operationIdsRef.current.set(nextThread.id, operationId);
+        runModesRef.current.set(nextThread.id, "goal");
         const bootstrappedHistory = await bootstrapHatchHistory(
           nextThread.messages,
           request.environment,
@@ -1204,6 +1262,7 @@ function App() {
           nextThread.id,
           runProfile,
           runFallbackProfiles,
+          operationId,
           () => hatchRunIsCurrent(nextThread.id, hatchRunToken),
         );
         if (!hatchRunIsCurrent(nextThread.id, hatchRunToken)) return;
@@ -1216,17 +1275,15 @@ function App() {
         setNotice(tr("残影孵化任务已启动，正在处理首个待生成任务", "Echo hatching started; processing the first pending job"));
         if (!hatchRunIsCurrent(nextThread.id, hatchRunToken)) return;
         handedOffToAgent = true;
-        await runAgent(
+        await runHarnessAgent(
           bootstrappedThread,
           bootstrappedHistory,
-          0,
           "goal",
           permissionLevel,
-          runStartedAt,
           runProfile,
           runFallbackProfiles,
-          activePetIdRef.current,
-          hatchRunToken,
+          operationId,
+          { hatch: true, hatchSkillLoaded: true },
         );
       } catch (error) {
         if (!hatchRunIsCurrent(nextThread.id, hatchRunToken)) return;
@@ -1250,12 +1307,15 @@ function App() {
           // The Goal may already have been paused or cancelled by the user.
         }
         releasePetHatchJob(nextThread.id);
+        if (operationId) {
+          await harnessUpdateState(operationId, "failed").catch(() => undefined);
+        }
         setNotice(`${tr("残影孵化启动失败", "Echo hatch bootstrap failed")}: ${reason}`);
       } finally {
         if (!handedOffToAgent && hatchRunIsCurrent(nextThread.id, hatchRunToken)) {
-          finishThreadRun(nextThread.id);
+          finishThreadRun(nextThread.id, operationId);
         } else if (!handedOffToAgent && hatchRunWasCancelled(nextThread.id, hatchRunToken)) {
-          finishThreadRun(nextThread.id);
+          finishThreadRun(nextThread.id, operationId);
         }
       }
     })();
@@ -1323,7 +1383,7 @@ function App() {
     threadsRef.current = threads;
     // Desktop conversations are persisted in SQLite. Keeping the full thread
     // payload in WebView localStorage can exceed its quota during hydration.
-    if (!isDesktop()) saveThreads(threads.filter((thread) => thread.kind !== "pet"));
+    if (!isDesktop()) saveThreads(threads);
   }, [threads]);
 
   useEffect(() => {
@@ -1332,7 +1392,7 @@ function App() {
 
   useEffect(() => {
     const selected = threadsRef.current.find((thread) => thread.id === activeThreadId);
-    if (activeThreadId && selected?.kind !== "pet" && !isDesktop()) saveActiveThreadId(activeThreadId);
+    if (activeThreadId && selected && !isDesktop()) saveActiveThreadId(activeThreadId);
   }, [activeThreadId]);
 
   useEffect(() => {
@@ -1421,22 +1481,25 @@ function App() {
             setThreadPending(approval.threadId, {
               calls: [{ id: approval.callId, name: approval.toolName, arguments: approval.arguments }],
               history: thread.messages,
-              mode: "agent",
-              permissionLevel: "request",
+              mode: approval.mode,
+              permissionLevel: approval.permissionLevel,
               startedAt: Date.now(),
               nextRound: 0,
-              profileId: activeProfileIdRef.current,
+              profileId: approval.requestedProfileId ?? activeProfileIdRef.current,
               operationId: approval.operationId,
               approvalId: approval.approvalId,
               approvalTokens: [],
             });
+            operationIdsRef.current.set(approval.threadId, approval.operationId);
+            runModesRef.current.set(approval.threadId, approval.mode);
           }
         }
         // No in-memory agent operation survives a process restart. Mark any
-        // durable active hatch Goal as paused during hydration so an old crash
-        // cannot leave a permanent global lock or restart a stale tool loop.
+        // durable Goal as paused during hydration so an old crash cannot leave
+        // a permanent global lock; the user can explicitly resume it, which
+        // creates a fresh operation and snapshot.
         const hatchGoals = await Promise.all(
-          hydratedThreads.filter(isPetHatchThread).map(async (thread) => ({
+          hydratedThreads.map(async (thread) => ({
             threadId: thread.id,
             goal: await getGoal(thread.id).catch(() => null),
           })),
@@ -1448,8 +1511,8 @@ function App() {
             snapshot.goal = await changeGoalStatus(snapshot.threadId, "pause").catch(() => snapshot.goal);
           }
         }
-        const selectedHatchGoal = hatchGoals.find(({ threadId }) => threadId === activeThreadIdRef.current)?.goal;
-        if (selectedHatchGoal) setGoalState(selectedHatchGoal);
+        const selectedGoal = hatchGoals.find(({ threadId }) => threadId === activeThreadIdRef.current)?.goal;
+        if (selectedGoal) setGoalState(selectedGoal);
         setPetHatchJob(null);
         setMediaCatalogRevision((current) => current + 1);
       } catch (error) {
@@ -1678,7 +1741,7 @@ function App() {
   };
 
   const commitThread = (next: AgentThread, persist = true) => {
-    if (persist && next.kind !== "pet" && isDesktop() && !databaseReadyRef.current) {
+    if (persist && isDesktop() && !databaseReadyRef.current) {
       setNotice(databasePersistenceFailedRef.current
         ? tr(
           "会话保存已暂停，请释放应用数据所在磁盘空间后重启软件",
@@ -1693,7 +1756,7 @@ function App() {
       : [next, ...current];
     threadsRef.current = updated;
     setThreads(updated);
-    if (persist && next.kind !== "pet" && isDesktop()
+    if (persist && isDesktop()
       && databaseReadyRef.current && !databasePersistenceFailedRef.current) {
       enqueuePersistence(() => savePersistedThread(next));
     }
@@ -1874,9 +1937,9 @@ function App() {
     }
     const operationId = expectedOperationId ?? operationIdsRef.current.get(threadId);
     const changeStatus = terminalChangeStatus(harnessState);
-    if (operationId && changeStatus && thread?.kind !== "pet") {
-      void finalizeWorkspaceRunChanges(threadId, operationId, changeStatus, Date.now());
-    }
+      if (operationId && changeStatus && thread && isDesktop()) {
+        void finalizeWorkspaceRunChanges(threadId, operationId, changeStatus, Date.now());
+      }
     operationIdsRef.current.delete(threadId);
     runModesRef.current.delete(threadId);
     setThreadRunning(threadId, false);
@@ -1903,16 +1966,26 @@ function App() {
     runProfile: ProviderProfile,
     runFallbackProfiles: ProviderProfile[],
     operationId: string,
+    options: { hatch?: boolean; hatchSkillLoaded?: boolean } = {},
   ): Promise<void> => {
     await ensureWorkspaceRunBaseline(operationId, thread.id, thread.workspace);
     setThreadRunning(thread.id, true);
     runModesRef.current.set(thread.id, runMode);
     operationIdsRef.current.set(thread.id, operationId);
     let projected = history;
+    let cumulativeInputTokens = thread.inputTokens;
+    let cumulativeOutputTokens = thread.outputTokens;
     let lastReconnectAttempt = 0;
     let reconnectStatusMessageId: string | undefined;
+    const projectedThread = (messages: AgentMessage[]): AgentThread => ({
+      ...thread,
+      messages,
+      updatedAt: Date.now(),
+      inputTokens: cumulativeInputTokens,
+      outputTokens: cumulativeOutputTokens,
+    });
     try {
-      await harnessRun({
+      const outcome = await harnessRun({
         operationId,
         threadId: thread.id,
         messages: history,
@@ -1921,8 +1994,8 @@ function App() {
         permissionLevel: runPermission,
         workspace: thread.workspace,
         fallbackProfiles: runFallbackProfiles,
-        hatch: false,
-        hatchSkillLoaded: false,
+        hatch: options.hatch ?? false,
+        hatchSkillLoaded: options.hatchSkillLoaded ?? false,
       }, (event: HarnessRuntimeEvent) => {
         if (event.kind === "provider_reconnecting") {
           const payload = event.payload as { retryAttempt?: number; maxRetryAttempts?: number };
@@ -1945,7 +2018,7 @@ function App() {
             reconnectStatusMessageId = reconnectStatus.id;
             projected = [...projected, reconnectStatus];
           }
-          commitThread({ ...thread, messages: projected, updatedAt: Date.now() });
+          commitThread(projectedThread(projected));
         } else if (event.kind === "provider_reconnected") {
           const payload = event.payload as { retryAttempts?: number };
           const content = `${tr("重连", "Reconnect")} ${payload.retryAttempts ?? lastReconnectAttempt}/5 ${tr("已恢复，继续后面的对话", "succeeded; continuing the conversation")}`;
@@ -1961,7 +2034,7 @@ function App() {
             })];
           }
           reconnectStatusMessageId = undefined;
-          commitThread({ ...thread, messages: projected, updatedAt: Date.now() });
+          commitThread(projectedThread(projected));
         } else if (event.kind === "assistant_completed") {
           const payload = event.payload as {
             content?: string;
@@ -1980,25 +2053,49 @@ function App() {
             ...assistantMessageIdentity(respondingProfile),
           });
           projected = [...projected, assistant];
-          commitThread({
-            ...thread,
-            messages: projected,
-            updatedAt: Date.now(),
-            inputTokens: thread.inputTokens + (payload.inputTokens ?? 0),
-            outputTokens: thread.outputTokens + (payload.outputTokens ?? 0),
-          });
+          cumulativeInputTokens += payload.inputTokens ?? 0;
+          cumulativeOutputTokens += payload.outputTokens ?? 0;
+          const rewardPetId = thread.petId ?? activePetIdRef.current;
+          if (rewardPetId) {
+            void recordPetUsage(
+              rewardPetId,
+              `agent:${payload.requestId || operationId}`,
+              payload.inputTokens ?? 0,
+              payload.outputTokens ?? 0,
+            ).then(() => setPetCatalogRevision((current) => current + 1)).catch((error) => {
+              setNotice(`${tr("残影经验保存失败", "Could not save echo XP")}: ${errorText(error)}`);
+            });
+          }
+          if (thread.kind === "pet" && thread.petId && assistant.content) {
+            const learned = petKnowledgeCandidate(projected.slice(0, -1), assistant.content);
+            if (learned) {
+              void recordPetKnowledge({
+                petId: thread.petId,
+                title: learned.title,
+                summary: learned.summary,
+                source: locale === "zh-CN" ? "摇光残影会话" : "Starlight Echo conversation",
+                sourceKind: "conversation",
+                sourceRef: `pet-chat:${payload.requestId || operationId}`,
+                tags: ["conversation", thread.petId],
+                confidence: 0.82,
+              }).then(() => setPetCatalogRevision((current) => current + 1)).catch((error) => {
+                setNotice(`${tr("残影知识保存失败", "Could not save echo knowledge")}: ${errorText(error)}`);
+              });
+            }
+          }
+          commitThread(projectedThread(projected));
         } else if (event.kind === "tool_execution_completed") {
           const payload = event.payload as { callId?: string; output?: string; isError?: boolean };
           projected = [...projected, message("tool", payload.output ?? "", {
             toolCallId: payload.callId,
             isError: payload.isError,
           })];
-          commitThread({ ...thread, messages: projected, updatedAt: Date.now() });
+          commitThread(projectedThread(projected));
         } else if (event.kind === "queue_injected") {
           const payload = event.payload as { queueId?: string; body?: string };
           if (payload.body) {
             projected = [...projected, message("user", payload.body)];
-            commitThread({ ...thread, messages: projected, updatedAt: Date.now() });
+            commitThread(projectedThread(projected));
           }
           if (payload.queueId) {
             setThreadQueue(
@@ -2023,14 +2120,24 @@ function App() {
           }
         }
       });
-      if (pendingApprovalsRef.current[thread.id]) {
+      if (outcome.state === "awaiting_approval" || pendingApprovalsRef.current[thread.id]) {
         // Keep the operation owner while the approval bar is visible. The
         // resolver needs the same operation ID to finalize a deny or resume
         // the loop; clearing it here leaves the UI permanently "thinking".
         setThreadRunning(thread.id, false);
-      } else {
-        commitThread({ ...thread, messages: projected, updatedAt: Date.now() });
+      } else if (outcome.state === "completed") {
+        commitThread(projectedThread(projected));
         finishThreadRun(thread.id, operationId, "completed");
+      } else {
+        const reason = tr("Harness 运行未完成", "Harness run did not complete");
+        commitThread(projectedThread([
+          ...projected,
+          message("assistant", reason, {
+            isError: true,
+            ...assistantMessageIdentity(runProfile),
+          }),
+        ]));
+        finishThreadRun(thread.id, operationId, outcome.state);
       }
     } catch (error) {
       const reason = errorText(error);
@@ -2048,21 +2155,17 @@ function App() {
               isError: true,
               ...assistantMessageIdentity(runProfile),
             })];
-        commitThread({ ...thread, messages: projected, updatedAt: Date.now() });
+        commitThread(projectedThread(projected));
         finishThreadRun(thread.id, operationId, "failed");
         return;
       }
-      commitThread({
-        ...thread,
-        messages: finalizeConversationMessages([
+      commitThread(projectedThread(finalizeConversationMessages([
           ...projected,
           message("assistant", friendlyAgentError(reason), {
             isError: true,
             ...assistantMessageIdentity(runProfile),
           }),
-        ], Date.now()),
-        updatedAt: Date.now(),
-      });
+        ], Date.now())));
       finishThreadRun(thread.id, operationId, "failed");
     }
   };
@@ -2224,6 +2327,9 @@ function App() {
       const updated = current.some((thread) => thread.id === next.id)
         ? current.map((thread) => thread.id === next.id ? next : thread)
         : [next, ...current];
+      if (isDesktop() && databaseReadyRef.current) {
+        await savePersistedThread(next);
+      }
       threadsRef.current = updated;
       setThreads(updated);
       setActiveThreadId(next.id);
@@ -2377,7 +2483,8 @@ function App() {
     setKeyStatusLoaded(true);
   };
 
-  const runAgent = async (
+  /** Browser-only preview loop. Desktop conversations must use runHarnessAgent. */
+  const runBrowserPreviewAgent = async (
     thread: AgentThread,
     history: AgentMessage[],
     round = 0,
@@ -2390,6 +2497,9 @@ function App() {
     hatchToken: number | null = null,
     harnessOperationId?: string,
   ): Promise<void> => {
+    if (isDesktop()) {
+      throw new Error("The browser preview loop cannot run in the desktop app");
+    }
     const threadId = thread.id;
     const hatchRun = isPetHatchThread(thread);
     const hatchRunStillCurrent = () => !hatchRun
@@ -2405,6 +2515,8 @@ function App() {
     const hatchSkillLoaded = hatchRun && hatchSkillManifestWasRead(history);
     setThreadRunning(threadId, true);
     runModesRef.current.set(threadId, runMode);
+    // This function is intentionally browser-preview-only; it has no Rust
+    // ledger, so a local correlation ID is sufficient there.
     const operationId = harnessOperationId ?? crypto.randomUUID();
     if (thread.kind !== "pet") {
       await ensureWorkspaceRunBaseline(operationId, threadId, thread.workspace);
@@ -2655,7 +2767,7 @@ function App() {
       const goalContinues = currentGoal?.status === "active" || currentGoal?.status === "auditing";
       if (automatic.length > 0) {
         if (runMode !== "goal" || goalContinues) {
-          await runAgent(nextThread, nextHistory, round + 1, runMode, runPermission, runStartedAt, runProfile, runFallbackProfiles, rewardPetId, hatchToken, operationId);
+          await runBrowserPreviewAgent(nextThread, nextHistory, round + 1, runMode, runPermission, runStartedAt, runProfile, runFallbackProfiles, rewardPetId, hatchToken, operationId);
           if (!hatchRunStillCurrent()) finishThreadRun(threadId, operationId);
         } else {
           const completedHistory = finalizeConversationMessages(nextHistory, runStartedAt);
@@ -2677,7 +2789,7 @@ function App() {
         nextHistory = [...nextHistory, continuation];
         nextThread = { ...nextThread, messages: nextHistory, updatedAt: Date.now() };
         commitThread(nextThread);
-        await runAgent(nextThread, nextHistory, round + 1, runMode, runPermission, runStartedAt, runProfile, runFallbackProfiles, rewardPetId, hatchToken, operationId);
+        await runBrowserPreviewAgent(nextThread, nextHistory, round + 1, runMode, runPermission, runStartedAt, runProfile, runFallbackProfiles, rewardPetId, hatchToken, operationId);
         if (!hatchRunStillCurrent()) finishThreadRun(threadId, operationId);
       } else {
         const completedHistory = finalizeConversationMessages(nextHistory, runStartedAt);
@@ -2919,6 +3031,15 @@ function App() {
     let harnessOperationId: string | undefined;
     if (useHarness) {
       try {
+        // `harness_start` has a foreign key to the durable thread. Wait for
+        // this exact user turn to reach SQLite instead of racing the queued
+        // persistence scheduled by commitThread.
+        await savePersistedThread(next);
+        const hatchRunDir = isPetHatchThread(thread)
+          ? hatchRunDirectoryFromHistory(next.messages)
+            ?? await harnessLatestHatchRunDir(thread.id)
+            ?? undefined
+          : undefined;
         const harnessRequest = {
           threadId: thread.id,
           rawUserInput: rawValue,
@@ -2927,6 +3048,8 @@ function App() {
           permissionLevel,
           requestedProfileId: runProfile.id,
           workspace: thread.workspace,
+          hatch: isPetHatchThread(thread),
+          hatchRunDir,
         };
         const report = await harnessPreflight(harnessRequest);
         if (!report.ok) {
@@ -2972,9 +3095,15 @@ function App() {
         runProfile,
         runFallbackProfiles,
         harnessOperationId,
+        {
+          hatch: isPetHatchThread(next),
+          hatchSkillLoaded: isPetHatchThread(next) && hatchSkillManifestWasRead(next.messages),
+        },
       );
     } else {
-      await runAgent(
+      // Browser preview has no Rust runtime/database and remains intentionally
+      // local. Every desktop path above owns a real Harness operation.
+      await runBrowserPreviewAgent(
         next,
         next.messages,
         0,
@@ -2993,7 +3122,7 @@ function App() {
   const interruptWithQueuedMessage = async (item: HarnessQueueItem) => {
     const thread = activeThread;
     const currentOperationId = operationIdsRef.current.get(thread.id);
-    if (!currentOperationId || thread.kind === "pet") return;
+    if (!currentOperationId) return;
     try {
       // Steer preserves the current operation. The Rust runtime only
       // interrupts the provider phase; an in-flight tool is allowed to finish.
@@ -3144,6 +3273,14 @@ function App() {
     const runProfile = profilesRef.current.find((profile) => profile.id === approval.profileId) ?? activeProfile;
     const runFallbackProfiles = profilesRef.current.filter((profile) => profile.id !== runProfile.id);
     let harnessToken = approval.approvalTokens?.[0];
+    if (isDesktop() && !approval.operationId) {
+      setNotice(tr(
+        "该审批来自已移除的旧运行链路，请重新发送消息",
+        "This approval belongs to a removed legacy run; please send the message again",
+      ));
+      setThreadPending(thread.id, null);
+      return;
+    }
     if (approval.approvalId && !harnessToken) {
       try {
         harnessToken = await harnessReissueApproval(approval.approvalId);
@@ -3152,9 +3289,15 @@ function App() {
         return;
       }
     }
-    if (harnessToken && approval.operationId && isDesktop() && thread.kind !== "pet") {
+    if (isDesktop() && approval.operationId) {
+      if (!harnessToken) {
+        setNotice(tr("审批令牌已失效", "The approval token is no longer available"));
+        return;
+      }
       setThreadPending(thread.id, null);
       setThreadRunning(thread.id, true);
+      operationIdsRef.current.set(thread.id, approval.operationId);
+      runModesRef.current.set(thread.id, approval.mode);
       try {
         const record = await harnessResolveApproval({
           operationId: approval.operationId,
@@ -3177,8 +3320,8 @@ function App() {
           thread.id,
           runProfile,
           runFallbackProfiles,
-          false,
-          false,
+          isPetHatchThread(thread),
+          isPetHatchThread(thread) && hatchSkillManifestWasRead(approval.history),
           false,
           approval.mode,
           approval.permissionLevel,
@@ -3199,6 +3342,10 @@ function App() {
           runProfile,
           runFallbackProfiles,
           approval.operationId,
+          {
+            hatch: isPetHatchThread(thread),
+            hatchSkillLoaded: isPetHatchThread(thread) && hatchSkillManifestWasRead(nextHistory),
+          },
         );
       } catch (error) {
         commitThread({
@@ -3210,6 +3357,7 @@ function App() {
       }
       return;
     }
+    if (isDesktop()) return;
     const hatchRun = isPetHatchThread(thread);
     const hatchToken = hatchRun
       ? hatchRunTokensRef.current.get(thread.id) ?? beginHatchRun(thread.id)
@@ -3283,7 +3431,7 @@ function App() {
         finishCancelledHatchLocalRun(thread.id, hatchToken);
         return;
       }
-      await runAgent(
+      await runBrowserPreviewAgent(
         next,
         history,
         approval.nextRound,
@@ -3424,6 +3572,8 @@ function App() {
     if (!goalState || !isDesktop()) return;
     const hatchThread = isPetHatchThread(activeThread);
     let hatchRunToken: number | null = null;
+    let resumedOperationId: string | undefined;
+    let resumeGoalActivated = false;
     try {
       if (action === "pause" || action === "cancel") {
         if (pendingApprovalsRef.current[activeThread.id]) setThreadPending(activeThread.id, null);
@@ -3437,6 +3587,7 @@ function App() {
       }
       const nextGoal = await changeGoalStatus(activeThread.id, action);
       setGoalState(nextGoal);
+      resumeGoalActivated = action === "resume";
       if (hatchThread) {
         if (action === "resume") {
           setPetHatchJob({ threadId: activeThread.id, startedAt: nextGoal.createdAt });
@@ -3446,60 +3597,122 @@ function App() {
       }
       if (action === "resume") {
         setMode("goal");
+        const runProfile = activeProfile;
+        const runFallbackProfiles = profiles.filter((profile) => profile.id !== runProfile.id);
         hatchRunToken = hatchThread ? beginHatchRun(activeThread.id) : null;
         if (hatchThread) setThreadRunning(activeThread.id, true);
+        const resumePrompt = "Resume the active Goal from persisted state and take the next concrete action.";
         let nextHistory: AgentMessage[];
+        let resumeWorkspace = activeThread.workspace;
+        let hatchRunDir: string | undefined;
         if (hatchThread) {
           const environment = await configurePetHatch();
+          resumeWorkspace ||= environment.workDirectory;
+          hatchRunDir = hatchRunDirectoryFromHistory(activeThread.messages)
+            ?? await harnessLatestHatchRunDir(activeThread.id)
+            ?? undefined;
+          if (!hatchRunDir) {
+            throw new Error("The persisted hatch conversation does not contain its canonical run directory");
+          }
+          await savePersistedThread({ ...activeThread, workspace: resumeWorkspace });
+          const harnessRequest = {
+            threadId: activeThread.id,
+            rawUserInput: resumePrompt,
+            attachmentIds: [],
+            mode: "goal" as const,
+            permissionLevel,
+            requestedProfileId: runProfile.id,
+            workspace: resumeWorkspace,
+            hatch: true,
+            hatchRunDir,
+          };
+          const report = await harnessPreflight(harnessRequest);
+          if (!report.ok) throw new Error(report.errors.join("; ") || "Harness preflight blocked");
+          const submission = await harnessStart(harnessRequest);
+          if (submission.disposition !== "started") {
+            throw new Error("Goal resume was unexpectedly queued behind another operation");
+          }
+          resumedOperationId = submission.value.operationId;
+          operationIdsRef.current.set(activeThread.id, resumedOperationId);
+          runModesRef.current.set(activeThread.id, "goal");
           nextHistory = await bootstrapHatchHistory(
             activeThread.messages,
             environment,
-            activeThread.workspace || environment.workDirectory,
+            resumeWorkspace,
             activeThread.id,
-            activeProfile,
-            profiles.filter((profile) => profile.id !== activeProfile.id),
+            runProfile,
+            runFallbackProfiles,
+            resumedOperationId,
             () => hatchRunToken === null || hatchRunIsCurrent(activeThread.id, hatchRunToken),
           );
           if (hatchRunToken !== null && !hatchRunIsCurrent(activeThread.id, hatchRunToken)) return;
         } else {
           nextHistory = [
             ...activeThread.messages,
-            message("user", "Resume the active Goal from persisted state and take the next concrete action.", { internal: true }),
+            message("user", resumePrompt, { internal: true }),
           ];
+          const durableThread = {
+            ...activeThread,
+            messages: nextHistory,
+            updatedAt: Date.now(),
+          };
+          await savePersistedThread(durableThread);
+          const harnessRequest = {
+            threadId: activeThread.id,
+            rawUserInput: resumePrompt,
+            attachmentIds: [],
+            mode: "goal" as const,
+            permissionLevel,
+            requestedProfileId: runProfile.id,
+            workspace: resumeWorkspace,
+            hatch: false,
+          };
+          const report = await harnessPreflight(harnessRequest);
+          if (!report.ok) throw new Error(report.errors.join("; ") || "Harness preflight blocked");
+          const submission = await harnessStart(harnessRequest);
+          if (submission.disposition !== "started") {
+            throw new Error("Goal resume was unexpectedly queued behind another operation");
+          }
+          resumedOperationId = submission.value.operationId;
         }
         const nextThread = {
           ...activeThread,
+          workspace: resumeWorkspace,
           messages: nextHistory,
           updatedAt: Date.now(),
         };
         commitThread(nextThread);
         if (hatchRunToken !== null && !hatchRunIsCurrent(activeThread.id, hatchRunToken)) return;
-        await runAgent(
+        await runHarnessAgent(
           nextThread,
           nextHistory,
-          0,
           "goal",
           permissionLevel,
-          Date.now(),
-          activeProfile,
-          profiles.filter((profile) => profile.id !== activeProfile.id),
-          activePetIdRef.current,
-          hatchRunToken,
+          runProfile,
+          runFallbackProfiles,
+          resumedOperationId,
+          {
+            hatch: hatchThread,
+            hatchSkillLoaded: hatchThread && hatchSkillManifestWasRead(nextHistory),
+          },
         );
       }
     } catch (error) {
       const resumeStillCurrent = !hatchThread
         || hatchRunToken === null
         || hatchRunIsCurrent(activeThread.id, hatchRunToken);
-      if (hatchThread && action === "resume" && resumeStillCurrent) {
+      if (action === "resume" && resumeGoalActivated && resumeStillCurrent) {
         try {
           const paused = await changeGoalStatus(activeThread.id, "pause");
           if (activeThreadIdRef.current === activeThread.id) setGoalState(paused);
         } catch {
           // The Goal may already be terminal or paused.
         }
-        releasePetHatchJob(activeThread.id);
-        finishThreadRun(activeThread.id);
+        if (hatchThread) releasePetHatchJob(activeThread.id);
+        if (resumedOperationId) {
+          await harnessUpdateState(resumedOperationId, "failed").catch(() => undefined);
+        }
+        finishThreadRun(activeThread.id, resumedOperationId);
       }
       setNotice(`${tr("Goal 操作失败", "Goal action failed")}: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -7509,6 +7722,7 @@ async function bootstrapHatchHistory(
   threadId: string,
   profile: ProviderProfile,
   fallbackProfiles: ProviderProfile[],
+  operationId: string,
   isCurrent?: () => boolean,
 ): Promise<AgentMessage[]> {
   const ensureCurrent = () => {
@@ -7544,6 +7758,7 @@ async function bootstrapHatchHistory(
       profile,
       fallbackProfiles,
       hatchSkillLoaded: false,
+      operationId,
     });
     ensureCurrent();
     nextHistory = appendHatchToolExchange(nextHistory, readCall, readResult);
@@ -7577,6 +7792,7 @@ async function bootstrapHatchHistory(
       profile,
       fallbackProfiles,
       hatchSkillLoaded: true,
+      operationId,
     });
     ensureCurrent();
     nextHistory = appendHatchToolExchange(nextHistory, referenceCall, referenceResult);
@@ -7607,6 +7823,7 @@ async function bootstrapHatchHistory(
       profile,
       fallbackProfiles,
       hatchSkillLoaded: true,
+      operationId,
     });
     ensureCurrent();
     nextHistory = appendHatchToolExchange(nextHistory, prepareCall, prepareResult);
@@ -7636,6 +7853,7 @@ async function bootstrapHatchHistory(
     profile,
     fallbackProfiles,
     hatchSkillLoaded: true,
+    operationId,
   });
   ensureCurrent();
   nextHistory = appendHatchToolExchange(nextHistory, statusCall, statusResult);

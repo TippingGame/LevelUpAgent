@@ -4,11 +4,14 @@ export function usesDurableHarness(
   thread: Pick<AgentThread, "kind">,
   desktop: boolean,
 ): boolean {
-  return desktop && thread.kind !== "pet";
+  // Every desktop conversation has a durable operation. The browser preview
+  // has no Rust database/runtime, so it keeps its deliberately local loop.
+  void thread;
+  return desktop;
 }
 
 export function providerThreadId(
   thread: Pick<AgentThread, "id" | "kind">,
-): string | undefined {
-  return thread.kind === "pet" ? undefined : thread.id;
+): string {
+  return thread.id;
 }

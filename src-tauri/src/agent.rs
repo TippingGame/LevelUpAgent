@@ -2043,7 +2043,7 @@ fn allowed_tool_specs(
         tool_specs()
             .into_iter()
             .filter(|(name, _, _)| {
-                if hatch && matches!(*name, "list_files" | "read_file" | "search_files") {
+                if hatch && !matches!(*name, "run_command") {
                     return false;
                 }
                 if mode == "plan" {

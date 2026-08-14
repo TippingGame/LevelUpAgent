@@ -21,6 +21,42 @@ pub fn run(
     if request.raw_user_input.trim().is_empty() && request.attachment_ids.is_empty() {
         errors.push("draft must contain text or at least one attachment".to_owned());
     }
+    if request.hatch
+        && request
+            .hatch_run_dir
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+    {
+        errors.push("hatchRunDir is required for a hatch operation".to_owned());
+    }
+    if let Some(raw_run_dir) = request
+        .hatch_run_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let run_dir = Path::new(raw_run_dir);
+        if !request.hatch {
+            errors.push("hatchRunDir is only valid for a hatch operation".to_owned());
+        } else if !run_dir.is_absolute() {
+            errors.push("hatchRunDir must be an absolute path".to_owned());
+        } else {
+            let resolved_workspace = std::fs::canonicalize(workspace).ok();
+            let resolved_boundary = if run_dir.exists() {
+                std::fs::canonicalize(run_dir).ok()
+            } else {
+                run_dir
+                    .parent()
+                    .and_then(|path| std::fs::canonicalize(path).ok())
+            };
+            if resolved_boundary
+                .zip(resolved_workspace)
+                .is_none_or(|(boundary, workspace)| !boundary.starts_with(workspace))
+            {
+                errors.push("hatchRunDir must stay inside the selected workspace".to_owned());
+            }
+        }
+    }
     if !workspace.is_dir() {
         errors.push("workspace must exist and be a directory".to_owned());
     } else if workspace.is_symlink() {
@@ -102,6 +138,8 @@ mod tests {
             permission_level: PermissionLevel::Request,
             requested_profile_id: None,
             workspace: Some("workspace".to_owned()),
+            hatch: false,
+            hatch_run_dir: None,
         }
     }
 
@@ -123,5 +161,40 @@ mod tests {
         let report = run(&request(), &workspace, Some(&settings()), |_| true);
         assert!(report.ok, "{:?}", report.errors);
         assert_eq!(report.selected_profile_id.as_deref(), Some("test"));
+    }
+
+    #[test]
+    fn hatch_run_directory_must_be_absolute_and_inside_workspace() {
+        let workspace = std::env::temp_dir().join(format!(
+            "levelup-harness-preflight-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut request = request();
+        request.hatch = true;
+        request.hatch_run_dir = Some("relative-run".to_owned());
+        let relative = run(&request, &workspace, Some(&settings()), |_| true);
+        assert!(
+            relative
+                .errors
+                .iter()
+                .any(|error| error.contains("absolute"))
+        );
+
+        request.hatch_run_dir = Some(workspace.join("pet-run").to_string_lossy().into_owned());
+        let valid = run(&request, &workspace, Some(&settings()), |_| true);
+        assert!(valid.ok, "{:?}", valid.errors);
+
+        request.hatch_run_dir = Some(
+            workspace
+                .parent()
+                .unwrap()
+                .join("outside-run")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let outside = run(&request, &workspace, Some(&settings()), |_| true);
+        assert!(outside.errors.iter().any(|error| error.contains("inside")));
+        let _ = std::fs::remove_dir_all(workspace);
     }
 }
