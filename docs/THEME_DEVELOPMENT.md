@@ -108,7 +108,7 @@ CSS 禁止包含：
 - `javascript:`
 - `expression(`
 - `-moz-binding`
-- `behavior:`
+- 独立的旧式 IE `behavior` 属性（合法的 `scroll-behavior` 与 `overscroll-behavior` 不受影响）
 - `http:`、`https:` 或 `url(//`
 
 ## 5. 推荐的主题项目结构

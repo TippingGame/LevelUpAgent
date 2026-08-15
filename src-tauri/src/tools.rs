@@ -536,8 +536,7 @@ fn strip_transport_bom<'a>(
 }
 
 async fn delete_file(root: &Path, relative: &str) -> Result<String, String> {
-    validate_relative(relative)?;
-    let requested = root.join(relative);
+    let requested = requested_path(root, relative)?;
     let link_metadata = tokio::fs::symlink_metadata(&requested)
         .await
         .map_err(|error| format!("Could not inspect file: {error}"))?;
@@ -596,16 +595,14 @@ async fn run_command(root: &Path, command: &str) -> Result<String, String> {
 }
 
 fn resolve_existing(root: &Path, relative: &str) -> Result<PathBuf, String> {
-    validate_relative(relative)?;
-    let path = std::fs::canonicalize(root.join(relative))
+    let path = std::fs::canonicalize(requested_path(root, relative)?)
         .map_err(|error| format!("Path is unavailable: {error}"))?;
     ensure_inside(root, &path)?;
     Ok(path)
 }
 
 fn resolve_for_write(root: &Path, relative: &str) -> Result<PathBuf, String> {
-    validate_relative(relative)?;
-    let candidate = root.join(relative);
+    let candidate = requested_path(root, relative)?;
     if let Ok(metadata) = std::fs::symlink_metadata(&candidate)
         && metadata.file_type().is_symlink()
     {
@@ -629,16 +626,22 @@ fn resolve_for_write(root: &Path, relative: &str) -> Result<PathBuf, String> {
     Err("Could not resolve destination path".to_owned())
 }
 
-fn validate_relative(relative: &str) -> Result<(), String> {
-    let path = Path::new(relative);
-    if path.is_absolute()
-        || path
-            .components()
-            .any(|part| matches!(part, Component::ParentDir | Component::Prefix(_)))
-    {
+fn requested_path(root: &Path, requested: &str) -> Result<PathBuf, String> {
+    let path = Path::new(requested);
+    let has_parent = path
+        .components()
+        .any(|part| matches!(part, Component::ParentDir));
+    let has_root_or_prefix = path
+        .components()
+        .any(|part| matches!(part, Component::RootDir | Component::Prefix(_)));
+    if has_parent || (!path.is_absolute() && has_root_or_prefix) {
         return Err("Tool paths must stay inside the selected workspace".to_owned());
     }
-    Ok(())
+    Ok(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    })
 }
 
 fn ensure_inside(root: &Path, path: &Path) -> Result<(), String> {
@@ -709,14 +712,50 @@ mod tests {
 
     #[test]
     fn rejects_parent_directory_components() {
-        assert!(validate_relative("../secret.txt").is_err());
-        assert!(validate_relative("safe/../../secret.txt").is_err());
+        let root = Path::new("workspace");
+        assert!(requested_path(root, "../secret.txt").is_err());
+        assert!(requested_path(root, "safe/../../secret.txt").is_err());
     }
 
     #[test]
     fn accepts_workspace_relative_paths() {
-        assert!(validate_relative("src/main.rs").is_ok());
-        assert!(validate_relative(".").is_ok());
+        let root = Path::new("workspace");
+        assert_eq!(
+            requested_path(root, "src/main.rs").unwrap(),
+            root.join("src/main.rs")
+        );
+        assert_eq!(requested_path(root, ".").unwrap(), root.join("."));
+    }
+
+    #[test]
+    fn accepts_only_workspace_internal_absolute_paths() {
+        let suite =
+            std::env::temp_dir().join(format!("levelup-absolute-path-{}", uuid::Uuid::new_v4()));
+        let root = suite.join("workspace");
+        let prefix_match = suite.join("workspace-outside");
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::create_dir_all(&prefix_match).unwrap();
+        std::fs::write(root.join("nested/existing.txt"), "inside").unwrap();
+        std::fs::write(prefix_match.join("outside.txt"), "outside").unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        let inside = root.join("nested/existing.txt");
+        let new_inside = root.join("nested/new.txt");
+        let outside = std::fs::canonicalize(prefix_match.join("outside.txt")).unwrap();
+
+        assert_eq!(
+            resolve_existing(&root, &inside.to_string_lossy()).unwrap(),
+            inside
+        );
+        assert_eq!(
+            resolve_for_write(&root, &new_inside.to_string_lossy()).unwrap(),
+            new_inside
+        );
+        assert!(resolve_existing(&root, &outside.to_string_lossy()).is_err());
+        assert!(
+            resolve_for_write(&root, &prefix_match.join("new.txt").to_string_lossy(),).is_err()
+        );
+
+        let _ = std::fs::remove_dir_all(suite);
     }
 
     #[cfg(unix)]

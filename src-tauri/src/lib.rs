@@ -283,6 +283,15 @@ fn attach_skills(
     if !matches!(request.mode.as_str(), "agent" | "goal" | "plan") {
         return Ok(());
     }
+    // Theme generation receives the packaged manifest and layout reference
+    // through an application-owned internal bootstrap message. Do not expose
+    // the generic Skill catalog or read_skill tool afterward: some providers
+    // otherwise keep rereading the same manifest instead of writing the theme.
+    if agent::theme_generation_bootstrapped(&request.messages) {
+        request.available_skills.clear();
+        request.available_tools.clear();
+        return Ok(());
+    }
     let enabled: Vec<_> = discover_skills(app, database, request.workspace.as_deref())?
         .into_iter()
         .filter(|skill| skill.enabled && skill.valid)
@@ -316,7 +325,7 @@ fn attach_skills(
     if !enabled.is_empty() && !request.hatch {
         request.available_tools.push(AgentToolDefinition {
             name: "read_skill".to_owned(),
-            description: "Read an enabled Skill's SKILL.md or a referenced UTF-8 file inside that Skill directory.".to_owned(),
+            description: "Read an enabled Skill's SKILL.md once, or read an explicitly referenced UTF-8 file inside that Skill directory. Never reread a manifest or reference that already has a successful result in the conversation.".to_owned(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -540,6 +549,17 @@ fn enforce_hatch_tool_catalog(request: &mut AgentTurnRequest) {
         .retain(|tool| matches!(tool.name.as_str(), "generate_images" | "update_goal"));
 }
 
+fn enforce_theme_generation_tool_catalog(request: &mut AgentTurnRequest) {
+    if !agent::theme_generation_bootstrapped(&request.messages) {
+        return;
+    }
+    // Theme references are input evidence, not requests for new media. Keep
+    // every dynamic catalog closed; agent::request_tool_specs separately
+    // reduces the built-in workspace catalog to write_file alone.
+    request.available_skills.clear();
+    request.available_tools.clear();
+}
+
 fn attachment_storage(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(app
         .path()
@@ -628,6 +648,69 @@ fn install_theme(
     source_path: String,
 ) -> Result<theme::ThemeManifest, String> {
     theme::install(&theme_storage(&app)?, std::path::Path::new(&source_path))
+}
+
+#[tauri::command]
+fn prepare_theme_generation(
+    app: tauri::AppHandle,
+    database: tauri::State<'_, database::Database>,
+    workspace: String,
+    background: Option<theme::ThemeGenerationBackgroundRequest>,
+) -> Result<theme::ThemeGenerationTarget, String> {
+    let workspace = workspace.trim();
+    if workspace.is_empty() {
+        return Err("Choose a workspace before generating a theme".to_owned());
+    }
+    let background = background
+        .map(|request| {
+            let asset_id = request.asset_id.trim();
+            if asset_id.is_empty() {
+                return Err("Generated theme background has no media asset ID".to_owned());
+            }
+            let asset = media::get_asset(&database, &media_storage(&app)?, asset_id)?
+                .ok_or_else(|| "Generated theme background media was not found".to_owned())?;
+            if asset.kind != MediaKind::Image || asset.status != MediaStatus::Completed {
+                return Err(
+                    "Only a completed managed image can be used as a generated theme background"
+                        .to_owned(),
+                );
+            }
+            let source_path = asset
+                .file_path
+                .map(PathBuf::from)
+                .ok_or_else(|| "Generated theme background has no managed image file".to_owned())?;
+            let mime_type = asset
+                .mime_type
+                .ok_or_else(|| "Generated theme background has no image MIME type".to_owned())?;
+            let mime_type = match mime_type
+                .split(';')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "image/jpg" => "image/jpeg".to_owned(),
+                value => value.to_owned(),
+            };
+            Ok(theme::ThemeGenerationBackgroundSource {
+                source_path,
+                mime_type,
+                fit: request.fit,
+                focus: request.focus,
+                readability: request.readability,
+            })
+        })
+        .transpose()?;
+    theme::prepare_generation_target_with_background(
+        std::path::Path::new(workspace),
+        background.as_ref(),
+    )
+}
+
+#[tauri::command]
+fn load_theme_generation_guidance() -> String {
+    theme::generation_guidance()
 }
 
 #[derive(serde::Deserialize)]
@@ -2113,15 +2196,48 @@ where
 async fn run_agent_turn_with_failover_events<F, R>(
     client: &Client,
     database: &database::Database,
-    mut request: AgentTurnRequest,
+    request: AgentTurnRequest,
     operation_id: Option<&str>,
     round: Option<usize>,
-    mut key_loader: F,
-    mut on_connection_event: R,
+    key_loader: F,
+    on_connection_event: R,
 ) -> Result<AgentTurnResponse, String>
 where
     F: FnMut(&str) -> Result<String, String>,
     R: FnMut(&ProviderProfile, u32, u32, Option<&str>),
+{
+    run_agent_turn_with_failover_events_inner(
+        client,
+        database,
+        request,
+        operation_id,
+        round,
+        key_loader,
+        false,
+        CancellationToken::new(),
+        on_connection_event,
+        |_| {},
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_agent_turn_with_failover_events_inner<F, R, S>(
+    client: &Client,
+    database: &database::Database,
+    mut request: AgentTurnRequest,
+    operation_id: Option<&str>,
+    round: Option<usize>,
+    mut key_loader: F,
+    streaming: bool,
+    cancellation: CancellationToken,
+    mut on_connection_event: R,
+    mut on_stream_event: S,
+) -> Result<AgentTurnResponse, String>
+where
+    F: FnMut(&str) -> Result<String, String>,
+    R: FnMut(&ProviderProfile, u32, u32, Option<&str>),
+    S: FnMut(AgentStreamEvent),
 {
     let candidates = provider_candidates(&request);
     request.fallback_profiles.clear();
@@ -2175,7 +2291,7 @@ where
                     "credentials",
                     false,
                     false,
-                    false,
+                    streaming,
                     &error,
                 );
                 last_error = error;
@@ -2187,6 +2303,8 @@ where
             attempt.profile = profile.clone();
             let retry_started_at = now_millis();
             let started = Instant::now();
+            let emitted = Arc::new(AtomicBool::new(false));
+            let output_started = emitted.clone();
             log_provider_request_started(
                 &request,
                 &profile,
@@ -2194,9 +2312,24 @@ where
                 round,
                 retry_number + 1,
                 failover_attempts,
-                false,
+                streaming,
             );
-            match agent::run_turn(client, attempt, &api_key).await {
+            let attempt_result = if streaming {
+                agent::run_turn_stream(client, attempt, &api_key, cancellation.clone(), |event| {
+                    if event
+                        .delta
+                        .as_deref()
+                        .is_some_and(|delta| !delta.is_empty())
+                    {
+                        output_started.store(true, Ordering::Release);
+                    }
+                    on_stream_event(event);
+                })
+                .await
+            } else {
+                agent::run_turn(client, attempt, &api_key).await
+            };
+            match attempt_result {
                 Ok(mut result) => {
                     let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
                     database.record_provider_success(&profile.id, latency_ms, index > 0)?;
@@ -2222,7 +2355,7 @@ where
                         retry_number + 1,
                         failover_attempts,
                         latency_ms,
-                        false,
+                        streaming,
                     );
                     if reconnecting {
                         on_connection_event(
@@ -2237,8 +2370,11 @@ where
                 Err(error) => {
                     let error = agent::annotate_tool_compatibility_error(error, &request);
                     let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                    let output_was_emitted = emitted.load(Ordering::Acquire);
                     let reconnectable = agent::is_reconnectable_provider_error(&error);
-                    let will_retry = reconnectable && retry_number < PROVIDER_RECONNECT_RETRIES;
+                    let will_retry = reconnectable
+                        && !output_was_emitted
+                        && retry_number < PROVIDER_RECONNECT_RETRIES;
                     let status = if will_retry {
                         "retrying"
                     } else if error.contains("REQUEST_CANCELLED") {
@@ -2265,10 +2401,10 @@ where
                         retry_number + 1,
                         failover_attempts,
                         latency_ms,
-                        "request",
+                        if streaming { "stream" } else { "request" },
                         will_retry,
-                        false,
-                        false,
+                        output_was_emitted,
+                        streaming,
                         &error,
                     );
                     if will_retry {
@@ -2286,13 +2422,16 @@ where
                             operation_id,
                             round,
                             retry_number + 1,
-                            false,
+                            streaming,
                         );
-                        tokio::time::sleep(provider_reconnect_delay(retry_number + 1)).await;
+                        wait_for_provider_reconnect(retry_number + 1, &cancellation).await?;
                         continue;
                     }
                     if agent::is_retryable_provider_error(&error) {
                         database.record_provider_failure(&profile.id, &error)?;
+                        if output_was_emitted {
+                            return Err(error);
+                        }
                         last_error = error;
                         continue 'providers;
                     }
@@ -3196,6 +3335,7 @@ async fn agent_turn(
         attach_media_tools(&mut request);
         attach_skills(&app, &database, &mut request)?;
         attach_mcp_tools(&database, &manager, &mut request).await?;
+        enforce_theme_generation_tool_catalog(&mut request);
         enforce_hatch_tool_catalog(&mut request);
         let goal_thread = (request.mode == "goal")
             .then(|| request.thread_id.clone())
@@ -3319,6 +3459,7 @@ async fn agent_turn_stream_inner(
     attach_media_tools(&mut request);
     attach_skills(&app, &database, &mut request)?;
     attach_mcp_tools(&database, &manager, &mut request).await?;
+    enforce_theme_generation_tool_catalog(&mut request);
     enforce_hatch_tool_catalog(&mut request);
     let goal_thread = (request.mode == "goal")
         .then(|| request.thread_id.clone())
@@ -3634,6 +3775,62 @@ async fn harness_run(
     result
 }
 
+struct ThemeGenerationRun {
+    workspace: PathBuf,
+    relative_path: String,
+}
+
+fn theme_generation_run(
+    messages: &[AgentMessage],
+    workspace: Option<&str>,
+) -> Result<Option<ThemeGenerationRun>, String> {
+    let Some(relative_path) = agent::theme_generation_target(messages) else {
+        return Ok(None);
+    };
+    let workspace = workspace
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| "Theme generation operation has no workspace".to_owned())?;
+    // Validate the immutable application marker before the provider runs. The
+    // actual package may not exist yet, but its parent must be the managed
+    // generated-themes directory prepared by the host.
+    theme::generation_target_path(&workspace, &relative_path)?;
+    Ok(Some(ThemeGenerationRun {
+        workspace,
+        relative_path,
+    }))
+}
+
+fn validate_theme_generation_after_tool(
+    run: Option<&ThemeGenerationRun>,
+    result: &mut ToolExecutionResponse,
+) -> Result<Option<theme::ThemeManifest>, String> {
+    let Some(run) = run else {
+        return Ok(None);
+    };
+    if result.is_error {
+        return Ok(None);
+    }
+    match theme::validate_generation_result(&run.workspace, &run.relative_path)? {
+        theme::ThemeGenerationValidation::Missing => Ok(None),
+        theme::ThemeGenerationValidation::Invalid(error) => {
+            result.is_error = true;
+            result.output.push_str(&format!(
+                "\n\nTheme package validation failed: {error}\nRewrite the same application-provided target with write_file and correct this validation error. Do not choose another path."
+            ));
+            Ok(None)
+        }
+        theme::ThemeGenerationValidation::Valid(manifest) => {
+            result.output.push_str(&format!(
+                "\n\nTheme package validation passed for '{}' ({}). LevelUpAgent will now finish this Harness operation and import it; do not write the file again.",
+                manifest.name, manifest.id
+            ));
+            Ok(Some(*manifest))
+        }
+    }
+}
+
 async fn harness_run_inner(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -3723,7 +3920,10 @@ async fn harness_run_loop(
 ) -> Result<crate::harness::types::HarnessRunOutcome, String> {
     let operation_id = request.operation_id.clone();
     let mut history = request.messages.clone();
+    let theme_generation_mode = agent::theme_generation_bootstrapped(&history);
+    let theme_generation = theme_generation_run(&history, request.workspace.as_deref())?;
     let mut round = 0usize;
+    let mut theme_tool_violations = 0usize;
     let mut hatch_status_requires_action =
         request.hatch && database.harness_hatch_status_requires_action(&operation_id)?;
     loop {
@@ -3850,6 +4050,7 @@ async fn harness_run_loop(
         attach_media_tools(&mut turn_request);
         attach_skills(app, database, &mut turn_request)?;
         attach_mcp_tools(database, manager, &mut turn_request).await?;
+        enforce_theme_generation_tool_catalog(&mut turn_request);
         enforce_hatch_tool_catalog(&mut turn_request);
         let attempt_id = database.start_harness_provider_attempt(
             &operation_id,
@@ -3885,13 +4086,15 @@ async fn harness_run_loop(
             .lock()
             .map_err(|_| "Could not lock harness turn state".to_owned())?
             .insert(operation_id.clone(), turn_cancellation.clone());
-        let provider_future = run_agent_turn_with_failover_events(
+        let provider_future = run_agent_turn_with_failover_events_inner(
             &state.client,
             database,
             turn_request,
             Some(&operation_id),
             Some(round),
             load_api_key,
+            theme_generation_mode,
+            turn_cancellation.clone(),
             |profile, retry_attempt, max_retry_attempts, error| {
                 let (kind, payload) = if let Some(error) = error {
                     (
@@ -3923,6 +4126,7 @@ async fn harness_run_loop(
                     ));
                 }
             },
+            |_| {},
         );
         let response = tokio::select! {
             result = provider_future => result,
@@ -3933,7 +4137,22 @@ async fn harness_run_loop(
             turns.remove(&operation_id);
         }
         match response {
-            Ok(response) => {
+            Ok(mut response) => {
+                let duplicate_skill_reads =
+                    agent::deduplicate_skill_read_calls(&mut response.tool_calls);
+                if duplicate_skill_reads > 0 {
+                    logging::write(
+                        "warn",
+                        "harness",
+                        "duplicate_skill_reads_removed",
+                        serde_json::json!({
+                            "operationId": &operation_id,
+                            "threadId": &request.thread_id,
+                            "round": round,
+                            "removed": duplicate_skill_reads,
+                        }),
+                    );
+                }
                 logging::write(
                     "info",
                     "harness",
@@ -4096,6 +4315,9 @@ async fn harness_run_loop(
                     } else {
                         None
                     };
+                    let theme_tool_violation =
+                        theme_generation_mode && !agent::theme_generation_tool_allowed(&call.name);
+                    let repeated_skill_read = agent::skill_read_was_successful(&history, &call);
                     if request.hatch && hatch_status_requires_action {
                         let concrete = call.name == "generate_images"
                             || hatch_command_kind == Some("action")
@@ -4118,11 +4340,18 @@ async fn harness_run_loop(
                         name: call.name.clone(),
                         arguments: call.arguments.clone(),
                     };
-                    let decision = crate::harness::evaluate_tool_call(
-                        request.mode,
-                        request.permission_level,
-                        &policy_call,
-                    );
+                    let decision = if theme_tool_violation {
+                        // This call is never executed. Bypass approval so an
+                        // old or non-conforming provider cannot turn a blocked
+                        // media call into a user-facing costly approval.
+                        crate::harness::types::PolicyDecision::Allow
+                    } else {
+                        crate::harness::evaluate_tool_call(
+                            request.mode,
+                            request.permission_level,
+                            &policy_call,
+                        )
+                    };
                     if matches!(decision, crate::harness::types::PolicyDecision::Deny) {
                         logging::write(
                             "warn",
@@ -4249,16 +4478,32 @@ async fn harness_run_loop(
                     let pet_manager = app
                         .try_state::<pet::PetManager>()
                         .ok_or_else(|| "Pet manager is unavailable".to_owned())?;
-                    let tool_result = execute_tool_inner(
-                        app,
-                        state,
-                        database,
-                        manager,
-                        &pet_manager,
-                        subagents,
-                        tool_request,
-                    )
-                    .await;
+                    let tool_result = if theme_tool_violation {
+                        Ok(ToolExecutionResponse {
+                            output: format!(
+                                "Theme generation blocked tool '{}'. Reference images are visual input only and this task permits only write_file. Write the complete theme package to the exact application-provided target now; do not generate images or call another tool.",
+                                call.name
+                            ),
+                            is_error: true,
+                        })
+                    } else if repeated_skill_read {
+                        Ok(ToolExecutionResponse {
+                            output: "This Skill file was already loaded successfully earlier. Its existing result remains authoritative. Do not call read_skill for it again; take the requested concrete action now."
+                                .to_owned(),
+                            is_error: false,
+                        })
+                    } else {
+                        execute_tool_inner(
+                            app,
+                            state,
+                            database,
+                            manager,
+                            &pet_manager,
+                            subagents,
+                            tool_request,
+                        )
+                        .await
+                    };
                     log_tool_result(
                         &tool_name,
                         Some(&operation_id),
@@ -4267,10 +4512,14 @@ async fn harness_run_loop(
                         tool_started,
                         &tool_result,
                     );
-                    let tool_result = tool_result?;
+                    let mut tool_result = tool_result?;
+                    let completed_theme = validate_theme_generation_after_tool(
+                        theme_generation.as_ref(),
+                        &mut tool_result,
+                    )?;
                     let result_payload = serde_json::json!({
                         "callId": call.id,
-                        "toolName": tool_name,
+                        "toolName": &tool_name,
                         "output": tool_result.output,
                         "isError": tool_result.is_error,
                     });
@@ -4297,6 +4546,96 @@ async fn harness_run_loop(
                         internal: false,
                         attachments: Vec::new(),
                     });
+                    if theme_tool_violation {
+                        theme_tool_violations += 1;
+                        logging::write(
+                            "warn",
+                            "harness",
+                            "theme_generation_tool_blocked",
+                            serde_json::json!({
+                                "operationId": &operation_id,
+                                "threadId": &request.thread_id,
+                                "round": round,
+                                "toolName": &tool_name,
+                                "violations": theme_tool_violations,
+                            }),
+                        );
+                        if theme_tool_violations >= 2 {
+                            database.update_harness_operation_state(
+                                &operation_id,
+                                &crate::harness::types::RuntimeState::Failed,
+                            )?;
+                            let payload = serde_json::json!({
+                                "error": "Theme generation stopped because the provider repeatedly requested tools outside the write-only theme boundary.",
+                                "round": round,
+                                "toolName": tool_name,
+                            });
+                            let sequence = database.append_harness_event(
+                                &operation_id,
+                                "operation_failed",
+                                &payload,
+                            )?;
+                            let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+                                &operation_id,
+                                sequence,
+                                "operation_failed",
+                                payload,
+                            ));
+                            return Ok(crate::harness::types::HarnessRunOutcome {
+                                state: crate::harness::types::RuntimeState::Failed,
+                            });
+                        }
+                    }
+                    if let Some(manifest) = completed_theme {
+                        logging::write(
+                            "info",
+                            "harness",
+                            "theme_generation_validated",
+                            serde_json::json!({
+                                "operationId": &operation_id,
+                                "threadId": &request.thread_id,
+                                "round": round,
+                                "themeId": &manifest.id,
+                                "themeName": &manifest.name,
+                            }),
+                        );
+                        logging::write(
+                            "info",
+                            "harness",
+                            "round_completed",
+                            serde_json::json!({
+                                "operationId": &operation_id,
+                                "threadId": &request.thread_id,
+                                "round": round,
+                                "outcome": "theme_package_validated",
+                                "latencyMs": round_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                            }),
+                        );
+                        database.update_harness_operation_state(
+                            &operation_id,
+                            &crate::harness::types::RuntimeState::Completed,
+                        )?;
+                        let payload = serde_json::json!({
+                            "round": round,
+                            "reason": "theme_package_validated",
+                            "themeId": manifest.id,
+                            "themeName": manifest.name,
+                        });
+                        let sequence = database.append_harness_event(
+                            &operation_id,
+                            "operation_completed",
+                            &payload,
+                        )?;
+                        let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+                            &operation_id,
+                            sequence,
+                            "operation_completed",
+                            payload,
+                        ));
+                        return Ok(crate::harness::types::HarnessRunOutcome {
+                            state: crate::harness::types::RuntimeState::Completed,
+                        });
+                    }
                     if request.hatch {
                         hatch_status_requires_action =
                             hatch_command_kind == Some("status") && !tool_result.is_error;
@@ -6671,6 +7010,7 @@ pub fn run() {
         .manage(AppState {
             client: Client::builder()
                 .user_agent(concat!("LevelUpAgent/", env!("CARGO_PKG_VERSION")))
+                .connect_timeout(std::time::Duration::from_secs(30))
                 .timeout(std::time::Duration::from_secs(180))
                 .build()
                 .expect("failed to build HTTP client"),
@@ -6895,8 +7235,10 @@ pub fn run() {
             apply_external_prompt_write,
             rollback_external_prompt_write,
             list_themes,
+            load_theme_generation_guidance,
             install_theme,
             install_theme_data,
+            prepare_theme_generation,
             load_theme,
             load_theme_layout,
             uninstall_theme,
@@ -6987,6 +7329,70 @@ mod tests {
             priority,
             failover_enabled,
         }
+    }
+
+    #[test]
+    fn first_normalizable_generated_theme_signals_harness_completion() {
+        let root =
+            std::env::temp_dir().join(format!("levelup-theme-loop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let target = theme::prepare_generation_target(&root).unwrap();
+        let run = ThemeGenerationRun {
+            workspace: root.clone(),
+            relative_path: target.relative_path.clone(),
+        };
+        let mut before_write = ToolExecutionResponse {
+            output: "Listed files".to_owned(),
+            is_error: false,
+        };
+        assert!(
+            validate_theme_generation_after_tool(Some(&run), &mut before_write)
+                .unwrap()
+                .is_none()
+        );
+
+        let package = serde_json::json!({
+            "schemaVersion": 1,
+            "id": "generated-test",
+            "name": "Generated test",
+            "author": "LevelUpAgent",
+            "description": "Harness completion fixture",
+            "layout": "standard",
+            "css": "html[data-levelup-theme=\"generated-test\"] { --accent: #3366ff; --icon: url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3C/svg%3E\"); }"
+        });
+        let invalid_multiline = serde_json::to_string(&package)
+            .unwrap()
+            .replace("; --icon:", ";\n --icon:");
+        assert!(serde_json::from_str::<serde_json::Value>(&invalid_multiline).is_err());
+        std::fs::write(&target.source_path, invalid_multiline.as_bytes()).unwrap();
+        let mut write_result = ToolExecutionResponse {
+            output: "Wrote generated theme".to_owned(),
+            is_error: false,
+        };
+        let manifest = validate_theme_generation_after_tool(Some(&run), &mut write_result)
+            .unwrap()
+            .expect("a valid first write must complete theme generation");
+        assert_eq!(manifest.id, "generated-test");
+        assert_eq!(manifest.version, "1.0.0");
+        assert!(write_result.output.contains("do not write the file again"));
+        let normalized = std::fs::read_to_string(&target.source_path).unwrap();
+        assert!(normalized.contains("http%3A//www.w3.org/2000/svg"));
+        assert!(!normalized.contains("http://www.w3.org/2000/svg"));
+
+        std::fs::write(&target.source_path, b"not json").unwrap();
+        let mut invalid_result = ToolExecutionResponse {
+            output: "Wrote generated theme".to_owned(),
+            is_error: false,
+        };
+        assert!(
+            validate_theme_generation_after_tool(Some(&run), &mut invalid_result)
+                .unwrap()
+                .is_none()
+        );
+        assert!(invalid_result.is_error);
+        assert!(invalid_result.output.contains("validation failed"));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -7434,6 +7840,45 @@ mod tests {
                 .iter()
                 .any(|tool| tool.name == "generate_images")
         );
+    }
+
+    #[test]
+    fn theme_generation_removes_every_dynamic_and_media_tool() {
+        let mut request = AgentTurnRequest {
+            profile: profile("primary", 10, true),
+            messages: vec![AgentMessage {
+                role: "user".to_owned(),
+                content: "[LEVELUP_THEME_GENERATION_BOOTSTRAP_COMPLETE]\n[LEVELUP_THEME_GENERATION_TARGET] .levelup/generated-themes/0123456789abcdef0123456789abcdef.levelup-theme".to_owned(),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                internal: true,
+                attachments: Vec::new(),
+            }],
+            mode: "agent".to_owned(),
+            workspace: Some("workspace".to_owned()),
+            thread_id: Some("thread-theme".to_owned()),
+            hatch: false,
+            hatch_skill_loaded: false,
+            available_tools: Vec::new(),
+            available_skills: vec![AgentSkillSummary {
+                id: "theme-skill".to_owned(),
+                name: "theme".to_owned(),
+                description: "Theme guidance".to_owned(),
+            }],
+            goal: None,
+            fallback_profiles: Vec::new(),
+            custom_instructions: None,
+        };
+        attach_media_tools(&mut request);
+        attach_subagent_tools(&mut request);
+        assert!(!request.available_tools.is_empty());
+
+        enforce_theme_generation_tool_catalog(&mut request);
+
+        assert!(request.available_tools.is_empty());
+        assert!(request.available_skills.is_empty());
+        assert!(agent::theme_generation_tool_allowed("write_file"));
+        assert!(!agent::theme_generation_tool_allowed("generate_images"));
     }
 
     #[test]

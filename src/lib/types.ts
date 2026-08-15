@@ -54,6 +54,18 @@ export interface ThemePackage extends ThemeManifest {
   css: string;
 }
 
+export interface ThemeGenerationTarget {
+  relativePath: string;
+  sourcePath: string;
+}
+
+export interface ThemeGenerationBackgroundInput {
+  assetId: string;
+  fit: "cover" | "contain" | "tile";
+  focus: "left" | "center" | "right";
+  readability: "soft" | "balanced" | "strong";
+}
+
 export type LayoutLocaleText = string | { "zh-CN": string; "en-US": string };
 export type LayoutScalar = string | number | boolean | null;
 export type LayoutValue = LayoutScalar | LayoutValue[] | { [key: string]: LayoutValue };

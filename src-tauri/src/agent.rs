@@ -26,6 +26,23 @@ const SKILL_TOOL_RESULT_MAX_CHARS: usize = 48_000;
 const TOOL_ARGUMENTS_MAX_CHARS: usize = 8_000;
 pub const TOOL_CALLING_UNSUPPORTED_MARKER: &str = "[LEVELUP_TOOL_CALLING_UNSUPPORTED]";
 const HATCH_BOOTSTRAP_MARKER: &str = "[LEVELUP_HATCH_BOOTSTRAP_COMPLETE]";
+const THEME_GENERATION_BOOTSTRAP_MARKER: &str = "[LEVELUP_THEME_GENERATION_BOOTSTRAP_COMPLETE]";
+const THEME_GENERATION_TARGET_MARKER: &str = "[LEVELUP_THEME_GENERATION_TARGET]";
+const THEME_GENERATION_REQUEST_TIMEOUT_SECS: u64 = 360;
+
+fn turn_request_timeout(request: &AgentTurnRequest) -> Option<std::time::Duration> {
+    theme_generation_bootstrapped(&request.messages)
+        .then(|| std::time::Duration::from_secs(THEME_GENERATION_REQUEST_TIMEOUT_SECS))
+}
+
+fn turn_post(client: &Client, url: Url, request: &AgentTurnRequest) -> RequestBuilder {
+    let builder = client.post(url);
+    if let Some(timeout) = turn_request_timeout(request) {
+        builder.timeout(timeout)
+    } else {
+        builder
+    }
+}
 
 fn bearer_auth_if_present(request: RequestBuilder, api_key: &str) -> RequestBuilder {
     if api_key.is_empty() {
@@ -466,7 +483,7 @@ async fn run_gemini_generate_content(
         &request.profile.base_url,
         &format!("/v1beta/models/{model}:generateContent"),
     )?;
-    let response = gemini_auth_if_present(client.post(url), api_key)
+    let response = gemini_auth_if_present(turn_post(client, url, &request), api_key)
         .json(&gemini_body(&request))
         .send()
         .await
@@ -484,7 +501,7 @@ async fn run_openai_chat(
     let url = endpoint(&request.profile.base_url, "/v1/chat/completions")?;
     let body = chat_body(&request, false);
 
-    let response = bearer_auth_if_present(client.post(url), api_key)
+    let response = bearer_auth_if_present(turn_post(client, url, &request), api_key)
         .json(&body)
         .send()
         .await
@@ -502,7 +519,7 @@ async fn run_openai_responses(
     let url = endpoint(&request.profile.base_url, "/v1/responses")?;
     let body = responses_body(&request, false);
 
-    let response = bearer_auth_if_present(client.post(url), api_key)
+    let response = bearer_auth_if_present(turn_post(client, url, &request), api_key)
         .header("OpenAI-Beta", "responses=experimental")
         .json(&body)
         .send()
@@ -520,7 +537,7 @@ async fn run_anthropic_messages(
 ) -> Result<AgentTurnResponse, String> {
     let url = endpoint(&request.profile.base_url, "/v1/messages")?;
     let body = anthropic_body(&request, false);
-    let response = anthropic_auth_if_present(client.post(url), api_key)
+    let response = anthropic_auth_if_present(turn_post(client, url, &request), api_key)
         .header("anthropic-version", "2023-06-01")
         .json(&body)
         .send()
@@ -549,7 +566,7 @@ where
     F: FnMut(AgentStreamEvent),
 {
     let url = endpoint(&request.profile.base_url, "/v1/chat/completions")?;
-    let response = bearer_auth_if_present(client.post(url), api_key)
+    let response = bearer_auth_if_present(turn_post(client, url, &request), api_key)
         .json(&chat_body(&request, true))
         .send()
         .await
@@ -635,7 +652,7 @@ where
     F: FnMut(AgentStreamEvent),
 {
     let url = endpoint(&request.profile.base_url, "/v1/responses")?;
-    let response = bearer_auth_if_present(client.post(url), api_key)
+    let response = bearer_auth_if_present(turn_post(client, url, &request), api_key)
         .header("OpenAI-Beta", "responses=experimental")
         .json(&responses_body(&request, true))
         .send()
@@ -756,7 +773,7 @@ where
     F: FnMut(AgentStreamEvent),
 {
     let url = endpoint(&request.profile.base_url, "/v1/messages")?;
-    let response = anthropic_auth_if_present(client.post(url), api_key)
+    let response = anthropic_auth_if_present(turn_post(client, url, &request), api_key)
         .header("anthropic-version", "2023-06-01")
         .json(&anthropic_body(&request, true))
         .send()
@@ -874,7 +891,7 @@ where
         &request.profile.base_url,
         &format!("/v1beta/models/{model}:streamGenerateContent?alt=sse"),
     )?;
-    let response = gemini_auth_if_present(client.post(url), api_key)
+    let response = gemini_auth_if_present(turn_post(client, url, &request), api_key)
         .json(&gemini_body(&request))
         .send()
         .await
@@ -1565,6 +1582,100 @@ fn request_has_workspace(request: &AgentTurnRequest) -> bool {
         .is_some_and(|workspace| !workspace.trim().is_empty())
 }
 
+pub(crate) fn theme_generation_bootstrapped(messages: &[AgentMessage]) -> bool {
+    messages.iter().any(|message| {
+        message.role == "user"
+            && message.internal
+            && message.content.contains(THEME_GENERATION_BOOTSTRAP_MARKER)
+    })
+}
+
+pub(crate) fn theme_generation_target(messages: &[AgentMessage]) -> Option<String> {
+    messages
+        .iter()
+        .filter(|message| {
+            message.role == "user"
+                && message.internal
+                && message.content.contains(THEME_GENERATION_BOOTSTRAP_MARKER)
+        })
+        .find_map(|message| {
+            message.content.lines().find_map(|line| {
+                line.trim()
+                    .strip_prefix(THEME_GENERATION_TARGET_MARKER)
+                    .map(str::trim)
+                    .filter(|target| !target.is_empty())
+                    .map(str::to_owned)
+            })
+        })
+}
+
+fn skill_read_key(call: &ToolCall) -> Option<(String, String)> {
+    if call.name != "read_skill" {
+        return None;
+    }
+    let skill_id = call
+        .arguments
+        .get("skillId")
+        .and_then(serde_json::Value::as_str)?
+        .trim();
+    if skill_id.is_empty() {
+        return None;
+    }
+    let path = call
+        .arguments
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .unwrap_or("SKILL.md")
+        .replace('\\', "/");
+    Some((
+        skill_id.to_owned(),
+        path.trim_start_matches("./").to_ascii_lowercase(),
+    ))
+}
+
+fn successful_skill_reads(messages: &[AgentMessage]) -> BTreeSet<(String, String)> {
+    let mut pending = BTreeMap::new();
+    let mut successful = BTreeSet::new();
+    for message in messages {
+        if message.role == "assistant" {
+            for call in &message.tool_calls {
+                if let Some(key) = skill_read_key(call) {
+                    pending.insert(call.id.clone(), key);
+                }
+            }
+            continue;
+        }
+        if message.role != "tool" || !message.content.trim_start().starts_with("Skill: ") {
+            continue;
+        }
+        if let Some(key) = message
+            .tool_call_id
+            .as_deref()
+            .and_then(|call_id| pending.remove(call_id))
+        {
+            successful.insert(key);
+        }
+    }
+    successful
+}
+
+pub(crate) fn skill_read_was_successful(messages: &[AgentMessage], call: &ToolCall) -> bool {
+    skill_read_key(call).is_some_and(|key| successful_skill_reads(messages).contains(&key))
+}
+
+fn skill_manifest_was_read(messages: &[AgentMessage], skill_id: &str) -> bool {
+    successful_skill_reads(messages).contains(&(skill_id.to_owned(), "skill.md".to_owned()))
+}
+
+pub(crate) fn deduplicate_skill_read_calls(calls: &mut Vec<ToolCall>) -> usize {
+    let original = calls.len();
+    let mut seen = BTreeSet::new();
+    calls.retain(|call| skill_read_key(call).is_none_or(|key| seen.insert(key)));
+    original.saturating_sub(calls.len())
+}
+
 /// Return whether a hatch run has already received the bundled hatch-pet
 /// manifest. The frontend sends the complete tool exchange back on every
 /// continuation, so this is intentionally derived from history rather than
@@ -1640,6 +1751,10 @@ fn system_prompt_with_omission(request: &AgentTurnRequest, omission: &ContextOmi
         prompt.push_str("\n\nUser-defined Instructions\n");
         prompt.push_str(instructions);
     }
+    let theme_generation = theme_generation_bootstrapped(&request.messages);
+    if theme_generation {
+        prompt.push_str("\n\nTheme generation mode\nLevelUpAgent already attached the packaged customize-levelup-layout instructions and layout reference once. This task exposes only write_file: Skill, media generation, delegation, shell, browsing, and other tools are intentionally unavailable. Attached reference images are visual evidence only; analyze them directly and express the result with scoped CSS. Never generate replacement images or raster assets. Write the requested theme package directly to the exact application-provided target.");
+    }
     if request
         .messages
         .iter()
@@ -1661,19 +1776,44 @@ fn system_prompt_with_omission(request: &AgentTurnRequest, omission: &ContextOmi
     }
     let hatch_skill_read =
         request.hatch && (request.hatch_skill_loaded || hatch_skill_was_read(&request.messages));
-    if !request.available_skills.is_empty() {
+    if !request.available_skills.is_empty() && !theme_generation {
         if request.hatch && hatch_skill_read {
             prompt.push_str("\n\nEnabled Skills are listed below. The bundled legacy hatch-pet SKILL.md has already been read successfully in this run. Its one-time bootstrap is closed: do not call read_skill again. Take the next concrete hatch action now.\n");
         } else if request.hatch {
             prompt.push_str("\n\nEnabled Skills are listed below. The application has not completed the bundled legacy hatch-pet bootstrap, so this provider turn must not proceed. The client must load the manifest and prepare the run before asking the model for a concrete action.\n");
         } else {
-            prompt.push_str("\n\nEnabled Skills are listed below. When a Skill clearly matches the task, call read_skill before acting and follow its instructions. Read referenced files with the same tool and Skill ID.\n");
+            let loaded = request
+                .available_skills
+                .iter()
+                .filter(|skill| skill_manifest_was_read(&request.messages, &skill.id))
+                .map(|skill| skill.id.as_str())
+                .collect::<BTreeSet<_>>();
+            if loaded.is_empty() {
+                prompt.push_str("\n\nEnabled Skills are listed below. When a Skill clearly matches the task, call read_skill before acting and follow its instructions. Read referenced files with the same tool and Skill ID.\n");
+            } else {
+                prompt.push_str("\n\nEnabled Skills are listed below. A manifest marked already loaded is present in the conversation history: never read that SKILL.md again. Use its existing instructions and call read_skill only with an explicit referenced-file path when those instructions require that file.\n");
+            }
+            for skill in &request.available_skills {
+                prompt.push_str(&format!(
+                    "- {} [{}]: {}{}\n",
+                    skill.name,
+                    skill.id,
+                    skill.description,
+                    if loaded.contains(skill.id.as_str()) {
+                        " (manifest already loaded; do not reread)"
+                    } else {
+                        ""
+                    }
+                ));
+            }
         }
-        for skill in &request.available_skills {
-            prompt.push_str(&format!(
-                "- {} [{}]: {}\n",
-                skill.name, skill.id, skill.description
-            ));
+        if request.hatch {
+            for skill in &request.available_skills {
+                prompt.push_str(&format!(
+                    "- {} [{}]: {}\n",
+                    skill.name, skill.id, skill.description
+                ));
+            }
         }
     }
     if let Some(goal) = &request.goal {
@@ -1949,7 +2089,7 @@ fn text_attachment_block(attachment: &ImageAttachment) -> Option<String> {
         .replace('"', "&quot;");
     if attachment.data_base64.is_some() {
         return Some(format!(
-            "<managed_image_reference id=\"{}\" name=\"{safe_name}\" mime=\"{}\">Use this exact id in generate_images.referenceAttachmentIds when the user asks to edit or use this image as a generation reference.</managed_image_reference>",
+            "<managed_image_reference id=\"{}\" name=\"{safe_name}\" mime=\"{}\">This managed image is visual context. Only when a media generation tool is available and the user explicitly requests an edit or generated derivative, use this exact id as its reference attachment.</managed_image_reference>",
             attachment.id, attachment.mime_type
         ));
     }
@@ -2087,13 +2227,25 @@ fn allowed_tool_specs(
     tools
 }
 
-fn chat_tools(request: &AgentTurnRequest) -> Vec<Value> {
-    allowed_tool_specs(
+pub(crate) fn theme_generation_tool_allowed(name: &str) -> bool {
+    name == "write_file"
+}
+
+fn request_tool_specs(request: &AgentTurnRequest) -> Vec<(String, String, Value)> {
+    let mut tools = allowed_tool_specs(
         &request.mode,
         request_has_workspace(request),
         request.hatch,
         &request.available_tools,
-    )
+    );
+    if theme_generation_bootstrapped(&request.messages) {
+        tools.retain(|(name, _, _)| theme_generation_tool_allowed(name));
+    }
+    tools
+}
+
+fn chat_tools(request: &AgentTurnRequest) -> Vec<Value> {
+    request_tool_specs(request)
         .into_iter()
         .map(|(name, description, parameters)| {
             json!({ "type": "function", "function": { "name": name, "description": description, "parameters": parameters } })
@@ -2102,12 +2254,7 @@ fn chat_tools(request: &AgentTurnRequest) -> Vec<Value> {
 }
 
 fn responses_tools(request: &AgentTurnRequest) -> Vec<Value> {
-    allowed_tool_specs(
-        &request.mode,
-        request_has_workspace(request),
-        request.hatch,
-        &request.available_tools,
-    )
+    request_tool_specs(request)
         .into_iter()
         .map(|(name, description, parameters)| {
             json!({ "type": "function", "name": name, "description": description, "parameters": parameters, "strict": false })
@@ -2116,12 +2263,7 @@ fn responses_tools(request: &AgentTurnRequest) -> Vec<Value> {
 }
 
 fn anthropic_tools(request: &AgentTurnRequest) -> Vec<Value> {
-    allowed_tool_specs(
-        &request.mode,
-        request_has_workspace(request),
-        request.hatch,
-        &request.available_tools,
-    )
+    request_tool_specs(request)
         .into_iter()
         .map(|(name, description, input_schema)| {
             json!({ "name": name, "description": description, "input_schema": input_schema })
@@ -2130,12 +2272,7 @@ fn anthropic_tools(request: &AgentTurnRequest) -> Vec<Value> {
 }
 
 fn gemini_tools(request: &AgentTurnRequest) -> Vec<Value> {
-    allowed_tool_specs(
-        &request.mode,
-        request_has_workspace(request),
-        request.hatch,
-        &request.available_tools,
-    )
+    request_tool_specs(request)
         .into_iter()
         .map(|(name, description, parameters)| {
             json!({ "name": name, "description": description, "parameters": parameters })
@@ -2624,6 +2761,128 @@ mod tests {
         let prompt = system_prompt(&request);
         assert!(prompt.contains("review [skill-review]"));
         assert!(prompt.contains("call read_skill before acting"));
+    }
+
+    #[test]
+    fn theme_generation_bootstrap_closes_the_skill_catalog() {
+        let mut request = test_request(
+            "https://levelup.example".to_owned(),
+            ProviderProtocol::OpenaiResponses,
+        );
+        request
+            .available_skills
+            .push(crate::models::AgentSkillSummary {
+                id: "skill-theme".to_owned(),
+                name: "customize-levelup-layout".to_owned(),
+                description: "Create a theme".to_owned(),
+            });
+        request.available_tools.push(AgentToolDefinition {
+            name: "generate_images".to_owned(),
+            description: "Generate a raster image".to_owned(),
+            input_schema: json!({ "type": "object" }),
+            read_only: false,
+        });
+        request.messages = vec![AgentMessage {
+            role: "user".to_owned(),
+            content: format!(
+                "{THEME_GENERATION_BOOTSTRAP_MARKER}\n{THEME_GENERATION_TARGET_MARKER} .levelup/generated-themes/0123456789abcdef0123456789abcdef.levelup-theme\npackaged guidance"
+            ),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            internal: true,
+            attachments: Vec::new(),
+        }];
+
+        assert!(theme_generation_bootstrapped(&request.messages));
+        assert_eq!(
+            turn_request_timeout(&request),
+            Some(std::time::Duration::from_secs(360))
+        );
+        assert_eq!(
+            theme_generation_target(&request.messages).as_deref(),
+            Some(".levelup/generated-themes/0123456789abcdef0123456789abcdef.levelup-theme")
+        );
+        let prompt = system_prompt(&request);
+        assert!(prompt.contains("Theme generation mode"));
+        assert!(prompt.contains("only write_file"));
+        assert!(prompt.contains("Never generate replacement images"));
+        assert!(!prompt.contains("call read_skill before acting"));
+        assert_eq!(
+            request_tool_specs(&request)
+                .into_iter()
+                .map(|(name, _, _)| name)
+                .collect::<Vec<_>>(),
+            vec!["write_file"]
+        );
+    }
+
+    #[test]
+    fn regular_provider_requests_keep_the_client_default_timeout() {
+        let request = test_request(
+            "https://levelup.example".to_owned(),
+            ProviderProtocol::OpenaiResponses,
+        );
+        assert_eq!(turn_request_timeout(&request), None);
+    }
+
+    #[test]
+    fn successful_skill_manifest_is_marked_loaded_and_exact_reads_are_deduplicated() {
+        let mut request = test_request(
+            "https://levelup.example".to_owned(),
+            ProviderProtocol::OpenaiResponses,
+        );
+        request
+            .available_skills
+            .push(crate::models::AgentSkillSummary {
+                id: "skill-theme".to_owned(),
+                name: "customize-levelup-layout".to_owned(),
+                description: "Create a theme".to_owned(),
+            });
+        let manifest_call = ToolCall {
+            id: "read-manifest".to_owned(),
+            name: "read_skill".to_owned(),
+            arguments: json!({ "skillId": "skill-theme" }),
+        };
+        request.messages = vec![
+            AgentMessage {
+                role: "assistant".to_owned(),
+                content: String::new(),
+                tool_calls: vec![manifest_call.clone()],
+                tool_call_id: None,
+                internal: false,
+                attachments: Vec::new(),
+            },
+            AgentMessage {
+                role: "tool".to_owned(),
+                content: "Skill: customize-levelup-layout\nFile: SKILL.md\n\n# Theme".to_owned(),
+                tool_calls: Vec::new(),
+                tool_call_id: Some("read-manifest".to_owned()),
+                internal: false,
+                attachments: Vec::new(),
+            },
+        ];
+
+        assert!(skill_read_was_successful(&request.messages, &manifest_call));
+        let prompt = system_prompt(&request);
+        assert!(prompt.contains("manifest already loaded; do not reread"));
+        assert!(!prompt.contains("call read_skill before acting"));
+
+        let mut calls = vec![
+            manifest_call,
+            ToolCall {
+                id: "read-manifest-again".to_owned(),
+                name: "read_skill".to_owned(),
+                arguments: json!({ "skillId": "skill-theme", "path": "./SKILL.md" }),
+            },
+            ToolCall {
+                id: "read-reference".to_owned(),
+                name: "read_skill".to_owned(),
+                arguments: json!({ "skillId": "skill-theme", "path": "references/layout-schema.md" }),
+            },
+        ];
+        assert_eq!(deduplicate_skill_read_calls(&mut calls), 1);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].id, "read-reference");
     }
 
     #[test]

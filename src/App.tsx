@@ -100,6 +100,7 @@ import {
   getCustomInstructions,
   getPetRuntime,
   getProviderSettings,
+  generateMedia,
   harnessPreflight,
   harnessStart,
   harnessLatestHatchRunDir,
@@ -141,6 +142,7 @@ import {
   rollbackExternalPromptWrite,
   scanExternalConfigs,
   scanSkills,
+  selectImageReferences,
   selectPet,
   selectWorkspace,
   setSkillEnabled,
@@ -149,10 +151,12 @@ import {
   upsertMcpServer,
   listThemes,
   loadTheme,
+  loadThemeGenerationGuidance,
   loadThemeLayout,
   installTheme,
   installThemeFile,
   installThemeText,
+  prepareThemeGeneration,
   selectAndInstallTheme,
   uninstallTheme,
   updatePetActivities,
@@ -185,7 +189,20 @@ import {
 import { getAppLocale, setAppLocale, tr, type AppLocale } from "./lib/i18n";
 import { executeCallsWithParallelMedia } from "./lib/mediaConcurrency";
 import { isConversationNearBottom, shouldFollowConversationUpdate } from "./lib/conversationScroll";
-import { providerThreadId, usesDurableHarness } from "./lib/threadExecution";
+import { providerRetryProgressLabel, providerThreadId, usesDurableHarness } from "./lib/threadExecution";
+import {
+  themeGenerationAttachmentIds,
+  themeGenerationAttachments,
+  themeGenerationBackgroundPrompt,
+  themeGenerationBootstrap,
+  themeGenerationBootstrapAcknowledgement,
+  themeGenerationPrompt,
+  themeGenerationReadyForImport,
+  themeGenerationThreadTitle,
+  type ThemeGenerationPreferences,
+  type ThemeGenerationRequest,
+  type ThemeGenerationJob,
+} from "./lib/themeGeneration";
 import { preferredDetectedModel } from "./lib/modelSelection";
 import {
   createHatchExecutionState,
@@ -203,7 +220,7 @@ import {
   hatchToolPolicyViolation,
 } from "./lib/hatchProgress";
 import { copyText } from "./lib/clipboard";
-import { openAppLogDirectory } from "./lib/appLogging";
+import { openAppLogDirectory, writeFrontendLog } from "./lib/appLogging";
 import type {
   AgentMessage,
   AgentMode,
@@ -252,6 +269,7 @@ import type {
   SkillInfo,
   ToolCall,
   ThemeManifest,
+  ThemeGenerationTarget,
   LayoutDefinition,
   ResolvedLayout,
 } from "./lib/types";
@@ -277,11 +295,6 @@ const DEFAULT_LAYOUT: ResolvedLayout = {
   source: "default",
   definition: defaultLayoutJson as LayoutDefinition,
 };
-
-interface ThemeGenerationJob {
-  threadId: string;
-  sourcePath: string;
-}
 
 interface PetHatchJob {
   threadId: string;
@@ -788,6 +801,7 @@ function App() {
   const [balanceBusy, setBalanceBusy] = useState(false);
   const [balanceError, setBalanceError] = useState<string | null>(null);
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
+  const [sidebarWidth, setSidebarWidth] = useState<number | null>(null);
   const [inspectorWidth, setInspectorWidth] = useState(320);
   const [diffViewSettings, setDiffViewSettings] = useState<DiffViewSettings>(loadDiffViewSettings);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("details");
@@ -1035,26 +1049,9 @@ function App() {
     return installed;
   };
 
-  const ensureThemeGenerationSkill = async (workspace: string) => {
-    try {
-      const skills = await scanSkills(workspace);
-      const themeSkill = skills.find((skill) => skill.valid && (
-        normalizeSkillIdentity(skill.name).includes("customizeleveluplayout")
-        || normalizeSkillIdentity(skill.id).includes("customizeleveluplayout")
-        || normalizeSkillIdentity(skill.path).includes("customizeleveluplayout")
-      ));
-      if (!themeSkill) return tr("未发现主题布局 Skill，将按内置主题规范继续", "The theme layout Skill was not found; generation will continue with the built-in theme rules");
-      if (!themeSkill.enabled) await setSkillEnabled(themeSkill.id, true, workspace);
-      return null;
-    } catch (error) {
-      return `${tr("主题 Skill 未能自动启用，将按内置主题规范继续", "The theme Skill could not be enabled; generation will continue with the built-in theme rules")}: ${errorText(error)}`;
-    }
-  };
-
-  const generateTheme = async (brief: string) => {
+  const generateTheme = async (generationRequest: ThemeGenerationRequest) => {
     if (!isDesktop()) throw new Error(tr("生成主题需要桌面应用", "Theme generation requires the desktop app"));
     if (themeGeneration) throw new Error(tr("已有主题生成任务正在进行", "A theme generation task is already running"));
-    if (running || pending) throw new Error(tr("请先完成当前会话任务", "Finish the current conversation task first"));
     if (!connectionReady) {
       setThemesOpen(false);
       setSettingsOpen(true);
@@ -1062,32 +1059,170 @@ function App() {
       setNotice(reason);
       throw new Error(reason);
     }
-    const workspace = activeThread.workspace?.trim() || defaultWorkspace?.trim();
-    if (!workspace) throw new Error(tr("请先为当前会话选择工作区", "Choose a workspace for the current conversation first"));
+    const workspace = defaultWorkspace?.trim();
+    if (!workspace) throw new Error(tr("临时工作区尚未就绪，请稍后重试", "The temporary workspace is not ready; try again shortly"));
 
-    const relativePath = `.levelup/generated-themes/${crypto.randomUUID()}.levelup-theme`;
-    const skillWarning = await ensureThemeGenerationSkill(workspace);
-    const request = themeGenerationPrompt(relativePath, brief, locale);
-    const user = message("user", request);
-    const title = activeThread.messages.length === 0 && isDefaultThreadTitle(activeThread.title)
-      ? tr("生成主题", "Generate theme")
-      : activeThread.title;
-    const nextThread: AgentThread = {
-      ...activeThread,
-      workspace,
-      title,
-      messages: [...activeThread.messages, user],
-      updatedAt: Date.now(),
-    };
+    const created = createThread(workspace);
+    const preparationStartedAt = Date.now();
     const runProfile = activeProfile;
     const runFallbackProfiles = profiles.filter((profile) => profile.id !== runProfile.id);
+    const preparationThread: AgentThread = {
+      ...created,
+      title: themeGenerationThreadTitle(generationRequest, locale),
+      messages: [
+        message("user", generationRequest.brief.trim() || tr(
+          "根据当前选项生成一套主题",
+          "Generate a theme from the current options",
+        ), { attachments: generationRequest.references }),
+        message("assistant", generationRequest.backgroundMode === "ai"
+          ? tr(
+            "正在生成 1 张会话背景，通常需要 30 秒到 3 分钟。完成后会自动启动主题 Harness，请不要重复点击。",
+            "Generating one conversation background. This usually takes 30 seconds to 3 minutes. Theme Harness will start automatically afterward; do not click again.",
+          )
+          : tr(
+            "正在准备独立临时工作区和主题 Harness，完成后会自动导入。",
+            "Preparing a dedicated temporary workspace and Theme Harness. The result will be imported automatically.",
+          )),
+      ],
+      updatedAt: Date.now(),
+    };
     setMode("agent");
     setWorkspaceView("chat");
     setThemesOpen(false);
+    revealProject(workspaceKey(workspace));
+    commitThread(preparationThread);
+    setActiveThreadId(preparationThread.id);
+    expandProject(workspaceKey(workspace));
+    setThemeGeneration({
+      threadId: preparationThread.id,
+      sourcePath: "",
+      phase: "preparing",
+    });
+    setNotice(generationRequest.backgroundMode === "ai"
+      ? tr(
+        "主题会话已创建，正在生成唯一一张会话背景",
+        "Theme conversation created; generating its single conversation background",
+      )
+      : tr(
+        "主题会话已创建，正在准备 Harness",
+        "Theme conversation created; preparing Harness",
+      ));
+    writeFrontendLog("info", "theme_generation_preparation_started", {
+      message: `thread=${created.id}; background=${generationRequest.backgroundMode}`,
+    });
+
+    const failPreparation = async (error: unknown) => {
+      const detail = errorText(error);
+      const failedThread: AgentThread = {
+        ...preparationThread,
+        messages: [...preparationThread.messages, message("assistant", `${tr(
+          "主题生成准备失败",
+          "Theme generation preparation failed",
+        )}: ${detail}`)],
+        updatedAt: Date.now(),
+      };
+      commitThread(failedThread);
+      await savePersistedThread(failedThread).catch(() => undefined);
+      setThemeGeneration((current) => current?.threadId === preparationThread.id ? null : current);
+      setNotice(`${tr("主题生成准备失败", "Theme generation preparation failed")}: ${detail}`);
+      writeFrontendLog("error", "theme_generation_preparation_failed", {
+        message: `thread=${created.id}; elapsedMs=${Date.now() - preparationStartedAt}; error=${detail}`,
+      });
+    };
+
+    try {
+      await savePersistedThread(preparationThread);
+    } catch (error) {
+      await failPreparation(error);
+      return;
+    }
+
+    let generatedBackground: ImageAttachment | undefined;
+    let backgroundAssetId: string | undefined;
+    let target: ThemeGenerationTarget;
+    let guidance: string;
+    try {
+      if (generationRequest.backgroundMode === "ai") {
+        const mediaResult = await generateMedia({
+          kind: "image",
+          prompt: themeGenerationBackgroundPrompt(generationRequest, locale),
+          count: 1,
+          size: "1536x1024",
+          quality: "medium",
+          outputFormat: "webp",
+          referenceAttachmentIds: generationRequest.references.slice(0, 3).map((attachment) => attachment.id),
+        }, created.id);
+        const backgroundAsset = mediaResult.assets.find((asset) => (
+          asset.kind === "image"
+          && asset.status === "completed"
+          && Boolean(asset.filePath)
+        ));
+        if (!backgroundAsset?.filePath) {
+          const detail = mediaResult.errors.join(" · ")
+            || mediaResult.assets.map((asset) => asset.error).filter(Boolean).join(" · ");
+          throw new Error(`${tr("会话背景生成失败", "Conversation background generation failed")}${detail ? `: ${detail}` : ""}`);
+        }
+        const imported = await importAttachments([backgroundAsset.filePath]);
+        generatedBackground = imported.find((attachment) => attachment.kind === "image");
+        if (!generatedBackground) {
+          throw new Error(tr(
+            "生成的会话背景无法作为主题视觉附件导入",
+            "The generated conversation background could not be imported as a theme visual attachment",
+          ));
+        }
+        backgroundAssetId = backgroundAsset.id;
+        writeFrontendLog("info", "theme_generation_background_completed", {
+          message: `thread=${created.id}; elapsedMs=${Date.now() - preparationStartedAt}`,
+        });
+      }
+      [target, guidance] = await Promise.all([
+        prepareThemeGeneration(workspace, backgroundAssetId ? {
+          assetId: backgroundAssetId,
+          fit: generationRequest.backgroundFit,
+          focus: generationRequest.backgroundFocus,
+          readability: generationRequest.backgroundReadability,
+        } : undefined),
+        loadThemeGenerationGuidance(),
+      ]);
+    } catch (error) {
+      if (generatedBackground) {
+        await deleteImageAttachment(generatedBackground.id).catch(() => undefined);
+      }
+      await failPreparation(error);
+      return;
+    }
+    const effectiveRequest: ThemeGenerationRequest = {
+      ...generationRequest,
+      generatedBackground,
+    };
+    const relativePath = target.relativePath;
+    const prompt = themeGenerationPrompt(relativePath, effectiveRequest, locale);
+    const bootstrap = message("user", themeGenerationBootstrap(guidance, relativePath, locale), { internal: true });
+    const bootstrapAcknowledgement = message("assistant", themeGenerationBootstrapAcknowledgement(locale), { internal: true });
+    const user = message("user", prompt, { attachments: themeGenerationAttachments(effectiveRequest) });
+    const nextThread: AgentThread = {
+      ...created,
+      title: themeGenerationThreadTitle(effectiveRequest, locale),
+      messages: [bootstrap, bootstrapAcknowledgement, user],
+      updatedAt: Date.now(),
+    };
     commitThread(nextThread);
-    setNotice(skillWarning
-      ? `${tr("已在会话中开始生成主题", "Theme generation started in the conversation")} · ${skillWarning}`
-      : tr("已在会话中开始生成主题，完成后会自动导入", "Theme generation started in the conversation; it will be imported automatically when complete"));
+    setNotice(tr(
+      generationRequest.backgroundMode === "ai"
+        ? "会话背景已完成，主题 Harness 已开始；完成后会自动导入"
+        : "主题 Harness 已开始，完成后会自动导入",
+      generationRequest.backgroundMode === "ai"
+        ? "Conversation background completed and Theme Harness started; the result will be imported automatically"
+        : "Theme Harness started; the result will be imported automatically",
+    ));
+    setThemeGeneration({
+      threadId: nextThread.id,
+      sourcePath: target.sourcePath,
+      phase: "starting",
+    });
+    writeFrontendLog("info", "theme_generation_harness_starting", {
+      message: `thread=${nextThread.id}; elapsedMs=${Date.now() - preparationStartedAt}`,
+    });
     void (async () => {
       try {
         // Persist the generated user turn before harness_start validates the
@@ -1096,8 +1231,8 @@ function App() {
         await savePersistedThread(nextThread);
         const harnessRequest = {
           threadId: nextThread.id,
-          rawUserInput: request,
-          attachmentIds: [],
+          rawUserInput: prompt,
+          attachmentIds: themeGenerationAttachmentIds(effectiveRequest),
           mode: "agent" as const,
           permissionLevel,
           requestedProfileId: runProfile.id,
@@ -1110,6 +1245,13 @@ function App() {
         if (submission.disposition !== "started") {
           throw new Error("Theme generation was unexpectedly queued behind another operation");
         }
+        writeFrontendLog("info", "theme_generation_harness_started", {
+          message: `thread=${nextThread.id}; operation=${submission.value.operationId}; elapsedMs=${Date.now() - preparationStartedAt}`,
+        });
+        setThemeGeneration((current) => current?.threadId === nextThread.id
+          && current.sourcePath === target.sourcePath
+          ? { ...current, phase: "running" }
+          : current);
         await runHarnessAgent(
           nextThread,
           nextThread.messages,
@@ -1121,17 +1263,22 @@ function App() {
         );
       } catch (error) {
         setNotice(`${tr("主题生成失败", "Theme generation failed")}: ${errorText(error)}`);
+        setThemeGeneration((current) => current?.threadId === nextThread.id
+          && current.sourcePath === target.sourcePath
+          && current.phase === "starting"
+          ? null
+          : current);
       }
     })();
-    setThemeGeneration({
-      threadId: nextThread.id,
-      sourcePath: workspacePath(workspace, relativePath),
-    });
   };
 
   useEffect(() => {
     const job = themeGeneration;
-    if (!job || runningThreadIds.has(job.threadId) || pendingApprovals[job.threadId] || operationIdsRef.current.has(job.threadId)) return;
+    if (!job || !themeGenerationReadyForImport(job, {
+      running: runningThreadIds.has(job.threadId),
+      pendingApproval: Boolean(pendingApprovals[job.threadId]),
+      ownsOperation: operationIdsRef.current.has(job.threadId),
+    })) return;
     const jobKey = `${job.threadId}:${job.sourcePath}`;
     if (themeImportingRef.current === jobKey) return;
     themeImportingRef.current = jobKey;
@@ -1968,15 +2115,18 @@ function App() {
     operationId: string,
     options: { hatch?: boolean; hatchSkillLoaded?: boolean } = {},
   ): Promise<void> => {
-    await ensureWorkspaceRunBaseline(operationId, thread.id, thread.workspace);
     setThreadRunning(thread.id, true);
     runModesRef.current.set(thread.id, runMode);
     operationIdsRef.current.set(thread.id, operationId);
+    await ensureWorkspaceRunBaseline(operationId, thread.id, thread.workspace);
     let projected = history;
     let cumulativeInputTokens = thread.inputTokens;
     let cumulativeOutputTokens = thread.outputTokens;
     let lastReconnectAttempt = 0;
+    let maxReconnectAttempts = 5;
     let reconnectStatusMessageId: string | undefined;
+    let reconnectStartedAt = 0;
+    let reconnectProgressTimer: number | undefined;
     const projectedThread = (messages: AgentMessage[]): AgentThread => ({
       ...thread,
       messages,
@@ -1984,6 +2134,24 @@ function App() {
       inputTokens: cumulativeInputTokens,
       outputTokens: cumulativeOutputTokens,
     });
+    const stopReconnectProgress = () => {
+      if (reconnectProgressTimer === undefined) return;
+      window.clearInterval(reconnectProgressTimer);
+      reconnectProgressTimer = undefined;
+    };
+    const updateReconnectProgress = (persist: boolean) => {
+      if (!reconnectStatusMessageId || reconnectStartedAt <= 0) return;
+      const content = providerRetryProgressLabel(
+        lastReconnectAttempt,
+        maxReconnectAttempts,
+        Date.now() - reconnectStartedAt,
+        locale,
+      );
+      projected = projected.map((item) => item.id === reconnectStatusMessageId
+        ? { ...item, content }
+        : item);
+      commitThread(projectedThread(projected), persist);
+    };
     try {
       const outcome = await harnessRun({
         operationId,
@@ -2002,7 +2170,15 @@ function App() {
           const retryAttempt = payload.retryAttempt ?? 1;
           const maxRetryAttempts = payload.maxRetryAttempts ?? 5;
           lastReconnectAttempt = retryAttempt;
-          const content = `${tr("正在重连", "Reconnecting")} ${retryAttempt}/${maxRetryAttempts}`;
+          maxReconnectAttempts = maxRetryAttempts;
+          reconnectStartedAt = Date.now();
+          stopReconnectProgress();
+          const content = providerRetryProgressLabel(
+            retryAttempt,
+            maxRetryAttempts,
+            0,
+            locale,
+          );
           projected = collapseReconnectStatusMessages(projected);
           reconnectStatusMessageId ??= latestReconnectStatusId(projected);
           if (reconnectStatusMessageId) {
@@ -2019,9 +2195,17 @@ function App() {
             projected = [...projected, reconnectStatus];
           }
           commitThread(projectedThread(projected));
+          reconnectProgressTimer = window.setInterval(() => {
+            if (operationIdsRef.current.get(thread.id) !== operationId) {
+              stopReconnectProgress();
+              return;
+            }
+            updateReconnectProgress(false);
+          }, 1_000);
         } else if (event.kind === "provider_reconnected") {
+          stopReconnectProgress();
           const payload = event.payload as { retryAttempts?: number };
-          const content = `${tr("重连", "Reconnect")} ${payload.retryAttempts ?? lastReconnectAttempt}/5 ${tr("已恢复，继续后面的对话", "succeeded; continuing the conversation")}`;
+          const content = `${tr("重连", "Reconnect")} ${payload.retryAttempts ?? lastReconnectAttempt}/${maxReconnectAttempts} ${tr("已恢复，继续后面的对话", "succeeded; continuing the conversation")}`;
           if (reconnectStatusMessageId) {
             projected = projected.map((item) => item.id === reconnectStatusMessageId
               ? { ...item, content, status: "reconnected" as const }
@@ -2167,6 +2351,8 @@ function App() {
           }),
         ], Date.now())));
       finishThreadRun(thread.id, operationId, "failed");
+    } finally {
+      stopReconnectProgress();
     }
   };
 
@@ -3755,6 +3941,13 @@ function App() {
 
   const sidebarSlot = (
       <aside className="sidebar">
+        <div
+          className="sidebar-resize-handle"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label={tr("调整左侧栏宽度", "Resize navigation sidebar")}
+          onPointerDown={startSidebarResize}
+        />
         <div className="sidebar-header">
           <button className="brand" type="button" title={tr("访问 LevelUpAPI 官网", "Visit LevelUpAPI")} onClick={() => void openLevelUpWebsite()}>
             <span className="brand-mark"><img src="/logo.png" alt="" /></span>
@@ -4229,6 +4422,36 @@ function App() {
       </main>
   ) : null;
 
+  function startSidebarResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (window.matchMedia("(max-width: 820px)").matches) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = event.currentTarget.parentElement?.getBoundingClientRect().width
+      ?? sidebarWidth
+      ?? 244;
+    const inspectorOccupancy = window.matchMedia("(min-width: 1181px)").matches
+      && rightPanelOpen
+      && workspaceView === "chat"
+      ? inspectorWidth
+      : 0;
+    const mainMinWidth = window.matchMedia("(max-width: 1180px)").matches ? 500 : 520;
+    const maxWidth = Math.min(480, Math.max(180, window.innerWidth - mainMinWidth - inspectorOccupancy));
+    const onMove = (moveEvent: PointerEvent) => {
+      const nextWidth = Math.min(maxWidth, Math.max(180, startWidth + moveEvent.clientX - startX));
+      setSidebarWidth(nextWidth);
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.style.removeProperty("cursor");
+      document.body.style.removeProperty("user-select");
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp, { once: true });
+  }
+
   const startInspectorResize = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (window.matchMedia("(max-width: 680px)").matches) return;
     event.preventDefault();
@@ -4525,6 +4748,7 @@ function App() {
       actions={layoutActions}
       shellClassName={rightPanelOpen && workspaceView === "chat" ? undefined : "details-collapsed"}
       shellStyle={{
+        "--sidebar-width": sidebarWidth == null ? undefined : `${sidebarWidth}px`,
         "--inspector-width": `${inspectorWidth}px`,
         "--diff-font-family": diffFontStack(diffViewSettings.fontFamily),
         "--diff-font-size": `${diffViewSettings.fontSize}px`,
@@ -5760,6 +5984,27 @@ function protocolPlatformLabel(platform: ProtocolPlatform) {
   return "Grok";
 }
 
+const DEFAULT_THEME_GENERATION_PREFERENCES: ThemeGenerationPreferences = {
+  appearance: "auto",
+  style: "auto",
+  density: "comfortable",
+  contrast: "balanced",
+  corners: "balanced",
+  accentColor: "",
+  surfaceStyle: "glass",
+  controlStyle: "soft",
+  messageStyle: "card",
+  sidebarStyle: "solid",
+  composerStyle: "panel",
+  decoration: "balanced",
+  backgroundMode: "css",
+  backgroundArtStyle: "auto",
+  backgroundFit: "cover",
+  backgroundFocus: "center",
+  backgroundReadability: "balanced",
+  backgroundBrief: "",
+};
+
 function ThemeDialog({
   themes,
   activeThemeId,
@@ -5781,7 +6026,7 @@ function ThemeDialog({
   onInstallPath: (sourcePath: string) => Promise<unknown>;
   onInstallFile: (file: File, companion?: File) => Promise<unknown>;
   onInstallText: (text: string) => Promise<unknown>;
-  onGenerate: (brief: string) => Promise<void>;
+  onGenerate: (request: ThemeGenerationRequest) => Promise<void>;
   onUninstall: (themeId: string) => Promise<void>;
   onClose: () => void;
 }) {
@@ -5789,7 +6034,23 @@ function ThemeDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [brief, setBrief] = useState("");
+  const [preferences, setPreferences] = useState<ThemeGenerationPreferences>(DEFAULT_THEME_GENERATION_PREFERENCES);
+  const [references, setReferences] = useState<ImageAttachment[]>([]);
   const [domDropActive, setDomDropActive] = useState(false);
+  const [referenceDropActive, setReferenceDropActive] = useState(false);
+  const referencesRef = useRef<ImageAttachment[]>([]);
+  const generationSubmittedRef = useRef(false);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (!generationSubmittedRef.current) {
+        for (const attachment of referencesRef.current) void deleteImageAttachment(attachment.id).catch(() => undefined);
+      }
+    };
+  }, []);
 
   const act = async (action: () => Promise<unknown>) => {
     setBusy(true);
@@ -5800,6 +6061,72 @@ function ThemeDialog({
       setError(errorText(reason));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const updatePreference = <Key extends keyof ThemeGenerationPreferences,>(
+    key: Key,
+    value: ThemeGenerationPreferences[Key],
+  ) => {
+    setPreferences((current) => ({ ...current, [key]: value }));
+  };
+
+  const appendReferences = async (selected: ImageAttachment[]) => {
+    if (!mountedRef.current) {
+      await Promise.all(selected.map((attachment) => deleteImageAttachment(attachment.id).catch(() => false)));
+      return;
+    }
+    const known = new Set(referencesRef.current.map((attachment) => attachment.id));
+    const fresh: ImageAttachment[] = [];
+    const rejected: ImageAttachment[] = [];
+    for (const attachment of selected) {
+      if (known.has(attachment.id)) continue;
+      known.add(attachment.id);
+      if (attachment.kind === "image") fresh.push(attachment);
+      else rejected.push(attachment);
+    }
+    const capacity = Math.max(0, 6 - referencesRef.current.length);
+    const added = fresh.slice(0, capacity);
+    rejected.push(...fresh.slice(capacity));
+    if (added.length > 0) {
+      const next = [...referencesRef.current, ...added];
+      referencesRef.current = next;
+      setReferences(next);
+    }
+    if (rejected.length > 0) {
+      await Promise.all(rejected.map((attachment) => deleteImageAttachment(attachment.id).catch(() => false)));
+      if (fresh.length > capacity) setError(tr("最多添加 6 张参考图", "You can add up to 6 reference images"));
+    }
+  };
+
+  const addReferences = async () => {
+    await appendReferences(await selectImageReferences());
+  };
+
+  const addReferenceFiles = async (files: File[]) => {
+    const images = files.filter(isThemeReferenceImageFile).slice(0, 8);
+    if (images.length === 0) return;
+    await appendReferences(await importClipboardAttachments(images));
+  };
+
+  const removeReference = async (attachment: ImageAttachment) => {
+    const next = referencesRef.current.filter((item) => item.id !== attachment.id);
+    referencesRef.current = next;
+    setReferences(next);
+    await deleteImageAttachment(attachment.id).catch(() => undefined);
+  };
+
+  const submitGeneration = async () => {
+    generationSubmittedRef.current = true;
+    try {
+      await onGenerate({
+        brief: brief.trim(),
+        references: referencesRef.current,
+        ...preferences,
+      });
+    } catch (reason) {
+      generationSubmittedRef.current = false;
+      throw reason;
     }
   };
 
@@ -5823,6 +6150,12 @@ function ThemeDialog({
       importFile(file, files);
       return;
     }
+    const images = files.filter(isThemeReferenceImageFile);
+    if (images.length > 0) {
+      event.preventDefault();
+      void act(() => addReferenceFiles(images));
+      return;
+    }
     const text = event.clipboardData.getData("text/plain").trim();
     if (isThemePath(text) && (text.includes("\\") || text.includes("/"))) {
       event.preventDefault();
@@ -5842,7 +6175,17 @@ function ThemeDialog({
     const file = files.find((item) => isThemeFileName(item.name))
       ?? files.find((item) => (item.type === "application/json" || isJsonFileName(item.name)) && !isThemeLayoutFileName(item.name));
     if (file) importFile(file, files);
-    else if (event.dataTransfer.files.length > 0) setError(tr("请拖入 .levelup-theme 文件", "Drop a .levelup-theme file"));
+    else if (files.some(isThemeReferenceImageFile)) void act(() => addReferenceFiles(files));
+    else if (event.dataTransfer.files.length > 0) setError(tr("请拖入 .levelup-theme 文件或图片", "Drop a .levelup-theme file or image"));
+  };
+
+  const handleReferenceDrop = (event: ReactDragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setReferenceDropActive(false);
+    const images = Array.from(event.dataTransfer.files).filter(isThemeReferenceImageFile);
+    if (images.length > 0) void act(() => addReferenceFiles(images));
+    else if (event.dataTransfer.files.length > 0) setError(tr("参考素材仅支持 PNG、JPG、WebP 或 GIF 图片", "References support PNG, JPG, WebP, or GIF images"));
   };
 
   return (
@@ -5853,35 +6196,6 @@ function ThemeDialog({
           <IconButton label={tr("关闭", "Close")} onClick={onClose}><X size={18} /></IconButton>
         </div>
         <div className="themes-body">
-          <div
-            className={`theme-import-zone${dropActive || domDropActive ? " active" : ""}`}
-            onDragEnter={(event) => {
-              event.preventDefault();
-              setDomDropActive(true);
-            }}
-            onDragOver={(event) => event.preventDefault()}
-            onDragLeave={(event) => {
-              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDomDropActive(false);
-            }}
-            onDrop={handleDrop}
-          >
-            <span><FileInput size={19} /></span>
-            <div><strong>{tr("导入主题包", "Import a theme package")}</strong><small>{tr("拖入 .levelup-theme 文件，或在此处按 Ctrl+V 粘贴", "Drop a .levelup-theme file, or press Ctrl+V here")}</small></div>
-          </div>
-          <div className="theme-generation-controls">
-            <label className="theme-generation-brief">
-              <span>{tr("生成描述", "Generation brief")} <small>{tr("可选", "Optional")}</small></span>
-              <input
-                value={brief}
-                maxLength={2_000}
-                onChange={(event) => setBrief(event.target.value)}
-                placeholder={tr("例如：深色霓虹、低干扰、适合长时间编码", "For example: dark neon, calm, optimized for long coding sessions")}
-              />
-            </label>
-            <button className="secondary-button theme-generate-button" disabled={busy || !isDesktop()} onClick={() => void act(() => onGenerate(brief.trim()))}>
-              <Sparkles size={15} /> {tr("生成主题", "Generate theme")}
-            </button>
-          </div>
           <div className={`theme-card default-theme-card${activeThemeId === "default" ? " active" : ""}`}>
             <span className="theme-swatch" aria-hidden="true"><i /><i /><i /></span>
             <span className="theme-copy"><strong>{tr("LevelUpAgent 默认主题", "LevelUpAgent default")}</strong><small>{tr("内置暖色视觉系统", "Built-in warm visual system")}</small></span>
@@ -5904,6 +6218,96 @@ function ThemeDialog({
             </div>
           ))}
           {themes.length === 0 && <p className="theme-empty">{tr("尚未安装第三方主题。请选择一个 .levelup-theme 文件。", "No third-party themes are installed. Select a .levelup-theme file to begin.")}</p>}
+          <div
+            className={`theme-import-zone${dropActive || domDropActive ? " active" : ""}`}
+            onDragEnter={(event) => {
+              event.preventDefault();
+              setDomDropActive(true);
+            }}
+            onDragOver={(event) => event.preventDefault()}
+            onDragLeave={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDomDropActive(false);
+            }}
+            onDrop={handleDrop}
+          >
+            <span><FileInput size={19} /></span>
+            <div><strong>{tr("导入主题包", "Import a theme package")}</strong><small>{tr("拖入 .levelup-theme 文件，或在此处按 Ctrl+V 粘贴", "Drop a .levelup-theme file, or press Ctrl+V here")}</small></div>
+          </div>
+          <section className="theme-generator-card">
+            <header className="theme-generator-heading">
+              <span><Sparkles size={18} /></span>
+              <div><strong>{tr("AI 生成主题", "AI theme generator")}</strong><small>{tr("保持标准功能布局，深度定制侧栏、消息、输入区、按钮、菜单、面板和会话背景", "Keep the standard functional layout while deeply customizing the sidebar, messages, composer, buttons, menus, panels, and conversation background")}</small></div>
+            </header>
+            <label className="theme-generation-brief">
+              <span>{tr("主题设定", "Theme brief")} <small>{tr("可选", "Optional")}</small></span>
+              <textarea
+                value={brief}
+                maxLength={2_000}
+                rows={2}
+                onChange={(event) => setBrief(event.target.value)}
+                placeholder={tr("例如：深色霓虹、低干扰、适合长时间编码；侧栏更沉稳，强调色只用于关键操作", "For example: dark neon and calm for long coding sessions; subdued sidebar, accent color only for key actions")}
+              />
+            </label>
+            <div className="theme-generation-options">
+              <label><span>{tr("明暗模式", "Appearance")}</span><select value={preferences.appearance} onChange={(event) => updatePreference("appearance", event.target.value as ThemeGenerationPreferences["appearance"])}><option value="auto">{tr("自动", "Automatic")}</option><option value="light">{tr("浅色", "Light")}</option><option value="dark">{tr("深色", "Dark")}</option></select></label>
+              <label><span>{tr("视觉风格", "Visual style")}</span><select value={preferences.style} onChange={(event) => updatePreference("style", event.target.value as ThemeGenerationPreferences["style"])}><option value="auto">{tr("自动", "Automatic")}</option><option value="minimal">{tr("极简", "Minimal")}</option><option value="glass">{tr("玻璃拟态", "Glass")}</option><option value="retro">{tr("复古", "Retro")}</option><option value="futuristic">{tr("未来科技", "Futuristic")}</option><option value="editorial">{tr("杂志编辑", "Editorial")}</option><option value="playful">{tr("活泼", "Playful")}</option></select></label>
+              <label><span>{tr("界面密度", "Density")}</span><select value={preferences.density} onChange={(event) => updatePreference("density", event.target.value as ThemeGenerationPreferences["density"])}><option value="compact">{tr("紧凑", "Compact")}</option><option value="comfortable">{tr("舒适", "Comfortable")}</option><option value="spacious">{tr("宽松", "Spacious")}</option></select></label>
+              <label><span>{tr("对比度", "Contrast")}</span><select value={preferences.contrast} onChange={(event) => updatePreference("contrast", event.target.value as ThemeGenerationPreferences["contrast"])}><option value="soft">{tr("柔和", "Soft")}</option><option value="balanced">{tr("均衡", "Balanced")}</option><option value="high">{tr("高对比", "High contrast")}</option></select></label>
+              <label><span>{tr("圆角倾向", "Corners")}</span><select value={preferences.corners} onChange={(event) => updatePreference("corners", event.target.value as ThemeGenerationPreferences["corners"])}><option value="sharp">{tr("利落", "Sharp")}</option><option value="balanced">{tr("适中", "Balanced")}</option><option value="rounded">{tr("圆润", "Rounded")}</option></select></label>
+              <div className="theme-generation-accent">
+                <span>{tr("主色", "Accent color")}</span>
+                <div>
+                  <label><input type="checkbox" checked={Boolean(preferences.accentColor)} onChange={(event) => updatePreference("accentColor", event.target.checked ? "#F43F5E" : "")} /><span>{tr("指定", "Custom")}</span></label>
+                  <input type="color" aria-label={tr("选择主题主色", "Choose theme accent color")} disabled={!preferences.accentColor} value={preferences.accentColor || "#F43F5E"} onChange={(event) => updatePreference("accentColor", event.target.value.toUpperCase())} />
+                  <code>{preferences.accentColor || tr("自动", "Auto")}</code>
+                </div>
+              </div>
+              <label><span>{tr("表面风格", "Surface style")}</span><select value={preferences.surfaceStyle} onChange={(event) => updatePreference("surfaceStyle", event.target.value as ThemeGenerationPreferences["surfaceStyle"])}><option value="flat">{tr("平面", "Flat")}</option><option value="glass">{tr("玻璃", "Glass")}</option><option value="outlined">{tr("描边", "Outlined")}</option><option value="floating">{tr("悬浮", "Floating")}</option></select></label>
+              <label><span>{tr("控件风格", "Control style")}</span><select value={preferences.controlStyle} onChange={(event) => updatePreference("controlStyle", event.target.value as ThemeGenerationPreferences["controlStyle"])}><option value="solid">{tr("实心", "Solid")}</option><option value="soft">{tr("柔和", "Soft")}</option><option value="outline">{tr("描边", "Outline")}</option><option value="glow">{tr("发光", "Glow")}</option></select></label>
+              <label><span>{tr("消息样式", "Message style")}</span><select value={preferences.messageStyle} onChange={(event) => updatePreference("messageStyle", event.target.value as ThemeGenerationPreferences["messageStyle"])}><option value="plain">{tr("纯文本", "Plain")}</option><option value="bubble">{tr("气泡", "Bubbles")}</option><option value="card">{tr("卡片", "Cards")}</option></select></label>
+              <label><span>{tr("侧栏样式", "Sidebar style")}</span><select value={preferences.sidebarStyle} onChange={(event) => updatePreference("sidebarStyle", event.target.value as ThemeGenerationPreferences["sidebarStyle"])}><option value="solid">{tr("纯色", "Solid")}</option><option value="glass">{tr("玻璃", "Glass")}</option><option value="gradient">{tr("渐变", "Gradient")}</option></select></label>
+              <label><span>{tr("输入区样式", "Composer style")}</span><select value={preferences.composerStyle} onChange={(event) => updatePreference("composerStyle", event.target.value as ThemeGenerationPreferences["composerStyle"])}><option value="minimal">{tr("简洁", "Minimal")}</option><option value="panel">{tr("面板", "Panel")}</option><option value="floating">{tr("悬浮", "Floating")}</option></select></label>
+              <label><span>{tr("装饰程度", "Decoration")}</span><select value={preferences.decoration} onChange={(event) => updatePreference("decoration", event.target.value as ThemeGenerationPreferences["decoration"])}><option value="restrained">{tr("克制", "Restrained")}</option><option value="balanced">{tr("均衡", "Balanced")}</option><option value="rich">{tr("丰富", "Rich")}</option></select></label>
+              <label><span>{tr("会话背景", "Conversation background")}</span><select value={preferences.backgroundMode} onChange={(event) => updatePreference("backgroundMode", event.target.value as ThemeGenerationPreferences["backgroundMode"])}><option value="css">{tr("CSS 氛围（无额外生成）", "CSS atmosphere (no extra generation)")}</option><option value="ai">{tr("AI 生成一张成品图", "Generate one AI artwork")}</option></select></label>
+              <label><span>{tr("背景艺术", "Background art")}</span><select value={preferences.backgroundArtStyle} onChange={(event) => updatePreference("backgroundArtStyle", event.target.value as ThemeGenerationPreferences["backgroundArtStyle"])}><option value="auto">{tr("自动", "Automatic")}</option><option value="illustration">{tr("插画", "Illustration")}</option><option value="cinematic">{tr("电影感", "Cinematic")}</option><option value="abstract">{tr("抽象", "Abstract")}</option><option value="pattern">{tr("图案纹理", "Pattern")}</option></select></label>
+              <label><span>{tr("背景适配", "Background fit")}</span><select value={preferences.backgroundFit} onChange={(event) => updatePreference("backgroundFit", event.target.value as ThemeGenerationPreferences["backgroundFit"])}><option value="cover">cover</option><option value="contain">contain</option><option value="tile">{tr("平铺", "Tile")}</option></select></label>
+              <label><span>{tr("画面焦点", "Visual focus")}</span><select value={preferences.backgroundFocus} onChange={(event) => updatePreference("backgroundFocus", event.target.value as ThemeGenerationPreferences["backgroundFocus"])}><option value="left">{tr("左侧", "Left")}</option><option value="center">{tr("中央", "Center")}</option><option value="right">{tr("右侧", "Right")}</option></select></label>
+              <label><span>{tr("可读性遮罩", "Readability mask")}</span><select value={preferences.backgroundReadability} onChange={(event) => updatePreference("backgroundReadability", event.target.value as ThemeGenerationPreferences["backgroundReadability"])}><option value="soft">{tr("柔和", "Soft")}</option><option value="balanced">{tr("均衡", "Balanced")}</option><option value="strong">{tr("强", "Strong")}</option></select></label>
+            </div>
+            <label className={`theme-generation-brief theme-generation-background-brief${preferences.backgroundMode === "ai" ? " ai" : ""}`}>
+              <span>{tr("背景画面描述", "Background art direction")} <small>{preferences.backgroundMode === "ai" ? tr("会额外生成 1 张图片", "Generates exactly 1 additional image") : tr("用于 CSS 渐变、纹理和光影", "Used for CSS gradients, texture, and lighting")}</small></span>
+              <textarea
+                value={preferences.backgroundBrief}
+                maxLength={1_000}
+                rows={2}
+                onChange={(event) => updatePreference("backgroundBrief", event.target.value)}
+                placeholder={tr("例如：夕阳下的忍者村远景，人物位于右侧，中央留出安静区域承载消息；暖金与深黑配色", "For example: a sunset village scene, subject on the right, quiet center for messages, warm gold and near-black palette")}
+              />
+            </label>
+            <div
+              className={`theme-generation-references${referenceDropActive ? " active" : ""}`}
+              onDragEnter={(event) => { event.preventDefault(); setReferenceDropActive(true); }}
+              onDragOver={(event) => event.preventDefault()}
+              onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setReferenceDropActive(false); }}
+              onDrop={handleReferenceDrop}
+            >
+              <div className="theme-reference-heading">
+                <span><strong>{tr("参考图", "Reference images")}</strong><small>{tr("最多 6 张；影响控件视觉，选择 AI 背景时也用于画面生成", "Up to 6; guide control styling and, when selected, AI background generation")}</small></span>
+                <button className="secondary-button" type="button" disabled={busy || references.length >= 6 || !isDesktop()} onClick={() => void act(addReferences)}><ImagePlus size={14} />{tr("添加参考图", "Add references")}</button>
+              </div>
+              {references.length > 0 ? (
+                <div className="theme-reference-list">{references.map((attachment) => <AttachmentChip attachment={attachment} onRemove={(item) => { void removeReference(item); }} key={attachment.id} />)}</div>
+              ) : <p><ImagePlus size={16} />{tr("从喜欢的界面中提取配色、层次、材质和视觉节奏", "Borrow palette, hierarchy, material, and rhythm from interfaces you like")}</p>}
+            </div>
+            <div className="theme-generation-actions">
+              <small>{preferences.backgroundMode === "ai"
+                ? tr("先由宿主只生成 1 张背景，再创建独立临时会话；Harness 不会获得媒体工具", "The host generates exactly 1 background first, then creates a dedicated temporary conversation; Harness receives no media tools")
+                : tr("将在临时工作区创建独立会话；参考图会作为真实多模态附件发送", "A dedicated temporary-workspace conversation will be created; references are sent as real multimodal attachments")}</small>
+              <button className="primary-button theme-generate-button" disabled={busy || !isDesktop()} onClick={() => void act(submitGeneration)}>
+                {busy ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />} {tr("生成并自动导入", "Generate and auto-import")}
+              </button>
+            </div>
+          </section>
           {error && <div className="dialog-error">{error}</div>}
         </div>
         <div className="dialog-footer themes-footer">
@@ -7384,10 +7788,6 @@ function assistantMessageIdentity(profile: ProviderProfile) {
   } satisfies Pick<AgentMessage, "modelName" | "providerBrand">;
 }
 
-function normalizeSkillIdentity(value: string) {
-  return value.toLocaleLowerCase().replace(/[^a-z0-9]+/g, "");
-}
-
 function isThemePath(path: string) {
   return path.trim().toLocaleLowerCase().endsWith(".levelup-theme");
 }
@@ -7398,6 +7798,10 @@ function isThemeFileName(name: string) {
 
 function isJsonFileName(name: string) {
   return name.trim().toLocaleLowerCase().endsWith(".json");
+}
+
+function isThemeReferenceImageFile(file: File) {
+  return file.type.startsWith("image/") || /\.(?:png|jpe?g|webp|gif)$/i.test(file.name.trim());
 }
 
 function isThemeLayoutFileName(name: string) {
@@ -7439,35 +7843,6 @@ function isThemePackageText(text: string) {
   } catch {
     return false;
   }
-}
-
-function workspacePath(workspace: string, relativePath: string) {
-  const base = workspace.replace(/\\/g, "/").replace(/\/+$/, "");
-  return base + "/" + relativePath.replace(/\\/g, "/").replace(/^\/+/, "");
-}
-
-function themeGenerationPrompt(relativePath: string, brief: string, locale: AppLocale) {
-  const request = brief.trim().slice(0, 2_000) || (locale === "zh-CN"
-    ? "请基于当前 LevelUpAgent 界面生成一套精致、易读、适合长时间工作的标准视觉主题。"
-    : "Create a polished, readable standard visual theme for the current LevelUpAgent interface, optimized for long work sessions.");
-  if (locale === "zh-CN") {
-    return [
-      "请在当前工作区完成一次“生成主题”任务。",
-      "用户的视觉要求：" + request,
-      "如果当前工作区包含 docs/THEMES.md、docs/THEME_DEVELOPMENT.md、docs/THEME_AGENT_WORKFLOW.md，请先阅读它们；如果可用，请读取 customize-levelup-layout Skill。只修改当前工作区内为本任务生成的文件，不要修改 LevelUpAgent 源码、Provider 设置、API Key、会话数据库或其他无关文件。",
-      "必须实际使用 write_file 写出一个 UTF-8 JSON 主题包到：" + relativePath,
-      "默认使用 schemaVersion 1 和标准布局；只有确实需要声明式布局时才使用 schemaVersion 2，并在同一目录创建 layoutFile 指向的 layout.json。主题必须满足现有校验器：CSS 全部使用 html[data-levelup-theme=\"主题ID\"] 作用域，不得包含 JavaScript、@import、远程资源或未内嵌的图片；素材必须使用本地 data URL；不能引入可执行代码、凭据或远程网络依赖。",
-      "完成前检查 JSON、主题 ID、作用域和文件路径。不要只把代码放在回复中，必须先写入目标文件；最后简要报告实际创建的文件和验证结果。应用会在本轮会话结束后自动导入这个包。",
-    ].join("\n\n");
-  }
-  return [
-    "Complete a “generate theme” task in the current workspace.",
-    "Visual brief: " + request,
-    "If docs/THEMES.md, docs/THEME_DEVELOPMENT.md, and docs/THEME_AGENT_WORKFLOW.md exist in the current workspace, read them first; read the customize-levelup-layout Skill when it is available. Only create files needed for this task in the current workspace. Do not modify LevelUpAgent source code, provider settings, API keys, conversation databases, or unrelated files.",
-    "You must use write_file to create a UTF-8 JSON theme package at: " + relativePath,
-    "Prefer schemaVersion 1 with the standard layout. Use schemaVersion 2 only when a declarative layout is genuinely needed, and create its layoutFile companion beside the package. Follow the existing validator: scope every CSS rule under html[data-levelup-theme=\"THEME_ID\"], and do not use JavaScript, @import, remote resources, or unresolved image URLs. Embed local assets as data URLs; do not add executable code, credentials, or network dependencies.",
-    "Validate the JSON, theme ID, scope, and paths before finishing. Do not only paste code in the response: write the target file first, then briefly report the files created and validation results. The app will import the package automatically when this conversation turn finishes.",
-  ].join("\n\n");
 }
 
 function buildPetActivities(

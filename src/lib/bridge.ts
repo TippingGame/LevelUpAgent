@@ -65,6 +65,8 @@ import type {
   ToolExecutionResponse,
   ThemeManifest,
   ThemePackage,
+  ThemeGenerationBackgroundInput,
+  ThemeGenerationTarget,
   ResolvedLayout,
   WritingProjectRecord,
   PermissionLevel,
@@ -257,6 +259,19 @@ export async function selectAndInstallTheme(): Promise<ThemeManifest | null> {
 export async function installTheme(sourcePath: string): Promise<ThemeManifest> {
   if (!isDesktop()) throw new Error("Theme installation is available only in the desktop app");
   return invoke<ThemeManifest>("install_theme", { sourcePath });
+}
+
+export async function prepareThemeGeneration(
+  workspace: string,
+  background?: ThemeGenerationBackgroundInput,
+): Promise<ThemeGenerationTarget> {
+  if (!isDesktop()) throw new Error("Theme generation is available only in the desktop app");
+  return invoke<ThemeGenerationTarget>("prepare_theme_generation", { workspace, background: background ?? null });
+}
+
+export async function loadThemeGenerationGuidance(): Promise<string> {
+  if (!isDesktop()) return "";
+  return invoke<string>("load_theme_generation_guidance");
 }
 
 export async function installThemeFile(file: File, companion?: File): Promise<ThemeManifest> {
