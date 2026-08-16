@@ -191,6 +191,8 @@ pub struct HarnessRunRequest {
     pub hatch: bool,
     #[serde(default)]
     pub hatch_skill_loaded: bool,
+    #[serde(default)]
+    pub custom_instructions: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

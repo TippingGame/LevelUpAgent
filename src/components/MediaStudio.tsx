@@ -54,6 +54,12 @@ import {
   selectVideoReference,
 } from "../lib/bridge";
 import { tr } from "../lib/i18n";
+import {
+  armorModeMediaInstructions,
+  armorModeMediaPrompt,
+  type ArmorModeLevel,
+  type ArmorSkillState,
+} from "../lib/armorMode";
 import { copyText } from "../lib/clipboard";
 import { mediaModelSupportsExplicitImageMask } from "../lib/mediaCapabilities";
 import type {
@@ -105,6 +111,9 @@ const MEDIA_HISTORY_PAGE_SIZE = 24;
 interface MediaStudioProps {
   active: boolean;
   locale: string;
+  armorMode: boolean;
+  armorModeLevel: ArmorModeLevel;
+  armorModeSkills: ArmorSkillState;
   mediaCatalogRevision: number;
   dropActive: boolean;
   referenceDrop: { id: string; paths: string[] } | null;
@@ -150,7 +159,7 @@ const STUDIO_IMAGE_MODES: Array<{ value: StudioImageMode; label: string; labelEn
   { value: "inpaint", label: "局部重绘", labelEn: "Inpaint" },
 ];
 
-export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, referenceDrop, onReferenceDropHandled, onConfigureConnection, onPendingCountChange, onWriting, onConstellation }: MediaStudioProps) {
+export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorModeSkills, mediaCatalogRevision, dropActive, referenceDrop, onReferenceDropHandled, onConfigureConnection, onPendingCountChange, onWriting, onConstellation }: MediaStudioProps) {
   const rootRef = useRef<HTMLElement>(null);
   const [kind, setKind] = useState<MediaKind>("image");
   const [catalog, setCatalog] = useState<Awaited<ReturnType<typeof getMediaCatalog>> | null>(null);
@@ -719,7 +728,21 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
 
     const results = await Promise.allSettled(tasks.map(async (task) => {
       try {
-        const result = await generateMedia({ ...base, prompt: task.prompt });
+        const result = await generateMedia({
+          ...base,
+          prompt: armorModeMediaPrompt(armorMode, armorModeLevel, kind, task.prompt, {
+            model: selected.id,
+            protocol: selected.protocol,
+            skills: armorModeSkills,
+            surface: kind,
+          }),
+          instructions: armorModeMediaInstructions(armorMode, armorModeLevel, kind, base.instructions, {
+            model: selected.id,
+            protocol: selected.protocol,
+            skills: armorModeSkills,
+            surface: kind,
+          }),
+        });
         setAssets((current) => mergeAssets(current, result.assets));
         return result;
       } finally {
@@ -770,10 +793,13 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
     }
   };
 
+  const armorClassName = armorMode ? ` armor-mode armor-level-${armorModeLevel}` : "";
+
   return (
     <main
       ref={rootRef}
-      className={`media-studio${dropActive ? " file-drag-active" : ""}`}
+      className={`media-studio${dropActive ? " file-drag-active" : ""}${armorClassName}`}
+      data-armor-level={armorMode ? armorModeLevel : undefined}
       hidden={!active}
       onDragEnter={(event) => event.preventDefault()}
       onDragOver={(event) => event.preventDefault()}
@@ -1013,6 +1039,8 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
           setPreviewAsset(null);
           return editImageAsset(asset);
         }}
+        armorMode={armorMode}
+        armorModeLevel={armorModeLevel}
         onClose={() => setPreviewAsset(null)}
       />}
       {active && imageEditorOpen && imageEditSource && <ConstellationCanvasEditor
@@ -1170,6 +1198,8 @@ export function MediaImagePreview({
   previewAssets,
   onNavigate,
   onEdit,
+  armorMode = false,
+  armorModeLevel,
   onClose,
 }: {
   asset: MediaAsset;
@@ -1177,6 +1207,8 @@ export function MediaImagePreview({
   previewAssets: MediaAsset[];
   onNavigate: (asset: MediaAsset) => void;
   onEdit?: (asset: MediaAsset) => Promise<void> | void;
+  armorMode?: boolean;
+  armorModeLevel?: ArmorModeLevel;
   onClose: () => void;
 }) {
   const url = mediaAssetUrl(asset);
@@ -1425,8 +1457,10 @@ export function MediaImagePreview({
     minute: "2-digit",
   }).format(asset.createdAt);
 
+  const armorClassName = armorMode ? ` armor-mode armor-level-${armorModeLevel ?? "standard"}` : "";
+
   return createPortal(
-    <div className="media-image-lightbox" role="dialog" aria-modal="true" aria-labelledby="media-image-preview-title" onMouseDown={(event) => {
+    <div className={`media-image-lightbox${armorClassName}`} data-armor-level={armorMode ? armorModeLevel ?? "standard" : undefined} role="dialog" aria-modal="true" aria-labelledby="media-image-preview-title" onMouseDown={(event) => {
       if (event.target === event.currentTarget) onClose();
     }}>
       <section className="media-image-lightbox-dialog">

@@ -32,6 +32,9 @@
   --yellow-soft: #fef3c7;
   --danger-soft: #ffe4e6;
   --shadow: 0 24px 70px rgba(15, 23, 42, 0.13), 0 4px 16px rgba(15, 23, 42, 0.07);
+  --scrollbar-track: color-mix(in srgb, var(--surface) 82%, transparent);
+  --scrollbar-thumb: color-mix(in srgb, var(--accent) 34%, var(--line-strong));
+  --scrollbar-thumb-hover: color-mix(in srgb, var(--accent-hover) 54%, var(--line-strong));
   /* Typography scale: rem-based so WebView/OS text scaling remains effective. */
   --font-compact: .6875rem;
   --font-caption: .75rem;
@@ -46,7 +49,34 @@
   --font-mono: "Monaco Embedded", Monaco, "SFMono-Regular", "Cascadia Code", Consolas, monospace;
 }
 
-* { box-sizing: border-box; }
+* {
+  box-sizing: border-box;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+*::-webkit-scrollbar-thumb {
+  border: 2px solid var(--scrollbar-track);
+  border-radius: 999px;
+  background: var(--scrollbar-thumb);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+
+*::-webkit-scrollbar-corner {
+  background: var(--scrollbar-track);
+}
 
 html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 
@@ -88,6 +118,298 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .app-shell.details-collapsed {
   grid-template-columns: min(var(--sidebar-width, 244px), calc(100vw - 520px)) minmax(520px, 1fr) 0;
 }
+
+.app-shell.armor-mode {
+  --canvas: #020617;
+  --surface: #07111f;
+  --surface-raised: #0b1628;
+  --panel: rgba(2, 6, 23, .84);
+  --line: rgba(34, 211, 238, .12);
+  --line-strong: rgba(34, 211, 238, .24);
+  --text: #e0f2fe;
+  --muted: #8bd3e6;
+  --faint: #50879b;
+  --accent: #22d3ee;
+  --accent-hover: #a3e635;
+  background-color: #020617;
+  background-image:
+    radial-gradient(circle at 9% 13%, rgba(34,211,238,.15), transparent 24%),
+    radial-gradient(circle at 88% 18%, rgba(163,230,53,.11), transparent 26%),
+    linear-gradient(45deg, rgba(34,211,238,.055) 25%, transparent 25%),
+    linear-gradient(-45deg, rgba(163,230,53,.045) 25%, transparent 25%);
+  background-size: auto, auto, 22px 22px, 22px 22px;
+}
+.app-shell.armor-mode .sidebar,
+.app-shell.armor-mode .inspector {
+  border-color: rgba(34,211,238,.16);
+  background: rgba(2,6,23,.8);
+  box-shadow: inset -1px 0 rgba(163,230,53,.05), 0 0 34px rgba(34,211,238,.06);
+}
+.app-shell.armor-mode .brand {
+  color: #dff8ff;
+  text-shadow: 0 0 12px rgba(34,211,238,.18);
+}
+.app-shell.armor-mode .brand-copy strong {
+  color: #ecfeff;
+  letter-spacing: .02em;
+  text-shadow: 0 0 14px rgba(34,211,238,.32);
+}
+.app-shell.armor-mode .brand-copy small {
+  color: #86efac;
+  text-shadow: 0 0 10px rgba(163,230,53,.24);
+}
+.app-shell.armor-mode .brand-mark {
+  border-color: rgba(34,211,238,.28);
+  background: radial-gradient(circle at 35% 30%, rgba(34,211,238,.22), rgba(2,6,23,.9));
+  box-shadow: 0 0 0 1px rgba(163,230,53,.1), 0 0 18px rgba(34,211,238,.24), 0 10px 24px rgba(0,0,0,.24);
+}
+.app-shell.armor-mode .brand:hover,
+.app-shell.armor-mode .brand:hover .brand-copy strong,
+.app-shell.armor-mode .levelup-quick-link:hover { color: #a3e635; }
+.app-shell.armor-mode .project-group.active > .project-row,
+.app-shell.armor-mode .thread-row.active,
+.app-shell.armor-mode .open-project-button,
+.app-shell.armor-mode .sidebar-search,
+.app-shell.armor-mode .account-button { border-color: rgba(34,211,238,.16); background: rgba(15,23,42,.58); }
+.app-shell.armor-mode .new-task-button,
+.app-shell.armor-mode .send-button,
+.app-shell.armor-mode .primary-button {
+  background: linear-gradient(135deg, #0891b2, #65a30d);
+  color: #ecfeff;
+  box-shadow: 0 0 22px rgba(34,211,238,.2);
+}
+.app-shell.armor-mode .inspector-tabs { border-color: rgba(34,211,238,.15); background: rgba(2,6,23,.72); }
+.app-shell.armor-mode .inspector,
+.app-shell.armor-mode .inspector h1,
+.app-shell.armor-mode .inspector h2,
+.app-shell.armor-mode .inspector h3,
+.app-shell.armor-mode .inspector strong { color: #dff8ff; }
+.app-shell.armor-mode .inspector small,
+.app-shell.armor-mode .inspector span,
+.app-shell.armor-mode .detail-row small,
+.app-shell.armor-mode .permission-line span { color: #9bd7e7; }
+.app-shell.armor-mode .detail-row code,
+.app-shell.armor-mode .path-detail,
+.app-shell.armor-mode .change-status { color: #67e8f9; }
+.app-shell.armor-mode .permission-line,
+.app-shell.armor-mode .detail-row,
+.app-shell.armor-mode .goal-empty,
+.app-shell.armor-mode .clean-state { border-color: rgba(34,211,238,.18); background: rgba(15,23,42,.64); }
+
+.app-shell.armor-mode .account-button { color: #dff8ff; }
+.app-shell.armor-mode .account-button strong { color: #ecfeff; }
+.app-shell.armor-mode .account-button small { color: #8bd3e6; }
+.app-shell.armor-mode .account-button > svg { color: #67e8f9; }
+.app-shell.armor-mode .connection-dot { background: #fbbf24; box-shadow: 0 0 0 3px rgba(251,191,36,.13), 0 0 12px rgba(251,191,36,.28); }
+.app-shell.armor-mode .connection-dot.online { background: #a3e635; box-shadow: 0 0 0 3px rgba(163,230,53,.16), 0 0 14px rgba(163,230,53,.38); }
+.app-shell.armor-mode .dialog-backdrop { background: rgba(2,6,23,.66); backdrop-filter: blur(14px) saturate(145%); }
+.app-shell.armor-mode .dialog,
+.app-shell.armor-mode .connection-dialog,
+.app-shell.armor-mode .themes-dialog,
+.app-shell.armor-mode .pet-dialog,
+.app-shell.armor-mode .mcp-dialog,
+.app-shell.armor-mode .skills-dialog,
+.app-shell.armor-mode .instructions-dialog,
+.app-shell.armor-mode .request-logs-dialog,
+.app-shell.armor-mode .diff-dialog {
+  border-color: rgba(34,211,238,.24);
+  background: linear-gradient(180deg, rgba(2,6,23,.98), rgba(7,18,33,.98));
+  color: #dff8ff;
+  box-shadow: 0 30px 90px rgba(0,0,0,.42), 0 0 42px rgba(34,211,238,.12), inset 0 0 0 1px rgba(163,230,53,.035);
+}
+.app-shell.armor-mode .dialog-header,
+.app-shell.armor-mode .dialog-footer,
+.app-shell.armor-mode .instructions-footer,
+.app-shell.armor-mode .mcp-footer,
+.app-shell.armor-mode .diff-actions {
+  border-color: rgba(34,211,238,.16);
+  background: rgba(2,6,23,.92);
+  color: #dff8ff;
+}
+.app-shell.armor-mode .dialog-header strong,
+.app-shell.armor-mode .dialog-header h1,
+.app-shell.armor-mode .dialog strong { color: #ecfeff; }
+.app-shell.armor-mode .dialog-header span,
+.app-shell.armor-mode .dialog small,
+.app-shell.armor-mode .dialog p,
+.app-shell.armor-mode .field,
+.app-shell.armor-mode .settings-nav button { color: #9bd7e7; }
+.app-shell.armor-mode .field input,
+.app-shell.armor-mode .field textarea,
+.app-shell.armor-mode .field select,
+.app-shell.armor-mode .connection-picker select,
+.app-shell.armor-mode .prompt-sync select,
+.app-shell.armor-mode .request-log-toolbar select,
+.app-shell.armor-mode .config-writeback select,
+.app-shell.armor-mode .model-id-control .model-id-clear {
+  border-color: rgba(34,211,238,.2);
+  background: rgba(15,23,42,.82);
+  color: #e0f2fe;
+}
+.app-shell.armor-mode .field input:focus,
+.app-shell.armor-mode .field textarea:focus,
+.app-shell.armor-mode .field select:focus { border-color: rgba(163,230,53,.55); box-shadow: 0 0 0 3px rgba(34,211,238,.13); }
+.app-shell.armor-mode .settings-nav { border-bottom-color: rgba(34,211,238,.16); background: rgba(2,6,23,.5); }
+.app-shell.armor-mode .settings-nav button:hover,
+.app-shell.armor-mode .settings-nav button.active { background: rgba(34,211,238,.08); color: #a3e635; }
+.app-shell.armor-mode .levelup-connection-card,
+.app-shell.armor-mode .general-settings-section,
+.app-shell.armor-mode .diff-settings-card,
+.app-shell.armor-mode .failover-toggle,
+.app-shell.armor-mode .provider-health,
+.app-shell.armor-mode .config-writeback,
+.app-shell.armor-mode .prompt-sync,
+.app-shell.armor-mode .migration-row,
+.app-shell.armor-mode .theme-import-zone,
+.app-shell.armor-mode .theme-generator-card,
+.app-shell.armor-mode .theme-card,
+.app-shell.armor-mode .theme-generation-background-brief,
+.app-shell.armor-mode .theme-generation-references,
+.app-shell.armor-mode .theme-empty {
+  border-color: rgba(34,211,238,.18);
+  background: rgba(15,23,42,.62);
+  color: #dff8ff;
+  box-shadow: inset 0 0 0 1px rgba(163,230,53,.025);
+}
+.app-shell.armor-mode .levelup-connection-card:hover,
+.app-shell.armor-mode .theme-card.active,
+.app-shell.armor-mode .theme-import-zone.active,
+.app-shell.armor-mode .theme-generation-references.active { border-color: rgba(163,230,53,.36); box-shadow: 0 0 20px rgba(34,211,238,.1), inset 0 0 0 1px rgba(163,230,53,.08); }
+.app-shell.armor-mode .levelup-connection-logo,
+.app-shell.armor-mode .theme-import-zone > span,
+.app-shell.armor-mode .theme-generator-heading > span,
+.app-shell.armor-mode .theme-swatch,
+.app-shell.armor-mode .theme-package-icon { border-color: rgba(34,211,238,.18); background: rgba(8,47,73,.62); color: #67e8f9; }
+.app-shell.armor-mode .levelup-connection-copy small,
+.app-shell.armor-mode .general-settings-heading small,
+.app-shell.armor-mode .diff-settings-heading small,
+.app-shell.armor-mode .theme-copy small,
+.app-shell.armor-mode .theme-generator-heading small,
+.app-shell.armor-mode .theme-import-zone small,
+.app-shell.armor-mode .theme-generation-actions > small,
+.app-shell.armor-mode .theme-generation-options > label > span,
+.app-shell.armor-mode .theme-generation-accent > span,
+.app-shell.armor-mode .theme-generation-brief > span,
+.app-shell.armor-mode .theme-reference-heading small,
+.app-shell.armor-mode .provider-health p,
+.app-shell.armor-mode .config-writeback p,
+.app-shell.armor-mode .protocol-help,
+.app-shell.armor-mode .endpoint-preview { color: #8bd3e6; }
+.app-shell.armor-mode .general-settings-heading strong,
+.app-shell.armor-mode .diff-settings-heading strong,
+.app-shell.armor-mode .theme-copy strong,
+.app-shell.armor-mode .theme-generator-heading strong,
+.app-shell.armor-mode .theme-import-zone strong,
+.app-shell.armor-mode .theme-reference-heading strong,
+.app-shell.armor-mode .protocol-option-heading strong { color: #ecfeff; }
+.app-shell.armor-mode .theme-generation-brief textarea,
+.app-shell.armor-mode .theme-generation-options select,
+.app-shell.armor-mode .theme-generation-accent > div,
+.app-shell.armor-mode .theme-reference-list .attachment-chip { border-color: rgba(34,211,238,.18); background: rgba(2,6,23,.72); color: #e0f2fe; }
+.app-shell.armor-mode .theme-active-button,
+.app-shell.armor-mode .gateway-diagnostics .gateway-ok { background: rgba(163,230,53,.14); color: #bef264; }
+.app-shell.armor-mode .theme-remove-button { color: #9bd7e7; }
+.app-shell.armor-mode .theme-remove-button:hover { background: rgba(244,63,94,.14); color: #fda4af; }
+.app-shell.armor-mode .provider-health-metrics,
+.app-shell.armor-mode .request-log-metrics { border-color: rgba(34,211,238,.14); background: rgba(34,211,238,.14); }
+.app-shell.armor-mode .provider-health-metrics > span,
+.app-shell.armor-mode .request-log-metrics > span,
+.app-shell.armor-mode .gateway-diagnostics span { background: rgba(2,6,23,.7); color: #9bd7e7; }
+.app-shell.armor-mode .protocol-switch,
+.app-shell.armor-mode .protocol-options {
+  border-color: rgba(34,211,238,.18);
+  background: rgba(2,6,23,.74);
+  box-shadow: inset 0 0 0 1px rgba(163,230,53,.035), 0 0 18px rgba(34,211,238,.06);
+}
+.app-shell.armor-mode .protocol-switch button,
+.app-shell.armor-mode .protocol-options .protocol-option {
+  border-color: rgba(34,211,238,.13);
+  background: rgba(15,23,42,.58);
+  color: #9bd7e7;
+}
+.app-shell.armor-mode .protocol-options .protocol-option:hover,
+.app-shell.armor-mode .protocol-options .protocol-option.active {
+  border-color: rgba(163,230,53,.32);
+  background: linear-gradient(135deg, rgba(8,47,73,.82), rgba(6,78,59,.54));
+  color: #dff8ff;
+  box-shadow: 0 0 18px rgba(34,211,238,.1), inset 0 0 0 1px rgba(163,230,53,.07);
+}
+.app-shell.armor-mode .protocol-option-heading em {
+  background: linear-gradient(135deg, rgba(163,230,53,.18), rgba(34,211,238,.14));
+  color: #bef264;
+}
+.app-shell.armor-mode .protocol-platforms {
+  background: transparent;
+}
+.app-shell.armor-mode .protocol-options .protocol-option:hover,
+.app-shell.armor-mode .protocol-options .protocol-option.active { border-color: rgba(34,211,238,.2); background: rgba(34,211,238,.08); }
+.app-shell.armor-mode .platform-pill-openai { border-color: rgba(16,185,129,.28); background: rgba(16,185,129,.12); color: #34d399; }
+.app-shell.armor-mode .platform-pill-anthropic { border-color: rgba(249,115,22,.28); background: rgba(249,115,22,.12); color: #fb923c; }
+.app-shell.armor-mode .platform-pill-gemini { border-color: rgba(59,130,246,.28); background: rgba(59,130,246,.12); color: #60a5fa; }
+.app-shell.armor-mode .platform-pill-grok { border-color: rgba(161,161,170,.28); background: rgba(113,113,122,.16); color: #d4d4d8; }
+.app-shell.armor-mode .platform-pill-antigravity { border-color: rgba(139,92,246,.28); background: rgba(139,92,246,.12); color: #a78bfa; }
+.app-shell.armor-mode .config-preview > div { border-color: rgba(34,211,238,.16); background: rgba(2,6,23,.72); }
+.app-shell.armor-mode .config-preview > div > span { border-bottom-color: rgba(34,211,238,.14); background: rgba(8,47,73,.62); color: #bae6fd; }
+.app-shell.armor-mode .config-preview pre { background: rgba(2,6,23,.84); color: #dff8ff; }
+.app-shell.armor-mode .pet-dialog.dialog { background: rgba(2,6,23,.98); }
+.app-shell.armor-mode .pet-studio { background: radial-gradient(circle at 20% 12%, rgba(34,211,238,.12), transparent 32%), radial-gradient(circle at 82% 76%, rgba(163,230,53,.09), transparent 34%), #020617; color: #dff8ff; }
+.app-shell.armor-mode .pet-studio-header,
+.app-shell.armor-mode .pet-roster,
+.app-shell.armor-mode .pet-control-panel,
+.app-shell.armor-mode .pet-progress-band,
+.app-shell.armor-mode .pet-stage-toolbar { border-color: rgba(34,211,238,.16); background: rgba(2,6,23,.68); }
+.app-shell.armor-mode .pet-stage-section { background-color: rgba(2,6,23,.74); background-image: linear-gradient(rgba(34,211,238,.085) 1px, transparent 1px), linear-gradient(90deg, rgba(34,211,238,.085) 1px, transparent 1px); }
+.app-shell.armor-mode .pet-studio-mark,
+.app-shell.armor-mode .pet-panel-heading span,
+.app-shell.armor-mode .pet-control-tabs button.active,
+.app-shell.armor-mode .pet-animation-option,
+.app-shell.armor-mode .pet-memory-list article,
+.app-shell.armor-mode .pet-goal-grid article,
+.app-shell.armor-mode .pet-scale-control,
+.app-shell.armor-mode .pet-task-fields,
+.app-shell.armor-mode .pet-checkin-strip > span { border-color: rgba(34,211,238,.17); background: rgba(15,23,42,.72); color: #dff8ff; }
+.app-shell.armor-mode .pet-control-tabs { background: rgba(34,211,238,.09); }
+.app-shell.armor-mode .pet-roster-row.active,
+.app-shell.armor-mode .pet-animation-option.active,
+.app-shell.armor-mode .pet-task-list article.active { border-color: rgba(163,230,53,.28); background: rgba(34,211,238,.1); color: #a3e635; }
+.app-shell.armor-mode .pet-import-row:hover,
+.app-shell.armor-mode .pet-animation-live-button:hover:not(:disabled) { border-color: rgba(163,230,53,.32); background: rgba(34,211,238,.08); color: #a3e635; }
+.app-shell.armor-mode .pet-stage-toolbar small,
+.app-shell.armor-mode .pet-roster-row small,
+.app-shell.armor-mode .pet-progress-band span,
+.app-shell.armor-mode .pet-progress-band small,
+.app-shell.armor-mode .pet-field > span small,
+.app-shell.armor-mode .pet-memory-summary small,
+.app-shell.armor-mode .pet-life-current small,
+.app-shell.armor-mode .pet-life-section-title small,
+.app-shell.armor-mode .pet-study-note,
+.app-shell.armor-mode .pet-inner-traces p,
+.app-shell.armor-mode .pet-task-list small,
+.app-shell.armor-mode .pet-control-tabs button { color: #8bd3e6; }
+.app-shell.armor-mode .pet-activity-bubble { border-color: rgba(34,211,238,.18); background: rgba(2,6,23,.82); color: #dff8ff; box-shadow: 0 10px 28px rgba(0,0,0,.22), 0 0 20px rgba(34,211,238,.08); }
+.app-shell.armor-mode .pet-activity-bubble::after { border-color: rgba(34,211,238,.18); }
+.app-shell.armor-mode .pet-activity-bubble small { color: #8bd3e6; }
+.app-shell.armor-mode .pet-xp-track,
+.app-shell.armor-mode .pet-needs-list i,
+.app-shell.armor-mode .pet-goal-grid article > i { background: rgba(34,211,238,.16); }
+.app-shell.armor-mode .pet-field input,
+.app-shell.armor-mode .pet-field textarea,
+.app-shell.armor-mode .pet-inline-form input,
+.app-shell.armor-mode .pet-task-fields input,
+.app-shell.armor-mode .pet-task-fields select,
+.app-shell.armor-mode .pet-setting-row input,
+.app-shell.armor-mode .pet-quiet-hours select { border-color: rgba(34,211,238,.18); background: rgba(2,6,23,.72); color: #e0f2fe; }
+.app-shell.armor-mode .pet-hatch-missing p { border-color: rgba(251,191,36,.22); background: rgba(120,53,15,.2); color: #fde68a; }
+.app-shell.armor-mode .pet-hatch-missing small { color: #fcd34d; }
+.app-shell.armor-mode .pet-memory-list article > span,
+.app-shell.armor-mode .pet-life-current > span { background: rgba(34,211,238,.13); color: #67e8f9; }
+.app-shell.armor-mode .pet-life-current.wandering > span { background: rgba(16,185,129,.13); color: #6ee7b7; }
+.app-shell.armor-mode .pet-life-current.resting > span,
+.app-shell.armor-mode .pet-life-current.sleeping > span { background: rgba(168,85,247,.14); color: #c084fc; }
+.app-shell.armor-mode .pet-life-current.waiting > span { background: rgba(251,146,60,.14); color: #fdba74; }
+.app-shell.armor-mode .pet-bookmark-strip > span { border-color: rgba(251,191,36,.22); background: rgba(120,53,15,.2); color: #fde68a; }
+.app-shell.armor-mode .pet-bookmark-strip > span.together { border-color: rgba(34,211,238,.22); background: rgba(8,47,73,.32); color: #67e8f9; }
+.app-shell.armor-mode .pet-bookmark-strip > span.empty { background: transparent; color: #50879b; }
 
 .app-shell.qq2007-layout {
   grid-template-columns: var(--sidebar-width, 266px) minmax(0, 1fr) var(--inspector-width, 300px);
@@ -296,6 +618,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .thread-row:hover .icon-button, .thread-row:focus-within .icon-button { opacity: 1; }
 .thread-row .thread-pin-button.pinned { opacity: 1; color: var(--accent); }
 .thread-row .thread-pin-button.pinned:hover { color: var(--accent-hover); }
+.thread-row.has-completion > button:first-child > svg { flex: 0 0 auto; color: #188444; }
+.thread-completion-dot { width: 7px; height: 7px; flex: 0 0 7px; border: 1px solid rgba(255,255,255,.94); border-radius: 50%; background: #34c759; box-shadow: 0 0 0 2px rgba(52,199,89,.12); }
 .thread-row:hover { background: rgba(255,255,255,0.48); }
 .thread-row.active { background: rgba(255,255,255,0.82); box-shadow: inset 2px 0 var(--accent); }
 .thread-row.active > button:first-child { color: var(--text); font-weight: 590; }
@@ -439,6 +763,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .thread-menu-popover button { width: 100%; height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 9px; border: 0; border-radius: 7px; background: transparent; color: var(--text); font-size: var(--font-small); cursor: pointer; text-align: left; }
 .thread-menu-popover button:hover { background: rgba(255,241,242,.92); color: var(--accent-hover); }
 .topbar-actions { display: flex; align-items: center; gap: 4px; }
+.task-completion-button { position: relative; color: #188444; }
+.task-completion-button > span { position: absolute; top: -3px; right: -4px; min-width: 16px; height: 16px; display: grid; place-items: center; padding: 0 4px; border: 1.5px solid var(--surface); border-radius: 999px; background: #e5484d; color: #fff; font-size: 9px; font-weight: 760; line-height: 1; }
 
 .icon-button {
   width: 32px;
@@ -488,6 +814,197 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 
 .conversation-stage { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 .conversation { width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.workspace-shell.armor-mode {
+  --armor-glow: rgba(34,211,238,.28);
+  --armor-grid: rgba(34,211,238,.1);
+  background:
+    radial-gradient(circle at 18% 18%, rgba(34,211,238,.16), transparent 28%),
+    radial-gradient(circle at 86% 78%, rgba(163,230,53,.13), transparent 32%),
+    linear-gradient(180deg, rgba(2,6,23,.96), rgba(6,13,24,.94));
+  color: #e2f6ff;
+}
+.workspace-shell.armor-mode::before,
+.workspace-shell.armor-mode::after {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  content: "";
+  pointer-events: none;
+}
+.workspace-shell.armor-mode::before {
+  background-image:
+    linear-gradient(var(--armor-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--armor-grid) 1px, transparent 1px),
+    repeating-linear-gradient(0deg, transparent 0 20px, rgba(34,211,238,.035) 20px 21px);
+  background-size: 34px 34px, 34px 34px, 100% 21px;
+  mask-image: radial-gradient(circle at center, #000 0 68%, transparent 100%);
+}
+.workspace-shell.armor-mode::after {
+  background: linear-gradient(180deg, transparent 0%, rgba(34,211,238,.2) 48%, transparent 52%);
+  opacity: .38;
+  animation: armor-scan 5.5s linear infinite;
+}
+.workspace-shell.armor-mode .topbar,
+.workspace-shell.armor-mode .conversation-stage,
+.workspace-shell.armor-mode .approval-bar,
+.workspace-shell.armor-mode .harness-queue-panel,
+.workspace-shell.armor-mode .composer-wrap { position: relative; z-index: 1; }
+.workspace-shell.armor-mode .topbar {
+  position: relative;
+  z-index: 20;
+  border-bottom-color: rgba(34,211,238,.24);
+  background: linear-gradient(90deg, rgba(2,6,23,.92), rgba(8,47,73,.78), rgba(2,6,23,.92));
+  color: #e0f2fe;
+  box-shadow: 0 10px 38px rgba(0,0,0,.28), inset 0 -1px rgba(163,230,53,.08);
+}
+.workspace-shell.armor-mode .task-heading > svg,
+.workspace-shell.armor-mode .topbar .icon-button { color: #67e8f9; }
+.workspace-shell.armor-mode .task-heading strong { color: #ecfeff; text-shadow: 0 0 14px rgba(34,211,238,.32); }
+.workspace-shell.armor-mode .task-heading > span { color: #86efac; }
+.workspace-shell.armor-mode .thread-menu-popover {
+  z-index: 80;
+  border-color: rgba(34,211,238,.22);
+  background: rgba(2,6,23,.96);
+  box-shadow: 0 18px 52px rgba(0,0,0,.42), 0 0 26px rgba(34,211,238,.13), inset 0 0 0 1px rgba(163,230,53,.055);
+}
+.workspace-shell.armor-mode .thread-menu-popover button { color: #dff8ff; }
+.workspace-shell.armor-mode .thread-menu-popover button svg { color: #67e8f9; }
+.workspace-shell.armor-mode .thread-menu-popover button:hover {
+  background: rgba(34,211,238,.12);
+  color: #ecfeff;
+}
+.workspace-shell.armor-mode .thread-menu-popover button:hover svg { color: #a3e635; }
+.workspace-shell.armor-mode .conversation { background: transparent; }
+.workspace-shell.armor-mode .message-stream { filter: drop-shadow(0 0 20px rgba(34,211,238,.05)); }
+.workspace-shell.armor-mode .assistant-message-segment,
+.workspace-shell.armor-mode .tool-result,
+.workspace-shell.armor-mode .change-set-summary {
+  border-color: rgba(34,211,238,.18);
+  background: rgba(2,6,23,.72);
+  box-shadow: inset 0 0 0 1px rgba(163,230,53,.035), 0 0 24px rgba(8,145,178,.08);
+}
+.workspace-shell.armor-mode .assistant-message-segment { padding: 12px 14px; border-radius: 14px; }
+.workspace-shell.armor-mode .assistant-message-segment .markdown-body,
+.workspace-shell.armor-mode .assistant-status-segment,
+.workspace-shell.armor-mode .tool-call,
+.workspace-shell.armor-mode .tool-call strong,
+.workspace-shell.armor-mode .tool-result,
+.workspace-shell.armor-mode .change-set-summary { color: #dff8ff; }
+.workspace-shell.armor-mode .assistant-message-segment .markdown-body h1,
+.workspace-shell.armor-mode .assistant-message-segment .markdown-body h2,
+.workspace-shell.armor-mode .assistant-message-segment .markdown-body h3,
+.workspace-shell.armor-mode .assistant-message-segment .markdown-body h4,
+.workspace-shell.armor-mode .assistant-message-segment .markdown-body strong { color: #f0fdff; }
+.workspace-shell.armor-mode .assistant-message-segment .markdown-body p,
+.workspace-shell.armor-mode .assistant-message-segment .markdown-body li { color: #dff8ff; }
+.workspace-shell.armor-mode .assistant-message-segment .markdown-body blockquote { border-left-color: rgba(34,211,238,.38); color: #a7f3d0; }
+.workspace-shell.armor-mode .assistant-message-segment .markdown-body a { color: #67e8f9; text-decoration-color: rgba(103,232,249,.42); }
+.workspace-shell.armor-mode .assistant-message-segment .markdown-body :not(pre) > code { border-color: rgba(34,211,238,.24); background: rgba(15,23,42,.92); color: #bef264; }
+.workspace-shell.armor-mode .assistant-message-segment .markdown-body th,
+.workspace-shell.armor-mode .assistant-message-segment .markdown-body td { border-color: rgba(34,211,238,.18); }
+.workspace-shell.armor-mode .assistant-message-segment .markdown-body th { background: rgba(8,47,73,.72); color: #e0f2fe; }
+.workspace-shell.armor-mode .markdown-code-block { border-color: rgba(34,211,238,.22); background: rgba(2,6,23,.92); }
+.workspace-shell.armor-mode .markdown-code-toolbar { border-bottom-color: rgba(34,211,238,.18); background: rgba(8,47,73,.72); color: #bae6fd; }
+.workspace-shell.armor-mode .markdown-code-toolbar button { color: #bae6fd; }
+.workspace-shell.armor-mode .markdown-code-toolbar button:hover { background: rgba(34,211,238,.12); color: #ecfeff; }
+.workspace-shell.armor-mode .markdown-code-block pre { background: rgba(2,6,23,.82); color: #dff8ff; }
+.workspace-shell.armor-mode .markdown-code-block pre code { background: transparent; color: inherit; }
+.workspace-shell.armor-mode .message-avatar,
+.workspace-shell.armor-mode .assistant-avatar { border-color: rgba(34,211,238,.34); box-shadow: 0 0 16px rgba(34,211,238,.16); }
+.workspace-shell.armor-mode .message.user .message-avatar { background: #0f172a; border-color: rgba(163,230,53,.42); color: #d9f99d; }
+.workspace-shell.armor-mode .message-meta strong { color: #cffafe; }
+.workspace-shell.armor-mode .message-meta span { color: rgba(186,230,253,.72); }
+.workspace-shell.armor-mode .message.user .markdown-body { border-color: rgba(226,232,240,.92); background: rgba(248,250,252,.96); color: #1e293b; box-shadow: 0 10px 28px rgba(0,0,0,.22); }
+.workspace-shell.armor-mode .composer-wrap { background: linear-gradient(180deg, transparent, rgba(2,6,23,.72)); }
+.workspace-shell.armor-mode .composer {
+  border-color: rgba(34,211,238,.38);
+  background: rgba(2,6,23,.86);
+  box-shadow: 0 0 0 1px rgba(163,230,53,.09), 0 14px 44px rgba(0,0,0,.34), 0 0 30px rgba(34,211,238,.14);
+}
+.workspace-shell.armor-mode .composer:focus-within { border-color: rgba(163,230,53,.6); box-shadow: 0 0 0 2px rgba(34,211,238,.14), 0 18px 52px rgba(0,0,0,.38); }
+.workspace-shell.armor-mode .composer textarea { color: #e0f2fe; caret-color: #a3e635; }
+.workspace-shell.armor-mode .composer textarea::placeholder { color: rgba(186,230,253,.52); }
+.workspace-shell.armor-mode .mode-switch { border-color: rgba(34,211,238,.16); background: rgba(15,23,42,.76); }
+.workspace-shell.armor-mode .mode-switch button.active { background: rgba(8,47,73,.9); color: #a3e635; box-shadow: inset 0 0 0 1px rgba(34,211,238,.18); }
+.workspace-shell.armor-mode .permission-button,
+.workspace-shell.armor-mode .armor-level-button,
+.workspace-shell.armor-mode .model-pill { border-color: rgba(34,211,238,.2); background: rgba(15,23,42,.76); color: #bae6fd; }
+.workspace-shell.armor-mode .permission-menu,
+.workspace-shell.armor-mode .armor-level-menu,
+.workspace-shell.armor-mode .model-menu { border-color: rgba(34,211,238,.24); background: rgba(2,6,23,.96); color: #e0f2fe; }
+.workspace-shell.armor-mode .permission-menu > button:hover,
+.workspace-shell.armor-mode .permission-menu > button.active,
+.workspace-shell.armor-mode .armor-level-menu > button:hover,
+.workspace-shell.armor-mode .armor-level-menu > button.active,
+.workspace-shell.armor-mode .model-menu > button:hover,
+.workspace-shell.armor-mode .model-menu > button.active { background: rgba(34,211,238,.09); }
+.workspace-shell.armor-mode.armor-level-deep { --armor-glow: rgba(168,85,247,.32); --armor-grid: rgba(168,85,247,.11); }
+.workspace-shell.armor-mode.armor-level-deep .armor-hud span { color: #d8b4fe; }
+.workspace-shell.armor-mode.armor-level-execution { --armor-glow: rgba(245,158,11,.32); --armor-grid: rgba(245,158,11,.1); }
+.workspace-shell.armor-mode.armor-level-execution .armor-hud span { color: #fde68a; }
+.workspace-shell.armor-mode.armor-level-reverse { --armor-glow: rgba(56,189,248,.34); --armor-grid: rgba(56,189,248,.13); }
+.workspace-shell.armor-mode.armor-level-reverse .armor-hud span { color: #7dd3fc; }
+.workspace-shell.armor-mode.armor-level-delivery { --armor-glow: rgba(16,185,129,.32); --armor-grid: rgba(16,185,129,.12); }
+.workspace-shell.armor-mode.armor-level-delivery .armor-hud span { color: #86efac; }
+.armor-hud {
+  position: absolute;
+  top: 76px;
+  left: clamp(18px, 3.4vw, 42px);
+  z-index: 6;
+  width: fit-content;
+  max-width: min(760px, calc(100% - 48px));
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+  transform: none;
+  border: 1px solid rgba(34,211,238,.28);
+  border-radius: 999px;
+  background: rgba(2,6,23,.76);
+  color: #bae6fd;
+  box-shadow: 0 0 24px rgba(34,211,238,.18), inset 0 0 18px rgba(34,211,238,.06);
+  backdrop-filter: blur(14px) saturate(140%);
+  font-size: var(--font-compact);
+  pointer-events: none;
+  white-space: nowrap;
+}
+.workspace-shell.armor-mode .armor-hud {
+  position: absolute;
+  z-index: 6;
+  align-self: start;
+  justify-self: start;
+}
+.armor-hud span { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px; color: #a3e635; font-weight: 800; letter-spacing: .08em; }
+.armor-hud code { flex: 0 0 auto; padding: 2px 5px; border: 1px solid rgba(34,211,238,.18); border-radius: 999px; background: rgba(34,211,238,.08); color: #67e8f9; font-family: var(--font-mono); font-size: inherit; }
+.armor-hud i { min-width: 0; overflow: hidden; flex: 1 1 auto; color: rgba(226,232,240,.72); font-style: normal; text-overflow: ellipsis; }
+.armor-hud button {
+  flex: 0 0 auto;
+  min-height: 22px;
+  padding: 2px 7px;
+  border: 1px solid rgba(163,230,53,.26);
+  border-radius: 999px;
+  background: rgba(101,163,13,.14);
+  color: #d9f99d;
+  font-size: inherit;
+  font-weight: 720;
+  pointer-events: auto;
+}
+.armor-hud button:hover { border-color: rgba(163,230,53,.52); background: rgba(101,163,13,.24); }
+
+@media (max-width: 820px) {
+  .armor-hud { left: 16px; max-width: calc(100% - 32px); }
+  .armor-hud code { display: none; }
+}
+
+@media (max-height: 560px) {
+  .armor-hud { top: 60px; min-height: 28px; padding-block: 4px; }
+  .workspace-shell.armor-mode .empty-state { padding-top: 56px; }
+}
+@keyframes armor-scan {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(100%); }
+}
 .conversation-jump-button { position: absolute; left: 50%; bottom: 14px; z-index: 8; min-height: 32px; display: inline-flex; align-items: center; gap: 6px; padding: 0 11px; transform: translateX(-50%); border: 1px solid var(--line-strong); border-radius: 999px; background: color-mix(in srgb, var(--surface) 92%, transparent); color: var(--muted); box-shadow: 0 6px 20px rgba(15,23,42,.12); backdrop-filter: blur(12px); font-size: var(--font-caption); font-weight: 650; cursor: pointer; white-space: nowrap; transition: transform .14s ease, border-color .14s ease, background .14s ease, color .14s ease; }
 .conversation-jump-button:hover { transform: translate(-50%, -1px); border-color: color-mix(in srgb, var(--accent) 30%, var(--line)); background: var(--surface); color: var(--text); }
 .conversation-jump-button.has-new { border-color: color-mix(in srgb, var(--accent) 28%, var(--line)); color: var(--accent-hover); }
@@ -510,6 +1027,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .empty-state h1 { margin: 18px 0 4px; font-size: var(--font-display); line-height: 1.2; font-weight: 650; }
 .empty-state p { margin: 0 0 22px; color: var(--muted); font-size: var(--font-body); }
 .empty-state.connection-onboarding p { max-width: 430px; margin-bottom: 16px; line-height: 1.65; }
+
+.workspace-shell.armor-mode .empty-state {
+  padding-top: clamp(72px, 12vh, 128px);
+}
+.workspace-shell.armor-mode .empty-brand { box-shadow: 8px 8px 0 rgba(34,211,238,.42), 0 15px 34px rgba(0,0,0,.28); }
+.workspace-shell.armor-mode .workspace-button { border-color: rgba(226,232,240,.78); background: rgba(248,250,252,.94); color: #334155; }
+.workspace-shell.armor-mode .workspace-button:hover { border-color: rgba(34,211,238,.42); color: #0e7490; }
 .connection-setup-button { height: 40px; display: flex; align-items: center; gap: 7px; margin-bottom: 9px; padding: 0 18px; border: 0; border-radius: 10px; background: linear-gradient(135deg, #f43f5e, #f59e0b); color: #fff; font-size: var(--font-body); font-weight: 700; cursor: pointer; box-shadow: 0 9px 22px rgba(244,63,94,.2); }
 .connection-setup-button:hover { transform: translateY(-1px); box-shadow: 0 12px 28px rgba(244,63,94,.27); }
 .workspace-button { height: 36px; display: flex; align-items: center; gap: 7px; padding: 0 14px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface); font-size: var(--font-body); font-weight: 600; cursor: pointer; }
@@ -768,6 +1292,86 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .permission-button.permission-full, .permission-option-icon.permission-full { color: #e14f35; }
 .permission-button.permission-agent, .permission-option-icon.permission-agent { color: #5865a8; }
 .permission-button.permission-request, .permission-option-icon.permission-request { color: #52615d; }
+.armor-toggle {
+  --armor-a: #22d3ee;
+  --armor-b: #a3e635;
+  height: 29px;
+  max-width: 142px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 0 9px;
+  border: 1px solid rgba(15,23,42,.11);
+  border-radius: 8px;
+  background: rgba(255,255,255,.72);
+  color: #52615d;
+  cursor: pointer;
+  transition: transform .14s ease, border-color .14s ease, background .14s ease, color .14s ease, box-shadow .14s ease;
+}
+.armor-toggle > span { overflow: hidden; font-size: var(--font-caption); font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
+.armor-toggle > svg { flex: 0 0 auto; }
+.armor-toggle > i { width: 18px; height: 10px; flex: 0 0 auto; position: relative; border-radius: 999px; background: rgba(100,116,139,.24); box-shadow: inset 0 0 0 1px rgba(15,23,42,.08); }
+.armor-toggle > i::after { position: absolute; top: 2px; left: 2px; width: 6px; height: 6px; border-radius: 50%; background: #94a3b8; content: ""; transition: transform .14s ease, background .14s ease, box-shadow .14s ease; }
+.armor-toggle:hover:not(:disabled) { transform: translateY(-1px); border-color: rgba(34,211,238,.35); background: #fff; color: #0f766e; box-shadow: 0 6px 18px rgba(8,145,178,.12); }
+.armor-toggle.active {
+  border-color: rgba(34,211,238,.55);
+  background: linear-gradient(135deg, rgba(8,47,73,.96), rgba(6,78,59,.94));
+  color: #d9f99d;
+  box-shadow: 0 0 0 1px rgba(163,230,53,.18), 0 0 22px rgba(34,211,238,.24), inset 0 0 18px rgba(34,211,238,.08);
+  text-shadow: 0 0 8px rgba(163,230,53,.42);
+}
+.armor-toggle.active > i { background: rgba(34,211,238,.32); box-shadow: inset 0 0 0 1px rgba(163,230,53,.22), 0 0 10px rgba(34,211,238,.34); }
+.armor-toggle.active > i::after { transform: translateX(8px); background: var(--armor-b); box-shadow: 0 0 8px var(--armor-b); }
+.armor-toggle:disabled { cursor: default; opacity: .55; }
+.armor-level-picker { position: relative; flex: 0 0 auto; }
+.armor-level-button {
+  height: 29px;
+  max-width: 116px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  border: 1px solid rgba(15,23,42,.11);
+  border-radius: 8px;
+  background: rgba(255,255,255,.72);
+  color: #52615d;
+  cursor: pointer;
+  transition: transform .14s ease, border-color .14s ease, background .14s ease, color .14s ease, box-shadow .14s ease;
+}
+.armor-level-button > span { overflow: hidden; font-size: var(--font-caption); font-weight: 720; text-overflow: ellipsis; white-space: nowrap; }
+.armor-level-button > svg { flex: 0 0 auto; }
+.armor-level-picker.active .armor-level-button {
+  border-color: rgba(34,211,238,.38);
+  background: rgba(236,254,255,.78);
+  color: #0f766e;
+  box-shadow: inset 0 0 0 1px rgba(34,211,238,.08), 0 6px 18px rgba(8,145,178,.08);
+}
+.armor-level-button:hover:not(:disabled) { transform: translateY(-1px); border-color: rgba(34,211,238,.35); background: #fff; color: #0f766e; box-shadow: 0 6px 18px rgba(8,145,178,.12); }
+.armor-level-button:disabled { cursor: default; opacity: .55; }
+.armor-manage-button {
+  height: 29px;
+  max-width: 112px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  border: 1px solid rgba(15,23,42,.11);
+  border-radius: 8px;
+  background: rgba(255,255,255,.72);
+  color: #52615d;
+  cursor: pointer;
+  transition: transform .14s ease, border-color .14s ease, background .14s ease, color .14s ease, box-shadow .14s ease;
+}
+.armor-manage-button > span { overflow: hidden; font-size: var(--font-caption); font-weight: 720; text-overflow: ellipsis; white-space: nowrap; }
+.armor-manage-button:hover { transform: translateY(-1px); border-color: rgba(163,230,53,.42); background: rgba(247,254,231,.94); color: #3f6212; box-shadow: 0 6px 18px rgba(101,163,13,.10); }
+.armor-level-menu { position: absolute; bottom: 36px; left: 0; z-index: 60; width: min(360px, calc(100vw - 48px)); padding: 6px; border: 1px solid rgba(255,255,255,.72); border-radius: 13px; background: rgba(255,255,255,.98); box-shadow: 0 18px 50px rgba(15,23,42,.18), 0 3px 10px rgba(15,23,42,.08); backdrop-filter: blur(18px); }
+.armor-level-menu > button { width: 100%; min-height: 54px; display: grid; grid-template-columns: 32px minmax(0, 1fr) 22px; align-items: center; gap: 8px; padding: 7px 9px; border: 0; border-radius: 9px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.armor-level-menu > button:hover, .armor-level-menu > button.active { background: rgba(8,145,178,.075); }
+.armor-level-option-icon { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 9px; background: rgba(8,145,178,.09); color: #0f766e; }
+.armor-level-menu > button > span:nth-child(2) { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.armor-level-menu strong { font-size: var(--font-body); font-weight: 700; }
+.armor-level-menu small { color: var(--muted); font-size: var(--font-caption); line-height: 1.35; }
+.armor-level-check { display: grid; place-items: center; color: #0f766e; }
 .permission-menu { position: absolute; bottom: 36px; left: 0; z-index: 60; width: min(380px, calc(100vw - 48px)); padding: 6px; border: 1px solid rgba(255,255,255,.72); border-radius: 13px; background: rgba(255,255,255,.98); box-shadow: 0 18px 50px rgba(15,23,42,.18), 0 3px 10px rgba(15,23,42,.08); backdrop-filter: blur(18px); }
 .permission-menu > button { width: 100%; min-height: 58px; display: grid; grid-template-columns: 34px minmax(0, 1fr) 22px; align-items: center; gap: 8px; padding: 7px 9px; border: 0; border-radius: 9px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
 .permission-menu > button:hover, .permission-menu > button.active { background: rgba(15,23,42,.055); }
@@ -1706,13 +2310,15 @@ button.detail-row { padding: 0; border: 0; background: transparent; text-align: 
 @media (max-width: 680px) {
   .composer-wrap { padding: 7px 10px 10px; }
   .composer textarea { min-height: 54px; }
-  .composer-toolbar { height: auto; min-height: 68px; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 5px; padding: 4px 7px 7px; }
-  .mode-switch { width: 100%; grid-column: 1 / -1; }
+  .composer-toolbar { height: auto; min-height: 68px; display: flex; flex-wrap: wrap; gap: 5px; padding: 4px 7px 7px; }
+  .mode-switch { width: 100%; flex: 1 0 100%; }
   .mode-switch button { min-width: 0; flex: 1; padding-inline: 5px; }
-  .permission-picker { grid-column: 1; }
+  .permission-picker { flex: 0 0 auto; }
+  .armor-toggle { max-width: 112px; padding-inline: 6px; }
+  .armor-level-button { max-width: 94px; padding-inline: 6px; }
+  .armor-manage-button { max-width: 92px; padding-inline: 6px; }
   .composer-spacer { display: none; }
-  .composer-model-switcher { grid-column: 2; }
-  .send-button { grid-column: 3; }
+  .composer-model-switcher { margin-left: auto; }
   .file-drop-overlay { inset: 7px; }
   .dialog-backdrop { padding: 12px; }
   .dialog { max-height: calc(100vh - 24px); }
@@ -1913,13 +2519,18 @@ button.detail-row { padding: 0; border: 0; background: transparent; text-align: 
   .failover-toggle, .provider-health, .config-writeback { background: rgba(255,255,255,.025); }
   .provider-health-metrics > span, .gateway-diagnostics span { background: rgba(255,255,255,.035); }
   .config-writeback select { background: #30332f; }
-  .new-task-button, .workspace-button, .model-pill, .subagent-result, .composer, .secondary-button, .field input, .field textarea, .field select, .model-id-control .model-id-clear, .connection-picker select, .migration-row, .protocol-switch button.active, .mode-switch button.active, .mcp-server-row.active { background: #30332f; color: var(--text); }
+  .new-task-button, .workspace-button, .model-pill, .subagent-result, .composer, .secondary-button, .armor-toggle, .armor-level-button, .field input, .field textarea, .field select, .model-id-control .model-id-clear, .connection-picker select, .migration-row, .protocol-switch button.active, .mode-switch button.active, .mcp-server-row.active { background: #30332f; color: var(--text); }
   .model-menu { border-color: rgba(255,255,255,.1); background: rgba(43,46,42,.98); }
   .permission-button { border-color: rgba(255,255,255,.09); background: rgba(255,255,255,.04); }
   .permission-button:hover:not(:disabled) { border-color: rgba(255,255,255,.16); background: rgba(255,255,255,.07); color: var(--text); }
   .permission-menu { border-color: rgba(255,255,255,.1); background: rgba(30,41,59,.98); }
   .permission-menu > button:hover, .permission-menu > button.active { background: rgba(255,255,255,.06); }
   .permission-option-icon { background: rgba(255,255,255,.055); }
+  .armor-level-button { border-color: rgba(255,255,255,.09); }
+  .armor-level-button:hover:not(:disabled), .armor-level-picker.active .armor-level-button { border-color: rgba(34,211,238,.24); background: rgba(15,23,42,.88); color: #67e8f9; }
+  .armor-level-menu { border-color: rgba(255,255,255,.1); background: rgba(15,23,42,.98); }
+  .armor-level-menu > button:hover, .armor-level-menu > button.active { background: rgba(34,211,238,.09); }
+  .armor-level-option-icon { background: rgba(34,211,238,.1); color: #67e8f9; }
   .model-menu > button:hover, .model-menu > button.active { background: rgba(255,255,255,.06); }
   .composer-attachments > span, .message-attachments > span { background: rgba(255,255,255,.04); color: var(--text); }
   .topbar { border-bottom-color: rgba(226,232,240,.08); background: rgba(2,6,23,.72); box-shadow: 0 8px 28px rgba(0,0,0,.16); }

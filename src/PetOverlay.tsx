@@ -2,12 +2,13 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEve
 import { listen } from "@tauri-apps/api/event";
 import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalPosition, PhysicalPosition } from "@tauri-apps/api/dpi";
-import { BookOpen, CircleAlert, Coffee, Footprints, LoaderCircle, Moon, Sparkles } from "lucide-react";
+import { BookOpen, CheckCircle2, ChevronRight, CircleAlert, Coffee, Footprints, LoaderCircle, Moon, Sparkles } from "lucide-react";
 import { getPixelAlignedPetSize, PetSprite, type PetSpriteState } from "./components/PetSprite";
 import {
   getPetRuntime,
   bondWithPet,
   isDesktop,
+  openCompletedTask,
   openPetChat,
   openPetWorkspace,
   respondToPetPrompt,
@@ -53,17 +54,30 @@ export function PetOverlay() {
   const [autonomousDirection, setAutonomousDirection] = useState<"running-left" | "running-right" | null>(null);
   const [positionReadyPetId, setPositionReadyPetId] = useState<string | null>(null);
   const [promptBusy, setPromptBusy] = useState<string | null>(null);
+  const [completionBusy, setCompletionBusy] = useState(false);
   const dragRef = useRef<PetDragState | null>(null);
   const dragFrameRef = useRef<number | null>(null);
   const pendingPositionRef = useRef<LogicalPosition | null>(null);
   const suppressClickRef = useRef(false);
   const clickTimerRef = useRef<number | null>(null);
   const lastLevelRef = useRef<number | null>(null);
+  const lastCompletionAtRef = useRef(0);
   const autonomousMoveRef = useRef<AutonomousMove | null>(null);
   const lastAutonomousMoveKeyRef = useRef<string | null>(null);
   const locale = getAppLocale();
   const text = (zh: string, en: string) => locale === "zh-CN" ? zh : en;
   const activePet = dashboard?.pets.find((pet) => pet.id === dashboard.activePetId) ?? dashboard?.pets[0];
+  const activeActivities = useMemo(
+    () => activities.filter((activity) => activity.state !== "completed"),
+    [activities],
+  );
+  const completionActivities = useMemo(
+    () => activities
+      .filter((activity) => activity.state === "completed" && activity.threadId)
+      .sort((left, right) => (right.completedAt ?? 0) - (left.completedAt ?? 0)),
+    [activities],
+  );
+  const latestCompletion = completionActivities[0];
 
   useEffect(() => {
     let disposed = false;
@@ -101,11 +115,17 @@ export function PetOverlay() {
   }, []);
 
   const workState = useMemo<PetSpriteState>(() => {
-    if (activities.some((item) => item.state === "waiting")) return "waiting";
-    if (activities.some((item) => item.state === "generating")) return "running";
-    if (activities.length > 0) return "review";
+    if (activeActivities.some((item) => item.state === "waiting")) return "waiting";
+    if (activeActivities.some((item) => item.state === "generating")) return "running";
+    if (activeActivities.length > 0) return "review";
     return "idle";
-  }, [activities]);
+  }, [activeActivities]);
+
+  useEffect(() => {
+    const completedAt = latestCompletion?.completedAt ?? 0;
+    if (completedAt > lastCompletionAtRef.current) setReaction("jumping");
+    lastCompletionAtRef.current = Math.max(lastCompletionAtRef.current, completedAt);
+  }, [latestCompletion?.completedAt]);
 
   useEffect(() => {
     if (!dashboard) return;
@@ -310,6 +330,18 @@ export function PetOverlay() {
     }
   };
 
+  const openLatestCompletion = async () => {
+    if (!latestCompletion?.threadId || completionBusy) return;
+    setCompletionBusy(true);
+    try {
+      await openCompletedTask(latestCompletion.threadId);
+    } catch {
+      setReaction("failed");
+    } finally {
+      setCompletionBusy(false);
+    }
+  };
+
   const beginPetDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
     if (!isDesktop() || event.button !== 0) return;
     if (autonomousMoveRef.current) {
@@ -385,7 +417,7 @@ export function PetOverlay() {
 
   const lifeSpriteState = autonomousDirection
     ?? (dashboard.life.behavior.state === "wandering" ? "idle" : petBehaviorSprite(dashboard.life.behavior));
-  const activeState = dragDirection ?? reaction ?? (activities.length > 0 ? workState : lifeSpriteState);
+  const activeState = dragDirection ?? reaction ?? (activeActivities.length > 0 ? workState : lifeSpriteState);
   const scale = Math.min(1.45, Math.max(0.55, dashboard.scale || 0.75));
   const spriteSize = getPixelAlignedPetSize(scale);
   const overlayStyle: PetOverlayStyle = {
@@ -410,18 +442,35 @@ export function PetOverlay() {
             </footer>
           </article>
         )}
-        {activities.slice(0, dashboard.life.prompt ? 2 : 4).map((activity) => (
+        {activeActivities.slice(0, dashboard.life.prompt ? 2 : 4).map((activity) => (
           <article className={activity.state} key={activity.id}>
             <span>{activity.state === "generating" ? <Sparkles size={13} /> : activity.state === "waiting" ? <CircleAlert size={13} /> : <LoaderCircle className="spin" size={13} />}</span>
             <div><strong>{activity.title}</strong><small>{activity.detail}</small></div>
           </article>
         ))}
-        {activities.length > (dashboard.life.prompt ? 2 : 4) && <b className="pet-overlay-more">+{activities.length - (dashboard.life.prompt ? 2 : 4)}</b>}
-        {activities.length === 0 && !dashboard.life.prompt && dashboard.life.behavior.state !== "idle" && (
+        {activeActivities.length > (dashboard.life.prompt ? 2 : 4) && <b className="pet-overlay-more">+{activeActivities.length - (dashboard.life.prompt ? 2 : 4)}</b>}
+        {activeActivities.length === 0 && completionActivities.length === 0 && !dashboard.life.prompt && dashboard.life.behavior.state !== "idle" && (
           <article className={`pet-overlay-thought ${dashboard.life.behavior.state}`}>
             <span>{behaviorIcon(dashboard.life.behavior.state)}</span>
             <div><strong>{petBehaviorLabel(dashboard.life.behavior.state, locale)}</strong><small>{petBehaviorMessage(dashboard.life.behavior, locale)}</small></div>
           </article>
+        )}
+        {latestCompletion && (
+          <button
+            className={`pet-overlay-completion${latestCompletion.unread ? " unread" : ""}`}
+            type="button"
+            aria-label={text(
+              `${latestCompletion.title} 已完成，打开会话`,
+              `${latestCompletion.title} completed, open conversation`,
+            )}
+            disabled={completionBusy}
+            onClick={() => void openLatestCompletion()}
+          >
+            <span><CheckCircle2 size={15} /></span>
+            <div><strong>{latestCompletion.title}</strong><small>{latestCompletion.unread ? text("任务已完成 · 点击查看", "Task completed · Click to view") : latestCompletion.detail}</small></div>
+            {completionActivities.length > 1 && <b>{completionActivities.length > 99 ? "99+" : completionActivities.length}</b>}
+            {completionBusy ? <LoaderCircle className="spin" size={12} /> : <ChevronRight size={12} />}
+          </button>
         )}
       </div>
       <button

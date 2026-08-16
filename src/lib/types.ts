@@ -285,6 +285,7 @@ export interface HarnessRunRequest {
   fallbackProfiles?: ProviderProfile[];
   hatch?: boolean;
   hatchSkillLoaded?: boolean;
+  customInstructions?: string;
 }
 
 export interface HarnessRuntimeEvent {
@@ -428,7 +429,7 @@ export interface ConfigWriteResult {
 }
 
 export interface AgentStreamEvent {
-  kind: "content_delta" | "provider_reconnecting" | "provider_reconnected";
+  kind: "stream_opened" | "content_delta" | "provider_reconnecting" | "provider_reconnected";
   delta?: string;
   retryAttempt?: number;
   maxRetryAttempts?: number;
@@ -957,13 +958,16 @@ export interface PetDashboard {
   life: PetLifeSnapshot;
 }
 
-export type PetActivityState = "working" | "generating" | "waiting";
+export type PetActivityState = "working" | "generating" | "waiting" | "completed";
 
 export interface PetActivity {
   id: string;
   title: string;
   detail: string;
   state: PetActivityState;
+  threadId?: string;
+  completedAt?: number;
+  unread?: boolean;
 }
 
 export interface PetRuntimeSnapshot {

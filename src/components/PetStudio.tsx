@@ -5,6 +5,7 @@ import {
   BrainCircuit,
   CalendarDays,
   Check,
+  CheckCircle2,
   CircleAlert,
   Download,
   Eye,
@@ -398,7 +399,7 @@ export function PetStudio({
             <div className="pet-activity-stack" aria-live="polite">
               {activities.slice(0, 4).map((activity) => (
                 <article className={`pet-activity-bubble ${activity.state}`} key={activity.id}>
-                  <span>{activity.state === "generating" ? <Sparkles size={14} /> : activity.state === "waiting" ? <CircleAlert size={14} /> : <LoaderCircle className="spin" size={14} />}</span>
+                  <span>{activity.state === "completed" ? <CheckCircle2 size={14} /> : activity.state === "generating" ? <Sparkles size={14} /> : activity.state === "waiting" ? <CircleAlert size={14} /> : <LoaderCircle className="spin" size={14} />}</span>
                   <div><strong>{activity.title}</strong><small>{activity.detail}</small></div>
                 </article>
               ))}

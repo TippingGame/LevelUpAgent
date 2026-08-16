@@ -234,6 +234,15 @@ pub struct AgentStreamEvent {
 }
 
 impl AgentStreamEvent {
+    pub fn stream_opened() -> Self {
+        Self {
+            kind: "stream_opened".to_owned(),
+            delta: None,
+            retry_attempt: None,
+            max_retry_attempts: None,
+        }
+    }
+
     pub fn content(delta: String) -> Self {
         Self {
             kind: "content_delta".to_owned(),

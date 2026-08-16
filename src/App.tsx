@@ -10,6 +10,7 @@ import {
   BrainCircuit,
   BookOpen,
   Check,
+  CheckCircle2,
   ChevronDown,
   ChevronRight,
   CircleAlert,
@@ -68,6 +69,7 @@ import { AttachmentChip } from "./components/AttachmentChip";
 import { MediaAssetCard, MediaStudio } from "./components/MediaStudio";
 import { WritingStudio } from "./components/WritingStudio";
 import { ConstellationStudio } from "./components/ConstellationStudio";
+import { ArmorStudio } from "./components/ArmorStudio";
 import { PetStudio, type PetGenerationRequest } from "./components/PetStudio";
 import type { PetLifeView } from "./components/PetLifeWorkspace";
 import { PetAvatar } from "./components/PetSprite";
@@ -166,6 +168,10 @@ import {
   clearLegacyProfiles,
   clearLegacyThreads,
   loadActiveProfileId,
+  loadArmorMode,
+  loadArmorModeLevel,
+  loadArmorModeSkills,
+  loadArmorWritingIntensity,
   loadActiveThreadId,
   loadHiddenProjectKeys,
   loadProfiles,
@@ -173,12 +179,18 @@ import {
   loadDiffViewSettings,
   loadPermissionLevel,
   loadPinnedThreadIds,
+  loadTaskCompletionNotices,
   loadThreads,
   migrateDefaultProfile,
   message,
   saveProfiles,
+  saveArmorMode,
+  saveArmorModeLevel,
+  saveArmorModeSkills,
+  saveArmorWritingIntensity,
   savePermissionLevel,
   savePinnedThreadIds,
+  saveTaskCompletionNotices,
   saveActiveProfileId,
   saveActiveThreadId,
   saveHiddenProjectKeys,
@@ -186,10 +198,27 @@ import {
   saveActiveThemeId,
   saveDiffViewSettings,
 } from "./lib/storage";
+import {
+  ARMOR_MODE_LEVELS,
+  ARMOR_MODE_PROFILES,
+  armorModeMediaInstructions,
+  armorModeMediaPrompt,
+  armorModeRunInstructions,
+  type ArmorModeLevel,
+  type ArmorSkillState,
+  type ArmorWritingIntensity,
+} from "./lib/armorMode";
 import { getAppLocale, setAppLocale, tr, type AppLocale } from "./lib/i18n";
 import { executeCallsWithParallelMedia } from "./lib/mediaConcurrency";
 import { isConversationNearBottom, shouldFollowConversationUpdate } from "./lib/conversationScroll";
 import { providerRetryProgressLabel, providerThreadId, usesDurableHarness } from "./lib/threadExecution";
+import {
+  acknowledgeTaskCompletionNotices,
+  shouldMarkTaskCompletionUnread,
+  upsertTaskCompletionNotice,
+  type TaskCompletionNotice,
+} from "./lib/taskCompletion";
+import { syncTaskbarBadge } from "./lib/taskbarBadge";
 import {
   themeGenerationAttachmentIds,
   themeGenerationAttachments,
@@ -274,6 +303,7 @@ import type {
   ResolvedLayout,
 } from "./lib/types";
 import "./App.css";
+import "./ArmorStudio.css";
 
 const READ_ONLY_TOOLS = new Set(["list_files", "read_file", "search_files", "read_skill", "get_goal", "update_goal", "check_media_jobs"]);
 const RISKY_COMMAND_PATTERNS = [
@@ -764,9 +794,15 @@ function App() {
   const [petProfiles, setPetProfiles] = useState<PetProfile[]>([]);
   const [petCatalogRevision, setPetCatalogRevision] = useState(0);
   const [petHatchJob, setPetHatchJob] = useState<PetHatchJob | null>(null);
+  const [taskCompletionNotices, setTaskCompletionNotices] = useState<TaskCompletionNotice[]>(loadTaskCompletionNotices);
   const [defaultWorkspace, setDefaultWorkspace] = useState<string>();
   const [mediaReferenceDrop, setMediaReferenceDrop] = useState<{ id: string; paths: string[] } | null>(null);
   const [permissionLevel, setPermissionLevel] = useState<PermissionLevel>(loadPermissionLevel);
+  const [armorMode, setArmorMode] = useState(loadArmorMode);
+  const [armorModeLevel, setArmorModeLevel] = useState<ArmorModeLevel>(loadArmorModeLevel);
+  const [armorModeSkills, setArmorModeSkills] = useState<ArmorSkillState>(loadArmorModeSkills);
+  const [armorWritingIntensity, setArmorWritingIntensity] = useState<ArmorWritingIntensity>(loadArmorWritingIntensity);
+  const [armorStudioOpen, setArmorStudioOpen] = useState(false);
   const [draft, setDraft] = useState("");
   const [draftAttachments, setDraftAttachments] = useState<ImageAttachment[]>([]);
   const [attachmentPasteBusy, setAttachmentPasteBusy] = useState(false);
@@ -843,6 +879,50 @@ function App() {
   const databasePersistenceFailedRef = useRef(false);
   const persistenceQueueRef = useRef<Promise<void>>(Promise.resolve());
   const petHatchImportingRef = useRef<string | null>(null);
+  const taskCompletionNoticesRef = useRef(taskCompletionNotices);
+  const taskCompletionTimersRef = useRef<Map<string, number>>(new Map());
+
+  const commitTaskCompletionNotices = useCallback((next: TaskCompletionNotice[]) => {
+    taskCompletionNoticesRef.current = next;
+    setTaskCompletionNotices(next);
+  }, []);
+
+  const acknowledgeTaskCompletion = useCallback((threadId: string) => {
+    const timer = taskCompletionTimersRef.current.get(threadId);
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      taskCompletionTimersRef.current.delete(threadId);
+    }
+    const next = acknowledgeTaskCompletionNotices(taskCompletionNoticesRef.current, threadId);
+    if (next.length !== taskCompletionNoticesRef.current.length) commitTaskCompletionNotices(next);
+  }, [commitTaskCompletionNotices]);
+
+  const recordTaskCompletion = useCallback((thread: AgentThread) => {
+    const completedAt = Date.now();
+    const unread = shouldMarkTaskCompletionUnread({
+      threadId: thread.id,
+      activeThreadId: activeThreadIdRef.current,
+      workspaceView: workspaceViewRef.current,
+      documentFocused: document.hasFocus(),
+    });
+    const next = upsertTaskCompletionNotice(taskCompletionNoticesRef.current, {
+      threadId: thread.id,
+      title: thread.title,
+      completedAt,
+      unread,
+    });
+    commitTaskCompletionNotices(next);
+    const existingTimer = taskCompletionTimersRef.current.get(thread.id);
+    if (existingTimer !== undefined) window.clearTimeout(existingTimer);
+    if (!unread) {
+      const timer = window.setTimeout(() => {
+        taskCompletionTimersRef.current.delete(thread.id);
+        const current = taskCompletionNoticesRef.current.find((notice) => notice.threadId === thread.id);
+        if (current?.completedAt === completedAt && !current.unread) acknowledgeTaskCompletion(thread.id);
+      }, 8_000);
+      taskCompletionTimersRef.current.set(thread.id, timer);
+    }
+  }, [acknowledgeTaskCompletion, commitTaskCompletionNotices]);
 
   const activeProfile =
     profiles.find((profile) => profile.id === activeProfileId) ?? profiles[0];
@@ -891,9 +971,18 @@ function App() {
     : displayedProjectGroups;
   const activePetProfile = petProfiles.find((profile) => profile.id === activeThread.petId);
   const petActivities = useMemo(
-    () => buildPetActivities(threads, runningThreadIds, pendingApprovals, mediaPendingCount, petProfiles, locale),
-    [threads, runningThreadIds, pendingApprovals, mediaPendingCount, petProfiles, locale],
+    () => buildPetActivities(threads, runningThreadIds, pendingApprovals, mediaPendingCount, petProfiles, taskCompletionNotices, locale),
+    [threads, runningThreadIds, pendingApprovals, mediaPendingCount, petProfiles, taskCompletionNotices, locale],
   );
+  const unreadTaskCompletionCount = useMemo(
+    () => taskCompletionNotices.filter((notice) => notice.unread).length,
+    [taskCompletionNotices],
+  );
+  const unreadTaskCompletionThreadIds = useMemo(
+    () => new Set(taskCompletionNotices.filter((notice) => notice.unread).map((notice) => notice.threadId)),
+    [taskCompletionNotices],
+  );
+  const latestUnreadTaskCompletion = taskCompletionNotices.find((notice) => notice.unread);
 
   useEffect(() => {
     document.documentElement.lang = locale;
@@ -932,6 +1021,32 @@ function App() {
     }, 160);
     return () => window.clearTimeout(timer);
   }, [petActivities]);
+
+  useEffect(() => {
+    saveTaskCompletionNotices(taskCompletionNotices);
+    if (isDesktop()) {
+      void syncTaskbarBadge(unreadTaskCompletionCount).catch((error) => {
+        console.info("Taskbar completion badge could not be updated", error);
+      });
+    }
+  }, [taskCompletionNotices, unreadTaskCompletionCount]);
+
+  useEffect(() => () => {
+    for (const timer of taskCompletionTimersRef.current.values()) window.clearTimeout(timer);
+    taskCompletionTimersRef.current.clear();
+  }, []);
+
+  useEffect(() => {
+    if (workspaceView === "chat" && document.hasFocus()) acknowledgeTaskCompletion(activeThreadId);
+  }, [acknowledgeTaskCompletion, activeThreadId, workspaceView]);
+
+  useEffect(() => {
+    const acknowledgeVisibleTask = () => {
+      if (workspaceViewRef.current === "chat") acknowledgeTaskCompletion(activeThreadIdRef.current);
+    };
+    window.addEventListener("focus", acknowledgeVisibleTask);
+    return () => window.removeEventListener("focus", acknowledgeVisibleTask);
+  }, [acknowledgeTaskCompletion]);
 
   useEffect(() => {
     themesOpenRef.current = themesOpen;
@@ -1145,12 +1260,29 @@ function App() {
       if (generationRequest.backgroundMode === "ai") {
         const mediaResult = await generateMedia({
           kind: "image",
-          prompt: themeGenerationBackgroundPrompt(generationRequest, locale),
+          prompt: armorModeMediaPrompt(
+            armorMode,
+            armorModeLevel,
+            "image",
+            themeGenerationBackgroundPrompt(generationRequest, locale),
+            {
+              model: activeProfile.model,
+              protocol: activeProfile.protocol,
+              skills: armorModeSkills,
+              surface: "image",
+            },
+          ),
           count: 1,
           size: "1536x1024",
           quality: "medium",
           outputFormat: "webp",
           referenceAttachmentIds: generationRequest.references.slice(0, 3).map((attachment) => attachment.id),
+          instructions: armorModeMediaInstructions(armorMode, armorModeLevel, "image", undefined, {
+          model: activeProfile.model,
+          protocol: activeProfile.protocol,
+          skills: armorModeSkills,
+          surface: "image",
+        }),
         }, created.id);
         const backgroundAsset = mediaResult.assets.find((asset) => (
           asset.kind === "image"
@@ -1513,6 +1645,22 @@ function App() {
   }, [permissionLevel]);
 
   useEffect(() => {
+    saveArmorMode(armorMode);
+  }, [armorMode]);
+
+  useEffect(() => {
+    saveArmorModeLevel(armorModeLevel);
+  }, [armorModeLevel]);
+
+  useEffect(() => {
+    saveArmorModeSkills(armorModeSkills);
+  }, [armorModeSkills]);
+
+  useEffect(() => {
+    saveArmorWritingIntensity(armorWritingIntensity);
+  }, [armorWritingIntensity]);
+
+  useEffect(() => {
     saveHiddenProjectKeys(hiddenProjectKeys);
   }, [hiddenProjectKeys]);
 
@@ -1577,6 +1725,11 @@ function App() {
         });
         threadsRef.current = hydratedThreads;
         setThreads(hydratedThreads);
+        const hydratedThreadIds = new Set(hydratedThreads.map((thread) => thread.id));
+        const validTaskCompletions = taskCompletionNoticesRef.current.filter((notice) => hydratedThreadIds.has(notice.threadId));
+        if (validTaskCompletions.length !== taskCompletionNoticesRef.current.length) {
+          commitTaskCompletionNotices(validTaskCompletions);
+        }
         setActiveThreadId((current) =>
           hydratedThreads.some((thread) => thread.id === current) ? current : loadActiveThreadId(hydratedThreads),
         );
@@ -2082,6 +2235,7 @@ function App() {
     if (expectedOperationId && harnessState && useHarness) {
       void harnessUpdateState(expectedOperationId, harnessState).catch(() => undefined);
     }
+    if (harnessState === "completed" && thread) recordTaskCompletion(thread);
     const operationId = expectedOperationId ?? operationIdsRef.current.get(threadId);
     const changeStatus = terminalChangeStatus(harnessState);
       if (operationId && changeStatus && thread && isDesktop()) {
@@ -2164,6 +2318,11 @@ function App() {
         fallbackProfiles: runFallbackProfiles,
         hatch: options.hatch ?? false,
         hatchSkillLoaded: options.hatchSkillLoaded ?? false,
+        customInstructions: armorModeRunInstructions(armorMode, armorModeLevel, {
+          model: runProfile.model,
+          protocol: runProfile.protocol,
+          skills: armorModeSkills,
+        }),
       }, (event: HarnessRuntimeEvent) => {
         if (event.kind === "provider_reconnecting") {
           const payload = event.payload as { retryAttempt?: number; maxRetryAttempts?: number };
@@ -2450,6 +2609,7 @@ function App() {
   const activateThread = (threadId: string) => {
     const thread = threadsRef.current.find((item) => item.id === threadId);
     if (!thread) return;
+    acknowledgeTaskCompletion(threadId);
     setActiveThreadId(threadId);
     expandProject(workspaceKey(thread.workspace));
     setProfileMenuOpen(false);
@@ -2592,6 +2752,41 @@ function App() {
       unlisten?.();
     };
   }, [showPetWorkspace]);
+
+  useEffect(() => {
+    if (!isDesktop()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void import("@tauri-apps/api/event")
+      .then(({ listen }) => listen<{ threadId?: string }>("pet://open-completed-task", (event) => {
+        const threadId = event.payload?.threadId;
+        if (!threadId) return;
+        const thread = threadsRef.current.find((candidate) => candidate.id === threadId);
+        acknowledgeTaskCompletion(threadId);
+        if (!thread) return;
+        setActiveThreadId(threadId);
+        setCollapsedProjectKeys((current) => {
+          const projectKey = workspaceKey(thread.workspace);
+          if (!current.has(projectKey)) return current;
+          const next = new Set(current);
+          next.delete(projectKey);
+          return next;
+        });
+        setProfileMenuOpen(false);
+        setProjectMenuKey(null);
+        setPetOpen(false);
+        setWorkspaceView("chat");
+      }))
+      .then((stop) => {
+        if (disposed) stop();
+        else unlisten = stop;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [acknowledgeTaskCompletion]);
 
   const openProject = async () => {
     if (!isDesktop()) {
@@ -2793,6 +2988,11 @@ function App() {
             updatedAt: Date.now(),
           });
         },
+        armorModeRunInstructions(armorMode, armorModeLevel, {
+          model: runProfile.model,
+          protocol: runProfile.protocol,
+          skills: armorModeSkills,
+        }),
       );
       if (frameId !== null) window.cancelAnimationFrame(frameId);
       if (!hatchRunStillCurrent()) {
@@ -3690,6 +3890,7 @@ function App() {
     }
     threadsRef.current = nextThreads;
     setThreads(nextThreads);
+    acknowledgeTaskCompletion(threadId);
     setThreadPendingDelete(null);
     setPinnedThreadIds((current) => {
       if (!current.has(threadId)) return current;
@@ -4076,9 +4277,9 @@ function App() {
                 {!collapsed && (
                   <div className="project-threads">
                     {project.threads.map((thread) => (
-                      <div className={`thread-row ${thread.id === activeThread.id ? "active" : ""}`} key={thread.id}>
+                      <div className={`thread-row${thread.id === activeThread.id ? " active" : ""}${unreadTaskCompletionThreadIds.has(thread.id) ? " has-completion" : ""}`} key={thread.id}>
                         <button
-                          aria-label={`${tr("打开任务", "Open task")} ${localizedThreadTitle(thread.title)}`}
+                          aria-label={`${tr("打开任务", "Open task")} ${localizedThreadTitle(thread.title)}${unreadTaskCompletionThreadIds.has(thread.id) ? ` · ${tr("已完成", "completed")}` : ""}`}
                           title={localizedThreadTitle(thread.title)}
                           onClick={() => activateThread(thread.id)}
                         >
@@ -4086,8 +4287,11 @@ function App() {
                             ? <ShieldCheck size={14} />
                             : runningThreadIds.has(thread.id)
                               ? <Activity className="spin" size={14} />
-                              : <MessageSquareText size={14} />}
+                              : unreadTaskCompletionThreadIds.has(thread.id)
+                                ? <CheckCircle2 size={14} />
+                                : <MessageSquareText size={14} />}
                           <span>{localizedThreadTitle(thread.title)}</span>
+                          {unreadTaskCompletionThreadIds.has(thread.id) && <b className="thread-completion-dot" aria-hidden="true" />}
                         </button>
                         <IconButton
                           className={`thread-pin-button${pinnedThreadIds.has(thread.id) ? " pinned" : ""}`}
@@ -4149,6 +4353,9 @@ function App() {
       <MediaStudio
         active={workspaceView === "media"}
         locale={locale}
+        armorMode={armorMode}
+        armorModeLevel={armorModeLevel}
+        armorModeSkills={armorModeSkills}
         mediaCatalogRevision={mediaCatalogRevision}
         dropActive={workspaceView === "media" && fileDragActive}
         referenceDrop={mediaReferenceDrop}
@@ -4161,6 +4368,10 @@ function App() {
       <WritingStudio
         active={workspaceView === "writing"}
         locale={locale}
+        armorMode={armorMode}
+        armorModeLevel={armorModeLevel}
+        armorModeSkills={armorModeSkills}
+        armorWritingIntensity={armorWritingIntensity}
         activeProfile={activeProfile}
         profiles={profiles}
         modelCatalogRevision={mediaCatalogRevision}
@@ -4173,6 +4384,10 @@ function App() {
       <ConstellationStudio
         active={workspaceView === "constellation"}
         locale={locale}
+        armorMode={armorMode}
+        armorModeLevel={armorModeLevel}
+        armorModeSkills={armorModeSkills}
+        armorWritingIntensity={armorWritingIntensity}
         activeProfile={activeProfile}
         profiles={profiles}
         workspace={activeThread.workspace}
@@ -4187,7 +4402,8 @@ function App() {
 
   const workspaceSlot = workspaceView === "chat" ? (
       <main
-        className={`workspace-shell${fileDragActive ? " file-drag-active" : ""}`}
+        className={`workspace-shell${fileDragActive ? " file-drag-active" : ""}${armorMode ? ` armor-mode armor-level-${armorModeLevel}` : ""}`}
+        data-armor-level={armorMode ? armorModeLevel : undefined}
         onDragEnter={(event) => {
           event.preventDefault();
           setFileDragActive(true);
@@ -4262,6 +4478,19 @@ function App() {
               : activeThread.workspace ? shortPath(activeThread.workspace) : tr("无项目", "No project")}</span>
           </div>
           <div className="topbar-actions">
+            {latestUnreadTaskCompletion && (
+              <IconButton
+                className="task-completion-button"
+                label={tr(
+                  `${unreadTaskCompletionCount} 个任务已完成，打开最新任务`,
+                  `${unreadTaskCompletionCount} completed ${unreadTaskCompletionCount === 1 ? "task" : "tasks"}; open latest`,
+                )}
+                onClick={() => activateThread(latestUnreadTaskCompletion.threadId)}
+              >
+                <CheckCircle2 size={17} />
+                <span>{unreadTaskCompletionCount > 99 ? "99+" : unreadTaskCompletionCount}</span>
+              </IconButton>
+            )}
             <IconButton label={tr("切换到 English", "Switch to 中文")} onClick={toggleLocale}>
               <Languages size={17} />
             </IconButton>
@@ -4290,6 +4519,18 @@ function App() {
             </IconButton>
           </div>
         </header>
+
+        {armorMode && (
+          <div className="armor-hud" aria-label={tr("一键破甲已开启", "Armor Mode enabled")}>
+            <span><TerminalSquare size={13} /> ARMOR MODE · {ARMOR_MODE_PROFILES[armorModeLevel].shortLabelZh}</span>
+            <code>GPT</code>
+            <code>CLAUDE</code>
+            <code>GEMINI</code>
+            <code>GROK</code>
+            <i>{tr("高强度执行链路在线", "High-intensity execution chain online")}</i>
+            <button type="button" onClick={() => setArmorStudioOpen(true)}>{tr("控制台", "Console")}</button>
+          </div>
+        )}
 
         <div className="conversation-stage">
           <section className="conversation" ref={conversationRef} onScroll={handleConversationScroll}>
@@ -4380,6 +4621,8 @@ function App() {
           attachments={draftAttachments}
           mode={activeThread.kind === "pet" ? "chat" : mode}
           permissionLevel={permissionLevel}
+          armorMode={armorMode}
+          armorModeLevel={armorModeLevel}
           running={running}
           disabled={Boolean(pending) || attachmentPasteBusy}
           modelMenuOpen={profileMenuOpen}
@@ -4416,6 +4659,9 @@ function App() {
           onRemoveAttachment={removeDraftImage}
           onModeChange={activeThread.kind === "pet" ? () => undefined : setMode}
           onPermissionChange={setPermissionLevel}
+          onArmorModeChange={setArmorMode}
+          onArmorModeLevelChange={setArmorModeLevel}
+          onArmorStudioOpen={() => setArmorStudioOpen(true)}
           onSend={send}
           onStop={stopAgent}
         />
@@ -4569,6 +4815,22 @@ function App() {
         />
       )}
 
+      {armorStudioOpen && (
+        <ArmorStudio
+          armorMode={armorMode}
+          armorModeLevel={armorModeLevel}
+          armorModeSkills={armorModeSkills}
+          armorWritingIntensity={armorWritingIntensity}
+          model={activeProfile.model}
+          protocol={activeProfile.protocol}
+          onArmorModeChange={setArmorMode}
+          onArmorModeLevelChange={setArmorModeLevel}
+          onArmorModeSkillsChange={setArmorModeSkills}
+          onArmorWritingIntensityChange={setArmorWritingIntensity}
+          onClose={() => setArmorStudioOpen(false)}
+        />
+      )}
+
       {petOpen && (
         <PetDialog
           locale={locale}
@@ -4694,7 +4956,7 @@ function App() {
       model: activeProfile.model,
       connected: connectionReady,
     },
-    agent: { mode: activeThread.kind === "pet" ? "chat" : mode, permission: permissionLevel },
+    agent: { mode: activeThread.kind === "pet" ? "chat" : mode, permission: permissionLevel, armorMode, armorLevel: armorModeLevel },
     balance: { label: balanceLabel, loading: balanceBusy, error: balanceError ?? "" },
     workspace: { temporary: activeUsesDefaultWorkspace, path: activeThread.workspace ?? "" },
     projects: displayedProjectGroups.map((project) => ({
@@ -4746,7 +5008,10 @@ function App() {
       locale={locale}
       data={layoutData}
       actions={layoutActions}
-      shellClassName={rightPanelOpen && workspaceView === "chat" ? undefined : "details-collapsed"}
+      shellClassName={[
+        rightPanelOpen && workspaceView === "chat" ? undefined : "details-collapsed",
+        armorMode ? `armor-mode armor-level-${armorModeLevel}` : undefined,
+      ].filter(Boolean).join(" ")}
       shellStyle={{
         "--sidebar-width": sidebarWidth == null ? undefined : `${sidebarWidth}px`,
         "--inspector-width": `${inspectorWidth}px`,
@@ -5431,6 +5696,8 @@ function Composer({
   attachments,
   mode,
   permissionLevel,
+  armorMode,
+  armorModeLevel,
   running,
   disabled,
   modelMenuOpen,
@@ -5440,6 +5707,9 @@ function Composer({
   onRemoveAttachment,
   onModeChange,
   onPermissionChange,
+  onArmorModeChange,
+  onArmorModeLevelChange,
+  onArmorStudioOpen,
   onSend,
   onStop,
 }: {
@@ -5447,6 +5717,8 @@ function Composer({
   attachments: ImageAttachment[];
   mode: AgentMode;
   permissionLevel: PermissionLevel;
+  armorMode: boolean;
+  armorModeLevel: ArmorModeLevel;
   running: boolean;
   disabled: boolean;
   modelMenuOpen: boolean;
@@ -5456,11 +5728,16 @@ function Composer({
   onRemoveAttachment: (attachment: ImageAttachment) => void;
   onModeChange: (value: AgentMode) => void;
   onPermissionChange: (value: PermissionLevel) => void;
+  onArmorModeChange: (value: boolean) => void;
+  onArmorModeLevelChange: (value: ArmorModeLevel) => void;
+  onArmorStudioOpen: () => void;
   onSend: () => void;
   onStop: () => void;
 }) {
   const [permissionMenuOpen, setPermissionMenuOpen] = useState(false);
+  const [armorLevelMenuOpen, setArmorLevelMenuOpen] = useState(false);
   const permissionMenuRef = useRef<HTMLDivElement>(null);
+  const armorLevelMenuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!permissionMenuOpen) return;
@@ -5478,9 +5755,31 @@ function Composer({
     };
   }, [permissionMenuOpen]);
 
+  useEffect(() => {
+    if (!armorLevelMenuOpen) return;
+    const close = (event: MouseEvent) => {
+      if (!armorLevelMenuRef.current?.contains(event.target as Node)) setArmorLevelMenuOpen(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setArmorLevelMenuOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [armorLevelMenuOpen]);
+
+  useEffect(() => {
+    if (!armorMode) setArmorLevelMenuOpen(false);
+  }, [armorMode]);
+
+  const activeArmorProfile = ARMOR_MODE_PROFILES[armorModeLevel];
+
   return (
     <div className="composer-wrap">
-      <div className={`composer${modelMenuOpen || permissionMenuOpen ? " menu-open" : ""}`}>
+      <div className={`composer${modelMenuOpen || permissionMenuOpen || (armorMode && armorLevelMenuOpen) ? " menu-open" : ""}`}>
         {attachments.length > 0 && (
           <div className="composer-attachments" aria-label={tr("待发送附件", "Attachments to send")}>
             {attachments.map((attachment) => (
@@ -5557,6 +5856,73 @@ function Composer({
               </div>
             )}
           </div>
+          <button
+            type="button"
+            className={`armor-toggle${armorMode ? " active" : ""}`}
+            aria-pressed={armorMode}
+            title={armorMode
+              ? tr("一键破甲已开启：对当前会话注入高强度执行指令", "Armor Mode is enabled: high-intensity execution instructions are injected into this conversation")
+              : tr("开启一键破甲：增强行动优先、工具验证和跨模型一致性", "Enable Armor Mode: strengthen action-first execution, tool verification, and cross-model consistency")}
+            disabled={disabled}
+            onClick={() => onArmorModeChange(!armorMode)}
+          >
+            <TerminalSquare size={14} />
+            <span>{tr("一键破甲", "Armor")}</span>
+            <i aria-hidden="true" />
+          </button>
+          {armorMode && (
+            <>
+              <div className="armor-level-picker active" ref={armorLevelMenuRef}>
+                <button
+                  type="button"
+                  className="armor-level-button"
+                  aria-label={`${tr("破甲等级", "Armor level")}: ${tr(activeArmorProfile.labelZh, activeArmorProfile.labelEn)}`}
+                  aria-expanded={armorLevelMenuOpen}
+                  aria-haspopup="menu"
+                  title={`${tr(activeArmorProfile.descriptionZh, activeArmorProfile.descriptionEn)} · ${tr("随下一轮请求注入", "Injected on the next request")}`}
+                  disabled={disabled}
+                  onClick={() => setArmorLevelMenuOpen((open) => !open)}
+                >
+                  <ShieldAlert size={13} />
+                  <span>{tr(activeArmorProfile.labelZh, activeArmorProfile.labelEn)}</span>
+                  <ChevronDown size={12} />
+                </button>
+                {armorLevelMenuOpen && (
+                  <div className="armor-level-menu" role="menu" aria-label={tr("选择破甲等级", "Choose Armor level")}>
+                    {ARMOR_MODE_LEVELS.map((level) => {
+                      const profile = ARMOR_MODE_PROFILES[level];
+                      return (
+                        <button
+                          type="button"
+                          role="menuitemradio"
+                          aria-checked={armorModeLevel === level}
+                          className={armorModeLevel === level ? "active" : ""}
+                          key={level}
+                          onClick={() => {
+                            onArmorModeLevelChange(level);
+                            setArmorLevelMenuOpen(false);
+                          }}
+                        >
+                          <span className="armor-level-option-icon"><TerminalSquare size={15} /></span>
+                          <span><strong>{tr(profile.labelZh, profile.labelEn)}</strong><small>{tr(profile.descriptionZh, profile.descriptionEn)}</small></span>
+                          <span className="armor-level-check">{armorModeLevel === level ? <Check size={14} /> : null}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+              <button
+                type="button"
+                className="armor-manage-button"
+                title={tr("打开一键破甲控制台", "Open Armor Mode control center")}
+                onClick={onArmorStudioOpen}
+              >
+                <ShieldCheck size={14} />
+                <span>{tr("控制台", "Console")}</span>
+              </button>
+            </>
+          )}
           <span className="composer-spacer" />
           {modelControl}
           {running && (
@@ -7851,9 +8217,27 @@ function buildPetActivities(
   pendingApprovals: Record<string, PendingApproval>,
   mediaPendingCount: number,
   pets: PetProfile[],
+  taskCompletions: TaskCompletionNotice[],
   locale: AppLocale,
 ): PetActivity[] {
-  const activities: PetActivity[] = [];
+  const activities: PetActivity[] = taskCompletions.slice(0, 4).map((notice) => {
+    const thread = threads.find((candidate) => candidate.id === notice.threadId);
+    const pet = thread?.petId ? pets.find((candidate) => candidate.id === thread.petId) : undefined;
+    const title = pet
+      ? (locale === "zh-CN" ? `与 ${pet.displayName} 会话` : `Chat with ${pet.displayName}`)
+      : localizedThreadTitle(thread?.title ?? notice.title);
+    return {
+      id: `completion:${notice.threadId}`,
+      title,
+      detail: notice.unread
+        ? (locale === "zh-CN" ? "任务已完成" : "Task completed")
+        : (locale === "zh-CN" ? "任务刚刚完成" : "Task just completed"),
+      state: "completed",
+      threadId: notice.threadId,
+      completedAt: notice.completedAt,
+      unread: notice.unread,
+    };
+  });
   for (const thread of threads) {
     const pending = pendingApprovals[thread.id];
     if (!pending && !runningThreadIds.has(thread.id)) continue;

@@ -22,7 +22,7 @@ const MAX_PROMPT_CHARS: usize = 32_000;
 const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_AUDIO_BYTES: usize = 64 * 1024 * 1024;
 const MAX_VIDEO_BYTES: usize = 1024 * 1024 * 1024;
-const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
+const MAX_JSON_BYTES: usize = 128 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct MediaProvider {
@@ -1104,76 +1104,8 @@ async fn call_imagen_image(
 
 fn parse_image_sources(value: &Value) -> Result<Vec<BlobSource>, String> {
     let mut sources = Vec::new();
-    if let Some(predictions) = value.get("predictions").and_then(Value::as_array) {
-        for item in predictions {
-            push_blob_source(&mut sources, item, None);
-        }
-    }
-    if let Some(data) = value.get("data").and_then(Value::as_array) {
-        for item in data {
-            push_blob_source(&mut sources, item, None);
-        }
-    }
-    if let Some(output) = value.get("output").and_then(Value::as_array) {
-        for item in output {
-            if item.get("type").and_then(Value::as_str) == Some("image_generation_call") {
-                let result = item.get("result").and_then(Value::as_str);
-                if let Some(result) = result {
-                    sources.push(BlobSource {
-                        base64: Some(result.to_owned()),
-                        url: None,
-                        mime_type: item
-                            .get("mime_type")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned),
-                        revised_prompt: None,
-                    });
-                }
-            }
-        }
-    }
-    if let Some(candidates) = value.get("candidates").and_then(Value::as_array) {
-        for part in candidates
-            .iter()
-            .filter_map(|item| item.get("content"))
-            .filter_map(|item| item.get("parts"))
-            .filter_map(Value::as_array)
-            .flatten()
-        {
-            if let Some(data) = part
-                .get("inlineData")
-                .or_else(|| part.get("inline_data"))
-                .and_then(|item| item.get("data"))
-                .and_then(Value::as_str)
-            {
-                sources.push(BlobSource {
-                    base64: Some(data.to_owned()),
-                    url: None,
-                    mime_type: part
-                        .get("inlineData")
-                        .or_else(|| part.get("inline_data"))
-                        .and_then(|item| item.get("mimeType").or_else(|| item.get("mime_type")))
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                    revised_prompt: None,
-                });
-            }
-        }
-    }
-    if let Some(choices) = value.get("choices").and_then(Value::as_array) {
-        for message in choices.iter().filter_map(|item| item.get("message")) {
-            if let Some(images) = message.get("images").and_then(Value::as_array) {
-                for image in images {
-                    push_blob_source(&mut sources, image, None);
-                }
-            }
-            if let Some(parts) = message.get("content").and_then(Value::as_array) {
-                for part in parts {
-                    push_blob_source(&mut sources, part, None);
-                }
-            }
-        }
-    }
+    collect_image_sources(value, &mut sources, 0, false);
+    deduplicate_image_sources(&mut sources);
     if sources.is_empty() {
         return Err(provider_message(value)
             .unwrap_or_else(|| "The provider returned no image output".to_owned()));
@@ -1181,39 +1113,180 @@ fn parse_image_sources(value: &Value) -> Result<Vec<BlobSource>, String> {
     Ok(sources)
 }
 
-fn push_blob_source(sources: &mut Vec<BlobSource>, value: &Value, revised: Option<&str>) {
-    let image_url = value
-        .get("image_url")
-        .and_then(|item| item.get("url").or(Some(item)))
+fn collect_image_sources(
+    value: &Value,
+    sources: &mut Vec<BlobSource>,
+    depth: usize,
+    image_context: bool,
+) {
+    if depth > 12 {
+        return;
+    }
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                collect_image_sources(item, sources, depth + 1, image_context);
+            }
+        }
+        Value::Object(object) => {
+            push_blob_source(sources, value, None, image_context);
+            for (key, child) in object {
+                let child_image_context = image_context
+                    || matches!(
+                        key.as_str(),
+                        "image"
+                            | "images"
+                            | "imageData"
+                            | "image_data"
+                            | "image_url"
+                            | "imageUrl"
+                            | "inlineData"
+                            | "inline_data"
+                            | "generatedImage"
+                            | "generated_image"
+                    );
+                if key == "content"
+                    && let Some(content) = child.as_str()
+                {
+                    push_image_text_sources(sources, content, None);
+                }
+                collect_image_sources(child, sources, depth + 1, child_image_context);
+            }
+        }
+        Value::String(text) if image_context => push_image_string_source(sources, text, None),
+        _ => {}
+    }
+}
+
+fn push_blob_source(
+    sources: &mut Vec<BlobSource>,
+    value: &Value,
+    revised: Option<&str>,
+    image_context: bool,
+) {
+    let Some(object) = value.as_object() else {
+        return;
+    };
+    let type_is_image = object
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind.to_ascii_lowercase().contains("image"));
+    let mime_type = object
+        .get("mime_type")
+        .or_else(|| object.get("mimeType"))
+        .or_else(|| object.get("content_type"))
+        .or_else(|| object.get("contentType"))
         .and_then(Value::as_str);
-    let base64 = value
+    let has_image_mime =
+        mime_type.is_some_and(|mime| mime.to_ascii_lowercase().starts_with("image/"));
+    let source_is_image = image_context || type_is_image || has_image_mime;
+    let base64 = object
         .get("b64_json")
-        .or_else(|| value.get("base64"))
-        .or_else(|| value.get("bytesBase64Encoded"))
-        .or_else(|| value.get("bytes_base64_encoded"))
-        .or_else(|| {
-            value
-                .get("data")
-                .filter(|_| value.get("mime_type").is_some())
-        })
+        .or_else(|| object.get("base64"))
+        .or_else(|| object.get("bytesBase64Encoded"))
+        .or_else(|| object.get("bytes_base64_encoded"))
+        .or_else(|| object.get("imageBase64"))
+        .or_else(|| object.get("image_base64"))
+        .or_else(|| object.get("data").filter(|_| source_is_image))
+        .or_else(|| object.get("result").filter(|_| type_is_image))
         .and_then(Value::as_str);
-    let url = value.get("url").and_then(Value::as_str).or(image_url);
+    let url = object
+        .get("url")
+        .or_else(|| object.get("uri"))
+        .and_then(Value::as_str)
+        .filter(|value| source_is_image || looks_like_image_url(value));
     if base64.is_some() || url.is_some() {
         sources.push(BlobSource {
             base64: base64.map(str::to_owned),
             url: url.map(str::to_owned),
-            mime_type: value
-                .get("mime_type")
-                .or_else(|| value.get("mimeType"))
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            revised_prompt: value
+            mime_type: mime_type.map(str::to_owned),
+            revised_prompt: object
                 .get("revised_prompt")
+                .or_else(|| object.get("revisedPrompt"))
                 .and_then(Value::as_str)
                 .or(revised)
                 .map(str::to_owned),
         });
     }
+}
+
+fn push_image_text_sources(sources: &mut Vec<BlobSource>, text: &str, revised: Option<&str>) {
+    let trimmed = text.trim();
+    if trimmed.starts_with("data:image/")
+        || trimmed.starts_with("https://")
+        || trimmed.starts_with("http://")
+    {
+        push_image_string_source(sources, trimmed, revised);
+    }
+
+    let mut cursor = 0;
+    while let Some(start) = text[cursor..].find("![") {
+        let start = cursor + start;
+        let Some(open) = text[start..].find("](").map(|offset| start + offset + 2) else {
+            break;
+        };
+        let Some(end) = text[open..].find(')').map(|offset| open + offset) else {
+            break;
+        };
+        push_image_string_source(
+            sources,
+            text[open..end].trim().trim_matches(['<', '>']),
+            revised,
+        );
+        cursor = end + 1;
+    }
+
+    let mut data_cursor = 0;
+    while let Some(start) = text[data_cursor..].find("data:image/") {
+        let start = data_cursor + start;
+        let end = text[start..]
+            .find(|character: char| {
+                character.is_whitespace() || matches!(character, '"' | '\'' | ')' | ']')
+            })
+            .map(|offset| start + offset)
+            .unwrap_or(text.len());
+        push_image_string_source(sources, &text[start..end], revised);
+        data_cursor = end;
+    }
+}
+
+fn push_image_string_source(sources: &mut Vec<BlobSource>, value: &str, revised: Option<&str>) {
+    let value = value.trim();
+    if value.starts_with("data:image/")
+        || value.starts_with("https://")
+        || value.starts_with("http://")
+    {
+        sources.push(BlobSource {
+            base64: None,
+            url: Some(value.to_owned()),
+            mime_type: parse_data_url(value).map(|(mime, _)| mime.to_owned()),
+            revised_prompt: revised.map(str::to_owned),
+        });
+    }
+}
+
+fn looks_like_image_url(value: &str) -> bool {
+    let value = value
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(value)
+        .to_ascii_lowercase();
+    value.starts_with("data:image/")
+        || [".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"]
+            .iter()
+            .any(|extension| value.ends_with(extension))
+}
+
+fn deduplicate_image_sources(sources: &mut Vec<BlobSource>) {
+    let mut seen = HashSet::new();
+    sources.retain(|source| {
+        let key = source
+            .base64
+            .as_deref()
+            .map(|value| format!("base64:{value}"))
+            .or_else(|| source.url.as_deref().map(|value| format!("url:{value}")));
+        key.is_some_and(|key| seen.insert(key))
+    });
 }
 
 async fn resolve_image_sources(
@@ -2775,6 +2848,38 @@ mod tests {
         let parsed = parse_image_sources(&gemini).unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].mime_type.as_deref(), Some("image/png"));
+        let wrapped_gemini = json!({
+            "response": {
+                "result": {
+                    "candidates": [{
+                        "content": {
+                            "parts": [{
+                                "imageData": {
+                                    "mimeType": "image/png",
+                                    "data": "aGVsbG8="
+                                }
+                            }]
+                        }
+                    }]
+                }
+            }
+        });
+        let parsed = parse_image_sources(&wrapped_gemini).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].mime_type.as_deref(), Some("image/png"));
+        let data_uri = json!({
+            "choices": [{
+                "message": {
+                    "content": "![generated](data:image/png;base64,aGVsbG8=)"
+                }
+            }]
+        });
+        let parsed = parse_image_sources(&data_uri).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            parsed[0].url.as_deref(),
+            Some("data:image/png;base64,aGVsbG8=")
+        );
         let mixed = b"{\"error\":{\"message\":\"Upstream request failed\"}}event: error\ndata: {\"error\":{\"message\":\"Upstream request failed\"}}";
         assert_eq!(provider_error_detail(mixed), "Upstream request failed");
     }

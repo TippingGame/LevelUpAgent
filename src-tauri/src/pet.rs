@@ -33,6 +33,7 @@ const MAX_PET_SCALE: f64 = 1.45;
 const PET_SCALE_UNITS: f64 = 1_000.0;
 static ACTIVE_PET_SCALE: AtomicU32 = AtomicU32::new(750);
 static PET_PROMPT_VISIBLE: AtomicBool = AtomicBool::new(false);
+static PET_COMPLETION_VISIBLE: AtomicBool = AtomicBool::new(false);
 const DEFAULT_MANIFEST: &[u8] = include_bytes!("../resources/pets/yui/pet.json");
 const DEFAULT_SPRITESHEET: &[u8] = include_bytes!("../resources/pets/yui/spritesheet.webp");
 
@@ -169,6 +170,12 @@ pub struct PetActivity {
     pub title: String,
     pub detail: String,
     pub state: String,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub completed_at: Option<i64>,
+    #[serde(default)]
+    pub unread: Option<bool>,
 }
 
 #[derive(Default)]
@@ -190,6 +197,12 @@ impl PetRuntime {
             .take(12)
             .filter_map(normalize_activity)
             .collect::<Vec<_>>();
+        PET_COMPLETION_VISIBLE.store(
+            normalized
+                .iter()
+                .any(|activity| activity.state == "completed"),
+            Ordering::Relaxed,
+        );
         *self
             .activities
             .lock()
@@ -1205,7 +1218,8 @@ fn install_mouse_passthrough(window: &WebviewWindow) -> Result<(), String> {
                         ..=(PET_WINDOW_WIDTH / 2.0 + character_half_width))
                         .contains(&x)
                         && (character_top..=(PET_WINDOW_HEIGHT - 28.0)).contains(&y);
-                    let over_prompt = PET_PROMPT_VISIBLE.load(Ordering::Relaxed)
+                    let over_prompt = (PET_PROMPT_VISIBLE.load(Ordering::Relaxed)
+                        || PET_COMPLETION_VISIBLE.load(Ordering::Relaxed))
                         && (55.0..=(PET_WINDOW_WIDTH - 55.0)).contains(&x)
                         && ((character_top - 128.0).max(24.0)..=(character_top + 24.0).max(152.0))
                             .contains(&y);
@@ -1797,14 +1811,24 @@ fn normalize_activity(activity: PetActivity) -> Option<PetActivity> {
         return None;
     }
     let state = match activity.state.as_str() {
-        "generating" | "waiting" | "working" => activity.state,
+        "completed" | "generating" | "waiting" | "working" => activity.state,
         _ => "working".to_owned(),
     };
+    let thread_id = activity
+        .thread_id
+        .map(|value| value.trim().chars().take(128).collect::<String>())
+        .filter(|value| !value.is_empty());
+    if state == "completed" && thread_id.is_none() {
+        return None;
+    }
     Some(PetActivity {
         id,
         title,
         detail: activity.detail.trim().chars().take(120).collect(),
         state,
+        thread_id,
+        completed_at: activity.completed_at.filter(|value| *value >= 0),
+        unread: activity.unread,
     })
 }
 
@@ -1911,6 +1935,9 @@ mod tests {
                 } else {
                     "generating".to_owned()
                 },
+                thread_id: None,
+                completed_at: None,
+                unread: None,
             })
             .collect();
         let normalized = PetRuntime::default().replace(activities).unwrap();
@@ -1920,6 +1947,35 @@ mod tests {
         assert_eq!(normalized[0].detail, "detail");
         assert_eq!(normalized[0].state, "working");
         assert_eq!(normalized[1].state, "generating");
+    }
+
+    #[test]
+    fn completed_activity_requires_a_thread_and_preserves_notification_metadata() {
+        let completion = normalize_activity(PetActivity {
+            id: " completion ".to_owned(),
+            title: " Finished task ".to_owned(),
+            detail: " Task completed ".to_owned(),
+            state: "completed".to_owned(),
+            thread_id: Some(" thread-1 ".to_owned()),
+            completed_at: Some(42),
+            unread: Some(true),
+        })
+        .unwrap();
+        assert_eq!(completion.thread_id.as_deref(), Some("thread-1"));
+        assert_eq!(completion.completed_at, Some(42));
+        assert_eq!(completion.unread, Some(true));
+        assert!(
+            normalize_activity(PetActivity {
+                id: "completion".to_owned(),
+                title: "Finished task".to_owned(),
+                detail: "Task completed".to_owned(),
+                state: "completed".to_owned(),
+                thread_id: None,
+                completed_at: Some(42),
+                unread: Some(true),
+            })
+            .is_none()
+        );
     }
 
     #[test]

@@ -1,4 +1,15 @@
 import type { AgentMessage, AgentThread, DiffViewSettings, ImageAttachment, PermissionLevel, ProviderProfile, ProviderProtocol, ToolCall } from "./types";
+import { normalizeTaskCompletionNotices, type TaskCompletionNotice } from "./taskCompletion";
+import {
+  DEFAULT_ARMOR_MODE_LEVEL,
+  DEFAULT_ARMOR_WRITING_INTENSITY,
+  isArmorModeLevel,
+  isArmorWritingIntensity,
+  normalizeArmorModeSkills,
+  type ArmorModeLevel,
+  type ArmorSkillState,
+  type ArmorWritingIntensity,
+} from "./armorMode";
 import { tr } from "./i18n";
 
 const PROFILE_KEY = "levelup-agent.profiles.v1";
@@ -6,10 +17,15 @@ const ACTIVE_PROFILE_KEY = "levelup-agent.active-profile.v1";
 const THREAD_KEY = "levelup-agent.threads.v1";
 const ACTIVE_THREAD_KEY = "levelup-agent.active-thread.v1";
 const PERMISSION_LEVEL_KEY = "levelup-agent.permission-level.v1";
+const ARMOR_MODE_KEY = "levelup-agent.armor-mode.v1";
+const ARMOR_MODE_LEVEL_KEY = "levelup-agent.armor-mode-level.v1";
+const ARMOR_MODE_SKILLS_KEY = "levelup-agent.armor-mode-skills.v1";
+const ARMOR_MODE_WRITING_INTENSITY_KEY = "levelup-agent.armor-mode-writing-intensity.v1";
 const HIDDEN_PROJECTS_KEY = "levelup-agent.hidden-projects.v1";
 const PINNED_THREADS_KEY = "levelup-agent.pinned-threads.v1";
 const ACTIVE_THEME_KEY = "levelup-agent.active-theme.v1";
 const DIFF_VIEW_SETTINGS_KEY = "levelup-agent.diff-view-settings.v1";
+const TASK_COMPLETIONS_KEY = "levelup-agent.task-completions.v1";
 
 export const DEFAULT_DIFF_VIEW_SETTINGS: DiffViewSettings = {
   fontFamily: "monaco",
@@ -240,6 +256,49 @@ export function savePermissionLevel(level: PermissionLevel) {
   writeStorageValue(PERMISSION_LEVEL_KEY, level);
 }
 
+export function loadArmorMode(): boolean {
+  return readStorageValue(ARMOR_MODE_KEY) === "true";
+}
+
+export function saveArmorMode(enabled: boolean) {
+  if (enabled) writeStorageValue(ARMOR_MODE_KEY, "true");
+  else removeStorageValue(ARMOR_MODE_KEY);
+}
+
+export function loadArmorModeLevel(): ArmorModeLevel {
+  const stored = readStorageValue(ARMOR_MODE_LEVEL_KEY);
+  return isArmorModeLevel(stored) ? stored : DEFAULT_ARMOR_MODE_LEVEL;
+}
+
+export function saveArmorModeLevel(level: ArmorModeLevel) {
+  if (level === DEFAULT_ARMOR_MODE_LEVEL) removeStorageValue(ARMOR_MODE_LEVEL_KEY);
+  else writeStorageValue(ARMOR_MODE_LEVEL_KEY, level);
+}
+
+export function loadArmorModeSkills(): ArmorSkillState {
+  const stored = readStorageValue(ARMOR_MODE_SKILLS_KEY);
+  if (!stored) return normalizeArmorModeSkills(undefined);
+  try {
+    return normalizeArmorModeSkills(JSON.parse(stored));
+  } catch {
+    return normalizeArmorModeSkills(undefined);
+  }
+}
+
+export function saveArmorModeSkills(skills: ArmorSkillState) {
+  writeStorageValue(ARMOR_MODE_SKILLS_KEY, JSON.stringify(normalizeArmorModeSkills(skills)));
+}
+
+export function loadArmorWritingIntensity(): ArmorWritingIntensity {
+  const stored = readStorageValue(ARMOR_MODE_WRITING_INTENSITY_KEY);
+  return isArmorWritingIntensity(stored) ? stored : DEFAULT_ARMOR_WRITING_INTENSITY;
+}
+
+export function saveArmorWritingIntensity(intensity: ArmorWritingIntensity) {
+  if (intensity === DEFAULT_ARMOR_WRITING_INTENSITY) removeStorageValue(ARMOR_MODE_WRITING_INTENSITY_KEY);
+  else writeStorageValue(ARMOR_MODE_WRITING_INTENSITY_KEY, intensity);
+}
+
 export function loadHiddenProjectKeys(): Set<string> {
   const stored = readJson<unknown>(HIDDEN_PROJECTS_KEY, []);
   return new Set(Array.isArray(stored) ? stored.filter((value): value is string => typeof value === "string") : []);
@@ -256,6 +315,16 @@ export function loadPinnedThreadIds(): Set<string> {
 
 export function savePinnedThreadIds(ids: Set<string>) {
   writeStorageValue(PINNED_THREADS_KEY, JSON.stringify([...ids]));
+}
+
+export function loadTaskCompletionNotices(): TaskCompletionNotice[] {
+  return normalizeTaskCompletionNotices(readJson<unknown>(TASK_COMPLETIONS_KEY, []));
+}
+
+export function saveTaskCompletionNotices(notices: TaskCompletionNotice[]) {
+  const unread = notices.filter((notice) => notice.unread);
+  if (unread.length === 0) removeStorageValue(TASK_COMPLETIONS_KEY);
+  else writeStorageValue(TASK_COMPLETIONS_KEY, JSON.stringify(unread));
 }
 
 export function loadActiveThemeId(): string {

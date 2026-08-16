@@ -220,6 +220,11 @@ export async function openPetChat(petId: string): Promise<void> {
   await invoke("open_pet_chat", { petId });
 }
 
+export async function openCompletedTask(threadId: string): Promise<void> {
+  if (!isDesktop()) return;
+  await invoke("open_completed_task", { threadId });
+}
+
 export type PetWorkspaceView = "life" | "plan" | "knowledge";
 
 export async function openPetWorkspace(petId: string, view: PetWorkspaceView = "life"): Promise<void> {
@@ -718,6 +723,7 @@ export async function agentTurn(
   fallbackProfiles: ProviderProfile[] = [],
   hatch = false,
   hatchSkillLoaded = false,
+  customInstructions?: string,
 ): Promise<AgentTurnResponse> {
   const cleanMessages = messages.filter((message) => !message.status).map(({ role, content, toolCalls, toolCallId, internal, attachments }) => ({
     role,
@@ -728,7 +734,7 @@ export async function agentTurn(
     attachments,
   }));
   return invoke<AgentTurnResponse>("agent_turn", {
-    request: { profile, messages: cleanMessages, mode, workspace, threadId, fallbackProfiles, hatch, hatchSkillLoaded },
+    request: { profile, messages: cleanMessages, mode, workspace, threadId, fallbackProfiles, hatch, hatchSkillLoaded, customInstructions },
   });
 }
 
@@ -745,6 +751,7 @@ export async function agentTurnStream(
   hatchSkillLoaded = false,
   onReconnect?: (retryAttempt: number, maxRetryAttempts: number) => void,
   onReconnected?: (retryAttempt?: number) => void,
+  customInstructions?: string,
 ): Promise<AgentTurnResponse> {
   const cleanMessages = messages.filter((message) => !message.status).map(({ role, content, toolCalls, toolCallId, internal, attachments }) => ({
     role,
@@ -763,7 +770,7 @@ export async function agentTurnStream(
     if (event.kind === "provider_reconnected") onReconnected?.(event.retryAttempt);
   };
   return invoke<AgentTurnResponse>("agent_turn_stream", {
-    request: { profile, messages: cleanMessages, mode, workspace, threadId, fallbackProfiles, hatch, hatchSkillLoaded },
+    request: { profile, messages: cleanMessages, mode, workspace, threadId, fallbackProfiles, hatch, hatchSkillLoaded, customInstructions },
     operationId,
     onEvent,
   });

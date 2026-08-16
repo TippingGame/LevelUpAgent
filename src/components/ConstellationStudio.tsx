@@ -71,6 +71,14 @@ import {
   selectVideoReference,
 } from "../lib/bridge";
 import {
+  armorModeMediaInstructions,
+  armorModeMediaPrompt,
+  armorModeWritingInstructions,
+  type ArmorModeLevel,
+  type ArmorSkillState,
+  type ArmorWritingIntensity,
+} from "../lib/armorMode";
+import {
   autoLayoutConstellation,
   BUILT_IN_CONSTELLATION_BLUEPRINTS,
   CONSTELLATION_BLUEPRINTS_KEY,
@@ -125,6 +133,10 @@ import "./ConstellationStudio.css";
 interface ConstellationStudioProps {
   active: boolean;
   locale: string;
+  armorMode: boolean;
+  armorModeLevel: ArmorModeLevel;
+  armorModeSkills: ArmorSkillState;
+  armorWritingIntensity: ArmorWritingIntensity;
   activeProfile: ProviderProfile;
   profiles: ProviderProfile[];
   workspace?: string;
@@ -172,8 +184,9 @@ const CONSTELLATION_DEFAULT_EDGE_OPTIONS = {
 const CONSTELLATION_CONNECTION_STYLE = { stroke: "#7c3aed", strokeWidth: 2.2 } as const;
 
 export function ConstellationStudio(props: ConstellationStudioProps) {
+  const armorClassName = props.armorMode ? ` armor-mode armor-level-${props.armorModeLevel}` : "";
   return (
-    <main className="constellation-studio" hidden={!props.active}>
+    <main className={`constellation-studio${armorClassName}`} data-armor-level={props.armorMode ? props.armorModeLevel : undefined} hidden={!props.active}>
       <ReactFlowProvider>
         <ConstellationStudioInner {...props} />
       </ReactFlowProvider>
@@ -184,6 +197,10 @@ export function ConstellationStudio(props: ConstellationStudioProps) {
 function ConstellationStudioInner({
   active,
   locale,
+  armorMode,
+  armorModeLevel,
+  armorModeSkills,
+  armorWritingIntensity,
   activeProfile,
   profiles,
   workspace,
@@ -860,6 +877,16 @@ function ConstellationStudioInner({
           },
           undefined,
           profiles.filter((item) => item.id !== profile.id && item.failoverEnabled),
+          false,
+          false,
+          undefined,
+          undefined,
+          armorModeWritingInstructions(armorMode, armorModeLevel, armorWritingIntensity, {
+            model: profile.model,
+            protocol: profile.protocol,
+            skills: armorModeSkills,
+            surface: "constellation",
+          }),
         );
         const text = (streamed || response.content).trim();
         if (!text) throw new Error(tr("写作模型没有返回正文", "The writing model returned no content"));
@@ -918,7 +945,12 @@ function ConstellationStudioInner({
       profileId: route.profileId,
       model: route.model,
       protocol: route.protocol,
-      prompt: effectivePrompt,
+      prompt: armorModeMediaPrompt(armorMode, armorModeLevel, mediaKind, effectivePrompt, {
+        model: route.model,
+        protocol: route.protocol,
+        skills: armorModeSkills,
+        surface: "constellation",
+      }),
       count: Math.max(1, Math.min(mediaKind === "image" ? 8 : 4, node.data.count ?? 1)),
       size: mediaKind === "image"
         ? node.data.size && node.data.size !== "auto" ? node.data.size : undefined
@@ -927,7 +959,18 @@ function ConstellationStudioInner({
       outputFormat: mediaKind === "video" ? undefined : node.data.outputFormat,
       background: mediaKind === "image" && node.data.background !== "auto" ? node.data.background : undefined,
       voice: mediaKind === "audio" ? node.data.voice?.trim() || undefined : undefined,
-      instructions: mediaKind === "audio" ? node.data.instruction?.trim() || undefined : undefined,
+      instructions: armorModeMediaInstructions(
+        armorMode,
+        armorModeLevel,
+        mediaKind,
+        mediaKind === "audio" ? node.data.instruction?.trim() || undefined : undefined,
+        {
+          model: route.model,
+          protocol: route.protocol,
+          skills: armorModeSkills,
+          surface: "constellation",
+        },
+      ),
       seconds: mediaKind === "video" ? node.data.seconds ?? 8 : undefined,
       videoMode: mediaKind === "video" ? attachments.length > 1 ? "reference" : attachments.length === 1 ? "image" : "text" : "text",
       videoResolution: mediaKind === "video" ? node.data.videoResolution : undefined,

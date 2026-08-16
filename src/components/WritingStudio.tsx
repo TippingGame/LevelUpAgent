@@ -85,6 +85,12 @@ import {
   saveWritingProject,
 } from "../lib/bridge";
 import { tr } from "../lib/i18n";
+import {
+  armorModeWritingInstructions,
+  type ArmorModeLevel,
+  type ArmorSkillState,
+  type ArmorWritingIntensity,
+} from "../lib/armorMode";
 import { isTextGenerationModel } from "../lib/modelSelection";
 import type { AgentMessage, ProviderModelInfo, ProviderProfile } from "../lib/types";
 import {
@@ -179,6 +185,10 @@ interface CompletionPreview {
 interface WritingStudioProps {
   active: boolean;
   locale: string;
+  armorMode: boolean;
+  armorModeLevel: ArmorModeLevel;
+  armorModeSkills: ArmorSkillState;
+  armorWritingIntensity: ArmorWritingIntensity;
   activeProfile: ProviderProfile;
   profiles: ProviderProfile[];
   modelCatalogRevision: number;
@@ -207,6 +217,10 @@ const COMPLETION_ACTIONS: Array<{ intent: CompletionIntent; label: string; needs
 export function WritingStudio({
   active,
   locale: _locale,
+  armorMode,
+  armorModeLevel,
+  armorModeSkills,
+  armorWritingIntensity,
   activeProfile,
   profiles,
   modelCatalogRevision,
@@ -572,6 +586,16 @@ export function WritingStudio({
           : current),
         undefined,
         fallbackProfiles,
+        false,
+        false,
+        undefined,
+        undefined,
+        armorModeWritingInstructions(armorMode, armorModeLevel, armorWritingIntensity, {
+          model: writingRunProfile.model,
+          protocol: writingRunProfile.protocol,
+          skills: armorModeSkills,
+          surface: "writing",
+        }),
       );
       if (completionEpochRef.current !== epoch || operationRef.current !== operationId) return;
       operationRef.current = undefined;
@@ -944,6 +968,16 @@ export function WritingStudio({
         },
         undefined,
         fallbackProfiles,
+        false,
+        false,
+        undefined,
+        undefined,
+        armorModeWritingInstructions(armorMode, armorModeLevel, armorWritingIntensity, {
+          model: writingRunProfile.model,
+          protocol: writingRunProfile.protocol,
+          skills: armorModeSkills,
+          surface: "writing",
+        }),
       );
       if (goalEpochRef.current !== epoch || goalOperationRef.current !== operationId) return undefined;
       goalOperationRef.current = undefined;
@@ -1228,9 +1262,12 @@ export function WritingStudio({
     if (goalOperationId) void cancelAgentTurn(goalOperationId).catch(() => false);
   }, []);
 
-  if (!active) return <main className="writing-studio" hidden />;
+  const armorClassName = armorMode ? ` armor-mode armor-level-${armorModeLevel}` : "";
+  const armorDataLevel = armorMode ? armorModeLevel : undefined;
+
+  if (!active) return <main className={`writing-studio${armorClassName}`} data-armor-level={armorDataLevel} hidden />;
   if (loading || !activeProject) return (
-    <main className="writing-studio writing-loading">
+    <main className={`writing-studio writing-loading${armorClassName}`} data-armor-level={armorDataLevel}>
       <LoaderCircle className="spin" size={24} />
       <span>{tr("正在打开写作空间…", "Opening writing studio…")}</span>
     </main>
@@ -1240,7 +1277,7 @@ export function WritingStudio({
   const selectedTextLength = Math.max(0, selection.end - selection.start);
 
   return (
-    <main className="writing-studio">
+    <main className={`writing-studio${armorClassName}`} data-armor-level={armorDataLevel}>
       <header className="writing-topbar" data-tauri-drag-region>
         <div className="writing-brand">
           <span><BookOpen size={17} /></span>

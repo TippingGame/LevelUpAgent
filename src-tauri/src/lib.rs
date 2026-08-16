@@ -21,6 +21,7 @@ mod theme;
 mod tools;
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -50,6 +51,9 @@ const PROVIDER_CREDENTIAL_PREFIX: &str = "provider:";
 const MCP_CREDENTIAL_PREFIX: &str = "mcp:";
 const MAX_PENDING_CONFIRMATIONS: usize = 128;
 const PROVIDER_RECONNECT_RETRIES: u32 = 5;
+const PROVIDER_ROUND_TIMEOUT: Duration = Duration::from_secs(240);
+const LONG_PROVIDER_ROUND_TIMEOUT: Duration = Duration::from_secs(360);
+const PROVIDER_ROUND_TIMEOUT_PREFIX: &str = "Provider round timed out";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -413,9 +417,20 @@ fn attach_custom_instructions(
     database: &database::Database,
     request: &mut AgentTurnRequest,
 ) -> Result<(), String> {
-    let content = database.custom_instructions()?;
-    request.custom_instructions = (!content.is_empty()).then_some(content);
+    let database_content = database.custom_instructions()?;
+    let request_content = request.custom_instructions.take().unwrap_or_default();
+    request.custom_instructions = merge_custom_instructions([database_content, request_content]);
     Ok(())
+}
+
+fn merge_custom_instructions<const N: usize>(parts: [String; N]) -> Option<String> {
+    let merged = parts
+        .iter()
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    (!merged.is_empty()).then_some(merged)
 }
 
 fn attach_subagent_tools(request: &mut AgentTurnRequest) {
@@ -1906,6 +1921,27 @@ fn open_pet_chat(
 }
 
 #[tauri::command]
+fn open_completed_task(app: tauri::AppHandle, thread_id: String) -> Result<(), String> {
+    let thread_id = thread_id.trim();
+    if thread_id.is_empty() || thread_id.chars().count() > 128 {
+        return Err("The completed task identifier is invalid".to_owned());
+    }
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| "The LevelUpAgent main window is unavailable".to_owned())?;
+    main.show()
+        .and_then(|_| main.unminimize())
+        .and_then(|_| main.set_focus())
+        .map_err(|error| format!("Could not focus LevelUpAgent: {error}"))?;
+    app.emit_to(
+        "main",
+        "pet://open-completed-task",
+        serde_json::json!({ "threadId": thread_id }),
+    )
+    .map_err(|error| format!("Could not open the completed task: {error}"))
+}
+
+#[tauri::command]
 fn open_pet_workspace(
     app: tauri::AppHandle,
     manager: tauri::State<'_, pet::PetManager>,
@@ -1997,6 +2033,41 @@ fn provider_reconnect_delay(retry_number: u32) -> Duration {
     const BASE_DELAY_MS: u64 = 2_000;
 
     Duration::from_millis(BASE_DELAY_MS.saturating_mul(retry_number.min(5) as u64))
+}
+
+fn provider_round_timeout_error(timeout: Duration) -> String {
+    format!(
+        "{PROVIDER_ROUND_TIMEOUT_PREFIX} after {} seconds",
+        timeout.as_secs()
+    )
+}
+
+fn is_provider_round_timeout(error: &str) -> bool {
+    error.starts_with(PROVIDER_ROUND_TIMEOUT_PREFIX)
+}
+
+fn should_reconnect_provider(error: &str, output_was_emitted: bool, retry_number: u32) -> bool {
+    agent::is_reconnectable_provider_error(error)
+        && !is_provider_round_timeout(error)
+        && !output_was_emitted
+        && retry_number < PROVIDER_RECONNECT_RETRIES
+}
+
+async fn within_provider_round_timeout<T, F>(
+    deadline: Instant,
+    timeout: Duration,
+    future: F,
+) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>>,
+{
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(provider_round_timeout_error(timeout));
+    }
+    tokio::time::timeout(remaining, future)
+        .await
+        .map_err(|_| provider_round_timeout_error(timeout))?
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2136,10 +2207,17 @@ fn log_provider_retry_scheduled(
 async fn wait_for_provider_reconnect(
     retry_number: u32,
     cancellation: &CancellationToken,
+    deadline: Instant,
+    round_timeout: Duration,
 ) -> Result<(), String> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(provider_round_timeout_error(round_timeout));
+    }
     tokio::select! {
         _ = tokio::time::sleep(provider_reconnect_delay(retry_number)) => Ok(()),
         _ = cancellation.cancelled() => Err("REQUEST_CANCELLED".to_owned()),
+        _ = tokio::time::sleep(remaining) => Err(provider_round_timeout_error(round_timeout)),
     }
 }
 
@@ -2214,6 +2292,7 @@ where
         round,
         key_loader,
         false,
+        PROVIDER_ROUND_TIMEOUT,
         CancellationToken::new(),
         on_connection_event,
         |_| {},
@@ -2230,6 +2309,7 @@ async fn run_agent_turn_with_failover_events_inner<F, R, S>(
     round: Option<usize>,
     mut key_loader: F,
     streaming: bool,
+    round_timeout: Duration,
     cancellation: CancellationToken,
     mut on_connection_event: R,
     mut on_stream_event: S,
@@ -2239,6 +2319,7 @@ where
     R: FnMut(&ProviderProfile, u32, u32, Option<&str>),
     S: FnMut(AgentStreamEvent),
 {
+    let round_deadline = Instant::now() + round_timeout;
     let candidates = provider_candidates(&request);
     request.fallback_profiles.clear();
     let mut last_error = "No provider is available".to_owned();
@@ -2305,6 +2386,10 @@ where
             let started = Instant::now();
             let emitted = Arc::new(AtomicBool::new(false));
             let output_started = emitted.clone();
+            let reconnected_on_open = Arc::new(AtomicBool::new(false));
+            let stream_reconnected = reconnected_on_open.clone();
+            let notify_reconnected_on_open = reconnecting;
+            let reconnect_attempt = last_reconnect_attempt;
             log_provider_request_started(
                 &request,
                 &profile,
@@ -2314,21 +2399,42 @@ where
                 failover_attempts,
                 streaming,
             );
-            let attempt_result = if streaming {
-                agent::run_turn_stream(client, attempt, &api_key, cancellation.clone(), |event| {
-                    if event
-                        .delta
-                        .as_deref()
-                        .is_some_and(|delta| !delta.is_empty())
-                    {
-                        output_started.store(true, Ordering::Release);
-                    }
-                    on_stream_event(event);
-                })
-                .await
-            } else {
-                agent::run_turn(client, attempt, &api_key).await
+            let attempt_future = async {
+                if streaming {
+                    agent::run_turn_stream(
+                        client,
+                        attempt,
+                        &api_key,
+                        cancellation.clone(),
+                        |event| {
+                            if event.kind == "stream_opened"
+                                && notify_reconnected_on_open
+                                && !stream_reconnected.swap(true, Ordering::AcqRel)
+                            {
+                                on_connection_event(
+                                    &profile,
+                                    reconnect_attempt,
+                                    PROVIDER_RECONNECT_RETRIES,
+                                    None,
+                                );
+                            }
+                            if event
+                                .delta
+                                .as_deref()
+                                .is_some_and(|delta| !delta.is_empty())
+                            {
+                                output_started.store(true, Ordering::Release);
+                            }
+                            on_stream_event(event);
+                        },
+                    )
+                    .await
+                } else {
+                    agent::run_turn(client, attempt, &api_key).await
+                }
             };
+            let attempt_result =
+                within_provider_round_timeout(round_deadline, round_timeout, attempt_future).await;
             match attempt_result {
                 Ok(mut result) => {
                     let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
@@ -2357,7 +2463,7 @@ where
                         latency_ms,
                         streaming,
                     );
-                    if reconnecting {
+                    if reconnecting && !reconnected_on_open.load(Ordering::Acquire) {
                         on_connection_event(
                             &profile,
                             last_reconnect_attempt,
@@ -2371,10 +2477,9 @@ where
                     let error = agent::annotate_tool_compatibility_error(error, &request);
                     let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
                     let output_was_emitted = emitted.load(Ordering::Acquire);
-                    let reconnectable = agent::is_reconnectable_provider_error(&error);
-                    let will_retry = reconnectable
-                        && !output_was_emitted
-                        && retry_number < PROVIDER_RECONNECT_RETRIES;
+                    let round_timed_out = is_provider_round_timeout(&error);
+                    let will_retry =
+                        should_reconnect_provider(&error, output_was_emitted, retry_number);
                     let status = if will_retry {
                         "retrying"
                     } else if error.contains("REQUEST_CANCELLED") {
@@ -2407,6 +2512,9 @@ where
                         streaming,
                         &error,
                     );
+                    if round_timed_out {
+                        return Err(error);
+                    }
                     if will_retry {
                         reconnecting = true;
                         last_reconnect_attempt = retry_number + 1;
@@ -2424,7 +2532,13 @@ where
                             retry_number + 1,
                             streaming,
                         );
-                        wait_for_provider_reconnect(retry_number + 1, &cancellation).await?;
+                        wait_for_provider_reconnect(
+                            retry_number + 1,
+                            &cancellation,
+                            round_deadline,
+                            round_timeout,
+                        )
+                        .await?;
                         continue;
                     }
                     if agent::is_retryable_provider_error(&error) {
@@ -3461,6 +3575,12 @@ async fn agent_turn_stream_inner(
     attach_mcp_tools(&database, &manager, &mut request).await?;
     enforce_theme_generation_tool_catalog(&mut request);
     enforce_hatch_tool_catalog(&mut request);
+    let round_timeout = if agent::theme_generation_bootstrapped(&request.messages) {
+        LONG_PROVIDER_ROUND_TIMEOUT
+    } else {
+        PROVIDER_ROUND_TIMEOUT
+    };
+    let round_deadline = Instant::now() + round_timeout;
     let goal_thread = (request.mode == "goal")
         .then(|| request.thread_id.clone())
         .flatten();
@@ -3539,6 +3659,10 @@ async fn agent_turn_stream_inner(
             attempt.profile = profile.clone();
             let emitted = Arc::new(AtomicBool::new(false));
             let output_started = emitted.clone();
+            let reconnected_on_open = Arc::new(AtomicBool::new(false));
+            let stream_reconnected = reconnected_on_open.clone();
+            let notify_reconnected_on_open = reconnecting;
+            let reconnect_attempt = last_reconnect_attempt;
             let event_channel = on_event.clone();
             let retry_started_at = now_millis();
             let started = Instant::now();
@@ -3556,12 +3680,21 @@ async fn agent_turn_stream_inner(
                 failover_attempts,
                 true,
             );
-            match agent::run_turn_stream(
+            let attempt_future = agent::run_turn_stream(
                 &state.client,
                 attempt,
                 &api_key,
                 cancellation.clone(),
                 move |event| {
+                    if event.kind == "stream_opened"
+                        && notify_reconnected_on_open
+                        && !stream_reconnected.swap(true, Ordering::AcqRel)
+                    {
+                        let _ = event_channel.send(AgentStreamEvent::provider_reconnected(
+                            reconnect_attempt,
+                            PROVIDER_RECONNECT_RETRIES,
+                        ));
+                    }
                     if event
                         .delta
                         .as_deref()
@@ -3584,8 +3717,8 @@ async fn agent_turn_stream_inner(
                     }
                     let _ = event_channel.send(event);
                 },
-            )
-            .await
+            );
+            match within_provider_round_timeout(round_deadline, round_timeout, attempt_future).await
             {
                 Ok(mut response) => {
                     let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
@@ -3614,7 +3747,7 @@ async fn agent_turn_stream_inner(
                         latency_ms,
                         true,
                     );
-                    if reconnecting {
+                    if reconnecting && !reconnected_on_open.load(Ordering::Acquire) {
                         let _ = on_event.send(AgentStreamEvent::provider_reconnected(
                             last_reconnect_attempt,
                             PROVIDER_RECONNECT_RETRIES,
@@ -3628,10 +3761,9 @@ async fn agent_turn_stream_inner(
                     let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
                     let output_was_emitted = emitted.load(Ordering::Acquire);
                     let retryable = agent::is_retryable_provider_error(&error);
-                    let reconnectable = agent::is_reconnectable_provider_error(&error);
-                    let will_retry = reconnectable
-                        && !output_was_emitted
-                        && retry_number < PROVIDER_RECONNECT_RETRIES;
+                    let round_timed_out = is_provider_round_timeout(&error);
+                    let will_retry =
+                        should_reconnect_provider(&error, output_was_emitted, retry_number);
                     let status = if will_retry {
                         "retrying"
                     } else if error.contains("REQUEST_CANCELLED") {
@@ -3664,6 +3796,10 @@ async fn agent_turn_stream_inner(
                         true,
                         &error,
                     );
+                    if round_timed_out {
+                        result = Some(Err(error));
+                        break 'providers;
+                    }
                     if will_retry {
                         reconnecting = true;
                         last_reconnect_attempt = retry_number + 1;
@@ -3679,8 +3815,13 @@ async fn agent_turn_stream_inner(
                             retry_number + 1,
                             true,
                         );
-                        if let Err(cancelled) =
-                            wait_for_provider_reconnect(retry_number + 1, &cancellation).await
+                        if let Err(cancelled) = wait_for_provider_reconnect(
+                            retry_number + 1,
+                            &cancellation,
+                            round_deadline,
+                            round_timeout,
+                        )
+                        .await
                         {
                             result = Some(Err(cancelled));
                             break 'providers;
@@ -4040,7 +4181,7 @@ async fn harness_run_loop(
             available_skills: Vec::new(),
             goal: None,
             fallback_profiles: request.fallback_profiles.clone(),
-            custom_instructions: None,
+            custom_instructions: request.custom_instructions.clone(),
         };
         attach_default_workspace(app, &mut turn_request)?;
         attach_images(app, &mut turn_request)?;
@@ -4093,7 +4234,12 @@ async fn harness_run_loop(
             Some(&operation_id),
             Some(round),
             load_api_key,
-            theme_generation_mode,
+            true,
+            if theme_generation_mode {
+                LONG_PROVIDER_ROUND_TIMEOUT
+            } else {
+                PROVIDER_ROUND_TIMEOUT
+            },
             turn_cancellation.clone(),
             |profile, retry_attempt, max_retry_attempts, error| {
                 let (kind, payload) = if let Some(error) = error {
@@ -7272,6 +7418,7 @@ pub fn run() {
             import_hatched_pets,
             update_pet_activities,
             open_pet_chat,
+            open_completed_task,
             open_pet_workspace
         ])
         .build(tauri::generate_context!())
@@ -7790,6 +7937,24 @@ mod tests {
     }
 
     #[test]
+    fn custom_instructions_merge_database_and_request_layers() {
+        let merged = merge_custom_instructions([
+            "  Persisted operator preference.  ".to_owned(),
+            "\nRuntime Armor Mode instructions.\n".to_owned(),
+        ])
+        .expect("custom instructions should merge");
+        assert_eq!(
+            merged,
+            "Persisted operator preference.\n\nRuntime Armor Mode instructions."
+        );
+
+        assert_eq!(
+            merge_custom_instructions(["   ".to_owned(), "\n".to_owned()]),
+            None
+        );
+    }
+
+    #[test]
     fn provider_candidates_keep_primary_first_and_sort_enabled_fallbacks() {
         let request = AgentTurnRequest {
             profile: profile("primary", 999, false),
@@ -8050,6 +8215,36 @@ mod tests {
             format_media_failures(&failures),
             "LevelUpAPI / gpt-image-2 (+1 candidates): Media provider request failed (502 Bad Gateway): Upstream request failed"
         );
+    }
+
+    #[test]
+    fn provider_reconnect_stops_after_output_or_six_attempts() {
+        let timeout = "Provider stream timed out after 30 seconds without activity";
+        assert!(should_reconnect_provider(timeout, false, 0));
+        assert!(!should_reconnect_provider(timeout, true, 0));
+        assert!(!should_reconnect_provider(
+            timeout,
+            false,
+            PROVIDER_RECONNECT_RETRIES
+        ));
+        assert!(!should_reconnect_provider(
+            &provider_round_timeout_error(PROVIDER_ROUND_TIMEOUT),
+            false,
+            0
+        ));
+    }
+
+    #[tokio::test]
+    async fn provider_round_budget_interrupts_a_pending_attempt() {
+        let timeout = Duration::from_millis(20);
+        let error = within_provider_round_timeout(
+            Instant::now() + timeout,
+            timeout,
+            std::future::pending::<Result<(), String>>(),
+        )
+        .await
+        .unwrap_err();
+        assert!(is_provider_round_timeout(&error), "{error}");
     }
 
     fn mock_responses_server(status: &'static str, body: &'static str) -> String {

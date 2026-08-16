@@ -12,7 +12,7 @@
     <a href="https://levelup.mom/">LevelUpAPI</a>
   </p>
   <p>
-    <img alt="Version" src="https://img.shields.io/badge/version-1.0.26-ff5a4f?style=flat-square" />
+    <img alt="Version" src="https://img.shields.io/badge/version-1.0.27-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-可用预览-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -45,7 +45,7 @@
 
 ### 安装
 
-从 GitHub Releases 下载对应平台的安装包。当前 `1.0.26` Windows x64 安装包由 GitHub Actions 构建并通过 Tauri updater 签名；未配置 Authenticode，Windows SmartScreen 可能提示“未知发布者”。
+从 GitHub Releases 下载对应平台的安装包。当前 `1.0.27` Windows x64 安装包由 GitHub Actions 构建并通过 Tauri updater 签名；未配置 Authenticode，Windows SmartScreen 可能提示“未知发布者”。
 
 | 平台 | 包格式 | 状态 |
 | --- | --- | --- |
@@ -151,7 +151,7 @@ macOS 安装包使用 `pnpm build:macos`。正式更新还需要仓库所有者�
 
 ## 当前状态
 
-`1.0.26` 是当前发布里程碑。桌面端普通聊天、宠物聊天、主题生成和“摇光残影”孵化统一使用持久化 Durable Harness；历史会话恢复时会创建新的 operation/snapshot，避免旧 operation 失效，并在重启后恢复审批、Goal 用量和孵化运行目录状态。主题生成支持独立临时会话、真实参考图附件和可选会话背景；标准布局的左右侧栏支持拖拽调整并在窄屏自适应。旧的桌面 React 递归执行链路已移除，孵化命令继续受到包内脚本、来源证明和重复执行熔断等最小权限约束。Windows 安装包使用 Tauri updater 签名但仍未配置 Authenticode，SmartScreen 可能提示“未知发布者”。提交 Issue 时请附上复现步骤、应用日志和平台信息。
+`1.0.27` 是当前发布里程碑。桌面端普通聊天、宠物聊天、主题生成和“摇光残影”孵化统一使用持久化 Durable Harness；历史会话恢复时会创建新的 operation/snapshot，避免旧 operation 失效，并在重启后恢复审批、Goal 用量和孵化运行目录状态。主题生成支持独立临时会话、真实参考图附件和可选会话背景；标准布局的左右侧栏支持拖拽调整并在窄屏自适应。旧的桌面 React 递归执行链路已移除，孵化命令继续受到包内脚本、来源证明和重复执行熔断等最小权限约束。Windows 安装包使用 Tauri updater 签名但仍未配置 Authenticode，SmartScreen 可能提示“未知发布者”。提交 Issue 时请附上复现步骤、应用日志和平台信息。
 
 ## 许可证
 

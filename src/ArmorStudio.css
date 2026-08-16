@@ -1,0 +1,1109 @@
+/* Armor Mode skin for every Creative Studio surface.
+   App.css already skins the chat workspace and shell. This file covers the
+   alternate workspace views: media (image/video/audio), writing, constellation,
+   plus media preview portals mounted under document.body. */
+
+html body .app-shell.armor-mode,
+html body .media-image-lightbox.armor-mode {
+  --studio-bg: #020617;
+  --studio-panel: rgba(2, 6, 23, .82);
+  --studio-panel-strong: rgba(7, 17, 31, .94);
+  --studio-panel-soft: rgba(15, 23, 42, .66);
+  --studio-field: rgba(2, 6, 23, .72);
+  --studio-field-strong: rgba(8, 47, 73, .68);
+  --studio-line: rgba(34, 211, 238, .16);
+  --studio-line-strong: rgba(34, 211, 238, .28);
+  --studio-text: #dff8ff;
+  --studio-text-strong: #f0fdff;
+  --studio-muted: #8bd3e6;
+  --studio-faint: #50879b;
+  --studio-accent: #22d3ee;
+  --studio-accent-2: #a3e635;
+  --studio-warning: #fde68a;
+  --studio-danger: #fda4af;
+  --studio-font: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+}
+
+html body .app-shell.armor-mode :is(.media-studio, .writing-studio, .constellation-studio),
+html body .media-image-lightbox.armor-mode {
+  color-scheme: dark;
+  color: var(--studio-text);
+  font-family: var(--studio-font);
+  background:
+    radial-gradient(circle at 14% 10%, rgba(34, 211, 238, .17), transparent 28%),
+    radial-gradient(circle at 88% 12%, rgba(163, 230, 53, .10), transparent 30%),
+    radial-gradient(circle at 72% 90%, rgba(168, 85, 247, .12), transparent 32%),
+    linear-gradient(180deg, rgba(2, 6, 23, .98), rgba(6, 13, 24, .96));
+}
+
+html body .app-shell.armor-mode :is(.media-studio, .writing-studio, .constellation-studio) :is(button, input, textarea, select),
+html body .media-image-lightbox.armor-mode :is(button, input, textarea, select) {
+  font-family: inherit;
+  accent-color: var(--studio-accent);
+}
+
+html body .app-shell.armor-mode :is(.media-topbar, .writing-topbar, .constellation-topbar) {
+  border-color: var(--studio-line);
+  background: linear-gradient(180deg, rgba(2, 6, 23, .92), rgba(8, 47, 73, .58));
+  color: var(--studio-text);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .22), inset 0 -1px rgba(163, 230, 53, .035);
+  backdrop-filter: blur(24px) saturate(150%);
+}
+
+html body .app-shell.armor-mode :is(.media-topbar strong, .writing-brand strong, .constellation-brand strong) {
+  color: var(--studio-text-strong);
+  letter-spacing: .02em;
+  text-shadow: 0 0 14px rgba(34, 211, 238, .26);
+}
+
+html body .app-shell.armor-mode :is(.media-topbar small, .writing-brand small, .constellation-brand small) {
+  color: var(--studio-muted);
+}
+
+html body .app-shell.armor-mode :is(.media-title-icon, .writing-brand > span, .constellation-brand > span) {
+  border-color: rgba(34, 211, 238, .26);
+  background: radial-gradient(circle at 34% 26%, rgba(163, 230, 53, .30), rgba(34, 211, 238, .18) 44%, rgba(2, 6, 23, .92));
+  color: var(--studio-accent);
+  box-shadow: 0 0 0 1px rgba(163, 230, 53, .08), 0 0 22px rgba(34, 211, 238, .22), 0 10px 26px rgba(0, 0, 0, .28);
+}
+
+html body .app-shell.armor-mode .creation-mode-switch {
+  border-color: var(--studio-line);
+  background: rgba(2, 6, 23, .70);
+  box-shadow: inset 0 0 0 1px rgba(163, 230, 53, .025);
+}
+
+html body .app-shell.armor-mode .creation-mode-switch button {
+  color: var(--studio-muted);
+}
+
+html body .app-shell.armor-mode .creation-mode-switch button:hover {
+  color: var(--studio-text-strong);
+}
+
+html body .app-shell.armor-mode .creation-mode-switch button.active {
+  background: linear-gradient(135deg, rgba(8, 145, 178, .88), rgba(77, 124, 15, .72));
+  color: var(--studio-text-strong) !important;
+  box-shadow: 0 0 18px rgba(34, 211, 238, .14), inset 0 0 0 1px rgba(163, 230, 53, .13);
+}
+
+/* Media Studio: image / video / audio */
+html body .app-shell.armor-mode .media-drop-overlay {
+  border-color: rgba(34, 211, 238, .58);
+  background: rgba(2, 6, 23, .86);
+  color: var(--studio-accent);
+  box-shadow: 0 24px 74px rgba(0, 0, 0, .34), 0 0 34px rgba(34, 211, 238, .18);
+}
+
+html body .app-shell.armor-mode .media-drop-overlay > span {
+  background: linear-gradient(135deg, rgba(34, 211, 238, .16), rgba(163, 230, 53, .14));
+}
+
+html body .app-shell.armor-mode .media-compose-panel {
+  border-right-color: var(--studio-line);
+  background: rgba(2, 6, 23, .62);
+  color: var(--studio-text);
+}
+
+html body .app-shell.armor-mode :is(.media-kind-tabs, .media-video-mode-control > div, .media-image-mode-control > div) {
+  border-color: var(--studio-line);
+  background: rgba(15, 23, 42, .74);
+}
+
+html body .app-shell.armor-mode :is(.media-kind-tabs button, .media-video-mode-control button, .media-image-mode-control button) {
+  color: var(--studio-muted);
+}
+
+html body .app-shell.armor-mode :is(.media-kind-tabs button.active, .media-video-mode-control button.active, .media-image-mode-control button.active) {
+  background: rgba(8, 47, 73, .92);
+  color: var(--studio-accent-2);
+  box-shadow: inset 0 0 0 1px rgba(34, 211, 238, .18), 0 0 14px rgba(34, 211, 238, .10);
+}
+
+html body .app-shell.armor-mode :is(.media-model-row label > span, .media-options-grid label > span, .media-wide-field > span, .media-video-mode-control > span, .media-image-mode-control > span, .media-inherited-video-size > span, .media-reference-heading > span) {
+  color: var(--studio-muted);
+}
+
+html body .app-shell.armor-mode :is(.media-model-row select, .media-options-grid select, .media-options-grid input, .media-wide-field input, .media-reference-heading > button, .media-history-pagination button, .media-icon-button) {
+  border-color: var(--studio-line);
+  background: var(--studio-field);
+  color: var(--studio-text);
+}
+
+html body .app-shell.armor-mode :is(.media-model-row select:focus, .media-options-grid select:focus, .media-options-grid input:focus, .media-wide-field input:focus) {
+  border-color: rgba(163, 230, 53, .55);
+  box-shadow: 0 0 0 3px rgba(34, 211, 238, .14);
+}
+
+html body .app-shell.armor-mode :is(.media-prompt-card, .media-image-edit-panel, .media-asset-card, .tool-media-result) {
+  border-color: var(--studio-line);
+  background: var(--studio-panel-soft);
+  color: var(--studio-text);
+  box-shadow: inset 0 0 0 1px rgba(163, 230, 53, .025), 0 10px 28px rgba(0, 0, 0, .20);
+}
+
+html body .app-shell.armor-mode .media-asset-card.status-in_progress {
+  border-color: rgba(34, 211, 238, .28);
+  background: linear-gradient(145deg, rgba(15, 23, 42, .9), rgba(8, 47, 73, .54));
+}
+
+html body .app-shell.armor-mode :is(.media-prompt-card > div, .media-image-edit-panel > header) {
+  border-color: var(--studio-line);
+  color: var(--studio-muted);
+}
+
+html body .app-shell.armor-mode .media-prompt-card textarea {
+  color: var(--studio-text);
+  caret-color: var(--studio-accent-2);
+}
+
+html body .app-shell.armor-mode .media-prompt-card textarea::placeholder {
+  color: rgba(139, 211, 230, .52);
+}
+
+html body .app-shell.armor-mode :is(.recommended-model, .media-image-edit-status span.ready, .media-asset-specs span, .media-video-reference-row .attachment-chip) {
+  background: rgba(16, 185, 129, .14);
+  color: #86efac;
+}
+
+html body .app-shell.armor-mode :is(.media-image-edit-panel > header strong, .media-image-edit-source-card > div strong, .media-image-edit-empty strong) {
+  color: var(--studio-warning);
+}
+
+html body .app-shell.armor-mode :is(.media-image-edit-panel > header small, .media-image-edit-source-card > div small, .media-image-edit-empty small) {
+  color: #fcd34d;
+}
+
+html body .app-shell.armor-mode :is(.media-image-edit-actions button, .media-image-edit-empty, .media-image-edit-thumbnail) {
+  border-color: rgba(251, 191, 36, .18);
+  background: rgba(15, 23, 42, .70);
+  color: #fbbf24;
+}
+
+html body .app-shell.armor-mode :is(.media-catalog-warning, .media-image-mask-warning) {
+  border-color: rgba(251, 191, 36, .18);
+  background: rgba(120, 53, 15, .20);
+  color: var(--studio-warning);
+}
+
+html body .app-shell.armor-mode .media-error {
+  border-color: rgba(244, 63, 94, .22);
+  background: rgba(159, 18, 57, .16);
+  color: var(--studio-danger);
+}
+
+html body .app-shell.armor-mode :is(.media-reference-row .attachment-chip, .media-gallery-heading em, .pending-preview > span, .media-asset-meta span, .media-gallery-heading span) {
+  background: rgba(34, 211, 238, .10);
+  color: var(--studio-accent);
+}
+
+html body .app-shell.armor-mode :is(.media-asset-prompt p, .pending-preview strong, .failed-preview strong, .media-gallery-heading strong) {
+  color: var(--studio-text-strong);
+}
+
+html body .app-shell.armor-mode :is(.media-gallery-heading small, .media-asset-content small, .media-empty, .media-empty span, .pending-preview, .failed-preview) {
+  color: var(--studio-muted);
+}
+
+html body .app-shell.armor-mode .media-empty strong {
+  color: var(--studio-text);
+}
+
+html body .app-shell.armor-mode .media-preview {
+  background: linear-gradient(145deg, #06111f, #0f172a);
+}
+
+html body .app-shell.armor-mode .audio-preview {
+  background: radial-gradient(circle at 50% 20%, rgba(34, 211, 238, .17), transparent 52%), linear-gradient(145deg, #0f172a, #020617);
+  color: var(--studio-accent);
+}
+
+html body .app-shell.armor-mode :is(.media-generate-button, .media-configure-button) {
+  background: linear-gradient(135deg, #0891b2, #65a30d);
+  color: var(--studio-text-strong);
+  box-shadow: 0 0 24px rgba(34, 211, 238, .20), 0 10px 28px rgba(0, 0, 0, .20);
+}
+
+html body .media-image-lightbox.armor-mode .media-image-lightbox-dialog {
+  border-color: var(--studio-line-strong);
+  background: linear-gradient(180deg, rgba(2, 6, 23, .98), rgba(7, 18, 33, .98));
+  color: var(--studio-text);
+  box-shadow: 0 30px 90px rgba(0, 0, 0, .48), 0 0 42px rgba(34, 211, 238, .14);
+}
+
+html body .media-image-lightbox.armor-mode .media-image-lightbox-dialog > header,
+html body .media-image-lightbox.armor-mode .media-image-lightbox-dialog > footer {
+  border-color: var(--studio-line);
+  background: rgba(2, 6, 23, .82);
+}
+
+html body .media-image-lightbox.armor-mode :is(.media-image-lightbox-dialog > header button, .media-image-lightbox-nav, .media-image-lightbox-toolbar, .media-image-pan-hint) {
+  border-color: var(--studio-line);
+  background: rgba(15, 23, 42, .82);
+  color: var(--studio-muted);
+}
+
+html body .media-image-lightbox.armor-mode .media-image-lightbox-canvas {
+  background-color: #07111f;
+  background-image:
+    linear-gradient(45deg, rgba(34, 211, 238, .045) 25%, transparent 25%),
+    linear-gradient(-45deg, rgba(34, 211, 238, .045) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, rgba(163, 230, 53, .04) 75%),
+    linear-gradient(-45deg, transparent 75%, rgba(163, 230, 53, .04) 75%);
+}
+
+html body .media-image-lightbox.armor-mode :is(.media-image-lightbox-toolbar button, .media-image-lightbox-toolbar output, .media-image-lightbox-dialog > header p, .media-image-lightbox-dialog > footer small) {
+  color: var(--studio-muted);
+}
+
+html body .media-image-lightbox.armor-mode .media-image-lightbox-dialog > footer span {
+  background: rgba(34, 211, 238, .10);
+  color: var(--studio-accent);
+}
+
+/* Writing Studio */
+html body .app-shell.armor-mode :is(.writing-topbar, .document-heading, .story-toolbar, .entity-editor, .writing-navigator, .writing-context-panel, .story-inspector, .playtest-panel, .snapshot-panel, .writing-settings-panel, .reference-workspace, .goal-brief-card, .goal-plan-card, .completion-card) {
+  border-color: var(--studio-line);
+  background: var(--studio-panel);
+  color: var(--studio-text);
+  box-shadow: inset 0 0 0 1px rgba(163, 230, 53, .018);
+}
+
+html body .app-shell.armor-mode :is(.writing-layout, .writing-workarea, .story-canvas-shell, .goal-workspace, .reference-empty, .goal-empty) {
+  background: rgba(2, 6, 23, .58);
+}
+
+html body .app-shell.armor-mode :is(.writing-topbar-actions > button, .writing-menu-wrap > button, .writing-model-wrap > button, .writing-project-picker > select, .writing-project-title, .writing-project-picker select, .writing-project-picker button, .writing-nav-heading button, .writing-nav-search, .entity-nav > select, .writing-nav-add select, .document-heading select, .writing-ai-instruction, .entity-form input, .entity-form select, .entity-form textarea, .entity-relations > div:first-child button, .node-inspector-form input, .node-inspector-form select, .node-inspector-form textarea, .writing-context-panel textarea, .relation-row input, .relation-row select, .node-inspector-actions button, .choice-editor header button, .choice-editor > article, .variable-inspector article, .variable-inspector input, .variable-inspector select, .issue-inspector > button, .completion-card > footer button, .reference-workspace > header button, .reference-form input, .reference-form select, .reference-form textarea, .goal-hero-actions button, .goal-brief-card input, .goal-brief-card select, .goal-brief-card textarea, .goal-card-heading > div button, .goal-step-copy details, .goal-step-copy footer button, .goal-step-index, .document-index, .writing-context-reopen, .writing-popover, .snapshot-list article button, .playtest-choices button, .writing-toast) {
+  border-color: var(--studio-line);
+  background: var(--studio-field);
+  color: var(--studio-text);
+}
+
+html body .app-shell.armor-mode :is(.writing-export-menu button:hover:not(:disabled), .writing-model-menu > button:hover, .writing-model-menu > button.active, .writing-section-tabs button.active, .document-row:hover, .document-row.active, .entity-list button.active, .entity-list button:hover, .story-node-list button.active, .story-node-list button:hover, .goal-nav-list > button.active, .goal-nav-list > button:hover, .reference-nav-list > button.active, .reference-nav-list > button:hover, .context-entities > label.included, .context-references > label.included, .story-inspector > nav button.active, .set-start.active, .playtest-choices button:hover) {
+  background: rgba(34, 211, 238, .10);
+  color: var(--studio-accent-2);
+}
+
+html body .app-shell.armor-mode :is(.writing-ai-toolbar, .manuscript-status, .completion-card > header, .completion-card > footer, .writing-context-panel > header) {
+  border-color: var(--studio-line);
+  background: rgba(2, 6, 23, .74);
+}
+
+html body .app-shell.armor-mode :is(.writing-ai-toolbar > span, .writing-topbar-actions > button:hover, .writing-menu-wrap > button:hover, .entity-editor > header .entity-ai-button, .writing-context-panel > header > span) {
+  color: var(--studio-accent-2);
+}
+
+html body .app-shell.armor-mode :is(.writing-nav-heading, .entity-form label > span, .node-inspector-form label > span, .writing-context-panel label > span, .goal-brief-card label > span, .document-row small, .entity-list small, .story-node-list small, .goal-step-copy > p) {
+  color: var(--studio-muted);
+}
+
+html body .app-shell.armor-mode :is(.document-heading > input, .document-row strong, .entity-list strong, .story-node-list strong, .entity-editor > header strong, .goal-card-heading > span, .goal-step-copy > header strong) {
+  color: var(--studio-text-strong);
+}
+
+html body .app-shell.armor-mode :is(.writing-empty-state > span, .entity-list button > svg, .goal-nav-list > button > svg, .reference-nav-list > button > svg, .goal-hero-title > svg, .reference-workspace > header > div:first-child > svg) {
+  border-color: rgba(34, 211, 238, .20);
+  background: rgba(8, 47, 73, .68);
+  color: var(--studio-accent);
+}
+
+html body .app-shell.armor-mode :is(.writing-nav-add button, .goal-nav-create, .reference-nav-actions button, .reference-empty button:first-child, .goal-empty button, .goal-hero-actions button.primary, .snapshot-actions button) {
+  border-color: rgba(163, 230, 53, .24);
+  background: linear-gradient(135deg, #0891b2, #65a30d);
+  color: var(--studio-text-strong);
+  box-shadow: 0 0 18px rgba(34, 211, 238, .14);
+}
+
+html body .app-shell.armor-mode :is(.goal-hero-actions button.danger, .writing-toast) {
+  border-color: rgba(244, 63, 94, .24);
+  background: rgba(159, 18, 57, .16);
+  color: var(--studio-danger);
+}
+
+html body .app-shell.armor-mode .manuscript-page-wrap {
+  background: radial-gradient(circle at 50% 0%, rgba(34, 211, 238, .08), transparent 36%), rgba(2, 6, 23, .52);
+}
+
+html body .app-shell.armor-mode :is(.manuscript-input-shell, .manuscript-ghost-mirror) {
+  background: #07111f;
+}
+
+html body .app-shell.armor-mode .manuscript-input-shell > textarea {
+  border-color: rgba(34, 211, 238, .20);
+  background: #07111f;
+  color: #e5f6ff;
+  caret-color: var(--studio-accent-2);
+  box-shadow: 0 0 0 1px rgba(163, 230, 53, .025), 0 14px 42px rgba(0, 0, 0, .32);
+}
+
+html body .app-shell.armor-mode .manuscript-input-shell > textarea:focus {
+  border-color: rgba(163, 230, 53, .45);
+  box-shadow: 0 0 0 3px rgba(34, 211, 238, .10), 0 16px 48px rgba(0, 0, 0, .36);
+}
+
+html body .app-shell.armor-mode .manuscript-input-shell.has-inline-completion > textarea {
+  background: transparent;
+  caret-color: var(--studio-accent-2);
+}
+
+html body .app-shell.armor-mode .manuscript-ghost-mirror,
+html body .app-shell.armor-mode :is(.completion-text, .playtest-copy, .reference-content) {
+  color: #e5f6ff;
+}
+
+html body .app-shell.armor-mode .manuscript-ghost-suggestion {
+  color: #6fa6b7;
+}
+
+html body .app-shell.armor-mode .inline-completion-controls {
+  border-color: var(--studio-line);
+  background: rgba(2, 6, 23, .90);
+  color: var(--studio-muted);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, .30);
+}
+
+html body .app-shell.armor-mode .inline-completion-controls kbd {
+  border-color: rgba(34, 211, 238, .22);
+  background: rgba(8, 47, 73, .62);
+  color: var(--studio-text);
+}
+
+html body .app-shell.armor-mode .story-canvas-shell .react-flow {
+  background: radial-gradient(circle at 18% 20%, rgba(34, 211, 238, .10), transparent 28%), linear-gradient(140deg, rgba(15, 23, 42, .78), rgba(2, 6, 23, .44));
+}
+
+html body .app-shell.armor-mode .story-flow-node {
+  border-color: rgba(34, 211, 238, .22);
+  background: rgba(7, 17, 31, .96);
+  color: var(--studio-text);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .30);
+}
+
+html body .app-shell.armor-mode :is(.story-flow-choice, .story-flow-output, .story-flow-node > header b, .playtest-node-type, .playtest-body code) {
+  background: rgba(34, 211, 238, .10);
+  color: var(--studio-accent);
+}
+
+html body .app-shell.armor-mode :is(.story-flow-output.branch, .story-flow-choice > small) {
+  background: rgba(251, 191, 36, .15);
+  color: var(--studio-warning);
+}
+
+html body .app-shell.armor-mode :is(.story-flow-node > p, .story-canvas-empty, .story-inspector-empty, .playtest-body > aside > strong, .playtest-body > aside p, .writing-settings-panel > label > span, .reference-enabled, .reference-form label > span, .goal-card-heading > small, .goal-brief-card label > span, .goal-step-copy summary) {
+  color: var(--studio-muted);
+}
+
+html body .app-shell.armor-mode :is(.story-flow-node > header em, .goal-step-error, .goal-step.failed .goal-step-index, .playtest-missing) {
+  background: rgba(159, 18, 57, .16);
+  color: var(--studio-danger);
+}
+
+html body .app-shell.armor-mode :is(.story-flow-choices, .story-flow-node > footer, .node-linked-entities, .playtest-body > aside, .snapshot-actions) {
+  border-color: var(--studio-line);
+}
+
+html body .app-shell.armor-mode :is(.story-flow-tools, .story-flow-hint, .story-canvas-shell .react-flow__controls, .story-canvas-shell .react-flow__minimap) {
+  border-color: var(--studio-line);
+  background: rgba(2, 6, 23, .88);
+  color: var(--studio-muted);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, .28);
+}
+
+html body .app-shell.armor-mode .story-canvas-shell .react-flow__edge-textbg {
+  fill: #07111f;
+  stroke: rgba(34, 211, 238, .22);
+}
+
+html body .app-shell.armor-mode .story-canvas-shell .react-flow__edge-text {
+  fill: var(--studio-muted) !important;
+}
+
+html body .app-shell.armor-mode .goal-hero {
+  border-color: var(--studio-line);
+  background: linear-gradient(110deg, rgba(6, 78, 59, .42) 0%, rgba(8, 47, 73, .52) 62%);
+}
+
+html body .app-shell.armor-mode :is(.writing-overlay, .writing-navigator-backdrop) {
+  background: rgba(2, 6, 23, .70);
+  backdrop-filter: blur(14px) saturate(135%);
+}
+
+html body .app-shell.armor-mode :is(.playtest-body > main, .playtest-body > aside) {
+  background: rgba(2, 6, 23, .54);
+}
+
+html body .app-shell.armor-mode :is(.goal-live-run, .goal-run-summary) {
+  border-color: rgba(52, 211, 153, .22);
+  background: rgba(16, 185, 129, .09);
+  color: #a7f3d0;
+}
+
+html body .app-shell.armor-mode :is(.goal-live-run pre, .goal-step-copy pre) {
+  color: #cbd5e1;
+}
+
+/* Constellation Studio */
+html body .app-shell.armor-mode .constellation-studio {
+  --constellation-violet: #22d3ee;
+  --constellation-violet-soft: rgba(34, 211, 238, .12);
+  --constellation-navy: #dff8ff;
+}
+
+html body .app-shell.armor-mode :is(.constellation-library-panel, .constellation-blueprint-panel, .constellation-command, .constellation-blueprint-dialog, .constellation-source-picker, .constellation-canvas-modal > section) {
+  border-color: var(--studio-line);
+  background: var(--studio-panel);
+  color: var(--studio-text);
+  box-shadow: 0 18px 52px rgba(0, 0, 0, .30), inset 0 0 0 1px rgba(163, 230, 53, .022);
+}
+
+html body .app-shell.armor-mode .constellation-canvas-shell {
+  background: rgba(2, 6, 23, .58);
+}
+
+html body .app-shell.armor-mode .constellation-canvas-shell::before {
+  background: radial-gradient(circle at 12% 18%, rgba(34, 211, 238, .09), transparent 23%), radial-gradient(circle at 78% 76%, rgba(163, 230, 53, .06), transparent 25%);
+}
+
+html body .app-shell.armor-mode :is(.constellation-title-input, .constellation-search, .constellation-topbar-actions button, .constellation-field textarea, .constellation-field input, .constellation-field select, .constellation-option-grid input, .constellation-option-grid select, .constellation-reference-picker, .constellation-reference-picker > div:first-child button, .constellation-segmented, .constellation-save-selection, .constellation-open-blueprints, .constellation-source-picker-actions button, .constellation-source-card, .canvas-tool-group, .canvas-expand-controls button, .canvas-history-controls button, .canvas-label-controls input[type="text"], .canvas-label-controls input:not([type]), .canvas-label-controls input[type="color"]) {
+  border-color: var(--studio-line);
+  background: var(--studio-field);
+  color: var(--studio-text);
+}
+
+html body .app-shell.armor-mode :is(.constellation-panel-heading, .constellation-command > header, .constellation-command > footer, .constellation-blueprint-dialog > header, .constellation-blueprint-dialog > footer, .constellation-source-picker > header, .constellation-source-picker-actions, .constellation-source-picker > footer, .constellation-canvas-modal > section > header, .constellation-editor-toolbar, .constellation-canvas-modal > section > footer) {
+  border-color: var(--studio-line);
+  background: rgba(2, 6, 23, .74);
+}
+
+html body .app-shell.armor-mode :is(.constellation-brand small, .constellation-library-scroll section > small, .constellation-panel-heading button, .constellation-search, .constellation-library-scroll section > button small, .constellation-field > span, .constellation-option-grid label > span, .constellation-reference-picker > div:first-child > span, .constellation-port-row, .constellation-port-row small, .constellation-node-header small, .constellation-output-empty, .constellation-output-empty span, .constellation-blueprint-card > p, .constellation-blueprint-empty, .constellation-source-picker-empty, .constellation-source-picker-empty strong, .constellation-source-picker > header small, .constellation-source-card > footer > span, .constellation-canvas-modal > section > header small, .constellation-canvas-modal > section > footer > div, .canvas-brush-size, .canvas-brush-size b, .canvas-expand-controls, .canvas-editor-error) {
+  color: var(--studio-muted);
+}
+
+html body .app-shell.armor-mode :is(.canvas-editor-error, .constellation-topbar-actions button.danger) {
+  border-color: rgba(244, 63, 94, .24);
+  background: rgba(159, 18, 57, .16);
+  color: var(--studio-danger);
+}
+
+html body .app-shell.armor-mode :is(.constellation-panel-heading > div, .constellation-library-scroll section > button strong, .constellation-blueprint-card > strong, .constellation-command > div strong, .constellation-blueprint-dialog > header strong, .constellation-source-picker > header strong, .constellation-canvas-modal > section > header strong, .constellation-output-empty strong) {
+  color: var(--studio-text-strong);
+}
+
+html body .app-shell.armor-mode :is(.constellation-library-scroll section > button:hover, .constellation-segmented button.active, .constellation-command > div > button:hover, .constellation-command > div > button.active, .canvas-tool-group button.active, .constellation-preview-download:hover, .constellation-source-card > footer > button:hover) {
+  background: rgba(34, 211, 238, .10);
+  color: var(--studio-accent-2);
+}
+
+html body .app-shell.armor-mode :is(.constellation-preview-download, .constellation-source-card > footer > button, .constellation-canvas-modal > section > header > button, .constellation-canvas-modal > section > footer > button, .constellation-blueprint-dialog > header > span, .constellation-blueprint-dialog > footer button, .constellation-source-picker > header > div > span, .constellation-source-picker > header > button, .constellation-source-picker > footer > button, .constellation-blueprint-card > footer > div span, .constellation-blueprint-card > footer button, .constellation-canvas-meta span) {
+  border-color: var(--studio-line);
+  background: rgba(15, 23, 42, .70);
+  color: var(--studio-muted);
+}
+
+html body .app-shell.armor-mode :is(.constellation-topbar-actions button.primary, .constellation-blueprint-dialog > footer button.primary, .constellation-source-picker-actions button.primary, .constellation-canvas-modal > section > footer > button.primary) {
+  border-color: rgba(163, 230, 53, .24);
+  background: linear-gradient(135deg, #0891b2, #65a30d);
+  color: var(--studio-text-strong);
+  box-shadow: 0 0 18px rgba(34, 211, 238, .14);
+}
+
+html body .app-shell.armor-mode :is(.constellation-canvas-toolbar, .constellation-selection-status, .constellation-catalog-loading, .constellation-notice, .constellation-canvas-shell .react-flow__controls, .constellation-canvas-shell .react-flow__minimap) {
+  border-color: var(--studio-line);
+  background: rgba(2, 6, 23, .88);
+  color: var(--studio-muted);
+  box-shadow: 0 9px 26px rgba(0, 0, 0, .28);
+}
+
+html body .app-shell.armor-mode .constellation-canvas-shell .react-flow__edge-path {
+  stroke: rgba(139, 211, 230, .58);
+}
+
+html body .app-shell.armor-mode .constellation-canvas-shell .react-flow__edge.selected .react-flow__edge-path {
+  stroke: var(--studio-accent);
+}
+
+html body .app-shell.armor-mode .constellation-node {
+  border-color: rgba(34, 211, 238, .22);
+  background: rgba(7, 17, 31, .96);
+  color: #22d3ee;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, .32), 0 0 18px rgba(34, 211, 238, .08);
+}
+
+html body .app-shell.armor-mode .constellation-node.selected {
+  border-color: rgba(163, 230, 53, .66);
+  box-shadow: 0 0 0 3px rgba(163, 230, 53, .11), 0 18px 42px rgba(34, 211, 238, .12);
+}
+
+html body .app-shell.armor-mode .constellation-node-header {
+  border-color: var(--studio-line);
+  background: linear-gradient(180deg, color-mix(in srgb, currentColor 11%, #07111f), rgba(2, 6, 23, .70));
+}
+
+html body .app-shell.armor-mode .constellation-node-header input {
+  color: var(--studio-text-strong);
+}
+
+html body .app-shell.armor-mode :is(.constellation-node-body, .constellation-port-row.connected, .constellation-port-row.ready) {
+  color: var(--studio-text);
+}
+
+html body .app-shell.armor-mode :is(.constellation-node-ports.inputs, .constellation-node-ports.outputs) {
+  border-color: rgba(34, 211, 238, .10);
+  background: rgba(2, 6, 23, .40);
+}
+
+html body .app-shell.armor-mode .constellation-node-icon {
+  background: color-mix(in srgb, currentColor 16%, #020617);
+}
+
+html body .app-shell.armor-mode .constellation-node-icon-button:hover {
+  background: rgba(34, 211, 238, .10);
+  color: var(--studio-text);
+}
+
+html body .app-shell.armor-mode .constellation-handle::after {
+  border-color: #020617;
+}
+
+html body .app-shell.armor-mode :is(.constellation-text-preview, .constellation-media-placeholder, .constellation-output-empty, .constellation-blueprint-intro, .constellation-blueprint-card, .constellation-canvas-launch) {
+  border-color: var(--studio-line);
+  background: rgba(15, 23, 42, .64);
+  color: var(--studio-text);
+}
+
+html body .app-shell.armor-mode :is(.constellation-media-preview, .constellation-source-image) {
+  border-color: var(--studio-line);
+  background: #07111f;
+}
+
+html body .app-shell.armor-mode .constellation-audio-preview {
+  background: rgba(16, 185, 129, .13);
+  color: #86efac;
+}
+
+html body .app-shell.armor-mode .constellation-audio-preview > span {
+  background: #059669;
+}
+
+html body .app-shell.armor-mode .constellation-node-error {
+  background: rgba(159, 18, 57, .16);
+  color: var(--studio-danger);
+}
+
+html body .app-shell.armor-mode .constellation-node-run {
+  background: color-mix(in srgb, currentColor 12%, #020617);
+}
+
+html body .app-shell.armor-mode :is(.constellation-source-picker-backdrop, .constellation-dialog-backdrop, .constellation-canvas-modal) {
+  background: rgba(2, 6, 23, .68);
+}
+
+/* Armor Mode control center */
+.armor-studio-dialog {
+  width: min(1060px, calc(100vw - 32px));
+  max-height: min(860px, calc(100vh - 32px));
+  border-color: rgba(34, 211, 238, .26);
+  background:
+    radial-gradient(circle at 85% 0%, rgba(34, 211, 238, .10), transparent 28%),
+    radial-gradient(circle at 0% 100%, rgba(163, 230, 53, .07), transparent 32%),
+    #07111f;
+  color: #e5f6ff;
+  box-shadow: 0 28px 100px rgba(0, 0, 0, .58), 0 0 44px rgba(34, 211, 238, .12);
+}
+
+.armor-studio-header {
+  border-bottom-color: rgba(34, 211, 238, .18);
+  background: rgba(2, 6, 23, .82);
+}
+
+.armor-studio-header strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #f0fdf4;
+}
+
+.armor-studio-header span {
+  color: #93b7c7;
+}
+
+.armor-studio-close {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(34, 211, 238, .20);
+  border-radius: 10px;
+  background: rgba(15, 23, 42, .76);
+  color: #b9dce8;
+}
+
+.armor-studio-close:hover {
+  border-color: rgba(163, 230, 53, .42);
+  color: #f0fdf4;
+}
+
+.armor-studio-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+  padding: 18px;
+  overflow: auto;
+}
+
+.armor-studio-overview,
+.armor-studio-section {
+  min-width: 0;
+  border: 1px solid rgba(34, 211, 238, .18);
+  border-radius: 14px;
+  background: rgba(2, 12, 24, .72);
+}
+
+.armor-studio-overview {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 15px;
+}
+
+.armor-studio-status-icon {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(148, 163, 184, .24);
+  border-radius: 12px;
+  background: rgba(30, 41, 59, .68);
+  color: #94a3b8;
+}
+
+.armor-studio-overview.active .armor-studio-status-icon {
+  border-color: rgba(163, 230, 53, .34);
+  background: rgba(101, 163, 13, .13);
+  color: #bef264;
+  box-shadow: 0 0 18px rgba(163, 230, 53, .10);
+}
+
+.armor-studio-overview > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.armor-studio-overview strong {
+  color: #f0fdf4;
+  font-size: 15px;
+}
+
+.armor-studio-overview small,
+.armor-studio-section header small,
+.armor-skill-list small,
+.armor-skill-list em,
+.armor-coverage-grid small,
+.armor-profile-grid small,
+.armor-writing-intensity small,
+.armor-health-list small {
+  color: #93b7c7;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.armor-studio-master-toggle {
+  min-width: 100px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 0 11px;
+  border: 1px solid rgba(148, 163, 184, .26);
+  border-radius: 10px;
+  background: rgba(15, 23, 42, .78);
+  color: #cbd5e1;
+  font-weight: 740;
+}
+
+.armor-studio-master-toggle i,
+.armor-skill-switch {
+  width: 24px;
+  height: 14px;
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: rgba(100, 116, 139, .46);
+  box-shadow: inset 0 0 0 1px rgba(148, 163, 184, .25);
+}
+
+.armor-studio-master-toggle i::after,
+.armor-skill-switch i {
+  width: 9px;
+  height: 9px;
+  position: absolute;
+  top: 2.5px;
+  left: 3px;
+  border-radius: 50%;
+  background: #cbd5e1;
+  content: "";
+  transition: transform .18s ease, background .18s ease;
+}
+
+.armor-studio-master-toggle.active {
+  border-color: rgba(163, 230, 53, .42);
+  background: linear-gradient(135deg, rgba(8, 145, 178, .36), rgba(101, 163, 13, .32));
+  color: #f0fdf4;
+}
+
+.armor-studio-master-toggle.active i {
+  background: rgba(163, 230, 53, .54);
+}
+
+.armor-studio-master-toggle.active i::after {
+  transform: translateX(9px);
+  background: #f7fee7;
+}
+
+.armor-studio-section > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 14px 10px;
+  border-bottom: 1px solid rgba(34, 211, 238, .11);
+}
+
+.armor-studio-section > header > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #dff8ff;
+}
+
+.armor-studio-section > header strong {
+  font-size: 14px;
+}
+
+.armor-studio-section > header > button {
+  flex: 0 0 auto;
+}
+
+.armor-profile-grid,
+.armor-writing-intensity {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 7px;
+  padding: 12px;
+}
+
+.armor-profile-grid button,
+.armor-writing-intensity button {
+  min-height: 76px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px;
+  border: 1px solid rgba(100, 116, 139, .32);
+  border-radius: 10px;
+  background: rgba(15, 23, 42, .54);
+  color: #cbd5e1;
+  text-align: left;
+}
+
+.armor-profile-grid button:hover,
+.armor-writing-intensity button:hover,
+.armor-profile-grid button.active,
+.armor-writing-intensity button.active {
+  border-color: rgba(34, 211, 238, .48);
+  background: rgba(8, 145, 178, .16);
+  color: #f0fdf4;
+}
+
+.armor-profile-grid button.active,
+.armor-writing-intensity button.active {
+  box-shadow: inset 0 0 0 1px rgba(163, 230, 53, .20), 0 0 18px rgba(34, 211, 238, .08);
+}
+
+.armor-profile-grid strong,
+.armor-writing-intensity strong,
+.armor-coverage-grid strong,
+.armor-skill-list strong,
+.armor-health-list strong {
+  font-size: 13px;
+}
+
+.armor-coverage-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  padding: 12px;
+}
+
+.armor-coverage-grid > div {
+  min-height: 70px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto 1fr;
+  column-gap: 7px;
+  padding: 9px;
+  border: 1px solid rgba(100, 116, 139, .24);
+  border-radius: 10px;
+  background: rgba(15, 23, 42, .46);
+  color: #94a3b8;
+}
+
+.armor-coverage-grid > div > span {
+  grid-row: 1 / -1;
+  color: #64748b;
+}
+
+.armor-coverage-grid > div.active {
+  border-color: rgba(163, 230, 53, .28);
+  background: rgba(22, 101, 52, .10);
+  color: #e5f6ff;
+}
+
+.armor-coverage-grid > div.active > span {
+  color: #bef264;
+}
+
+.armor-skill-section,
+.armor-media-compiler,
+.armor-health-section {
+  grid-column: 1 / -1;
+}
+
+.armor-skill-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  padding: 12px;
+}
+
+.armor-skill-list > button {
+  min-height: 90px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 11px;
+  border: 1px solid rgba(100, 116, 139, .28);
+  border-radius: 11px;
+  background: rgba(15, 23, 42, .48);
+  color: #94a3b8;
+  text-align: left;
+}
+
+.armor-skill-list > button:hover,
+.armor-skill-list > button.active {
+  border-color: rgba(34, 211, 238, .42);
+  background: rgba(8, 145, 178, .12);
+  color: #e5f6ff;
+}
+
+.armor-skill-list > button > span:nth-child(2) {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.armor-skill-list em {
+  margin-top: 2px;
+  color: #67e8f9;
+  font-style: normal;
+}
+
+.armor-skill-list > button.active .armor-skill-switch {
+  background: rgba(163, 230, 53, .52);
+}
+
+.armor-skill-list > button.active .armor-skill-switch i {
+  transform: translateX(9px);
+  background: #f7fee7;
+}
+
+.armor-skill-check {
+  color: #bef264;
+}
+
+.armor-writing-intensity {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.armor-media-compiler > textarea {
+  width: calc(100% - 24px);
+  min-height: 64px;
+  margin: 0 12px 10px;
+  resize: vertical;
+  border: 1px solid rgba(34, 211, 238, .22);
+  border-radius: 10px;
+  background: rgba(2, 6, 23, .68);
+  color: #e5f6ff;
+  padding: 10px;
+}
+
+.armor-media-kind-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 12px 12px 8px;
+}
+
+.armor-media-kind-picker button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 31px;
+  padding: 0 9px;
+  border: 1px solid rgba(100, 116, 139, .30);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, .58);
+  color: #a8c8d5;
+  font-size: 12px;
+}
+
+.armor-media-kind-picker button.active,
+.armor-media-kind-picker button:hover {
+  border-color: rgba(34, 211, 238, .42);
+  background: rgba(8, 145, 178, .16);
+  color: #e5f6ff;
+}
+
+.armor-compiled-preview {
+  margin: 0 12px 12px;
+  overflow: hidden;
+  border: 1px solid rgba(34, 211, 238, .16);
+  border-radius: 10px;
+  background: rgba(2, 6, 23, .72);
+}
+
+.armor-compiled-preview > div {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(34, 211, 238, .13);
+  color: #dff8ff;
+  font-size: 13px;
+}
+
+.armor-compiled-preview button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  background: transparent;
+  color: #67e8f9;
+  font-size: 12px;
+}
+
+.armor-compiled-preview pre {
+  max-height: 210px;
+  margin: 0;
+  overflow: auto;
+  padding: 11px;
+  color: #b7d7e4;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.52;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.armor-health-section > p {
+  margin: 0;
+  padding: 12px;
+  color: #93b7c7;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.armor-health-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  padding: 12px;
+}
+
+.armor-health-list > div {
+  min-height: 58px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto 1fr;
+  column-gap: 7px;
+  padding: 9px;
+  border: 1px solid rgba(100, 116, 139, .24);
+  border-radius: 9px;
+  background: rgba(15, 23, 42, .46);
+}
+
+.armor-health-list > div > span {
+  grid-row: 1 / -1;
+}
+
+.armor-health-list > div.ready {
+  border-color: rgba(163, 230, 53, .26);
+}
+
+.armor-health-list > div.ready > span {
+  color: #bef264;
+}
+
+.armor-health-list > div.disabled > span {
+  color: #94a3b8;
+}
+
+.armor-health-list > div.failed {
+  border-color: rgba(251, 191, 36, .34);
+}
+
+.armor-health-list > div.failed > span {
+  color: #fbbf24;
+}
+
+html body .app-shell.armor-mode .armor-studio-dialog {
+  border-color: rgba(34, 211, 238, .36);
+}
+
+@media (max-width: 760px) {
+  .armor-studio-dialog {
+    width: min(100vw - 16px, 700px);
+    max-height: calc(100vh - 16px);
+  }
+
+  .armor-studio-body,
+  .armor-skill-list,
+  .armor-health-list {
+    grid-template-columns: 1fr;
+  }
+
+  .armor-profile-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .armor-coverage-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 460px) {
+  .armor-studio-overview {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .armor-studio-master-toggle {
+    grid-column: 1 / -1;
+    justify-self: stretch;
+  }
+
+  .armor-profile-grid,
+  .armor-writing-intensity,
+  .armor-coverage-grid {
+    grid-template-columns: 1fr;
+  }
+}

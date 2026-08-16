@@ -9,6 +9,7 @@ button { font: inherit; letter-spacing: 0; }
 .pet-overlay-activities { position: absolute; z-index: 3; left: 50%; bottom: var(--pet-head-offset); width: min(320px, calc(100% - 28px)); display: flex; flex-direction: column; align-items: center; gap: 6px; transform: translateX(-50%); pointer-events: none; }
 .pet-overlay-activities article { position: relative; width: 100%; min-height: 43px; display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: center; gap: 8px; padding: 6px 10px; border: .5px solid rgba(255,255,255,.8); border-radius: 15px; background: rgba(248,250,255,.79); box-shadow: 0 10px 30px rgba(15,23,42,.12), inset 0 0 0 .5px rgba(100,116,139,.1); backdrop-filter: saturate(190%) blur(22px); animation: pet-bubble-enter .22s cubic-bezier(.2,.8,.2,1) both; }
 .pet-overlay-activities article:last-of-type::after { content: ""; position: absolute; left: 50%; bottom: -6px; width: 12px; height: 12px; border-right: .5px solid rgba(100,116,139,.16); border-bottom: .5px solid rgba(100,116,139,.16); background: inherit; transform: translateX(-50%) rotate(45deg); }
+.pet-overlay-activities:has(.pet-overlay-completion) article:last-of-type::after { display: none; }
 .pet-overlay-activities article > span { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 9px; background: rgba(10,132,255,.13); color: #0878d1; }
 .pet-overlay-activities article.generating > span { background: rgba(255,159,10,.15); color: #c66a00; }
 .pet-overlay-activities article.waiting > span { background: rgba(255,69,58,.13); color: #d62d26; }
@@ -29,6 +30,16 @@ button { font: inherit; letter-spacing: 0; }
 .pet-overlay-prompt footer button:first-child { border-color: #0a84ff; background: #0a84ff; color: white; }
 .pet-overlay-prompt footer button:disabled { cursor: default; opacity: .55; }
 .pet-overlay-prompt footer button:focus-visible { outline: 2px solid rgba(10,132,255,.45); outline-offset: 1px; }
+.pet-overlay-completion { position: relative; width: 100%; min-height: 47px; display: grid; grid-template-columns: 30px minmax(0, 1fr) auto 14px; align-items: center; gap: 8px; padding: 7px 10px; border: .5px solid rgba(52,199,89,.34); border-radius: 15px; background: rgba(247,255,249,.86); color: inherit; box-shadow: 0 12px 34px rgba(15,23,42,.14), inset 0 0 0 .5px rgba(52,199,89,.1); text-align: left; cursor: pointer; pointer-events: auto; backdrop-filter: saturate(190%) blur(22px); animation: pet-bubble-enter .22s cubic-bezier(.2,.8,.2,1) both; }
+.pet-overlay-completion::after { position: absolute; left: 50%; bottom: -6px; width: 12px; height: 12px; border-right: .5px solid rgba(52,199,89,.28); border-bottom: .5px solid rgba(52,199,89,.28); background: inherit; content: ""; transform: translateX(-50%) rotate(45deg); }
+.pet-overlay-completion > span { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 9px; background: rgba(52,199,89,.15); color: #188444; }
+.pet-overlay-completion.unread > span { box-shadow: 0 0 0 3px rgba(52,199,89,.08); }
+.pet-overlay-completion > div { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.pet-overlay-completion > b { min-width: 19px; height: 19px; display: grid; place-items: center; padding: 0 5px; border-radius: 999px; background: #e5484d; color: #fff; font-size: 9px; font-style: normal; line-height: 1; }
+.pet-overlay-completion > svg { color: #667085; }
+.pet-overlay-completion:hover:not(:disabled) { border-color: rgba(52,199,89,.56); background: rgba(247,255,249,.96); transform: translateY(-1px); }
+.pet-overlay-completion:focus-visible { outline: 2px solid rgba(52,199,89,.48); outline-offset: 2px; }
+.pet-overlay-completion:disabled { cursor: default; opacity: .7; }
 .pet-overlay-more { min-width: 30px; padding: 4px 8px; border: .5px solid rgba(255,255,255,.5); border-radius: 999px; background: rgba(29,29,31,.82); color: white; box-shadow: 0 7px 18px rgba(15,23,42,.15); font-size: 9px; text-align: center; backdrop-filter: blur(16px); }
 .pet-overlay-status { position: absolute; z-index: 4; left: 50%; bottom: 14px; width: 150px; min-height: 28px; display: grid; grid-template-columns: auto minmax(38px, 1fr); align-items: center; gap: 8px; padding: 5px 9px; border: .5px solid rgba(255,255,255,.78); border-radius: 12px; background: rgba(248,250,255,.76); box-shadow: 0 9px 24px rgba(15,23,42,.12), inset 0 0 0 .5px rgba(100,116,139,.1); transform: translateX(-50%); backdrop-filter: saturate(180%) blur(20px); pointer-events: none; }
 .pet-overlay-status > span { min-width: 0; display: flex; align-items: baseline; gap: 5px; }
@@ -41,7 +52,7 @@ button { font: inherit; letter-spacing: 0; }
 
 @media (prefers-color-scheme: dark) {
   :root { color: #f5f5f7; }
-  .pet-overlay-status, .pet-overlay-activities article { border-color: rgba(255,255,255,.12); background: rgba(28,28,30,.78); box-shadow: 0 12px 32px rgba(0,0,0,.28), inset 0 0 0 .5px rgba(255,255,255,.08); }
+  .pet-overlay-status, .pet-overlay-activities article, .pet-overlay-completion { border-color: rgba(255,255,255,.12); background: rgba(28,28,30,.84); box-shadow: 0 12px 32px rgba(0,0,0,.28), inset 0 0 0 .5px rgba(255,255,255,.08); }
   .pet-overlay-activities small, .pet-overlay-status small { color: #a1a1aa; }
   .pet-overlay-prompt footer button { border-color: rgba(255,255,255,.16); background: rgba(58,58,60,.88); color: #f5f5f7; }
   .pet-overlay-prompt footer button:first-child { border-color: #0a84ff; background: #0a84ff; }

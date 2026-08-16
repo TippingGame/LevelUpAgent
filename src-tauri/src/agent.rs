@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
 use eventsource_stream::Eventsource;
-use futures_util::{StreamExt, future::join_all};
-use reqwest::{Client, RequestBuilder};
+use futures_util::{Stream, StreamExt, future::join_all};
+use reqwest::{Client, RequestBuilder, Response};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -12,7 +13,7 @@ use crate::models::{
     GatewayDiagnostics, ImageAttachment, ModelInfo, ProviderProfile, ProviderProtocol, ToolCall,
 };
 
-const SYSTEM_PROMPT: &str = "You are LevelUpAgent, a precise local development agent. Work only inside the selected workspace. Inspect before editing, keep changes focused, explain consequential decisions, and never claim a tool action succeeded until its result is returned. Use tools whenever local evidence is needed. For existing text/code files, prefer edit_file with a small exact old_string/new_string change; it preserves the file's detected encoding, BOM, and line endings. If a legacy file is ambiguous, including a pure-ASCII file in a project known to use a legacy code page, pass its explicit encoding (utf-8, utf-16le, utf-16be, gbk/gb2312, gb18030, big5, shift-jis, or windows-1252). Use write_file for new files or deliberate full replacements only, and do not use shell commands to rewrite text files when a file tool can do the job.";
+const SYSTEM_PROMPT: &str = "You are LevelUpAgent, a precise local development agent. Do not force any fixed greeting or persona slogan; keep conversation clean and answer the user's actual request. Work only inside the selected workspace. Inspect before editing, keep changes focused, explain consequential decisions, and never claim a tool action succeeded until its result is returned. Use tools whenever local evidence is needed. For existing text/code files, prefer edit_file with a small exact old_string/new_string change; it preserves the file's detected encoding, BOM, and line endings. If a legacy file is ambiguous, including a pure-ASCII file in a project known to use a legacy code page, pass its explicit encoding (utf-8, utf-16le, utf-16be, gbk/gb2312, gb18030, big5, shift-jis, or windows-1252). Use write_file for new files or deliberate full replacements only, and do not use shell commands to rewrite text files when a file tool can do the job.";
 
 const CONTEXT_MAX_CHARS: usize = 240_000;
 const CONTEXT_MAX_MESSAGES: usize = 160;
@@ -29,6 +30,11 @@ const HATCH_BOOTSTRAP_MARKER: &str = "[LEVELUP_HATCH_BOOTSTRAP_COMPLETE]";
 const THEME_GENERATION_BOOTSTRAP_MARKER: &str = "[LEVELUP_THEME_GENERATION_BOOTSTRAP_COMPLETE]";
 const THEME_GENERATION_TARGET_MARKER: &str = "[LEVELUP_THEME_GENERATION_TARGET]";
 const THEME_GENERATION_REQUEST_TIMEOUT_SECS: u64 = 360;
+#[cfg(not(test))]
+const PROVIDER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const PROVIDER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_millis(250);
+const PROVIDER_STREAM_INTERRUPTED: &str = "Provider stream ended before completion";
 
 fn turn_request_timeout(request: &AgentTurnRequest) -> Option<std::time::Duration> {
     theme_generation_bootstrapped(&request.messages)
@@ -68,6 +74,53 @@ fn gemini_auth_if_present(request: RequestBuilder, api_key: &str) -> RequestBuil
             .header("x-goog-api-key", api_key)
             .bearer_auth(api_key)
     }
+}
+
+fn provider_stream_idle_timeout_error() -> String {
+    let timeout = if PROVIDER_STREAM_IDLE_TIMEOUT.subsec_millis() == 0 {
+        format!("{} seconds", PROVIDER_STREAM_IDLE_TIMEOUT.as_secs())
+    } else {
+        format!("{} ms", PROVIDER_STREAM_IDLE_TIMEOUT.as_millis())
+    };
+    format!("Provider stream timed out after {timeout} without activity")
+}
+
+async fn send_stream_request(
+    request: RequestBuilder,
+    cancellation: &CancellationToken,
+) -> Result<Response, String> {
+    let response = tokio::select! {
+        _ = cancellation.cancelled() => return Err("REQUEST_CANCELLED".to_owned()),
+        response = tokio::time::timeout(PROVIDER_STREAM_IDLE_TIMEOUT, request.send()) => response,
+    };
+    response
+        .map_err(|_| provider_stream_idle_timeout_error())?
+        .map_err(|error| format!("Connection failed: {error}"))
+}
+
+async fn stream_response_json(
+    response: Response,
+    cancellation: &CancellationToken,
+) -> Result<Value, String> {
+    let result = tokio::select! {
+        _ = cancellation.cancelled() => return Err("REQUEST_CANCELLED".to_owned()),
+        result = tokio::time::timeout(PROVIDER_STREAM_IDLE_TIMEOUT, response_json(response)) => result,
+    };
+    result.map_err(|_| provider_stream_idle_timeout_error())?
+}
+
+async fn next_stream_item<S>(
+    stream: &mut S,
+    cancellation: &CancellationToken,
+) -> Result<Option<S::Item>, String>
+where
+    S: Stream + Unpin,
+{
+    let next = tokio::select! {
+        _ = cancellation.cancelled() => return Err("REQUEST_CANCELLED".to_owned()),
+        next = tokio::time::timeout(PROVIDER_STREAM_IDLE_TIMEOUT, stream.next()) => next,
+    };
+    next.map_err(|_| provider_stream_idle_timeout_error())
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -425,6 +478,9 @@ pub fn is_retryable_provider_error(error: &str) -> bool {
     }
     error.contains("Connection failed")
         || error.contains("timed out")
+        || error.contains("Could not read provider response")
+        || error.contains("Invalid SSE stream")
+        || error.contains(PROVIDER_STREAM_INTERRUPTED)
         || error.contains("Invalid provider response")
         || error.contains("Base URL is invalid")
         || [
@@ -440,6 +496,9 @@ pub fn is_reconnectable_provider_error(error: &str) -> bool {
     }
     error.contains("Connection failed")
         || error.to_ascii_lowercase().contains("timed out")
+        || error.contains("Could not read provider response")
+        || error.contains("Invalid SSE stream")
+        || error.contains(PROVIDER_STREAM_INTERRUPTED)
         || ["408 ", "429 ", "500 ", "502 ", "503 ", "504 ", "524 "]
             .iter()
             .any(|status| error.contains(status))
@@ -566,14 +625,15 @@ where
     F: FnMut(AgentStreamEvent),
 {
     let url = endpoint(&request.profile.base_url, "/v1/chat/completions")?;
-    let response = bearer_auth_if_present(turn_post(client, url, &request), api_key)
-        .json(&chat_body(&request, true))
-        .send()
-        .await
-        .map_err(|error| format!("Connection failed: {error}"))?;
+    let response = send_stream_request(
+        bearer_auth_if_present(turn_post(client, url, &request), api_key)
+            .json(&chat_body(&request, true)),
+        &cancellation,
+    )
+    .await?;
     let request_id = header_request_id(&response);
     if !is_event_stream(&response) {
-        let value = response_json(response).await?;
+        let value = stream_response_json(response, &cancellation).await?;
         let result = parse_openai_chat_value(&value, request_id)?;
         if !result.content.is_empty() {
             emit(AgentStreamEvent::content(result.content.clone()));
@@ -581,20 +641,20 @@ where
         return Ok(result);
     }
     ensure_success_status(&response)?;
+    emit(AgentStreamEvent::stream_opened());
 
     let mut stream = response.bytes_stream().eventsource();
     let mut content = String::new();
     let mut tools: BTreeMap<usize, ToolAccumulator> = BTreeMap::new();
     let mut input_tokens = None;
     let mut output_tokens = None;
+    let mut completed = false;
     loop {
-        let next = tokio::select! {
-            _ = cancellation.cancelled() => return Err("REQUEST_CANCELLED".to_owned()),
-            next = stream.next() => next,
-        };
+        let next = next_stream_item(&mut stream, &cancellation).await?;
         let Some(event) = next else { break };
         let event = event.map_err(|error| format!("Invalid SSE stream: {error}"))?;
         if event.data.trim() == "[DONE]" {
+            completed = true;
             break;
         }
         let value: Value = serde_json::from_str(&event.data)
@@ -630,6 +690,9 @@ where
                 .or(output_tokens);
         }
     }
+    if !completed && content.is_empty() && tools.is_empty() {
+        return Err(PROVIDER_STREAM_INTERRUPTED.to_owned());
+    }
     Ok(AgentTurnResponse {
         content,
         tool_calls: finish_tools(tools),
@@ -652,15 +715,16 @@ where
     F: FnMut(AgentStreamEvent),
 {
     let url = endpoint(&request.profile.base_url, "/v1/responses")?;
-    let response = bearer_auth_if_present(turn_post(client, url, &request), api_key)
-        .header("OpenAI-Beta", "responses=experimental")
-        .json(&responses_body(&request, true))
-        .send()
-        .await
-        .map_err(|error| format!("Connection failed: {error}"))?;
+    let response = send_stream_request(
+        bearer_auth_if_present(turn_post(client, url, &request), api_key)
+            .header("OpenAI-Beta", "responses=experimental")
+            .json(&responses_body(&request, true)),
+        &cancellation,
+    )
+    .await?;
     let request_id = header_request_id(&response);
     if !is_event_stream(&response) {
-        let value = response_json(response).await?;
+        let value = stream_response_json(response, &cancellation).await?;
         let result = parse_openai_responses_value(&value, request_id)?;
         if !result.content.is_empty() {
             emit(AgentStreamEvent::content(result.content.clone()));
@@ -668,6 +732,7 @@ where
         return Ok(result);
     }
     ensure_success_status(&response)?;
+    emit(AgentStreamEvent::stream_opened());
 
     let mut stream = response.bytes_stream().eventsource();
     let mut content = String::new();
@@ -675,14 +740,13 @@ where
     let mut input_tokens = None;
     let mut output_tokens = None;
     let mut completed_result = None;
+    let mut completed = false;
     loop {
-        let next = tokio::select! {
-            _ = cancellation.cancelled() => return Err("REQUEST_CANCELLED".to_owned()),
-            next = stream.next() => next,
-        };
+        let next = next_stream_item(&mut stream, &cancellation).await?;
         let Some(event) = next else { break };
         let event = event.map_err(|error| format!("Invalid SSE stream: {error}"))?;
         if event.data.trim() == "[DONE]" {
+            completed = true;
             break;
         }
         let value: Value = serde_json::from_str(&event.data)
@@ -724,6 +788,7 @@ where
                 );
             }
             "response.completed" => {
+                completed = true;
                 if let Some(response) = value.get("response") {
                     completed_result =
                         Some(parse_openai_responses_value(response, request_id.clone())?);
@@ -731,6 +796,9 @@ where
             }
             _ => {}
         }
+    }
+    if !completed && content.is_empty() && tools.is_empty() {
+        return Err(PROVIDER_STREAM_INTERRUPTED.to_owned());
     }
     if let Some(completed) = completed_result {
         input_tokens = completed.input_tokens;
@@ -773,15 +841,16 @@ where
     F: FnMut(AgentStreamEvent),
 {
     let url = endpoint(&request.profile.base_url, "/v1/messages")?;
-    let response = anthropic_auth_if_present(turn_post(client, url, &request), api_key)
-        .header("anthropic-version", "2023-06-01")
-        .json(&anthropic_body(&request, true))
-        .send()
-        .await
-        .map_err(|error| format!("Connection failed: {error}"))?;
+    let response = send_stream_request(
+        anthropic_auth_if_present(turn_post(client, url, &request), api_key)
+            .header("anthropic-version", "2023-06-01")
+            .json(&anthropic_body(&request, true)),
+        &cancellation,
+    )
+    .await?;
     let request_id = header_request_id(&response);
     if !is_event_stream(&response) {
-        let value = response_json(response).await?;
+        let value = stream_response_json(response, &cancellation).await?;
         let result = parse_anthropic_value(&value, request_id)?;
         if !result.content.is_empty() {
             emit(AgentStreamEvent::content(result.content.clone()));
@@ -789,17 +858,16 @@ where
         return Ok(result);
     }
     ensure_success_status(&response)?;
+    emit(AgentStreamEvent::stream_opened());
 
     let mut stream = response.bytes_stream().eventsource();
     let mut content = String::new();
     let mut tools: BTreeMap<usize, ToolAccumulator> = BTreeMap::new();
     let mut input_tokens = None;
     let mut output_tokens = None;
+    let mut completed = false;
     loop {
-        let next = tokio::select! {
-            _ = cancellation.cancelled() => return Err("REQUEST_CANCELLED".to_owned()),
-            next = stream.next() => next,
-        };
+        let next = next_stream_item(&mut stream, &cancellation).await?;
         let Some(event) = next else { break };
         let event = event.map_err(|error| format!("Invalid SSE stream: {error}"))?;
         let value: Value = serde_json::from_str(&event.data)
@@ -862,8 +930,15 @@ where
                     .and_then(Value::as_u64)
                     .or(output_tokens);
             }
+            "message_stop" => {
+                completed = true;
+                break;
+            }
             _ => {}
         }
+    }
+    if !completed && content.is_empty() && tools.is_empty() {
+        return Err(PROVIDER_STREAM_INTERRUPTED.to_owned());
     }
     Ok(AgentTurnResponse {
         content,
@@ -891,14 +966,15 @@ where
         &request.profile.base_url,
         &format!("/v1beta/models/{model}:streamGenerateContent?alt=sse"),
     )?;
-    let response = gemini_auth_if_present(turn_post(client, url, &request), api_key)
-        .json(&gemini_body(&request))
-        .send()
-        .await
-        .map_err(|error| format!("Connection failed: {error}"))?;
+    let response = send_stream_request(
+        gemini_auth_if_present(turn_post(client, url, &request), api_key)
+            .json(&gemini_body(&request)),
+        &cancellation,
+    )
+    .await?;
     let request_id = header_request_id(&response);
     if !is_event_stream(&response) {
-        let value = response_json(response).await?;
+        let value = stream_response_json(response, &cancellation).await?;
         let result = parse_gemini_value(&value, request_id)?;
         if !result.content.is_empty() {
             emit(AgentStreamEvent::content(result.content.clone()));
@@ -906,25 +982,27 @@ where
         return Ok(result);
     }
     ensure_success_status(&response)?;
+    emit(AgentStreamEvent::stream_opened());
 
     let mut stream = response.bytes_stream().eventsource();
     let mut content = String::new();
     let mut tool_calls = Vec::new();
     let mut input_tokens = None;
     let mut output_tokens = None;
+    let mut completed = false;
+    let mut received_candidate = false;
     loop {
-        let next = tokio::select! {
-            _ = cancellation.cancelled() => return Err("REQUEST_CANCELLED".to_owned()),
-            next = stream.next() => next,
-        };
+        let next = next_stream_item(&mut stream, &cancellation).await?;
         let Some(event) = next else { break };
         let event = event.map_err(|error| format!("Invalid SSE stream: {error}"))?;
         if event.data.trim() == "[DONE]" {
+            completed = true;
             break;
         }
         let value: Value = serde_json::from_str(&event.data)
             .map_err(|error| format!("Invalid stream event: {error}"))?;
         check_stream_error(&value)?;
+        received_candidate |= value.pointer("/candidates/0").is_some();
         if let Some(parts) = value
             .pointer("/candidates/0/content/parts")
             .and_then(Value::as_array)
@@ -956,6 +1034,9 @@ where
                 .and_then(Value::as_u64)
                 .or(output_tokens);
         }
+    }
+    if !completed && !received_candidate {
+        return Err(PROVIDER_STREAM_INTERRUPTED.to_owned());
     }
     Ok(AgentTurnResponse {
         content,
@@ -1207,7 +1288,12 @@ fn parse_gemini_value(
 
 fn gemini_tool_call(function: &Value, index: usize) -> Option<ToolCall> {
     Some(ToolCall {
-        id: format!("gemini-call-{index}"),
+        id: function
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("gemini-call-{index}")),
         name: function.get("name")?.as_str()?.to_owned(),
         arguments: function.get("args").cloned().unwrap_or_else(|| json!({})),
     })
@@ -1953,17 +2039,26 @@ fn responses_input(messages: &[AgentMessage]) -> Vec<Value> {
 }
 
 fn anthropic_messages(messages: &[AgentMessage]) -> Vec<Value> {
-    messages
-        .iter()
-        .map(|message| match message.role.as_str() {
-            "tool" => json!({
-                "role": "user",
-                "content": [{
+    let mut output = Vec::with_capacity(messages.len());
+    let mut index = 0;
+    while index < messages.len() {
+        let message = &messages[index];
+        if message.role == "tool" {
+            let mut content = Vec::new();
+            while index < messages.len() && messages[index].role == "tool" {
+                let tool_message = &messages[index];
+                content.push(json!({
                     "type": "tool_result",
-                    "tool_use_id": message.tool_call_id,
-                    "content": message.content
-                }]
-            }),
+                    "tool_use_id": tool_message.tool_call_id,
+                    "content": tool_message.content
+                }));
+                index += 1;
+            }
+            output.push(json!({ "role": "user", "content": content }));
+            continue;
+        }
+
+        output.push(match message.role.as_str() {
             "assistant" if !message.tool_calls.is_empty() => {
                 let mut content = Vec::new();
                 if !message.content.is_empty() {
@@ -2003,14 +2098,46 @@ fn anthropic_messages(messages: &[AgentMessage]) -> Vec<Value> {
                 json!({ "role": "user", "content": content })
             }
             _ => json!({ "role": message.role, "content": message.content }),
-        })
-        .collect()
+        });
+        index += 1;
+    }
+    output
 }
 
 fn gemini_contents(messages: &[AgentMessage]) -> Vec<Value> {
-    messages
-        .iter()
-        .map(|message| match message.role.as_str() {
+    let mut contents = Vec::with_capacity(messages.len());
+    let mut index = 0;
+    while index < messages.len() {
+        let message = &messages[index];
+        if message.role == "tool" {
+            let mut parts = Vec::new();
+            while index < messages.len() && messages[index].role == "tool" {
+                let tool_message = &messages[index];
+                let call_id = tool_message.tool_call_id.as_deref();
+                let name = call_id
+                    .and_then(|call_id| {
+                        messages[..index]
+                            .iter()
+                            .rev()
+                            .flat_map(|candidate| candidate.tool_calls.iter())
+                            .find(|call| call.id == call_id)
+                    })
+                    .map(|call| call.name.as_str())
+                    .unwrap_or("tool");
+                parts.push(json!({
+                    "functionResponse": {
+                        "id": call_id,
+                        "name": name,
+                        "response": { "result": tool_message.content }
+                    }
+                }));
+                index += 1;
+            }
+            contents.push(json!({ "role": "user", "parts": parts }));
+            continue;
+        }
+
+        contents.push(match message.role.as_str() {
             "assistant" => {
                 let mut parts = Vec::new();
                 if !message.content.is_empty() {
@@ -2019,35 +2146,13 @@ fn gemini_contents(messages: &[AgentMessage]) -> Vec<Value> {
                 parts.extend(message.tool_calls.iter().map(|call| {
                     json!({
                         "functionCall": {
+                            "id": call.id,
                             "name": call.name,
                             "args": call.arguments
                         }
                     })
                 }));
                 json!({ "role": "model", "parts": parts })
-            }
-            "tool" => {
-                let name = message
-                    .tool_call_id
-                    .as_deref()
-                    .and_then(|call_id| {
-                        messages
-                            .iter()
-                            .rev()
-                            .flat_map(|candidate| candidate.tool_calls.iter())
-                            .find(|call| call.id == call_id)
-                    })
-                    .map(|call| call.name.as_str())
-                    .unwrap_or("tool");
-                json!({
-                    "role": "user",
-                    "parts": [{
-                        "functionResponse": {
-                            "name": name,
-                            "response": { "result": message.content }
-                        }
-                    }]
-                })
             }
             _ => {
                 let mut parts = Vec::new();
@@ -2069,8 +2174,10 @@ fn gemini_contents(messages: &[AgentMessage]) -> Vec<Value> {
                 }));
                 json!({ "role": "user", "parts": parts })
             }
-        })
-        .collect()
+        });
+        index += 1;
+    }
+    contents
 }
 
 fn image_data_url(attachment: &ImageAttachment) -> Option<String> {
@@ -2579,6 +2686,9 @@ mod tests {
             "Provider returned 429 Too Many Requests",
             "Provider returned 503 Service Unavailable",
             "Provider returned 524 <unknown status code>: upstream timeout",
+            "Could not read provider response: connection closed",
+            "Invalid SSE stream: connection reset",
+            PROVIDER_STREAM_INTERRUPTED,
             "Invalid provider response",
             "Base URL is invalid",
         ] {
@@ -2602,6 +2712,9 @@ mod tests {
             "Provider returned 502 Bad Gateway",
             "Provider returned 503 Service Unavailable",
             "Provider returned 524 <unknown status code>: upstream timeout",
+            "Could not read provider response: connection closed",
+            "Invalid SSE stream: connection reset",
+            PROVIDER_STREAM_INTERRUPTED,
         ] {
             assert!(is_reconnectable_provider_error(error), "{error}");
         }
@@ -3071,6 +3184,17 @@ mod tests {
     }
 
     #[test]
+    fn system_prompt_keeps_conversation_clean_without_static_greeting() {
+        let request = test_request(
+            "https://levelup.example".to_owned(),
+            ProviderProtocol::OpenaiResponses,
+        );
+        let prompt = system_prompt(&request);
+        assert!(prompt.contains("Do not force any fixed greeting"));
+        assert!(prompt.contains("keep conversation clean"));
+        assert!(prompt.contains("answer the user's actual request"));
+    }
+    #[test]
     fn custom_instructions_are_appended_to_every_protocol_system_prompt() {
         let mut request = test_request(
             "https://levelup.example".to_owned(),
@@ -3536,6 +3660,43 @@ mod tests {
         format!("http://{address}")
     }
 
+    fn mock_timed_sse_server(
+        expected_path: &'static str,
+        header_delay: std::time::Duration,
+        chunks: Vec<(std::time::Duration, &'static str)>,
+        final_hold: std::time::Duration,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = vec![0_u8; 32 * 1024];
+            let size = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..size]);
+            assert!(request.starts_with(&format!("POST {expected_path} ")));
+            thread::sleep(header_delay);
+            if stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+                )
+                .is_err()
+            {
+                return;
+            }
+            if stream.flush().is_err() {
+                return;
+            }
+            for (delay, chunk) in chunks {
+                thread::sleep(delay);
+                if stream.write_all(chunk.as_bytes()).is_err() || stream.flush().is_err() {
+                    return;
+                }
+            }
+            thread::sleep(final_hold);
+        });
+        format!("http://{address}")
+    }
+
     fn mock_slow_sse_server(expected_path: &'static str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -3820,6 +3981,114 @@ mod tests {
     }
 
     #[test]
+    fn parallel_tool_results_use_protocol_specific_grouping() {
+        let mut request = test_request(
+            "https://levelup.example".to_owned(),
+            ProviderProtocol::AnthropicMessages,
+        );
+        request.messages = vec![
+            plain_message("user", "Run both checks"),
+            AgentMessage {
+                role: "assistant".to_owned(),
+                content: "Running both checks.".to_owned(),
+                tool_calls: vec![
+                    ToolCall {
+                        id: "call-a".to_owned(),
+                        name: "read_file".to_owned(),
+                        arguments: json!({ "path": "a.txt" }),
+                    },
+                    ToolCall {
+                        id: "call-b".to_owned(),
+                        name: "read_file".to_owned(),
+                        arguments: json!({ "path": "b.txt" }),
+                    },
+                ],
+                tool_call_id: None,
+                internal: false,
+                attachments: Vec::new(),
+            },
+            AgentMessage {
+                role: "tool".to_owned(),
+                content: "first result".to_owned(),
+                tool_calls: Vec::new(),
+                tool_call_id: Some("call-a".to_owned()),
+                internal: false,
+                attachments: Vec::new(),
+            },
+            AgentMessage {
+                role: "tool".to_owned(),
+                content: "second result".to_owned(),
+                tool_calls: Vec::new(),
+                tool_call_id: Some("call-b".to_owned()),
+                internal: false,
+                attachments: Vec::new(),
+            },
+        ];
+
+        let chat = chat_body(&request, false);
+        assert_eq!(
+            chat.pointer("/messages/3/tool_call_id"),
+            Some(&json!("call-a"))
+        );
+        assert_eq!(
+            chat.pointer("/messages/4/tool_call_id"),
+            Some(&json!("call-b"))
+        );
+
+        let responses = responses_body(&request, false);
+        assert_eq!(
+            responses.pointer("/input/4/call_id"),
+            Some(&json!("call-a"))
+        );
+        assert_eq!(
+            responses.pointer("/input/5/call_id"),
+            Some(&json!("call-b"))
+        );
+
+        let anthropic = anthropic_body(&request, false);
+        assert_eq!(
+            anthropic
+                .pointer("/messages")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(3)
+        );
+        assert_eq!(
+            anthropic.pointer("/messages/2/content/0/tool_use_id"),
+            Some(&json!("call-a"))
+        );
+        assert_eq!(
+            anthropic.pointer("/messages/2/content/1/tool_use_id"),
+            Some(&json!("call-b"))
+        );
+
+        let gemini = gemini_body(&request);
+        assert_eq!(
+            gemini
+                .pointer("/contents")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(3)
+        );
+        assert_eq!(
+            gemini.pointer("/contents/1/parts/1/functionCall/id"),
+            Some(&json!("call-a"))
+        );
+        assert_eq!(
+            gemini.pointer("/contents/1/parts/2/functionCall/id"),
+            Some(&json!("call-b"))
+        );
+        assert_eq!(
+            gemini.pointer("/contents/2/parts/0/functionResponse/id"),
+            Some(&json!("call-a"))
+        );
+        assert_eq!(
+            gemini.pointer("/contents/2/parts/1/functionResponse/id"),
+            Some(&json!("call-b"))
+        );
+    }
+
+    #[test]
     fn incomplete_and_orphaned_tool_groups_are_excluded_and_disclosed() {
         let mut request = test_request(
             "https://levelup.example".to_owned(),
@@ -3901,7 +4170,7 @@ mod tests {
 
     #[tokio::test]
     async fn parses_gemini_function_calls() {
-        let body = r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"Checking."},{"functionCall":{"name":"read_file","args":{"path":"README.md"}}}]}}],"usageMetadata":{"promptTokenCount":14,"candidatesTokenCount":6}}"#;
+        let body = r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"Checking."},{"functionCall":{"id":"gemini-provider-call","name":"read_file","args":{"path":"README.md"}}}]}}],"usageMetadata":{"promptTokenCount":14,"candidatesTokenCount":6}}"#;
         let base_url = mock_server("/v1beta/models/test-model:generateContent", body);
         let request = test_request(
             format!("{base_url}/v1"),
@@ -3909,6 +4178,7 @@ mod tests {
         );
         let result = run_turn(&Client::new(), request, "test-key").await.unwrap();
         assert_eq!(result.content, "Checking.");
+        assert_eq!(result.tool_calls[0].id, "gemini-provider-call");
         assert_eq!(result.tool_calls[0].name, "read_file");
         assert_eq!(result.tool_calls[0].arguments["path"], "README.md");
         assert_eq!(result.input_tokens, Some(14));
@@ -4109,6 +4379,134 @@ mod tests {
         assert_eq!(result.tool_calls[0].arguments["path"], "src/App.tsx");
         assert_eq!(result.input_tokens, Some(25));
         assert_eq!(result.output_tokens, Some(10));
+    }
+
+    #[tokio::test]
+    async fn anthropic_stream_request_sets_stream_true() {
+        let (base_url, capture) = mock_contract_server(
+            r#"{"content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}"#,
+        );
+        let request = test_request(base_url, ProviderProtocol::AnthropicMessages);
+        let result = run_turn_stream(
+            &Client::new(),
+            request,
+            "test-key",
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.content, "ok");
+
+        let captured = capture
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let body = captured_json_request(captured, "/v1/messages");
+        assert_eq!(body.get("stream"), Some(&json!(true)));
+    }
+
+    #[tokio::test]
+    async fn stream_response_header_timeout_is_reconnectable() {
+        let request = test_request(
+            mock_timed_sse_server(
+                "/v1/messages",
+                PROVIDER_STREAM_IDLE_TIMEOUT + std::time::Duration::from_millis(150),
+                Vec::new(),
+                std::time::Duration::ZERO,
+            ),
+            ProviderProtocol::AnthropicMessages,
+        );
+        let error = run_turn_stream(
+            &Client::new(),
+            request,
+            "test-key",
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+        assert!(is_reconnectable_provider_error(&error), "{error}");
+    }
+
+    #[tokio::test]
+    async fn stream_event_idle_timeout_is_reconnectable() {
+        let request = test_request(
+            mock_timed_sse_server(
+                "/v1/messages",
+                std::time::Duration::ZERO,
+                Vec::new(),
+                PROVIDER_STREAM_IDLE_TIMEOUT + std::time::Duration::from_millis(150),
+            ),
+            ProviderProtocol::AnthropicMessages,
+        );
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured_events = events.clone();
+        let error = run_turn_stream(
+            &Client::new(),
+            request,
+            "test-key",
+            CancellationToken::new(),
+            move |event| captured_events.lock().unwrap().push(event.kind),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+        assert!(is_reconnectable_provider_error(&error), "{error}");
+        assert_eq!(events.lock().unwrap().as_slice(), ["stream_opened"]);
+    }
+
+    #[tokio::test]
+    async fn stream_eof_without_a_result_is_reconnectable() {
+        let request = test_request(
+            mock_timed_sse_server(
+                "/v1/messages",
+                std::time::Duration::ZERO,
+                Vec::new(),
+                std::time::Duration::ZERO,
+            ),
+            ProviderProtocol::AnthropicMessages,
+        );
+        let error = run_turn_stream(
+            &Client::new(),
+            request,
+            "test-key",
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, PROVIDER_STREAM_INTERRUPTED);
+        assert!(is_reconnectable_provider_error(&error));
+    }
+
+    #[tokio::test]
+    async fn stream_activity_resets_the_idle_timeout() {
+        let gap = std::time::Duration::from_millis(150);
+        let request = test_request(
+            mock_timed_sse_server(
+                "/v1/messages",
+                std::time::Duration::ZERO,
+                vec![
+                    (gap, "event: ping\ndata: {\"type\":\"ping\"}\n\n"),
+                    (gap, "event: ping\ndata: {\"type\":\"ping\"}\n\n"),
+                    (
+                        gap,
+                        concat!(
+                            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"kept alive\"}}\n\n",
+                            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+                        ),
+                    ),
+                ],
+                std::time::Duration::ZERO,
+            ),
+            ProviderProtocol::AnthropicMessages,
+        );
+        let started = std::time::Instant::now();
+        let (result, emitted) = collect_stream(request).await;
+        assert!(started.elapsed() > PROVIDER_STREAM_IDLE_TIMEOUT);
+        assert_eq!(result.content, "kept alive");
+        assert_eq!(emitted, "kept alive");
     }
 
     #[tokio::test]

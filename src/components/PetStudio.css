@@ -53,6 +53,8 @@
 .pet-activity-bubble > span { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 9px; background: rgba(10,132,255,.13); color: #0878d1; }
 .pet-activity-bubble.generating > span { background: #fef3c7; color: #b45309; }
 .pet-activity-bubble.waiting > span { background: #ffe4e6; color: #e11d48; }
+.pet-activity-bubble.completed { border-color: rgba(52,199,89,.28); }
+.pet-activity-bubble.completed > span { background: rgba(52,199,89,.14); color: #188444; }
 .pet-activity-bubble > div { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .pet-activity-bubble strong, .pet-activity-bubble small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pet-activity-bubble strong { font-size: var(--font-small); }
