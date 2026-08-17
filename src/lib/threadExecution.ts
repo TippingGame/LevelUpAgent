@@ -1,4 +1,5 @@
 import type { AgentThread } from "./types";
+import type { AgentMessage } from "./types";
 import type { AppLocale } from "./i18n";
 
 export function usesDurableHarness(
@@ -15,6 +16,45 @@ export function providerThreadId(
   thread: Pick<AgentThread, "id" | "kind">,
 ): string {
   return thread.id;
+}
+
+/**
+ * Add a provider delta to the current assistant turn without changing the
+ * placeholder's identity. The placeholder is added when a provider emits its
+ * first delta after a tool round.
+ */
+export function appendAssistantDelta(
+  messages: AgentMessage[],
+  placeholder: AgentMessage,
+  delta: string,
+): AgentMessage[] {
+  const index = messages.findIndex((item) => item.id === placeholder.id);
+  if (index < 0) {
+    return [...messages, { ...placeholder, content: delta }];
+  }
+  if (!delta) return messages;
+  return messages.map((item, itemIndex) => itemIndex === index
+    ? { ...item, content: `${item.content}${delta}` }
+    : item);
+}
+
+/**
+ * Replace a streaming placeholder with the durable provider response while
+ * preserving the id and creation time used by the conversation UI.
+ */
+export function finalizeAssistantMessage(
+  messages: AgentMessage[],
+  placeholder: AgentMessage,
+  completed: AgentMessage,
+): AgentMessage[] {
+  const replacement: AgentMessage = {
+    ...completed,
+    id: placeholder.id,
+    createdAt: placeholder.createdAt,
+  };
+  const index = messages.findIndex((item) => item.id === placeholder.id);
+  if (index < 0) return [...messages, replacement];
+  return messages.map((item, itemIndex) => itemIndex === index ? replacement : item);
 }
 
 export function providerRetryProgressLabel(

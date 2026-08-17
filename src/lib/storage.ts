@@ -28,7 +28,7 @@ const DIFF_VIEW_SETTINGS_KEY = "levelup-agent.diff-view-settings.v1";
 const TASK_COMPLETIONS_KEY = "levelup-agent.task-completions.v1";
 
 export const DEFAULT_DIFF_VIEW_SETTINGS: DiffViewSettings = {
-  fontFamily: "monaco",
+  fontFamily: "system",
   fontSize: 13,
 };
 

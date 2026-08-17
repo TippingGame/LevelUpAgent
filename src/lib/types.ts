@@ -20,7 +20,7 @@ export interface ProviderSettings {
   activeProfileId: string;
 }
 
-export type DiffFontFamily = "monaco" | "system" | "consolas";
+export type DiffFontFamily = "system" | "consolas";
 
 export interface DiffViewSettings {
   fontFamily: DiffFontFamily;
@@ -429,7 +429,7 @@ export interface ConfigWriteResult {
 }
 
 export interface AgentStreamEvent {
-  kind: "stream_opened" | "content_delta" | "provider_reconnecting" | "provider_reconnected";
+  kind: "stream_opened" | "non_stream_response" | "content_delta" | "provider_reconnecting" | "provider_reconnected";
   delta?: string;
   retryAttempt?: number;
   maxRetryAttempts?: number;

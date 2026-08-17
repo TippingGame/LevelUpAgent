@@ -243,6 +243,15 @@ impl AgentStreamEvent {
         }
     }
 
+    pub fn non_stream_response() -> Self {
+        Self {
+            kind: "non_stream_response".to_owned(),
+            delta: None,
+            retry_attempt: None,
+            max_retry_attempts: None,
+        }
+    }
+
     pub fn content(delta: String) -> Self {
         Self {
             kind: "content_delta".to_owned(),

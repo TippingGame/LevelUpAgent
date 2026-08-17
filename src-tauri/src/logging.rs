@@ -213,6 +213,10 @@ pub fn install_panic_hook() {
 }
 
 pub fn safe_error(value: &str) -> String {
+    truncate_chars(&redact_sensitive(value), MAX_ERROR_CHARS)
+}
+
+pub fn redact_sensitive(value: &str) -> String {
     let mut result = redact_bearer(value);
     result = redact_assignment(&result, "authorization");
     result = redact_assignment(&result, "api_key");
@@ -220,7 +224,7 @@ pub fn safe_error(value: &str) -> String {
     result = redact_assignment(&result, "x-api-key");
     result = redact_assignment(&result, "apikey");
     result = redact_assignment(&result, "access_token");
-    truncate_chars(&result, MAX_ERROR_CHARS)
+    result
 }
 
 pub fn truncate_chars(value: &str, limit: usize) -> String {

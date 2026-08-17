@@ -165,8 +165,13 @@ CREATE TABLE IF NOT EXISTS harness_compactions (
     tokens_before INTEGER NOT NULL,
     tokens_after INTEGER NOT NULL,
     summary_node_id TEXT REFERENCES harness_session_nodes(id) ON DELETE SET NULL,
+    summary_json TEXT NOT NULL DEFAULT '{}',
+    source_fingerprint TEXT NOT NULL DEFAULT '',
+    source_message_count INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_harness_compactions_operation_created
+    ON harness_compactions(operation_id, created_at DESC);
 "#;
 
 #[cfg(test)]

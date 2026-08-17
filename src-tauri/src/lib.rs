@@ -23,7 +23,7 @@ mod tools;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -2026,6 +2026,79 @@ fn provider_protocol_id(protocol: &models::ProviderProtocol) -> &'static str {
     }
 }
 
+#[derive(Default)]
+struct ProviderStreamMetrics {
+    delta_count: AtomicU64,
+    total_chars: AtomicU64,
+    max_delta_chars: AtomicU64,
+    non_stream_response: AtomicBool,
+}
+
+impl ProviderStreamMetrics {
+    fn observe(&self, event: &AgentStreamEvent) {
+        if event.kind == "non_stream_response" {
+            self.non_stream_response.store(true, Ordering::Release);
+        }
+        let Some(delta) = event.delta.as_deref().filter(|delta| !delta.is_empty()) else {
+            return;
+        };
+        let chars = u64::try_from(delta.chars().count()).unwrap_or(u64::MAX);
+        self.delta_count.fetch_add(1, Ordering::Relaxed);
+        self.total_chars.fetch_add(chars, Ordering::Relaxed);
+        self.max_delta_chars.fetch_max(chars, Ordering::Relaxed);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn log_provider_stream_summary(
+    request: &AgentTurnRequest,
+    profile: &ProviderProfile,
+    operation_id: Option<&str>,
+    round: Option<usize>,
+    attempt_number: u32,
+    failover_index: u32,
+    metrics: &ProviderStreamMetrics,
+) {
+    logging::write(
+        "info",
+        "provider",
+        "provider_stream_summary",
+        serde_json::json!({
+            "operationId": operation_id,
+            "threadId": request.thread_id.as_deref(),
+            "round": round,
+            "profileId": &profile.id,
+            "model": &profile.model,
+            "protocol": provider_protocol_id(&profile.protocol),
+            "attemptNumber": attempt_number,
+            "failoverIndex": failover_index,
+            "deltaCount": metrics.delta_count.load(Ordering::Relaxed),
+            "totalChars": metrics.total_chars.load(Ordering::Relaxed),
+            "maxDeltaChars": metrics.max_delta_chars.load(Ordering::Relaxed),
+            "nonStreamResponse": metrics.non_stream_response.load(Ordering::Acquire),
+        }),
+    );
+}
+
+fn harness_assistant_delta_event(
+    operation_id: &str,
+    round: usize,
+    event: AgentStreamEvent,
+) -> Option<crate::harness::types::HarnessRuntimeEvent> {
+    if event.kind != "content_delta" {
+        return None;
+    }
+    let delta = event.delta.filter(|value| !value.is_empty())?;
+    Some(crate::harness::types::HarnessRuntimeEvent::transient(
+        operation_id,
+        "assistant_delta",
+        serde_json::json!({
+            "round": round,
+            "delta": delta,
+        }),
+    ))
+}
+
 fn provider_reconnect_delay(retry_number: u32) -> Duration {
     #[cfg(test)]
     const BASE_DELAY_MS: u64 = 1;
@@ -2386,6 +2459,8 @@ where
             let started = Instant::now();
             let emitted = Arc::new(AtomicBool::new(false));
             let output_started = emitted.clone();
+            let stream_metrics = Arc::new(ProviderStreamMetrics::default());
+            let attempt_stream_metrics = stream_metrics.clone();
             let reconnected_on_open = Arc::new(AtomicBool::new(false));
             let stream_reconnected = reconnected_on_open.clone();
             let notify_reconnected_on_open = reconnecting;
@@ -2407,6 +2482,7 @@ where
                         &api_key,
                         cancellation.clone(),
                         |event| {
+                            attempt_stream_metrics.observe(&event);
                             if event.kind == "stream_opened"
                                 && notify_reconnected_on_open
                                 && !stream_reconnected.swap(true, Ordering::AcqRel)
@@ -2463,6 +2539,17 @@ where
                         latency_ms,
                         streaming,
                     );
+                    if streaming {
+                        log_provider_stream_summary(
+                            &request,
+                            &profile,
+                            operation_id,
+                            round,
+                            retry_number + 1,
+                            failover_attempts,
+                            &stream_metrics,
+                        );
+                    }
                     if reconnecting && !reconnected_on_open.load(Ordering::Acquire) {
                         on_connection_event(
                             &profile,
@@ -3659,6 +3746,8 @@ async fn agent_turn_stream_inner(
             attempt.profile = profile.clone();
             let emitted = Arc::new(AtomicBool::new(false));
             let output_started = emitted.clone();
+            let stream_metrics = Arc::new(ProviderStreamMetrics::default());
+            let attempt_stream_metrics = stream_metrics.clone();
             let reconnected_on_open = Arc::new(AtomicBool::new(false));
             let stream_reconnected = reconnected_on_open.clone();
             let notify_reconnected_on_open = reconnecting;
@@ -3686,6 +3775,7 @@ async fn agent_turn_stream_inner(
                 &api_key,
                 cancellation.clone(),
                 move |event| {
+                    attempt_stream_metrics.observe(&event);
                     if event.kind == "stream_opened"
                         && notify_reconnected_on_open
                         && !stream_reconnected.swap(true, Ordering::AcqRel)
@@ -3746,6 +3836,15 @@ async fn agent_turn_stream_inner(
                         failover_attempts,
                         latency_ms,
                         true,
+                    );
+                    log_provider_stream_summary(
+                        &request,
+                        &profile,
+                        Some(&operation_id),
+                        None,
+                        retry_number + 1,
+                        failover_attempts,
+                        &stream_metrics,
                     );
                     if reconnecting && !reconnected_on_open.load(Ordering::Acquire) {
                         let _ = on_event.send(AgentStreamEvent::provider_reconnected(
@@ -4061,6 +4160,23 @@ async fn harness_run_loop(
 ) -> Result<crate::harness::types::HarnessRunOutcome, String> {
     let operation_id = request.operation_id.clone();
     let mut history = request.messages.clone();
+    let mut active_checkpoint = database
+        .recent_harness_compactions(&request.thread_id)?
+        .into_iter()
+        .find(|checkpoint| crate::harness::context::checkpoint_matches(checkpoint, &history));
+    if let Some(checkpoint) = &active_checkpoint {
+        logging::write(
+            "info",
+            "harness",
+            "local_compaction_restored",
+            serde_json::json!({
+                "operationId": &operation_id,
+                "threadId": &request.thread_id,
+                "sourceMessageCount": checkpoint.source_message_count,
+                "sourceFingerprint": &checkpoint.source_fingerprint,
+            }),
+        );
+    }
     let theme_generation_mode = agent::theme_generation_bootstrapped(&history);
     let theme_generation = theme_generation_run(&history, request.workspace.as_deref())?;
     let mut round = 0usize;
@@ -4128,44 +4244,6 @@ async fn harness_run_loop(
                 ));
             }
         }
-        let snapshot_id = database.current_harness_snapshot(&operation_id)?;
-        let estimated_tokens = history
-            .iter()
-            .map(|message| message.content.chars().count() as u32)
-            .sum::<u32>()
-            .div_ceil(4);
-        let budget = serde_json::json!({
-            "contextWindow": 60_000,
-            "reserveOutputTokens": 4_000,
-            "safetyMarginTokens": 1_000,
-            "messageTokens": estimated_tokens,
-        });
-        let selection = serde_json::json!({
-            "messageCount": history.len(),
-            "selectedMessageIds": history.iter().enumerate().map(|(index, _)| format!("message-{index}")).collect::<Vec<_>>(),
-            "overflow": estimated_tokens > 55_000,
-        });
-        let context_manifest_id = database.record_harness_context_manifest(
-            &operation_id,
-            &snapshot_id,
-            &budget,
-            &selection,
-            "harness-context-v1",
-        )?;
-        let context_payload = serde_json::json!({
-            "contextManifestId": &context_manifest_id,
-            "budget": budget,
-            "selection": selection,
-        });
-        let sequence =
-            database.append_harness_event(&operation_id, "context_prepared", &context_payload)?;
-        let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
-            &operation_id,
-            sequence,
-            "context_prepared",
-            context_payload,
-        ));
-
         let mut turn_request = AgentTurnRequest {
             profile: request.profile.clone(),
             messages: history.clone(),
@@ -4193,6 +4271,175 @@ async fn harness_run_loop(
         attach_mcp_tools(database, manager, &mut turn_request).await?;
         enforce_theme_generation_tool_catalog(&mut turn_request);
         enforce_hatch_tool_catalog(&mut turn_request);
+
+        let source_history = turn_request.messages.clone();
+        let context_plan_result = (|| {
+            let mut fixed_tokens = agent::estimate_fixed_context_tokens(&turn_request);
+            let mut final_plan = None;
+            for _ in 0..4 {
+                let plan = crate::harness::context::prepare_local_context(
+                    &source_history,
+                    active_checkpoint.as_ref(),
+                    fixed_tokens,
+                )?;
+                turn_request.messages = plan.messages.clone();
+                let adjusted_fixed_tokens = agent::estimate_fixed_context_tokens(&turn_request);
+                final_plan = Some(plan);
+                if adjusted_fixed_tokens <= fixed_tokens {
+                    break;
+                }
+                fixed_tokens = adjusted_fixed_tokens;
+            }
+            final_plan.ok_or_else(|| "Could not prepare local provider context".to_owned())
+        })();
+        let context_plan = match context_plan_result {
+            Ok(plan) => plan,
+            Err(error) => {
+                database.update_harness_operation_state(
+                    &operation_id,
+                    &crate::harness::types::RuntimeState::Failed,
+                )?;
+                let payload = serde_json::json!({
+                    "error": &error,
+                    "reason": "local_context_overflow",
+                    "round": round,
+                });
+                let sequence =
+                    database.append_harness_event(&operation_id, "operation_failed", &payload)?;
+                let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+                    &operation_id,
+                    sequence,
+                    "operation_failed",
+                    payload,
+                ));
+                return Err(error);
+            }
+        };
+
+        if context_plan.compacted {
+            let checkpoint = context_plan
+                .checkpoint
+                .as_ref()
+                .ok_or_else(|| "Local compaction produced no checkpoint".to_owned())?;
+            database.update_harness_operation_state(
+                &operation_id,
+                &crate::harness::types::RuntimeState::Compacting,
+            )?;
+            let started_payload = serde_json::json!({
+                "algorithmVersion": crate::harness::context::LOCAL_COMPACTION_ALGORITHM_VERSION,
+                "pressure": context_plan.pressure,
+                "tokensBefore": context_plan.tokens_before,
+                "sourceMessageCount": checkpoint.source_message_count,
+            });
+            let sequence = database.append_harness_event(
+                &operation_id,
+                "compaction_started",
+                &started_payload,
+            )?;
+            let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+                &operation_id,
+                sequence,
+                "compaction_started",
+                started_payload,
+            ));
+            let compaction_id = database.record_harness_compaction(
+                &operation_id,
+                checkpoint,
+                context_plan.tokens_before,
+                context_plan.tokens_after,
+            )?;
+            active_checkpoint = Some(checkpoint.clone());
+            let completed_payload = serde_json::json!({
+                "compactionId": compaction_id,
+                "algorithmVersion": crate::harness::context::LOCAL_COMPACTION_ALGORITHM_VERSION,
+                "tokensBefore": context_plan.tokens_before,
+                "tokensAfter": context_plan.tokens_after,
+                "sourceMessageCount": checkpoint.source_message_count,
+                "sourceFingerprint": &checkpoint.source_fingerprint,
+            });
+            let sequence = database.append_harness_event(
+                &operation_id,
+                "compaction_completed",
+                &completed_payload,
+            )?;
+            let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+                &operation_id,
+                sequence,
+                "compaction_completed",
+                completed_payload,
+            ));
+            database.update_harness_operation_state(
+                &operation_id,
+                &crate::harness::types::RuntimeState::Running,
+            )?;
+            logging::write(
+                "info",
+                "harness",
+                "local_compaction_completed",
+                serde_json::json!({
+                    "operationId": &operation_id,
+                    "threadId": &request.thread_id,
+                    "round": round,
+                    "tokensBefore": context_plan.tokens_before,
+                    "tokensAfter": context_plan.tokens_after,
+                    "sourceMessageCount": checkpoint.source_message_count,
+                }),
+            );
+        }
+
+        let snapshot_id = database.current_harness_snapshot(&operation_id)?;
+        let message_tokens =
+            crate::harness::context::estimate_history_tokens(&turn_request.messages);
+        let raw_message_tokens = crate::harness::context::estimate_history_tokens(&source_history);
+        let input_capacity = crate::harness::context::CONTEXT_WINDOW_TOKENS.saturating_sub(
+            crate::harness::context::RESERVE_OUTPUT_TOKENS
+                .saturating_add(crate::harness::context::SAFETY_MARGIN_TOKENS),
+        );
+        let budget = serde_json::json!({
+            "contextWindow": crate::harness::context::CONTEXT_WINDOW_TOKENS,
+            "reserveOutputTokens": crate::harness::context::RESERVE_OUTPUT_TOKENS,
+            "safetyMarginTokens": crate::harness::context::SAFETY_MARGIN_TOKENS,
+            "fixedTokens": context_plan.fixed_tokens,
+            "rawMessageTokens": raw_message_tokens,
+            "messageTokens": message_tokens,
+            "estimatedInputTokens": context_plan.tokens_after,
+            "inputCapacity": input_capacity,
+        });
+        let selected_message_ids = context_plan.provider_message_ids(history.len());
+        let selection = serde_json::json!({
+            "rawMessageCount": history.len(),
+            "providerMessageCount": turn_request.messages.len(),
+            "selectedMessageIds": selected_message_ids,
+            "compacted": context_plan.source_message_count > 0,
+            "compactedThisRound": context_plan.compacted,
+            "compactedRange": (context_plan.source_message_count > 0).then(|| serde_json::json!({
+                "start": 0,
+                "endExclusive": context_plan.source_message_count,
+            })),
+            "pressure": context_plan.pressure,
+            "overflow": context_plan.tokens_after > input_capacity,
+        });
+        let context_manifest_id = database.record_harness_context_manifest(
+            &operation_id,
+            &snapshot_id,
+            &budget,
+            &selection,
+            crate::harness::context::LOCAL_COMPACTION_ALGORITHM_VERSION,
+        )?;
+        let context_payload = serde_json::json!({
+            "contextManifestId": &context_manifest_id,
+            "budget": budget,
+            "selection": selection,
+        });
+        let sequence =
+            database.append_harness_event(&operation_id, "context_prepared", &context_payload)?;
+        let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+            &operation_id,
+            sequence,
+            "context_prepared",
+            context_payload,
+        ));
+
         let attempt_id = database.start_harness_provider_attempt(
             &operation_id,
             &snapshot_id,
@@ -4272,7 +4519,18 @@ async fn harness_run_loop(
                     ));
                 }
             },
-            |_| {},
+            {
+                let stream_event_channel = on_event.clone();
+                let stream_operation_id = operation_id.clone();
+                let stream_round = round;
+                move |event| {
+                    if let Some(runtime_event) =
+                        harness_assistant_delta_event(&stream_operation_id, stream_round, event)
+                    {
+                        let _ = stream_event_channel.send(runtime_event);
+                    }
+                }
+            },
         );
         let response = tokio::select! {
             result = provider_future => result,
@@ -8232,6 +8490,58 @@ mod tests {
             false,
             0
         ));
+    }
+
+    #[test]
+    fn harness_content_delta_is_transient_and_keeps_round_metadata() {
+        let runtime = harness_assistant_delta_event(
+            "operation-1",
+            7,
+            AgentStreamEvent::content("hello".to_owned()),
+        )
+        .expect("content deltas should be forwarded");
+        assert_eq!(runtime.kind, "assistant_delta");
+        assert_eq!(runtime.sequence, 0);
+        assert_eq!(runtime.operation_id, "operation-1");
+        assert_eq!(
+            runtime.payload,
+            serde_json::json!({ "round": 7, "delta": "hello" })
+        );
+    }
+
+    #[test]
+    fn harness_non_content_events_are_not_forwarded_as_assistant_deltas() {
+        assert!(
+            harness_assistant_delta_event("operation-1", 1, AgentStreamEvent::stream_opened(),)
+                .is_none()
+        );
+        assert!(
+            harness_assistant_delta_event(
+                "operation-1",
+                1,
+                AgentStreamEvent {
+                    kind: "content_delta".to_owned(),
+                    delta: Some(String::new()),
+                    retry_attempt: None,
+                    max_retry_attempts: None,
+                },
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn provider_stream_metrics_capture_chunk_shape_and_non_stream_fallback() {
+        let metrics = ProviderStreamMetrics::default();
+        metrics.observe(&AgentStreamEvent::content("四字".to_owned()));
+        metrics.observe(&AgentStreamEvent::content("a longer chunk".to_owned()));
+        metrics.observe(&AgentStreamEvent::content(String::new()));
+        metrics.observe(&AgentStreamEvent::non_stream_response());
+
+        assert_eq!(metrics.delta_count.load(Ordering::Relaxed), 2);
+        assert_eq!(metrics.total_chars.load(Ordering::Relaxed), 2 + 14);
+        assert_eq!(metrics.max_delta_chars.load(Ordering::Relaxed), 14);
+        assert!(metrics.non_stream_response.load(Ordering::Acquire));
     }
 
     #[tokio::test]

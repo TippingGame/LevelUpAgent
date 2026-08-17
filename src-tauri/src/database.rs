@@ -15,7 +15,7 @@ use crate::models::{
     ProviderSettings, StoredMessage, StoredThread, ToolCall, WritingProjectRecord,
 };
 
-const SCHEMA_VERSION: i64 = 16;
+const SCHEMA_VERSION: i64 = 17;
 
 fn paths_equal(left: &str, right: &str) -> bool {
     #[cfg(windows)]
@@ -253,6 +253,46 @@ impl Database {
             connection
                 .execute(
                     "ALTER TABLE harness_tool_executions ADD COLUMN arguments_json TEXT NOT NULL DEFAULT '{}'",
+                    [],
+                )
+                .map_err(database_error)?;
+        }
+        let compaction_columns = connection
+            .prepare("PRAGMA table_info(harness_compactions)")
+            .and_then(|mut statement| {
+                let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+                columns.collect::<Result<Vec<_>, _>>()
+            })
+            .map_err(database_error)?;
+        if !compaction_columns
+            .iter()
+            .any(|column| column == "summary_json")
+        {
+            connection
+                .execute(
+                    "ALTER TABLE harness_compactions ADD COLUMN summary_json TEXT NOT NULL DEFAULT '{}'",
+                    [],
+                )
+                .map_err(database_error)?;
+        }
+        if !compaction_columns
+            .iter()
+            .any(|column| column == "source_fingerprint")
+        {
+            connection
+                .execute(
+                    "ALTER TABLE harness_compactions ADD COLUMN source_fingerprint TEXT NOT NULL DEFAULT ''",
+                    [],
+                )
+                .map_err(database_error)?;
+        }
+        if !compaction_columns
+            .iter()
+            .any(|column| column == "source_message_count")
+        {
+            connection
+                .execute(
+                    "ALTER TABLE harness_compactions ADD COLUMN source_message_count INTEGER NOT NULL DEFAULT 0",
                     [],
                 )
                 .map_err(database_error)?;
@@ -2257,6 +2297,76 @@ impl Database {
         Ok(id)
     }
 
+    pub fn record_harness_compaction(
+        &self,
+        operation_id: &str,
+        checkpoint: &crate::harness::context::LocalCheckpoint,
+        tokens_before: u32,
+        tokens_after: u32,
+    ) -> Result<String, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let source_reference = serde_json::json!([format!(
+            "message-prefix:0..{}:{}",
+            checkpoint.source_message_count, checkpoint.source_fingerprint
+        )]);
+        let summary_json = serde_json::to_string(checkpoint)
+            .map_err(|error| format!("Could not encode local context checkpoint: {error}"))?;
+        connection
+            .execute(
+                "INSERT INTO harness_compactions
+                 (id, operation_id, source_node_ids_json, algorithm_version, tokens_before, tokens_after, summary_node_id, summary_json, source_fingerprint, source_message_count, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10)",
+                params![
+                    &id,
+                    operation_id,
+                    source_reference.to_string(),
+                    crate::harness::context::LOCAL_COMPACTION_ALGORITHM_VERSION,
+                    i64::from(tokens_before),
+                    i64::from(tokens_after),
+                    summary_json,
+                    &checkpoint.source_fingerprint,
+                    checkpoint.source_message_count.min(i64::MAX as usize) as i64,
+                    now_millis(),
+                ],
+            )
+            .map_err(database_error)?;
+        Ok(id)
+    }
+
+    pub fn recent_harness_compactions(
+        &self,
+        thread_id: &str,
+    ) -> Result<Vec<crate::harness::context::LocalCheckpoint>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let mut statement = connection
+            .prepare(
+                "SELECT c.summary_json
+                 FROM harness_compactions AS c
+                 JOIN harness_operations AS o ON o.id = c.operation_id
+                 WHERE o.thread_id = ?1 AND c.summary_json <> '{}'
+                 ORDER BY c.created_at DESC, c.rowid DESC
+                 LIMIT 16",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([thread_id], |row| row.get::<_, String>(0))
+            .map_err(database_error)?;
+        let encoded = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        Ok(encoded
+            .into_iter()
+            .filter_map(|value| serde_json::from_str(&value).ok())
+            .collect())
+    }
+
     pub fn current_harness_snapshot(&self, operation_id: &str) -> Result<String, String> {
         let connection = self
             .connection
@@ -3244,6 +3354,54 @@ mod tests {
     }
 
     #[test]
+    fn local_compaction_checkpoint_round_trips_by_thread() {
+        let database = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        database.save_thread(&sample_thread()).unwrap();
+        let request = crate::harness::types::HarnessDraftRequest {
+            thread_id: "thread-1".to_owned(),
+            raw_user_input: "continue".to_owned(),
+            attachment_ids: Vec::new(),
+            mode: crate::harness::types::HarnessMode::Agent,
+            permission_level: crate::harness::types::PermissionLevel::Request,
+            requested_profile_id: Some("test".to_owned()),
+            workspace: Some("C:/workspace".to_owned()),
+            hatch: false,
+            hatch_run_dir: None,
+        };
+        let operation = database
+            .start_harness_operation(&request, "C:/workspace", "test")
+            .unwrap()
+            .into_started()
+            .unwrap();
+        let checkpoint = crate::harness::context::LocalCheckpoint {
+            version: 1,
+            source_message_count: 4,
+            source_fingerprint: "0123456789abcdef".to_owned(),
+            user_goals: vec!["Keep the history local".to_owned()],
+            decisions_and_progress: vec!["Use a deterministic checkpoint".to_owned()],
+            artifacts: Vec::new(),
+            tool_outcomes: Vec::new(),
+            open_items: vec!["Resume with recent raw turns".to_owned()],
+            conversation_digest: Vec::new(),
+        };
+
+        let compaction_id = database
+            .record_harness_compaction(&operation.operation_id, &checkpoint, 48_000, 24_000)
+            .unwrap();
+        assert!(!compaction_id.is_empty());
+        assert_eq!(
+            database.recent_harness_compactions("thread-1").unwrap(),
+            vec![checkpoint]
+        );
+        assert!(
+            database
+                .recent_harness_compactions("missing-thread")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn approval_token_is_persisted_and_consumed_once() {
         let database = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
         database.save_thread(&sample_thread()).unwrap();
@@ -3646,6 +3804,49 @@ mod tests {
             .unwrap();
         assert!(thread_columns.iter().any(|column| column == "kind"));
         assert!(thread_columns.iter().any(|column| column == "pet_id"));
+    }
+
+    #[test]
+    fn migrates_legacy_compaction_records_to_local_checkpoints() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE harness_compactions (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    operation_id TEXT NOT NULL,
+                    source_node_ids_json TEXT NOT NULL,
+                    algorithm_version TEXT NOT NULL,
+                    tokens_before INTEGER NOT NULL,
+                    tokens_after INTEGER NOT NULL,
+                    summary_node_id TEXT,
+                    created_at INTEGER NOT NULL
+                 );
+                 PRAGMA user_version = 16;",
+            )
+            .unwrap();
+
+        let database = Database::from_connection(connection).unwrap();
+        let connection = database.connection.lock().unwrap();
+        let columns = connection
+            .prepare("PRAGMA table_info(harness_compactions)")
+            .and_then(|mut statement| {
+                let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+                rows.collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap();
+        assert!(columns.iter().any(|column| column == "summary_json"));
+        assert!(columns.iter().any(|column| column == "source_fingerprint"));
+        assert!(
+            columns
+                .iter()
+                .any(|column| column == "source_message_count")
+        );
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
     }
 
     #[test]

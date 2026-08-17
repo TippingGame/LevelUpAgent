@@ -211,7 +211,13 @@ import {
 import { getAppLocale, setAppLocale, tr, type AppLocale } from "./lib/i18n";
 import { executeCallsWithParallelMedia } from "./lib/mediaConcurrency";
 import { isConversationNearBottom, shouldFollowConversationUpdate } from "./lib/conversationScroll";
-import { providerRetryProgressLabel, providerThreadId, usesDurableHarness } from "./lib/threadExecution";
+import {
+  appendAssistantDelta,
+  finalizeAssistantMessage,
+  providerRetryProgressLabel,
+  providerThreadId,
+  usesDurableHarness,
+} from "./lib/threadExecution";
 import {
   acknowledgeTaskCompletionNotices,
   shouldMarkTaskCompletionUnread,
@@ -2276,6 +2282,10 @@ function App() {
     let projected = history;
     let cumulativeInputTokens = thread.inputTokens;
     let cumulativeOutputTokens = thread.outputTokens;
+    let streamingAssistantMessageId: string | undefined;
+    let streamingAssistantMessage: AgentMessage | undefined;
+    let streamedContent = "";
+    let streamingFrameId: number | undefined;
     let lastReconnectAttempt = 0;
     let maxReconnectAttempts = 5;
     let reconnectStatusMessageId: string | undefined;
@@ -2306,7 +2316,51 @@ function App() {
         : item);
       commitThread(projectedThread(projected), persist);
     };
+    const ensureStreamingAssistant = (): AgentMessage => {
+      if (streamingAssistantMessage && streamingAssistantMessageId) {
+        return streamingAssistantMessage;
+      }
+      const placeholder = message("assistant", "", assistantMessageIdentity(runProfile));
+      streamingAssistantMessage = placeholder;
+      streamingAssistantMessageId = placeholder.id;
+      streamedContent = "";
+      projected = appendAssistantDelta(projected, placeholder, "");
+      return placeholder;
+    };
+    const cancelStreamingFrame = () => {
+      if (streamingFrameId === undefined) return;
+      window.cancelAnimationFrame(streamingFrameId);
+      streamingFrameId = undefined;
+    };
+    const settleStreamingAssistant = (keepPartial: boolean) => {
+      const placeholder = streamingAssistantMessage;
+      if (placeholder && streamingAssistantMessageId) {
+        if (keepPartial && streamedContent) {
+          projected = finalizeAssistantMessage(
+            projected,
+            placeholder,
+            { ...placeholder, content: streamedContent },
+          );
+        } else {
+          projected = projected.filter((item) => item.id !== streamingAssistantMessageId);
+        }
+      }
+      streamingAssistantMessage = undefined;
+      streamingAssistantMessageId = undefined;
+      streamedContent = "";
+    };
+    const scheduleStreamingCommit = () => {
+      if (streamingFrameId !== undefined) return;
+      streamingFrameId = window.requestAnimationFrame(() => {
+        streamingFrameId = undefined;
+        commitThread(projectedThread(projected), false);
+      });
+    };
     try {
+      // Keep a stable, non-persistent placeholder visible while the Harness
+      // is waiting for its first provider event.
+      ensureStreamingAssistant();
+      commitThread(projectedThread(projected), false);
       const outcome = await harnessRun({
         operationId,
         threadId: thread.id,
@@ -2324,7 +2378,14 @@ function App() {
           skills: armorModeSkills,
         }),
       }, (event: HarnessRuntimeEvent) => {
-        if (event.kind === "provider_reconnecting") {
+        if (event.kind === "assistant_delta") {
+          const payload = event.payload as { delta?: unknown };
+          if (typeof payload.delta !== "string" || payload.delta.length === 0) return;
+          const placeholder = ensureStreamingAssistant();
+          streamedContent += payload.delta;
+          projected = appendAssistantDelta(projected, placeholder, payload.delta);
+          scheduleStreamingCommit();
+        } else if (event.kind === "provider_reconnecting") {
           const payload = event.payload as { retryAttempt?: number; maxRetryAttempts?: number };
           const retryAttempt = payload.retryAttempt ?? 1;
           const maxRetryAttempts = payload.maxRetryAttempts ?? 5;
@@ -2379,6 +2440,7 @@ function App() {
           reconnectStatusMessageId = undefined;
           commitThread(projectedThread(projected));
         } else if (event.kind === "assistant_completed") {
+          cancelStreamingFrame();
           const payload = event.payload as {
             content?: string;
             toolCalls?: ToolCall[];
@@ -2390,12 +2452,20 @@ function App() {
           const respondingProfile = payload.providerId
             ? [runProfile, ...runFallbackProfiles].find((profile) => profile.id === payload.providerId) ?? runProfile
             : runProfile;
-          const assistant: AgentMessage = message("assistant", payload.content ?? "", {
+          const placeholder = ensureStreamingAssistant();
+          const assistant: AgentMessage = message("assistant", payload.content || streamedContent, {
             toolCalls: payload.toolCalls ?? [],
             requestId: payload.requestId,
             ...assistantMessageIdentity(respondingProfile),
           });
-          projected = [...projected, assistant];
+          const placeholderIndex = projected.findIndex((item) => item.id === placeholder.id);
+          const assistantHistory = placeholderIndex >= 0
+            ? projected.slice(0, placeholderIndex)
+            : projected;
+          projected = finalizeAssistantMessage(projected, placeholder, assistant);
+          streamingAssistantMessage = undefined;
+          streamingAssistantMessageId = undefined;
+          streamedContent = "";
           cumulativeInputTokens += payload.inputTokens ?? 0;
           cumulativeOutputTokens += payload.outputTokens ?? 0;
           const rewardPetId = thread.petId ?? activePetIdRef.current;
@@ -2410,7 +2480,7 @@ function App() {
             });
           }
           if (thread.kind === "pet" && thread.petId && assistant.content) {
-            const learned = petKnowledgeCandidate(projected.slice(0, -1), assistant.content);
+            const learned = petKnowledgeCandidate(assistantHistory, assistant.content);
             if (learned) {
               void recordPetKnowledge({
                 petId: thread.petId,
@@ -2463,15 +2533,18 @@ function App() {
           }
         }
       });
+      cancelStreamingFrame();
       if (outcome.state === "awaiting_approval" || pendingApprovalsRef.current[thread.id]) {
         // Keep the operation owner while the approval bar is visible. The
         // resolver needs the same operation ID to finalize a deny or resume
         // the loop; clearing it here leaves the UI permanently "thinking".
         setThreadRunning(thread.id, false);
       } else if (outcome.state === "completed") {
+        settleStreamingAssistant(true);
         commitThread(projectedThread(projected));
         finishThreadRun(thread.id, operationId, "completed");
       } else {
+        settleStreamingAssistant(true);
         const reason = tr("Harness 运行未完成", "Harness run did not complete");
         commitThread(projectedThread([
           ...projected,
@@ -2483,12 +2556,16 @@ function App() {
         finishThreadRun(thread.id, operationId, outcome.state);
       }
     } catch (error) {
+      cancelStreamingFrame();
       const reason = errorText(error);
       if (reason.includes("REQUEST_CANCELLED")) {
+        settleStreamingAssistant(true);
+        commitThread(projectedThread(projected));
         finishThreadRun(thread.id, operationId, "cancelled");
         return;
       }
       if (lastReconnectAttempt > 0) {
+        settleStreamingAssistant(true);
         const failureContent = `${tr("重连", "Reconnect")} ${lastReconnectAttempt}/5 ${tr("失败", "failed")}: ${friendlyAgentError(reason)}`;
         projected = reconnectStatusMessageId
           ? projected.map((item) => item.id === reconnectStatusMessageId ? { ...item, content: failureContent, status: "failed", isError: true } : item)
@@ -2502,6 +2579,7 @@ function App() {
         finishThreadRun(thread.id, operationId, "failed");
         return;
       }
+      settleStreamingAssistant(true);
       commitThread(projectedThread(finalizeConversationMessages([
           ...projected,
           message("assistant", friendlyAgentError(reason), {
@@ -2511,6 +2589,7 @@ function App() {
         ], Date.now())));
       finishThreadRun(thread.id, operationId, "failed");
     } finally {
+      cancelStreamingFrame();
       stopReconnectProgress();
     }
   };
@@ -5368,8 +5447,7 @@ function MarkdownContent({ content }: { content: string }) {
 }
 
 function diffFontStack(fontFamily: DiffFontFamily): string {
-  if (fontFamily === "system") return "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
-  if (fontFamily === "consolas") return "Consolas, Monaco, SFMono-Regular, monospace";
+  if (fontFamily === "consolas") return 'Consolas, ui-monospace, "Cascadia Mono", monospace';
   return "var(--font-mono)";
 }
 
@@ -6902,7 +6980,6 @@ function ConnectionDialog({
                 <label className="field">
                   <span>{tr("字体", "Font")}</span>
                   <select value={diffViewSettings.fontFamily} onChange={(event) => onDiffViewSettingsChange({ ...diffViewSettings, fontFamily: event.target.value as DiffFontFamily })}>
-                    <option value="monaco">Monaco · {tr("内置", "Bundled")}</option>
                     <option value="system">{tr("系统等宽字体", "System monospace")}</option>
                     <option value="consolas">Consolas</option>
                   </select>
@@ -7908,6 +7985,18 @@ function errorText(reason: unknown) {
 
 function friendlyAgentError(reason: string) {
   const normalized = reason.toLowerCase();
+  if (reason.includes("CURRENT_INPUT_TOO_LARGE")) {
+    return tr(
+      "当前消息和本轮工具上下文超过了模型请求预算。LevelUpAgent 没有截断你的消息；请缩短输入、减少附件或暂时停用不需要的工具后重试。",
+      "The current message and this turn's tool context exceed the model request budget. LevelUpAgent did not truncate your message; shorten it, remove attachments, or temporarily disable unneeded tools and try again.",
+    );
+  }
+  if (reason.includes("LOCAL_CONTEXT_OVERFLOW")) {
+    return tr(
+      "最近两轮对话在本地压缩后仍超过模型请求预算。请减少大型附件或工具结果，或开启一个新任务继续。",
+      "The two most recent turns still exceed the model request budget after local compaction. Remove large attachments or tool results, or continue in a new task.",
+    );
+  }
   if (reason.includes("524 ") || normalized.includes("upstream service temporarily unavailable") || normalized.includes('"code":"upstream_error"')) {
     return tr(
       "上游模型服务暂时不可用（524 超时）。软件已完成自动重试；请稍后重试，或切换备用连接。",

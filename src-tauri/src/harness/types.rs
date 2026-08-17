@@ -221,6 +221,10 @@ impl HarnessRuntimeEvent {
             payload,
         }
     }
+
+    pub fn transient(operation_id: &str, kind: &str, payload: Value) -> Self {
+        Self::new(operation_id, 0, kind, payload)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
