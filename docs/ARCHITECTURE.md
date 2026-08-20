@@ -70,6 +70,18 @@ Rust 适配器负责把通用历史转换为各协议格式，并把响应重新
 连接当前配置的协议仍是文字模型的默认路由；只有原生目录独占的模型才自动切换为 GenerateContent。
 执行原生 Gemini 路由时同样会把以 `/v1` 结尾的 Base URL 切换到同级 `/v1beta`，避免发现地址与生成地址不一致。
 
+OpenCode Go 在配置层表现为 `opencode_go` 自动路由，而不是新增一套 wire serializer。调用前会去掉
+`opencode-go/` 或 `opencode/` 模型前缀，再按模型族落到现有适配器：Grok 4.5、`gpt-5.6-luna` 与
+Muse Spark 使用 Responses；GLM、Kimi、DeepSeek、MiMo 与 HY 使用 Chat Completions；MiniMax 与 Qwen3
+使用 Messages。未知模型保守回落到 Chat Completions。目录项同时保留自动路由和解析出的真实协议，
+因此 UI 能显示技术接口，配置写回也能选择正确的 AI SDK provider。
+
+思考强度是请求级字段，不写入连接配置。选择器先按模型 ID 解析已知能力，只显示该模型支持的档位；
+切换模型后若原档位不兼容会自动回退到 `Auto`。`Auto` 会省略协议字段；其余受支持档位分别映射为
+Chat 的 `reasoning_effort`、Responses 的 `reasoning.effort`、Messages 的 `thinking` 预算，以及
+Gemini 的 `generationConfig.thinkingConfig.thinkingBudget`。未知兼容模型不会被乐观地注入可能导致
+400 的档位；故障转移时也会按最终模型再次过滤。
+
 `get_model_catalog` 使用 Rust 从系统凭据库分别加载每个连接的密钥，并把多协议模型展开为多条模型路由；
 前端只收到连接 ID、显示名、模型元数据和协议，不收到密钥。主会话使用当前连接的默认路由；写作空间
 单独保存所选文字路由；媒体目录跨全部可用连接聚合模型，并在已发现 Gemini 路由时为 Gemini 图片、

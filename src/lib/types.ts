@@ -2,7 +2,14 @@ export type ProviderProtocol =
   | "openai_responses"
   | "openai_chat"
   | "anthropic_messages"
-  | "gemini_generate_content";
+  | "gemini_generate_content"
+  | "opencode_go";
+
+/**
+ * Provider reasoning control. `auto` deliberately omits the provider field so
+ * each model can keep its native default behavior.
+ */
+export type ReasoningEffort = "auto" | "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface ProviderProfile {
   id: string;
@@ -188,6 +195,7 @@ export type ModelProviderBrand =
   | "gemini"
   | "antigravity"
   | "grok"
+  | "opencode"
   | "levelup";
 
 export interface AgentMessage {
@@ -286,6 +294,7 @@ export interface HarnessRunRequest {
   hatch?: boolean;
   hatchSkillLoaded?: boolean;
   customInstructions?: string;
+  reasoningEffort?: ReasoningEffort;
 }
 
 export interface HarnessRuntimeEvent {

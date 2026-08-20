@@ -892,6 +892,7 @@ fn isolated_pet_agent_request(
             .filter(|candidate| candidate.id != settings.active_profile_id)
             .collect(),
         custom_instructions: None,
+        reasoning_effort: None,
     })
 }
 
@@ -2023,6 +2024,7 @@ fn provider_protocol_id(protocol: &models::ProviderProtocol) -> &'static str {
         models::ProviderProtocol::OpenaiChat => "openai_chat",
         models::ProviderProtocol::AnthropicMessages => "anthropic_messages",
         models::ProviderProtocol::GeminiGenerateContent => "gemini_generate_content",
+        models::ProviderProtocol::OpencodeGo => "opencode_go",
     }
 }
 
@@ -4264,6 +4266,7 @@ async fn harness_run_loop(
             goal: None,
             fallback_profiles: request.fallback_profiles.clone(),
             custom_instructions: request.custom_instructions.clone(),
+            reasoning_effort: request.reasoning_effort.clone(),
         };
         attach_default_workspace(app, &mut turn_request)?;
         attach_images(app, &mut turn_request)?;
@@ -5514,6 +5517,7 @@ where
                 "This is an isolated child run. Never attempt shell commands, delegation, Goal updates, MCP calls, or access outside the selected worktree. Main-worktree application requires a separate approval."
                     .to_owned(),
             ),
+            reasoning_effort: None,
         };
         let response = run_agent_turn_with_failover(client, database, turn, |profile_id| {
             key_loader(profile_id)
@@ -8325,6 +8329,7 @@ mod tests {
                 profile("primary", 0, true),
             ],
             custom_instructions: None,
+            reasoning_effort: None,
         };
         let ids = provider_candidates(&request)
             .into_iter()
@@ -8348,6 +8353,7 @@ mod tests {
             goal: None,
             fallback_profiles: Vec::new(),
             custom_instructions: None,
+            reasoning_effort: None,
         };
         attach_media_tools(&mut request);
         assert!(
@@ -8384,6 +8390,7 @@ mod tests {
             goal: None,
             fallback_profiles: Vec::new(),
             custom_instructions: None,
+            reasoning_effort: None,
         };
         attach_media_tools(&mut request);
         attach_subagent_tools(&mut request);
@@ -8423,6 +8430,7 @@ mod tests {
             goal: None,
             fallback_profiles: Vec::new(),
             custom_instructions: None,
+            reasoning_effort: None,
         };
 
         attach_goal(&database, &mut request).unwrap();
@@ -8472,6 +8480,7 @@ mod tests {
             goal: None,
             fallback_profiles: Vec::new(),
             custom_instructions: None,
+            reasoning_effort: None,
         };
 
         attach_goal(&database, &mut request).unwrap();
@@ -8752,6 +8761,7 @@ mod tests {
             goal: None,
             fallback_profiles: Vec::new(),
             custom_instructions: None,
+            reasoning_effort: None,
         };
 
         let mut connection_events = Vec::new();
@@ -8831,6 +8841,7 @@ mod tests {
             goal: None,
             fallback_profiles: vec![fallback],
             custom_instructions: None,
+            reasoning_effort: None,
         };
         let result = run_agent_turn_with_failover(&Client::new(), &database, request, |_| {
             Ok("test-key".to_owned())
@@ -8892,6 +8903,7 @@ mod tests {
             goal: None,
             fallback_profiles: Vec::new(),
             custom_instructions: None,
+            reasoning_effort: None,
         };
         let result = run_agent_turn_with_failover(&Client::new(), &database, request, |_| {
             Err("No API key is stored".to_owned())

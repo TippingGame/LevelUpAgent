@@ -1,4 +1,4 @@
-import type { AgentMessage, AgentThread, DiffViewSettings, ImageAttachment, PermissionLevel, ProviderProfile, ProviderProtocol, ToolCall } from "./types";
+import type { AgentMessage, AgentThread, DiffViewSettings, ImageAttachment, PermissionLevel, ProviderProfile, ProviderProtocol, ReasoningEffort, ToolCall } from "./types";
 import { normalizeTaskCompletionNotices, type TaskCompletionNotice } from "./taskCompletion";
 import {
   DEFAULT_ARMOR_MODE_LEVEL,
@@ -17,6 +17,7 @@ const ACTIVE_PROFILE_KEY = "levelup-agent.active-profile.v1";
 const THREAD_KEY = "levelup-agent.threads.v1";
 const ACTIVE_THREAD_KEY = "levelup-agent.active-thread.v1";
 const PERMISSION_LEVEL_KEY = "levelup-agent.permission-level.v1";
+const REASONING_EFFORT_KEY = "levelup-agent.reasoning-effort.v1";
 const ARMOR_MODE_KEY = "levelup-agent.armor-mode.v1";
 const ARMOR_MODE_LEVEL_KEY = "levelup-agent.armor-mode-level.v1";
 const ARMOR_MODE_SKILLS_KEY = "levelup-agent.armor-mode-skills.v1";
@@ -89,7 +90,7 @@ function finiteNumber(value: unknown, fallback = 0) {
 }
 
 function normalizeProtocol(value: unknown): ProviderProtocol {
-  return value === "openai_chat" || value === "anthropic_messages" || value === "gemini_generate_content"
+  return value === "openai_chat" || value === "anthropic_messages" || value === "gemini_generate_content" || value === "opencode_go"
     ? value
     : "openai_responses";
 }
@@ -148,7 +149,7 @@ function normalizeMessage(value: unknown): AgentMessage | null {
     : undefined;
   const providerBrand = value.providerBrand === "openai" || value.providerBrand === "anthropic"
     || value.providerBrand === "gemini" || value.providerBrand === "antigravity"
-    || value.providerBrand === "grok" || value.providerBrand === "levelup"
+    || value.providerBrand === "grok" || value.providerBrand === "opencode" || value.providerBrand === "levelup"
     ? value.providerBrand
     : undefined;
   return {
@@ -254,6 +255,19 @@ export function loadPermissionLevel(): PermissionLevel {
 
 export function savePermissionLevel(level: PermissionLevel) {
   writeStorageValue(PERMISSION_LEVEL_KEY, level);
+}
+
+export function loadReasoningEffort(): ReasoningEffort {
+  const stored = readStorageValue(REASONING_EFFORT_KEY);
+  return stored === "none" || stored === "minimal" || stored === "low" || stored === "medium"
+    || stored === "high" || stored === "xhigh" || stored === "max"
+    ? stored
+    : "auto";
+}
+
+export function saveReasoningEffort(effort: ReasoningEffort) {
+  if (effort === "auto") removeStorageValue(REASONING_EFFORT_KEY);
+  else writeStorageValue(REASONING_EFFORT_KEY, effort);
 }
 
 export function loadArmorMode(): boolean {

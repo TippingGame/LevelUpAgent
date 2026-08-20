@@ -339,6 +339,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .app-shell.armor-mode .platform-pill-anthropic { border-color: rgba(249,115,22,.28); background: rgba(249,115,22,.12); color: #fb923c; }
 .app-shell.armor-mode .platform-pill-gemini { border-color: rgba(59,130,246,.28); background: rgba(59,130,246,.12); color: #60a5fa; }
 .app-shell.armor-mode .platform-pill-grok { border-color: rgba(161,161,170,.28); background: rgba(113,113,122,.16); color: #d4d4d8; }
+.app-shell.armor-mode .platform-pill-opencode { border-color: rgba(236,72,153,.28); background: rgba(236,72,153,.12); color: #f9a8d4; }
 .app-shell.armor-mode .platform-pill-antigravity { border-color: rgba(139,92,246,.28); background: rgba(139,92,246,.12); color: #a78bfa; }
 .app-shell.armor-mode .config-preview > div { border-color: rgba(34,211,238,.16); background: rgba(2,6,23,.72); }
 .app-shell.armor-mode .config-preview > div > span { border-bottom-color: rgba(34,211,238,.14); background: rgba(8,47,73,.62); color: #bae6fd; }
@@ -963,6 +964,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .workspace-shell.armor-mode .armor-level-menu > button.active,
 .workspace-shell.armor-mode .model-menu > button:hover,
 .workspace-shell.armor-mode .model-menu > button.active { background: rgba(34,211,238,.09); }
+.workspace-shell.armor-mode .reasoning-switcher.open .reasoning-pill { border-color: rgba(34,211,238,.4); background: rgba(15,23,42,.9); color: #67e8f9; }
+.workspace-shell.armor-mode .reasoning-pill > svg:first-child { color: #67e8f9; }
 .workspace-shell.armor-mode.armor-level-deep { --armor-glow: rgba(168,85,247,.32); --armor-grid: rgba(168,85,247,.11); }
 .workspace-shell.armor-mode.armor-level-deep .armor-hud span { color: #d8b4fe; }
 .workspace-shell.armor-mode.armor-level-execution { --armor-glow: rgba(245,158,11,.32); --armor-grid: rgba(245,158,11,.1); }
@@ -1303,6 +1306,18 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .composer-spacer { flex: 1; }
 .composer-model-switcher .model-pill { margin-right: 0; }
 .composer-model-switcher .model-menu { top: auto; right: 0; bottom: 38px; }
+.reasoning-switcher {
+  position: relative;
+  flex: 0 0 auto;
+}
+.reasoning-pill { max-width: 126px; margin-right: 0; }
+.reasoning-pill > svg:first-child { flex: 0 0 auto; color: var(--accent); }
+.reasoning-pill > svg:last-child { flex: 0 0 auto; transition: transform .16s ease; }
+.reasoning-switcher.open .reasoning-pill > svg:last-child { transform: rotate(180deg); }
+.reasoning-pill:disabled { cursor: default; opacity: .5; }
+.reasoning-switcher.open .reasoning-pill { border-color: rgba(244,63,94,.22); background: #fff; color: #e11d48; }
+.reasoning-menu { top: auto; right: 0; bottom: 38px; }
+.composer:has(.reasoning-switcher.open) { overflow: visible; }
 .send-button { color: #fff; background: #292b28; }
 .send-button:hover:not(:disabled) { color: #fff; background: #10110f; }
 .mode-switch, .protocol-switch { display: flex; align-items: center; padding: 2px; border: 1px solid var(--line); border-radius: 6px; background: #eff0ec; }
@@ -1614,6 +1629,7 @@ button.detail-row { padding: 0; border: 0; background: transparent; text-align: 
 .platform-pill-antigravity { border-color: rgba(139,92,246,.25); background: rgba(139,92,246,.11); color: #6d28d9; }
 .platform-pill-gemini { border-color: rgba(59,130,246,.25); background: rgba(59,130,246,.11); color: #1d4ed8; }
 .platform-pill-grok { border-color: rgba(113,113,122,.28); background: rgba(113,113,122,.11); color: #3f3f46; }
+.platform-pill-opencode { border-color: rgba(236,72,153,.25); background: rgba(236,72,153,.11); color: #be185d; }
 .protocol-help { display: block; margin-top: 6px; color: var(--muted); font-size: var(--font-compact); line-height: 1.45; }
 .endpoint-preview { overflow: hidden; color: var(--muted); font-family: "SFMono-Regular", Consolas, monospace; font-size: var(--font-compact); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .connection-test .secondary-button { align-self: flex-start; }
@@ -2343,7 +2359,9 @@ button.detail-row { padding: 0; border: 0; background: transparent; text-align: 
   .armor-level-button { max-width: 94px; padding-inline: 6px; }
   .armor-manage-button { max-width: 92px; padding-inline: 6px; }
   .composer-spacer { display: none; }
-  .composer-model-switcher { margin-left: auto; }
+  .reasoning-switcher { margin-left: auto; }
+  .reasoning-pill { max-width: 104px; }
+  .composer-model-switcher { margin-left: 0; }
   .file-drop-overlay { inset: 7px; }
   .dialog-backdrop { padding: 12px; }
   .dialog { max-height: calc(100vh - 24px); }
@@ -2557,6 +2575,7 @@ button.detail-row { padding: 0; border: 0; background: transparent; text-align: 
   .armor-level-menu > button:hover, .armor-level-menu > button.active { background: rgba(34,211,238,.09); }
   .armor-level-option-icon { background: rgba(34,211,238,.1); color: #67e8f9; }
   .model-menu > button:hover, .model-menu > button.active { background: rgba(255,255,255,.06); }
+  .reasoning-switcher.open .reasoning-pill { border-color: rgba(244,63,94,.28); background: rgba(255,255,255,.08); color: #fda4af; }
   .composer-attachments > span, .message-attachments > span { background: rgba(255,255,255,.04); color: var(--text); }
   .topbar { border-bottom-color: rgba(226,232,240,.08); background: rgba(2,6,23,.72); box-shadow: 0 8px 28px rgba(0,0,0,.16); }
   .task-heading strong, .composer textarea, .markdown-body { color: #e5edff; }
@@ -2618,6 +2637,7 @@ button.detail-row { padding: 0; border: 0; background: transparent; text-align: 
   .platform-pill-antigravity { border-color: rgba(139,92,246,.28); background: rgba(139,92,246,.12); color: #a78bfa; }
   .platform-pill-gemini { border-color: rgba(59,130,246,.28); background: rgba(59,130,246,.12); color: #60a5fa; }
   .platform-pill-grok { border-color: rgba(161,161,170,.28); background: rgba(113,113,122,.16); color: #d4d4d8; }
+  .platform-pill-opencode { border-color: rgba(236,72,153,.28); background: rgba(236,72,153,.12); color: #f9a8d4; }
   .media-nav-button { border-color: rgba(96,165,250,.12); background: linear-gradient(135deg, rgba(56,189,248,.08), rgba(244,63,94,.07)); color: #cbd5e1; }
   .media-nav-button.active { border-color: rgba(251,113,133,.2); background: linear-gradient(135deg, rgba(244,63,94,.16), rgba(251,191,36,.1)); color: #fda4af; }
   .media-nav-button > .media-nav-progress { background: rgba(251,113,133,.16); color: #fda4af; }

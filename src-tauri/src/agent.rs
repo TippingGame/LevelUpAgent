@@ -172,7 +172,7 @@ pub async fn run_turn(
     request: AgentTurnRequest,
     api_key: &str,
 ) -> Result<AgentTurnResponse, String> {
-    match request.profile.protocol {
+    match effective_protocol(&request.profile) {
         ProviderProtocol::OpenaiResponses => run_openai_responses(client, request, api_key).await,
         ProviderProtocol::OpenaiChat => run_openai_chat(client, request, api_key).await,
         ProviderProtocol::AnthropicMessages => {
@@ -181,6 +181,7 @@ pub async fn run_turn(
         ProviderProtocol::GeminiGenerateContent => {
             run_gemini_generate_content(client, request, api_key).await
         }
+        ProviderProtocol::OpencodeGo => unreachable!("OpenCode is resolved by effective_protocol"),
     }
 }
 
@@ -194,7 +195,7 @@ pub async fn run_turn_stream<F>(
 where
     F: FnMut(AgentStreamEvent),
 {
-    match request.profile.protocol {
+    match effective_protocol(&request.profile) {
         ProviderProtocol::OpenaiResponses => {
             stream_openai_responses(client, request, api_key, cancellation, emit).await
         }
@@ -207,7 +208,67 @@ where
         ProviderProtocol::GeminiGenerateContent => {
             stream_gemini_generate_content(client, request, api_key, cancellation, emit).await
         }
+        ProviderProtocol::OpencodeGo => unreachable!("OpenCode is resolved by effective_protocol"),
     }
+}
+
+/// Resolve the official OpenCode Go model-to-endpoint mapping. OpenCode's
+/// catalog intentionally mixes Responses, OpenAI-compatible Chat Completions,
+/// and Anthropic Messages models behind the same `/v1` base URL.
+pub(crate) fn opencode_wire_protocol_for_model(model: &str) -> ProviderProtocol {
+    let id = normalize_opencode_model_id(model).to_ascii_lowercase();
+    if opencode_model_or_variant(&id, "grok-4.5")
+        || opencode_model_or_variant(&id, "gpt-5.6-luna")
+        || opencode_model_or_variant(&id, "muse-spark-1.2-contributor")
+    {
+        return ProviderProtocol::OpenaiResponses;
+    }
+    if matches!(
+        id.as_str(),
+        "minimax-m3"
+            | "minimax-m2.7"
+            | "minimax-m2.5"
+            | "qwen3.8-max"
+            | "qwen3.7-max"
+            | "qwen3.7-plus"
+            | "qwen3.6-plus"
+    ) || id.starts_with("minimax")
+        || id.starts_with("qwen3.")
+        || id.starts_with("qwen3-")
+    {
+        return ProviderProtocol::AnthropicMessages;
+    }
+    // The compatibility endpoint is the default for newly published models.
+    ProviderProtocol::OpenaiChat
+}
+
+fn opencode_model_or_variant(id: &str, base: &str) -> bool {
+    id == base
+        || id
+            .strip_prefix(base)
+            .and_then(|suffix| suffix.as_bytes().first())
+            .is_some_and(|separator| matches!(separator, b'.' | b'_' | b'-'))
+}
+
+fn effective_protocol(profile: &ProviderProfile) -> ProviderProtocol {
+    if matches!(profile.protocol, ProviderProtocol::OpencodeGo) {
+        opencode_wire_protocol_for_model(&profile.model)
+    } else {
+        profile.protocol.clone()
+    }
+}
+
+pub(crate) fn normalize_opencode_model_id(model: &str) -> String {
+    let mut normalized = model.trim();
+    for prefix in ["models/", "opencode-go/", "opencode/"] {
+        if normalized
+            .get(..prefix.len())
+            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
+        {
+            normalized = &normalized[prefix.len()..];
+        }
+    }
+    normalized.to_owned()
 }
 
 pub async fn fetch_models(
@@ -259,7 +320,14 @@ pub async fn fetch_models(
 
     let mut models = merged.into_values().collect::<Vec<_>>();
     for model in &mut models {
-        model.protocol = if model.protocols.contains(&profile.protocol) {
+        model.protocol = if matches!(profile.protocol, ProviderProtocol::OpencodeGo) {
+            model
+                .protocols
+                .iter()
+                .find(|protocol| !matches!(protocol, ProviderProtocol::OpencodeGo))
+                .cloned()
+                .or(Some(ProviderProtocol::OpencodeGo))
+        } else if model.protocols.contains(&profile.protocol) {
             Some(profile.protocol.clone())
         } else if model.protocols.len() == 1 {
             model.protocols.first().cloned()
@@ -313,7 +381,11 @@ fn parse_model_list(
                 .or_else(|| item.get("name"))
                 .or_else(|| item.get("model"))?
                 .as_str()?;
-            let id = raw_id.trim().trim_start_matches("models/").to_owned();
+            let id = if configured_protocol == &ProviderProtocol::OpencodeGo {
+                normalize_opencode_model_id(raw_id)
+            } else {
+                raw_id.trim().trim_start_matches("models/").to_owned()
+            };
             if id.is_empty() {
                 return None;
             }
@@ -338,9 +410,15 @@ fn parse_model_list(
                 });
             let detected_protocol = if native_gemini_model {
                 ProviderProtocol::GeminiGenerateContent
+            } else if configured_protocol == &ProviderProtocol::OpencodeGo {
+                opencode_wire_protocol_for_model(&id)
             } else {
                 configured_protocol.clone()
             };
+            let mut protocols = vec![detected_protocol.clone()];
+            if configured_protocol == &ProviderProtocol::OpencodeGo {
+                protocols.push(ProviderProtocol::OpencodeGo);
+            }
             Some(ModelInfo {
                 id,
                 owned_by: ["owned_by", "ownedBy", "publisher", "provider"]
@@ -348,7 +426,7 @@ fn parse_model_list(
                     .find_map(|key| item.get(*key).and_then(Value::as_str))
                     .map(str::to_owned),
                 protocol: Some(detected_protocol.clone()),
-                protocols: vec![detected_protocol],
+                protocols,
                 supported_generation_methods,
                 input_modalities: model_string_list(
                     item,
@@ -1066,7 +1144,7 @@ fn chat_body(request: &AgentTurnRequest, stream: bool) -> Value {
     })];
     messages.extend(context.messages.iter().map(chat_message));
     let mut body = json!({
-        "model": request.profile.model,
+        "model": provider_model_id(request),
         "messages": messages,
         "stream": stream
     });
@@ -1078,13 +1156,16 @@ fn chat_body(request: &AgentTurnRequest, stream: bool) -> Value {
         body["tools"] = Value::Array(tools);
         body["tool_choice"] = json!("auto");
     }
+    if let Some(effort) = normalized_reasoning_effort_value(request) {
+        body["reasoning_effort"] = json!(effort);
+    }
     body
 }
 
 fn responses_body(request: &AgentTurnRequest, stream: bool) -> Value {
     let context = prepare_context(&request.messages);
     let mut body = json!({
-        "model": request.profile.model,
+        "model": provider_model_id(request),
         "instructions": system_prompt_with_omission(request, &context.omission),
         "input": responses_input(&context.messages),
         "stream": stream,
@@ -1095,21 +1176,31 @@ fn responses_body(request: &AgentTurnRequest, stream: bool) -> Value {
         body["tools"] = Value::Array(tools);
         body["tool_choice"] = json!("auto");
     }
+    if let Some(effort) = normalized_reasoning_effort_value(request) {
+        body["reasoning"] = json!({ "effort": effort });
+    }
     body
 }
 
 fn anthropic_body(request: &AgentTurnRequest, stream: bool) -> Value {
     let context = prepare_context(&request.messages);
     let mut body = json!({
-        "model": request.profile.model,
+        "model": provider_model_id(request),
         "system": system_prompt_with_omission(request, &context.omission),
         "messages": anthropic_messages(&context.messages),
-        "max_tokens": 8192,
+        "max_tokens": anthropic_max_tokens(request),
         "stream": stream
     });
     let tools = anthropic_tools(request);
     if request.mode != "chat" && !tools.is_empty() {
         body["tools"] = Value::Array(tools);
+    }
+    if let Some(effort) = normalized_reasoning_effort_value(request) {
+        body["thinking"] = if effort == "none" {
+            json!({ "type": "disabled" })
+        } else {
+            json!({ "type": "enabled", "budget_tokens": reasoning_budget_tokens(effort) })
+        };
     }
     body
 }
@@ -1129,7 +1220,135 @@ fn gemini_body(request: &AgentTurnRequest) -> Value {
             "functionCallingConfig": { "mode": "AUTO" }
         });
     }
+    if let Some(effort) = normalized_reasoning_effort_value(request) {
+        body["generationConfig"] = json!({
+            "thinkingConfig": { "thinkingBudget": if effort == "none" { 0 } else { reasoning_budget_tokens(effort) } }
+        });
+    }
     body
+}
+
+fn provider_model_id(request: &AgentTurnRequest) -> String {
+    if matches!(request.profile.protocol, ProviderProtocol::OpencodeGo) {
+        normalize_opencode_model_id(&request.profile.model)
+    } else {
+        request.profile.model.trim().to_owned()
+    }
+}
+
+fn reasoning_model_id(profile: &ProviderProfile) -> String {
+    let normalized = if matches!(profile.protocol, ProviderProtocol::OpencodeGo) {
+        normalize_opencode_model_id(&profile.model)
+    } else {
+        profile
+            .model
+            .trim()
+            .strip_prefix("models/")
+            .unwrap_or(profile.model.trim())
+            .to_owned()
+    };
+    normalized
+        .rsplit(['/', ':'])
+        .next()
+        .unwrap_or(&normalized)
+        .to_ascii_lowercase()
+}
+
+fn supported_reasoning_efforts(profile: &ProviderProfile) -> &'static [&'static str] {
+    const OPENAI: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh"];
+    const GPT_56: &[&str] = &["none", "low", "medium", "high", "xhigh", "max"];
+    const THREE_LEVEL: &[&str] = &["low", "medium", "high"];
+    const HIGH_MAX: &[&str] = &["high", "max"];
+    const GOOGLE: &[&str] = &["low", "high"];
+
+    let id = reasoning_model_id(profile);
+    if opencode_model_or_variant(&id, "gpt-5.6") {
+        return GPT_56;
+    }
+    if opencode_model_or_variant(&id, "grok-4.5") {
+        return THREE_LEVEL;
+    }
+    if opencode_model_or_variant(&id, "glm-5") || opencode_model_or_variant(&id, "deepseek-v4") {
+        return HIGH_MAX;
+    }
+
+    // Other OpenCode Go models currently publish reasoning output but not a
+    // configurable effort scale. Omitting the field preserves their provider
+    // default and avoids transferring unrelated Anthropic/OpenAI variants.
+    if matches!(profile.protocol, ProviderProtocol::OpencodeGo) {
+        return &[];
+    }
+
+    if ["claude", "opus", "sonnet", "haiku"]
+        .iter()
+        .any(|family| opencode_model_or_variant(&id, family))
+    {
+        return HIGH_MAX;
+    }
+    if matches!(profile.protocol, ProviderProtocol::GeminiGenerateContent)
+        || opencode_model_or_variant(&id, "gemini")
+    {
+        return GOOGLE;
+    }
+    if opencode_model_or_variant(&id, "gpt-5") {
+        return OPENAI;
+    }
+    if ["o1", "o3", "o4"]
+        .iter()
+        .any(|family| opencode_model_or_variant(&id, family))
+    {
+        return THREE_LEVEL;
+    }
+    &[]
+}
+
+fn normalized_reasoning_effort_value(request: &AgentTurnRequest) -> Option<&str> {
+    let value = request
+        .reasoning_effort
+        .as_deref()?
+        .trim()
+        .to_ascii_lowercase();
+    let normalized = match value.as_str() {
+        "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" => match value.as_str() {
+            "none" => "none",
+            "minimal" => "minimal",
+            "low" => "low",
+            "medium" => "medium",
+            "high" => "high",
+            "xhigh" => "xhigh",
+            "max" => "max",
+            _ => unreachable!(),
+        },
+        _ => return None,
+    };
+    if supported_reasoning_efforts(&request.profile).contains(&normalized) {
+        Some(normalized)
+    } else {
+        None
+    }
+}
+
+fn reasoning_budget_tokens(effort: &str) -> u64 {
+    match effort {
+        "minimal" => 1_024,
+        "low" => 4_096,
+        "medium" => 8_192,
+        "high" => 16_384,
+        "xhigh" => 32_768,
+        "max" => 32_768,
+        _ => 0,
+    }
+}
+
+fn anthropic_max_tokens(request: &AgentTurnRequest) -> u64 {
+    normalized_reasoning_effort_value(request)
+        .filter(|effort| *effort != "none")
+        .map(|effort| {
+            reasoning_budget_tokens(effort)
+                .saturating_add(4_096)
+                .max(8_192)
+        })
+        .unwrap_or(8_192)
 }
 
 fn parse_openai_chat_value(
@@ -2638,6 +2857,73 @@ mod tests {
     }
 
     #[test]
+    fn opencode_go_routes_documented_models_to_their_wire_protocols() {
+        assert_eq!(
+            normalize_opencode_model_id("models/OpenCode-Go/gpt-5.6-luna"),
+            "gpt-5.6-luna"
+        );
+        for model in [
+            "grok-4.5",
+            "grok-4.5-2026-07-09",
+            "grok-4.5.preview",
+            "gpt-5.6-luna",
+            "gpt-5.6-luna-2026-07-09",
+            "gpt-5.6-luna_preview",
+            "muse-spark-1.2-contributor",
+        ] {
+            assert_eq!(
+                opencode_wire_protocol_for_model(model),
+                ProviderProtocol::OpenaiResponses,
+                "{model}"
+            );
+        }
+        for model in [
+            "glm-5.3",
+            "glm-5.2",
+            "glm-5.1",
+            "kimi-k3",
+            "kimi-k2.7-code",
+            "kimi-k2.6",
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "mimo-v2.5",
+            "mimo-v2.5-pro",
+            "hy3",
+            "glm-5",
+            "kimi-k2.5",
+            "mimo-v2-pro",
+            "mimo-v2-omni",
+            "hy3-preview",
+        ] {
+            assert_eq!(
+                opencode_wire_protocol_for_model(model),
+                ProviderProtocol::OpenaiChat,
+                "{model}"
+            );
+        }
+        for model in [
+            "minimax-m3",
+            "minimax-m2.7",
+            "minimax-m2.5",
+            "qwen3.8-max",
+            "qwen3.7-max",
+            "qwen3.7-plus",
+            "qwen3.6-plus",
+            "qwen3.5-plus",
+        ] {
+            assert_eq!(
+                opencode_wire_protocol_for_model(model),
+                ProviderProtocol::AnthropicMessages,
+                "{model}"
+            );
+        }
+        assert_eq!(
+            opencode_wire_protocol_for_model("future-model"),
+            ProviderProtocol::OpenaiChat
+        );
+    }
+
+    #[test]
     fn endpoint_appends_protocol_path_to_root() {
         let url = endpoint("https://levelup.example", "/v1/responses").unwrap();
         assert_eq!(url.as_str(), "https://levelup.example/v1/responses");
@@ -3839,6 +4125,7 @@ mod tests {
             goal: None,
             fallback_profiles: Vec::new(),
             custom_instructions: None,
+            reasoning_effort: None,
         }
     }
 
@@ -4338,6 +4625,165 @@ mod tests {
                     );
                     assert!(headers.contains("x-goog-api-key: levelup-test-key"));
                 }
+                ProviderProtocol::OpencodeGo => {
+                    unreachable!("auto-routed OpenCode is tested separately")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reasoning_effort_serializes_only_supported_model_levels() {
+        let mut request = test_request(
+            "https://levelup.example".to_owned(),
+            ProviderProtocol::OpenaiChat,
+        );
+        request.profile.model = "gpt-5.6-sol".to_owned();
+        request.reasoning_effort = Some("none".to_owned());
+        assert_eq!(
+            chat_body(&request, false)["reasoning_effort"],
+            json!("none")
+        );
+
+        request.profile.protocol = ProviderProtocol::OpenaiResponses;
+        assert_eq!(
+            responses_body(&request, false).pointer("/reasoning/effort"),
+            Some(&json!("none"))
+        );
+
+        request.reasoning_effort = Some("max".to_owned());
+        assert_eq!(
+            responses_body(&request, false).pointer("/reasoning/effort"),
+            Some(&json!("max"))
+        );
+
+        request.profile.protocol = ProviderProtocol::AnthropicMessages;
+        request.profile.model = "claude-opus-4-7".to_owned();
+        request.reasoning_effort = Some("max".to_owned());
+        let body = anthropic_body(&request, false);
+        assert_eq!(body.pointer("/thinking/type"), Some(&json!("enabled")));
+        assert_eq!(
+            body.pointer("/thinking/budget_tokens"),
+            Some(&json!(32_768))
+        );
+        assert_eq!(body["max_tokens"], json!(36_864));
+
+        request.profile.protocol = ProviderProtocol::GeminiGenerateContent;
+        request.profile.model = "gemini-3.6-flash".to_owned();
+        request.reasoning_effort = Some("high".to_owned());
+        assert_eq!(
+            gemini_body(&request).pointer("/generationConfig/thinkingConfig/thinkingBudget"),
+            Some(&json!(16_384))
+        );
+
+        // MiniMax M3 is a reasoning model, but OpenCode Go does not advertise
+        // adjustable effort tiers for it. A stale saved level must be omitted.
+        request.profile.protocol = ProviderProtocol::OpencodeGo;
+        request.profile.model = "minimax-m3".to_owned();
+        request.reasoning_effort = Some("high".to_owned());
+        assert!(anthropic_body(&request, false).get("thinking").is_none());
+
+        // Generic compatible models also stay provider-controlled until their
+        // model ID or catalog declares a supported effort scale.
+        request.profile.protocol = ProviderProtocol::OpenaiChat;
+        request.profile.model = "unknown-compatible-model".to_owned();
+        assert!(chat_body(&request, false).get("reasoning_effort").is_none());
+
+        request.reasoning_effort = Some("auto".to_owned());
+        request.profile.protocol = ProviderProtocol::AnthropicMessages;
+        assert!(responses_body(&request, false).get("reasoning").is_none());
+        assert!(anthropic_body(&request, false).get("thinking").is_none());
+        assert!(gemini_body(&request).get("generationConfig").is_none());
+    }
+
+    #[test]
+    fn reasoning_effort_capabilities_are_model_specific() {
+        let mut profile = test_request(
+            "https://levelup.example".to_owned(),
+            ProviderProtocol::OpencodeGo,
+        )
+        .profile;
+        let cases: &[(&str, &[&str])] = &[
+            (
+                "gpt-5.6-luna",
+                &["none", "low", "medium", "high", "xhigh", "max"],
+            ),
+            ("grok-4.5", &["low", "medium", "high"]),
+            ("glm-5.3", &["high", "max"]),
+            ("deepseek-v4-pro", &["high", "max"]),
+            ("kimi-k3", &[]),
+            ("minimax-m3", &[]),
+            ("qwen3.8-max", &[]),
+            ("mimo-v2.5", &[]),
+        ];
+        for (model, expected) in cases {
+            profile.model = (*model).to_owned();
+            assert_eq!(supported_reasoning_efforts(&profile), *expected, "{model}");
+        }
+    }
+
+    #[tokio::test]
+    async fn opencode_go_auto_route_and_reasoning_request_contracts() {
+        let cases = [
+            (
+                "gpt-5.6-luna",
+                "/v1/responses",
+                r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}"#,
+                "responses",
+            ),
+            (
+                "glm-5.3",
+                "/v1/chat/completions",
+                r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#,
+                "chat",
+            ),
+            (
+                "minimax-m3",
+                "/v1/messages",
+                r#"{"content":[{"type":"text","text":"ok"}]}"#,
+                "messages",
+            ),
+        ];
+
+        for (model, path, response, interface) in cases {
+            let (base_url, capture) = mock_contract_server(response);
+            let mut request = test_request(base_url, ProviderProtocol::OpencodeGo);
+            request.profile.model = format!("opencode-go/{model}");
+            request.reasoning_effort = Some("high".to_owned());
+
+            let result = run_turn(&Client::new(), request, "opencode-test-key")
+                .await
+                .unwrap();
+            assert_eq!(result.content, "ok");
+
+            let captured = capture
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            let headers = captured
+                .split_once("\r\n\r\n")
+                .unwrap()
+                .0
+                .to_ascii_lowercase();
+            let body = captured_json_request(captured, path);
+            assert_eq!(body["model"], json!(model));
+
+            match interface {
+                "responses" => {
+                    assert_eq!(body.pointer("/reasoning/effort"), Some(&json!("high")));
+                    assert!(headers.contains("authorization: bearer opencode-test-key"));
+                    assert!(headers.contains("openai-beta: responses=experimental"));
+                }
+                "chat" => {
+                    assert_eq!(body["reasoning_effort"], json!("high"));
+                    assert!(headers.contains("authorization: bearer opencode-test-key"));
+                }
+                "messages" => {
+                    assert!(body.get("thinking").is_none());
+                    assert_eq!(body["max_tokens"], json!(8_192));
+                    assert!(headers.contains("x-api-key: opencode-test-key"));
+                    assert!(headers.contains("anthropic-version: 2023-06-01"));
+                }
+                _ => unreachable!(),
             }
         }
     }

@@ -60,6 +60,7 @@ import type {
   ProviderSettings,
   ProviderHealth,
   ProviderRequestLog,
+  ReasoningEffort,
   SkillInfo,
   ToolCall,
   ToolExecutionResponse,
@@ -724,6 +725,7 @@ export async function agentTurn(
   hatch = false,
   hatchSkillLoaded = false,
   customInstructions?: string,
+  reasoningEffort: ReasoningEffort = "auto",
 ): Promise<AgentTurnResponse> {
   const cleanMessages = messages.filter((message) => !message.status).map(({ role, content, toolCalls, toolCallId, internal, attachments }) => ({
     role,
@@ -734,7 +736,7 @@ export async function agentTurn(
     attachments,
   }));
   return invoke<AgentTurnResponse>("agent_turn", {
-    request: { profile, messages: cleanMessages, mode, workspace, threadId, fallbackProfiles, hatch, hatchSkillLoaded, customInstructions },
+    request: { profile, messages: cleanMessages, mode, workspace, threadId, fallbackProfiles, hatch, hatchSkillLoaded, customInstructions, reasoningEffort },
   });
 }
 
@@ -752,6 +754,7 @@ export async function agentTurnStream(
   onReconnect?: (retryAttempt: number, maxRetryAttempts: number) => void,
   onReconnected?: (retryAttempt?: number) => void,
   customInstructions?: string,
+  reasoningEffort: ReasoningEffort = "auto",
 ): Promise<AgentTurnResponse> {
   const cleanMessages = messages.filter((message) => !message.status).map(({ role, content, toolCalls, toolCallId, internal, attachments }) => ({
     role,
@@ -770,7 +773,7 @@ export async function agentTurnStream(
     if (event.kind === "provider_reconnected") onReconnected?.(event.retryAttempt);
   };
   return invoke<AgentTurnResponse>("agent_turn_stream", {
-    request: { profile, messages: cleanMessages, mode, workspace, threadId, fallbackProfiles, hatch, hatchSkillLoaded, customInstructions },
+    request: { profile, messages: cleanMessages, mode, workspace, threadId, fallbackProfiles, hatch, hatchSkillLoaded, customInstructions, reasoningEffort },
     operationId,
     onEvent,
   });

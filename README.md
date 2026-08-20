@@ -59,8 +59,9 @@
 2. 为每个连接配置 Base URL、API Key、默认文字模型和生成协议；可信的本机/局域网服务可以显式允许无 Key。
 3. 点击 **检测** 或直接输入模型 ID。标准 `/v1/models` 与 Gemini `/v1beta/models` 会独立发现。
 4. 可添加多个连接并设置优先级；请求失败时会按健康记录和冷却策略自动故障转移。
+5. 主输入框左侧的思考强度会随当前模型变化，只显示该模型已知支持的档位；`Auto` 不覆写服务端默认值，未公布可调档位的模型保持 `Auto`。
 
-LevelUpAgent 支持 LevelUpAPI，以及 OpenAI Responses、Chat Completions、Anthropic Messages 和 Gemini GenerateContent 兼容服务。API Key 只保存在系统凭据库，不写入网页存储。
+LevelUpAgent 支持 LevelUpAPI，以及 OpenAI Responses、Chat Completions、Anthropic Messages 和 Gemini GenerateContent 兼容服务。OpenCode Go 连接提供自动技术接口路由：Grok 4.5、Luna 与 Muse Spark 使用 Responses，GLM、Kimi、DeepSeek、MiMo 与 HY 使用 Chat Completions，MiniMax 与 Qwen3 使用 Messages；模型目录仍从 `/v1/models` 统一发现。API Key 只保存在系统凭据库，不写入网页存储。
 
 ### 第一次创作
 

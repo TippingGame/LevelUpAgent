@@ -264,6 +264,7 @@ const PROVIDER_ADAPTERS: Record<ProviderProtocol, string> = {
   openai_chat: "OpenAI Chat-compatible style: keep the system message compact, put execution constraints before background, and summarize verified artifacts at the end.",
   anthropic_messages: "Claude/Anthropic style: use explicit MUST-style workflow checkpoints, maintain context continuity, and avoid replacing execution with long prose.",
   gemini_generate_content: "Gemini style: keep systemInstruction declarative and short, restate exact artifact gates, and avoid claiming observations that were not produced by tools.",
+  opencode_go: "OpenCode Go style: preserve the model-specific wire route and keep the requested reasoning effort explicit without changing the task contract.",
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -344,6 +345,11 @@ function modelSpecificInstructions(model?: string, protocol?: ProviderProtocol):
     segments.push(`Grok/xAI adapter:
 - Preserve exact user constraints and command text.
 - Treat OpenAI-compatible gateway metadata as transport details, not a reason to change the task contract.`);
+  }
+  if (/opencode|opencode_go/.test(normalized)) {
+    segments.push(`OpenCode Go adapter:
+- Keep the selected model ID exact; its official route may be Responses, Chat Completions, or Anthropic Messages.
+- Preserve the selected reasoning effort as a transport parameter and do not silently substitute another model.`);
   }
   return segments.length > 0 ? segments.join("\n\n") : undefined;
 }

@@ -1,4 +1,4 @@
-# LevelUpAPI 四协议兼容性证据
+# LevelUpAPI 四协议与 OpenCode Go 自动路由兼容性证据
 
 审计日期：2026-07-12。适配目标为 `G:\Work\levelup2api\LevelUpAPI`，审计提交
 `c3b6cf6d6f21`（LevelUpAPI `1.1.217`），测试期间保持只读且工作树干净。
@@ -11,10 +11,19 @@
 | OpenAI Chat Completions | `POST /v1/chat/completions` | Chat Completions 自动平台路由 |
 | Anthropic Messages | `POST /v1/messages` | Messages 网关 |
 | Gemini GenerateContent | `POST /v1beta/models/{model}:generateContent` | Gemini 原生兼容层 |
+| OpenCode Go（自动） | 按模型选择上述 Responses / Chat / Messages | OpenCode 分组或官方 Go 上游 |
 
 Rust 契约测试 `levelup_api_four_protocol_request_contracts` 使用真实 HTTP socket 捕获四种 adapter
 发出的路径、Bearer/API Key 头和 JSON body，并用各协议响应结构完成解析。LevelUpAPI 侧的
 `internal/handler` 与 `internal/server/routes` unit suites 验证上述网关处理器和路由注册。
+
+2026-08-21 增量契约把 OpenCode Go 作为配置层路由器接入：`grok-4.5`、`gpt-5.6-luna` 与
+`muse-spark-1.2-contributor` 发送到 `/v1/responses`，GLM/Kimi/DeepSeek/MiMo/HY 发送到 `/v1/chat/completions`，
+MiniMax/Qwen3 发送到 `/v1/messages`。`opencode_go_auto_route_and_reasoning_request_contracts`
+使用真实本地 socket 同时校验三条路径、规范化后的模型 ID、认证头、响应解析和模型级思考强度过滤；
+`reasoning_effort_serializes_only_supported_model_levels` 与
+`reasoning_effort_capabilities_are_model_specific` 覆盖模型切换回退及四种 wire adapter，未公布可调
+档位的 OpenCode Go 模型不会继承另一协议族的档位。
 
 一条命令可重复运行双方证据：
 

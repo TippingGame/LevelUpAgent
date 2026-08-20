@@ -7,7 +7,6 @@ import {
   Activity,
   AudioLines,
   Bot,
-  BrainCircuit,
   BookOpen,
   Check,
   CheckCircle2,
@@ -178,6 +177,7 @@ import {
   loadActiveThemeId,
   loadDiffViewSettings,
   loadPermissionLevel,
+  loadReasoningEffort,
   loadPinnedThreadIds,
   loadTaskCompletionNotices,
   loadThreads,
@@ -189,6 +189,7 @@ import {
   saveArmorModeSkills,
   saveArmorWritingIntensity,
   savePermissionLevel,
+  saveReasoningEffort,
   savePinnedThreadIds,
   saveTaskCompletionNotices,
   saveActiveProfileId,
@@ -238,7 +239,12 @@ import {
   type ThemeGenerationRequest,
   type ThemeGenerationJob,
 } from "./lib/themeGeneration";
-import { preferredDetectedModel } from "./lib/modelSelection";
+import {
+  opencodeWireProtocol,
+  preferredDetectedModel,
+  reasoningEffortForProfile,
+  reasoningEffortsForProfile,
+} from "./lib/modelSelection";
 import {
   createHatchExecutionState,
   gateHatchToolCall,
@@ -301,6 +307,7 @@ import type {
   ProviderHealth,
   ProviderRequestLog,
   ProviderProtocol,
+  ReasoningEffort,
   SkillInfo,
   ToolCall,
   ThemeManifest,
@@ -804,6 +811,7 @@ function App() {
   const [defaultWorkspace, setDefaultWorkspace] = useState<string>();
   const [mediaReferenceDrop, setMediaReferenceDrop] = useState<{ id: string; paths: string[] } | null>(null);
   const [permissionLevel, setPermissionLevel] = useState<PermissionLevel>(loadPermissionLevel);
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>(loadReasoningEffort);
   const [armorMode, setArmorMode] = useState(loadArmorMode);
   const [armorModeLevel, setArmorModeLevel] = useState<ArmorModeLevel>(loadArmorModeLevel);
   const [armorModeSkills, setArmorModeSkills] = useState<ArmorSkillState>(loadArmorModeSkills);
@@ -932,6 +940,11 @@ function App() {
 
   const activeProfile =
     profiles.find((profile) => profile.id === activeProfileId) ?? profiles[0];
+  const reasoningEfforts = useMemo(
+    () => reasoningEffortsForProfile(activeProfile),
+    [activeProfile.model, activeProfile.protocol],
+  );
+  const effectiveReasoningEffort = reasoningEffortForProfile(activeProfile, reasoningEffort);
   const activeThread =
     threads.find((thread) => thread.id === activeThreadId) ?? threads[0];
   const visibleConversationMessages = useMemo(
@@ -1649,6 +1662,14 @@ function App() {
   useEffect(() => {
     savePermissionLevel(permissionLevel);
   }, [permissionLevel]);
+
+  useEffect(() => {
+    saveReasoningEffort(reasoningEffort);
+  }, [reasoningEffort]);
+
+  useEffect(() => {
+    if (effectiveReasoningEffort !== reasoningEffort) setReasoningEffort(effectiveReasoningEffort);
+  }, [effectiveReasoningEffort, reasoningEffort]);
 
   useEffect(() => {
     saveArmorMode(armorMode);
@@ -2377,6 +2398,7 @@ function App() {
           protocol: runProfile.protocol,
           skills: armorModeSkills,
         }),
+        reasoningEffort: reasoningEffortForProfile(runProfile, effectiveReasoningEffort),
       }, (event: HarnessRuntimeEvent) => {
         if (event.kind === "assistant_delta") {
           const payload = event.payload as { delta?: unknown };
@@ -3072,6 +3094,7 @@ function App() {
           protocol: runProfile.protocol,
           skills: armorModeSkills,
         }),
+        reasoningEffortForProfile(runProfile, effectiveReasoningEffort),
       );
       if (frameId !== null) window.cancelAnimationFrame(frameId);
       if (!hatchRunStillCurrent()) {
@@ -4705,6 +4728,15 @@ function App() {
           running={running}
           disabled={Boolean(pending) || attachmentPasteBusy}
           modelMenuOpen={profileMenuOpen}
+          thinkingControl={(
+            <ReasoningPicker
+              effort={effectiveReasoningEffort}
+              efforts={reasoningEfforts}
+              model={activeProfile.model}
+              onChange={setReasoningEffort}
+              disabled={Boolean(pending) || attachmentPasteBusy || running}
+            />
+          )}
           modelControl={(
             <div className="model-switcher composer-model-switcher">
               <button
@@ -4725,7 +4757,7 @@ function App() {
                   {[...profiles].sort((left, right) => left.priority - right.priority || left.name.localeCompare(right.name)).map((profile) => (
                     <button role="menuitemradio" aria-checked={profile.id === activeProfile.id} className={profile.id === activeProfile.id ? "active" : ""} key={profile.id} onClick={() => activateProfile(profile.id)}>
                       <span className="model-menu-check">{profile.id === activeProfile.id ? <Check size={13} /> : null}</span>
-                      <span><strong>{profile.name}</strong><small>{profile.model} · P{profile.priority}</small></span>
+                      <span><strong>{profile.name}</strong><small>{profile.model} · {protocolLabel(profile.protocol)} · P{profile.priority}</small></span>
                     </button>
                   ))}
                   <button className="model-menu-settings" role="menuitem" onClick={() => { setProfileMenuOpen(false); setSettingsOpen(true); }}><Settings2 size={13} /><span>{tr("管理模型连接", "Manage connections")}</span></button>
@@ -5762,9 +5794,114 @@ function AssistantMessageSegment({
 function ThinkingRow() {
   return (
     <div className="thinking-row">
-      <span className="thinking-mark"><BrainCircuit size={16} /></span>
+      <span className="thinking-mark"><Sparkles size={16} /></span>
       <span>{tr("正在处理", "Working")}</span>
       <i /><i /><i />
+    </div>
+  );
+}
+
+function reasoningEffortLabel(effort: ReasoningEffort) {
+  if (effort === "auto") return tr("自动", "Auto");
+  if (effort === "none") return tr("关闭", "Off");
+  if (effort === "minimal") return tr("极轻", "Minimal");
+  if (effort === "low") return tr("低", "Low");
+  if (effort === "medium") return tr("中", "Medium");
+  if (effort === "high") return tr("高", "High");
+  if (effort === "xhigh") return tr("极高", "XHigh");
+  return tr("最大", "Max");
+}
+
+function reasoningEffortDescription(effort: ReasoningEffort) {
+  if (effort === "auto") return tr("沿用模型默认或自适应策略", "Use the model default or adaptive strategy");
+  if (effort === "none") return tr("关闭额外推理，优先响应速度", "Disable extra reasoning and prioritize speed");
+  if (effort === "minimal") return tr("使用最少推理完成简单任务", "Use minimal reasoning for simple tasks");
+  if (effort === "low") return tr("轻量推理，适合直接问题", "Light reasoning for straightforward questions");
+  if (effort === "medium") return tr("平衡推理深度与响应速度", "Balance reasoning depth and response speed");
+  if (effort === "high") return tr("深入分析复杂任务与代码", "Analyze complex tasks and code more deeply");
+  if (effort === "xhigh") return tr("为高难度任务投入更多推理", "Spend more reasoning on demanding tasks");
+  return tr("使用模型允许的最大推理强度", "Use the highest reasoning effort the model allows");
+}
+
+function ReasoningPicker({
+  effort,
+  efforts,
+  model,
+  onChange,
+  disabled,
+}: {
+  effort: ReasoningEffort;
+  efforts: readonly ReasoningEffort[];
+  model: string;
+  onChange: (effort: ReasoningEffort) => void;
+  disabled: boolean;
+}) {
+  const adjustable = efforts.length > 1;
+  const [open, setOpen] = useState(false);
+  const pickerRef = useRef<HTMLDivElement>(null);
+  const title = adjustable
+    ? tr(`${model} 仅显示已知支持的思考强度`, `Only known supported thinking levels are shown for ${model}`)
+    : tr(`${model} 未公布可调思考档位，沿用模型默认值`, `${model} does not publish adjustable thinking levels; using the model default`);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (!pickerRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (disabled || !adjustable) setOpen(false);
+  }, [adjustable, disabled]);
+
+  useEffect(() => {
+    setOpen(false);
+  }, [model, efforts]);
+
+  return (
+    <div className={`reasoning-switcher${open ? " open" : ""}`} ref={pickerRef} title={title}>
+      <button
+        type="button"
+        className="model-pill reasoning-pill"
+        aria-label={`${tr("思考强度", "Thinking effort")}: ${reasoningEffortLabel(effort)}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        disabled={disabled || !adjustable}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <Sparkles size={14} />
+        <span>{reasoningEffortLabel(effort)}</span>
+        <ChevronDown size={13} />
+      </button>
+      {open && (
+        <div className="model-menu reasoning-menu" role="menu" aria-label={tr("选择思考强度", "Choose thinking effort")}>
+          {efforts.map((value) => (
+            <button
+              type="button"
+              role="menuitemradio"
+              aria-checked={effort === value}
+              className={effort === value ? "active" : ""}
+              key={value}
+              onClick={() => {
+                onChange(value);
+                setOpen(false);
+              }}
+            >
+              <span className="model-menu-check">{effort === value ? <Check size={13} /> : null}</span>
+              <span><strong>{reasoningEffortLabel(value)}</strong><small>{reasoningEffortDescription(value)}</small></span>
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -5779,6 +5916,7 @@ function Composer({
   running,
   disabled,
   modelMenuOpen,
+  thinkingControl,
   modelControl,
   onDraftChange,
   onPasteFiles,
@@ -5800,6 +5938,7 @@ function Composer({
   running: boolean;
   disabled: boolean;
   modelMenuOpen: boolean;
+  thinkingControl: ReactNode;
   modelControl: ReactNode;
   onDraftChange: (value: string) => void;
   onPasteFiles: (files: File[]) => void;
@@ -6002,6 +6141,7 @@ function Composer({
             </>
           )}
           <span className="composer-spacer" />
+          {thinkingControl}
           {modelControl}
           {running && (
             <IconButton label={tr("停止", "Stop")} className="send-button" onClick={onStop}>
@@ -6389,7 +6529,7 @@ function DiffDialog({
   );
 }
 
-type ProtocolPlatform = "anthropic" | "openai" | "antigravity" | "gemini" | "grok";
+type ProtocolPlatform = "anthropic" | "openai" | "antigravity" | "gemini" | "grok" | "opencode";
 
 const PROTOCOL_OPTIONS: Array<{
   value: ProviderProtocol;
@@ -6400,23 +6540,29 @@ const PROTOCOL_OPTIONS: Array<{
   {
     value: "openai_responses",
     label: "Responses",
-    platforms: ["openai", "anthropic", "grok"],
+    platforms: ["openai", "anthropic", "grok", "opencode"],
     recommended: true,
   },
   {
     value: "openai_chat",
     label: "Chat Completions",
-    platforms: ["openai", "anthropic", "grok"],
+    platforms: ["openai", "anthropic", "grok", "opencode"],
   },
   {
     value: "anthropic_messages",
     label: "Anthropic Messages",
-    platforms: ["anthropic", "openai", "gemini", "antigravity", "grok"],
+    platforms: ["anthropic", "openai", "gemini", "antigravity", "grok", "opencode"],
   },
   {
     value: "gemini_generate_content",
     label: "Gemini GenerateContent",
     platforms: ["gemini", "antigravity"],
+  },
+  {
+    value: "opencode_go",
+    label: "OpenCode Go · 自动路由",
+    platforms: ["opencode"],
+    recommended: true,
   },
 ];
 
@@ -6425,7 +6571,8 @@ function protocolPlatformLabel(platform: ProtocolPlatform) {
   if (platform === "openai") return "OpenAI";
   if (platform === "antigravity") return "Antigravity";
   if (platform === "gemini") return "Gemini";
-  return "Grok";
+  if (platform === "grok") return "Grok";
+  return "OpenCode";
 }
 
 const DEFAULT_THEME_GENERATION_PREFERENCES: ThemeGenerationPreferences = {
@@ -6828,7 +6975,11 @@ function ConnectionDialog({
     setDraftProfile((current) => ({
       ...current,
       model: modelId,
-      protocol: detected?.protocol ?? current.protocol,
+      // OpenCode Go is an intentional auto-router; selecting a model must not
+      // collapse it into one of the three concrete wire protocols.
+      protocol: current.protocol === "opencode_go"
+        ? current.protocol
+        : detected?.protocol ?? current.protocol,
     }));
   };
 
@@ -6909,7 +7060,9 @@ function ConnectionDialog({
         setDraftProfile((current) => ({
           ...current,
           model: preferredModel.id,
-          protocol: preferredModel.protocol ?? current.protocol,
+          protocol: current.protocol === "opencode_go"
+            ? current.protocol
+            : preferredModel.protocol ?? current.protocol,
         }));
       }
     } catch (reason) {
@@ -7003,7 +7156,7 @@ function ConnectionDialog({
               <div className="general-settings-actions">
                 <button className="secondary-button" type="button" onClick={onOpenMcp}><Network size={14} />MCP</button>
                 <button className="secondary-button" type="button" onClick={onOpenSkills}><BookOpen size={14} />Skills</button>
-                <button className="secondary-button" type="button" onClick={onOpenInstructions}><BrainCircuit size={14} />Instructions</button>
+                <button className="secondary-button" type="button" onClick={onOpenInstructions}><BookOpen size={14} />Instructions</button>
                 <button className="secondary-button" type="button" onClick={onOpenLogs}><Activity size={14} />{tr("请求日志", "Request logs")}</button>
                 <button className="secondary-button" type="button" onClick={onOpenPet}><PawPrint size={14} />{tr("摇光残影", "Starlight Echoes")}</button>
               </div>
@@ -7119,10 +7272,16 @@ function ConnectionDialog({
               ))}
             </div>
             <small className="protocol-help">
-              {tr(
-                "Grok/xAI 已由 LevelUpAPI 原生适配：推荐 Responses，也支持 Chat Completions 与 Anthropic Messages；创作空间可使用 Grok 图片和视频。当前 LevelUpAPI 未提供 Grok TTS、STT 或 Realtime 路由。直连其他服务时以服务商实际接口为准。",
-                "Grok/xAI is natively integrated by LevelUpAPI: Responses is recommended, with Chat Completions and Anthropic Messages also supported; Media Studio supports Grok images and videos. LevelUpAPI currently does not expose Grok TTS, STT, or Realtime routes. Direct providers may expose a different subset."
-              )}
+              {draftProfile.protocol === "opencode_go"
+                ? tr(
+                  "OpenCode Go 会按模型自动选择官方技术接口：Grok 4.5、GPT-5.6 Luna、Muse Spark 走 Responses；GLM/Kimi/DeepSeek/MiMo/Hy3 走 Chat Completions；MiniMax/Qwen3 走 Anthropic Messages。也可以手动选择具体协议。",
+                  "OpenCode Go automatically selects the official wire interface per model: Grok 4.5, GPT-5.6 Luna, and Muse Spark use Responses; GLM/Kimi/DeepSeek/MiMo/Hy3 use Chat Completions; MiniMax/Qwen3 use Anthropic Messages. You can also choose a concrete protocol manually."
+                )
+                : draftProfile.protocol === "gemini_generate_content"
+                  ? tr("Gemini 原生请求使用 GenerateContent；模型目录会独立检查 /v1beta/models。", "Native Gemini requests use GenerateContent; the model catalog checks /v1beta/models independently.")
+                  : draftProfile.protocol === "anthropic_messages"
+                    ? tr("Anthropic Messages 使用 /v1/messages；思考强度会转换为 thinking budget。", "Anthropic Messages uses /v1/messages; thinking effort is translated to a thinking budget.")
+                    : tr("OpenAI Responses 或 Chat Completions 使用当前选定的技术接口；思考强度会写入对应请求字段。", "OpenAI Responses or Chat Completions uses the selected wire interface; thinking effort is written to its corresponding request field.")}
             </small>
           </div>
           <label className="field wide">
@@ -7155,11 +7314,17 @@ function ConnectionDialog({
               </IconButton>
             </div>
             <datalist id={`provider-models-${draftProfile.id}`}>
-              {models.map((item) => <option value={item.id} key={item.id} />)}
+              {models.map((item) => (
+                <option
+                  value={item.id}
+                  label={protocolLabel(item.protocol ?? (draftProfile.protocol === "opencode_go" ? opencodeWireProtocol(item.id) : draftProfile.protocol))}
+                  key={item.id}
+                />
+              ))}
             </datalist>
             {models.length > 0 && <small>{tr(
-              `已从当前连接合并发现 ${models.length} 个模型；Gemini 原生专用模型会自动采用 GenerateContent，多协议模型保留当前文字协议。`,
-              `${models.length} models merged from this connection; Gemini-native-only models select GenerateContent automatically, while multi-protocol models retain the current text protocol.`,
+              `已从当前连接合并发现 ${models.length} 个模型；OpenCode Go 会显示每个模型的实际技术接口，Gemini 原生专用模型会自动采用 GenerateContent。`,
+              `${models.length} models merged from this connection; OpenCode Go shows each model's effective wire interface, while Gemini-native-only models select GenerateContent automatically.`,
             )}</small>}
           </div>
           <div className="field connection-test">
@@ -7190,7 +7355,7 @@ function ConnectionDialog({
           <div className="dialog-footer-actions">
             <button className="secondary-button" onClick={onOpenMcp}><Network size={14} /> {tr("MCP 服务器", "MCP servers")}</button>
             <button className="secondary-button" onClick={onOpenSkills}><BookOpen size={14} /> Skills</button>
-            <button className="secondary-button" onClick={onOpenInstructions}><BrainCircuit size={14} /> Instructions</button>
+            <button className="secondary-button" onClick={onOpenInstructions}><BookOpen size={14} /> Instructions</button>
             <button className="secondary-button" onClick={onOpenLogs}><Activity size={14} /> {tr("请求日志", "Request logs")}</button>
             <button className="secondary-button" onClick={onOpenPet}><PawPrint size={14} /> {tr("摇光残影", "Starlight Echoes")}</button>
             <button className="secondary-button" onClick={onOpenThemes}><Palette size={14} /> {tr("主题", "Themes")}</button>
@@ -7440,6 +7605,7 @@ function ConfigWritebackPanel({ profile, keyConfigured }: { profile: ProviderPro
 function targetForProtocol(protocol: ProviderProtocol): ExternalConfigTarget {
   if (protocol === "anthropic_messages") return "claude";
   if (protocol === "gemini_generate_content") return "gemini";
+  if (protocol === "opencode_go") return "opencode";
   return "codex";
 }
 
@@ -8151,16 +8317,18 @@ function protocolLabel(protocol: ProviderProtocol) {
   if (protocol === "openai_responses") return "Responses";
   if (protocol === "openai_chat") return "Chat Completions";
   if (protocol === "anthropic_messages") return "Messages";
+  if (protocol === "opencode_go") return "OpenCode Go · 自动路由";
   return "GenerateContent";
 }
 
 function providerEndpointPreview(profile: ProviderProfile) {
   const model = profile.model.trim().replace(/^models\//, "") || "MODEL_ID";
-  const path = profile.protocol === "openai_responses"
+  const wireProtocol = profile.protocol === "opencode_go" ? opencodeWireProtocol(model) : profile.protocol;
+  const path = wireProtocol === "openai_responses"
     ? "/v1/responses"
-    : profile.protocol === "openai_chat"
+    : wireProtocol === "openai_chat"
       ? "/v1/chat/completions"
-      : profile.protocol === "anthropic_messages"
+      : wireProtocol === "anthropic_messages"
         ? "/v1/messages"
         : `/v1beta/models/${model}:generateContent`;
   try {
@@ -8171,7 +8339,7 @@ function providerEndpointPreview(profile: ProviderProfile) {
     const requestedVersion = requested[0] ?? "";
     const baseVersion = baseSegments[baseSegments.length - 1] ?? "";
     if (
-      profile.protocol === "gemini_generate_content"
+      wireProtocol === "gemini_generate_content"
       && requestedVersion.toLocaleLowerCase() === "v1beta"
       && /^(?:v1|v1beta)$/i.test(baseVersion)
     ) {
@@ -8722,12 +8890,14 @@ async function bootstrapHatchHistory(
 }
 
 function modelProviderBrand(profile: ProviderProfile): ModelProviderBrand {
+  if (profile.protocol === "opencode_go") return "opencode";
   return modelProviderBrandFromName(`${profile.name} ${profile.model} ${profile.baseUrl}`);
 }
 
 function modelProviderBrandFromName(value: string): ModelProviderBrand {
   const identity = value.toLocaleLowerCase();
   if (identity.includes("antigravity")) return "antigravity";
+  if (identity.includes("opencode")) return "opencode";
   if (/\b(grok|xai|x\.ai)\b/.test(identity)) return "grok";
   if (/\b(claude|anthropic)\b/.test(identity)) return "anthropic";
   if (/\b(gemini|google|generativelanguage)\b/.test(identity)) return "gemini";
@@ -8741,6 +8911,7 @@ function providerBrandLabel(brand: ModelProviderBrand) {
   if (brand === "gemini") return "Gemini";
   if (brand === "antigravity") return "Antigravity";
   if (brand === "grok") return "Grok / xAI";
+  if (brand === "opencode") return "OpenCode Go";
   return "LevelUpAgent";
 }
 

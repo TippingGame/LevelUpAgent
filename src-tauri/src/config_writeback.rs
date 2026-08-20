@@ -488,6 +488,19 @@ fn opencode_plans(
         ProviderProtocol::OpenaiChat => "@ai-sdk/openai-compatible",
         ProviderProtocol::AnthropicMessages => "@ai-sdk/anthropic",
         ProviderProtocol::GeminiGenerateContent => "@ai-sdk/google",
+        ProviderProtocol::OpencodeGo => {
+            match crate::agent::opencode_wire_protocol_for_model(&profile.model) {
+                ProviderProtocol::OpenaiResponses => "@ai-sdk/openai",
+                ProviderProtocol::OpenaiChat => "@ai-sdk/openai-compatible",
+                ProviderProtocol::AnthropicMessages => "@ai-sdk/anthropic",
+                _ => "@ai-sdk/openai-compatible",
+            }
+        }
+    };
+    let model = if matches!(profile.protocol, ProviderProtocol::OpencodeGo) {
+        crate::agent::normalize_opencode_model_id(&profile.model)
+    } else {
+        profile.model.trim().to_owned()
     };
     providers.insert(
         "levelup_agent".to_owned(),
@@ -499,7 +512,7 @@ fn opencode_plans(
                 "apiKey": api_key,
             },
             "models": {
-                profile.model.clone(): { "name": profile.model }
+                model.clone(): { "name": model }
             }
         }),
     );
@@ -516,7 +529,7 @@ fn opencode_plans(
                 ("npm", npm),
                 ("baseURL", &profile.base_url),
                 ("apiKey", "••••••••"),
-                ("model", &profile.model),
+                ("model", &model),
             ],
         ),
     }])
@@ -805,6 +818,39 @@ mod tests {
             std::fs::read_to_string(directory.join("opencode.json")).unwrap(),
             "{ custom: true, provider: {}, }\n"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn opencode_auto_writeback_uses_the_models_wire_sdk_package() {
+        let root =
+            std::env::temp_dir().join(format!("levelup-write-opencode-auto-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join(".config/opencode")).unwrap();
+        for (model, expected_model, expected_npm) in [
+            ("opencode-go/gpt-5.6-luna", "gpt-5.6-luna", "@ai-sdk/openai"),
+            ("grok-4.5", "grok-4.5", "@ai-sdk/openai"),
+            (
+                "muse-spark-1.2-contributor",
+                "muse-spark-1.2-contributor",
+                "@ai-sdk/openai",
+            ),
+            ("minimax-m3", "minimax-m3", "@ai-sdk/anthropic"),
+        ] {
+            let mut profile = profile(ProviderProtocol::OpencodeGo);
+            profile.model = model.to_owned();
+            let plans = opencode_plans(&root, &profile, "open-secret").unwrap();
+            let value: Value = serde_json::from_str(&plans[0].content).unwrap();
+            assert_eq!(
+                value["provider"]["levelup_agent"]["npm"], expected_npm,
+                "{model}"
+            );
+            assert!(
+                value["provider"]["levelup_agent"]["models"]
+                    .get(expected_model)
+                    .is_some(),
+                "{model}"
+            );
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 

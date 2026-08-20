@@ -190,7 +190,8 @@ test("Armor Mode UI, storage, and request wiring stay connected", () => {
   assert.match(armorStudioCss, /\.constellation-preview-download/);
   assert.match(armorStudioCss, /\.constellation-canvas-modal/);
   assert.match(bridge, /customInstructions\?: string/);
-  assert.match(bridge, /customInstructions }/);
+  assert.match(bridge, /reasoningEffort: ReasoningEffort = "auto"/);
+  assert.match(bridge, /customInstructions, reasoningEffort }/);
 
   const mediaStudio = readFileSync(new URL("../src/components/MediaStudio.tsx", import.meta.url), "utf8");
   const writingStudio = readFileSync(new URL("../src/components/WritingStudio.tsx", import.meta.url), "utf8");

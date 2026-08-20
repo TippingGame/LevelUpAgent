@@ -67,7 +67,11 @@ fn scan_opencode_live(home: &Path) -> Vec<ImportMaterial> {
                 .get("models")
                 .and_then(Value::as_object)
                 .and_then(|models| models.keys().next().cloned())?;
-            let protocol = if npm.contains("anthropic") {
+            let is_opencode_go = base_url.to_ascii_lowercase().contains("opencode.ai/zen/go")
+                || id.to_ascii_lowercase().contains("opencode-go");
+            let protocol = if is_opencode_go {
+                ProviderProtocol::OpencodeGo
+            } else if npm.contains("anthropic") {
                 ProviderProtocol::AnthropicMessages
             } else if npm.contains("google") {
                 ProviderProtocol::GeminiGenerateContent
@@ -549,6 +553,51 @@ mod tests {
             item.candidate.protocol,
             ProviderProtocol::GeminiGenerateContent
         )));
+        let opencode_relay = candidates
+            .iter()
+            .find(|item| item.candidate.name == "OpenCode Relay")
+            .unwrap();
+        assert!(matches!(
+            opencode_relay.candidate.protocol,
+            ProviderProtocol::OpenaiChat
+        ));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn detects_official_opencode_go_auto_protocol() {
+        let root = std::env::temp_dir().join(format!(
+            "levelup-opencode-migration-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(root.join(".config/opencode")).unwrap();
+        std::fs::write(
+            root.join(".config/opencode/opencode.json"),
+            r#"{
+              provider: {
+                "opencode-go": {
+                  npm: "@ai-sdk/openai-compatible",
+                  name: "OpenCode Go",
+                  options: { baseURL: "https://opencode.ai/zen/go/v1", apiKey: "go-secret" },
+                  models: { "gpt-5.6-luna": { name: "GPT-5.6 Luna" } },
+                },
+              },
+            }"#,
+        )
+        .unwrap();
+
+        let candidates = scan_opencode_live(&root);
+        assert_eq!(candidates.len(), 1);
+        assert!(matches!(
+            candidates[0].candidate.protocol,
+            ProviderProtocol::OpencodeGo
+        ));
+        assert_eq!(candidates[0].candidate.model, "gpt-5.6-luna");
+        assert_eq!(
+            candidates[0].candidate.base_url,
+            "https://opencode.ai/zen/go/v1"
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }

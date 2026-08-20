@@ -8,6 +8,8 @@ pub enum ProviderProtocol {
     OpenaiChat,
     AnthropicMessages,
     GeminiGenerateContent,
+    /// OpenCode Go selects the wire endpoint from the model ID.
+    OpencodeGo,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -132,6 +134,10 @@ pub struct AgentTurnRequest {
     pub fallback_profiles: Vec<ProviderProfile>,
     #[serde(default)]
     pub custom_instructions: Option<String>,
+    /// Optional provider-native reasoning control. `auto` and unknown values
+    /// are treated as omitted by the adapter for backward compatibility.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
