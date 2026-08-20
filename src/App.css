@@ -918,6 +918,39 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .workspace-shell.armor-mode .composer textarea::placeholder { color: rgba(186,230,253,.52); }
 .workspace-shell.armor-mode .mode-switch { border-color: rgba(34,211,238,.16); background: rgba(15,23,42,.76); }
 .workspace-shell.armor-mode .mode-switch button.active { background: rgba(8,47,73,.9); color: #a3e635; box-shadow: inset 0 0 0 1px rgba(34,211,238,.18); }
+.workspace-shell.armor-mode .approval-bar {
+  border-color: rgba(34,211,238,.24);
+  background: linear-gradient(90deg, rgba(2,6,23,.94), rgba(8,47,73,.82), rgba(2,6,23,.94));
+  color: #dff8ff;
+  box-shadow: 0 0 24px rgba(34,211,238,.12), inset 0 0 0 1px rgba(163,230,53,.035);
+}
+.workspace-shell.armor-mode .approval-icon {
+  background: rgba(8,47,73,.78);
+  color: #67e8f9;
+  box-shadow: inset 0 0 0 1px rgba(34,211,238,.16), 0 0 14px rgba(34,211,238,.12);
+}
+.workspace-shell.armor-mode .approval-bar strong { color: #ecfeff; }
+.workspace-shell.armor-mode .approval-bar span { color: #9bd7e7; }
+.workspace-shell.armor-mode .approval-bar .secondary-button {
+  border-color: rgba(34,211,238,.2);
+  background: rgba(15,23,42,.76);
+  color: #bae6fd;
+}
+.workspace-shell.armor-mode .approval-bar .secondary-button:hover:not(:disabled) {
+  border-color: rgba(163,230,53,.42);
+  background: rgba(34,211,238,.12);
+  color: #ecfeff;
+}
+.workspace-shell.armor-mode .approval-bar .primary-button {
+  border-color: transparent;
+  background: linear-gradient(135deg, #0891b2, #65a30d);
+  color: #ecfeff;
+  box-shadow: 0 0 18px rgba(34,211,238,.16);
+}
+.workspace-shell.armor-mode .approval-bar .primary-button:hover:not(:disabled) {
+  background: linear-gradient(135deg, #0e7490, #4d7c0f);
+  box-shadow: 0 0 24px rgba(163,230,53,.2);
+}
 .workspace-shell.armor-mode .permission-button,
 .workspace-shell.armor-mode .armor-level-button,
 .workspace-shell.armor-mode .model-pill { border-color: rgba(34,211,238,.2); background: rgba(15,23,42,.76); color: #bae6fd; }
