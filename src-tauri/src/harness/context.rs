@@ -10,23 +10,28 @@ use serde::{Deserialize, Serialize};
 use super::types::{ContextBlock, ContextBudget, ContextSelection};
 use crate::models::AgentMessage;
 
-pub const LOCAL_COMPACTION_ALGORITHM_VERSION: &str = "local-checkpoint-v1";
+pub const LOCAL_COMPACTION_ALGORITHM_VERSION: &str = "local-checkpoint-v2";
 pub const LOCAL_CHECKPOINT_PREFIX: &str = "[LevelUpAgent local context checkpoint";
-pub const CONTEXT_WINDOW_TOKENS: u32 = 60_000;
+// This is an optimistic local ceiling, not a claim that every Provider model
+// has a 128k context window. The local manager should give capable models more
+// room and leave the final acceptance decision to the Provider. Historical
+// context is still bounded by the provider adapter and attachment limits.
+pub const CONTEXT_WINDOW_TOKENS: u32 = 128_000;
+pub const EMERGENCY_CONTEXT_WINDOW_TOKENS: u32 = 32_000;
 pub const RESERVE_OUTPUT_TOKENS: u32 = 8_192;
-pub const SAFETY_MARGIN_TOKENS: u32 = 2_048;
-pub const SOFT_COMPACTION_PERCENT: u32 = 72;
-pub const HARD_COMPACTION_PERCENT: u32 = 82;
-pub const TARGET_CONTEXT_PERCENT: u32 = 55;
-pub const RECENT_TURNS_TO_KEEP: usize = 6;
+pub const SAFETY_MARGIN_TOKENS: u32 = 4_096;
+pub const SOFT_COMPACTION_PERCENT: u32 = 80;
+pub const HARD_COMPACTION_PERCENT: u32 = 90;
+pub const TARGET_CONTEXT_PERCENT: u32 = 68;
+pub const RECENT_TURNS_TO_KEEP: usize = 8;
 pub const MIN_RECENT_TURNS: usize = 2;
-pub const HISTORICAL_USER_MAX_CHARS: usize = 64_000;
-pub const HISTORICAL_ASSISTANT_MAX_CHARS: usize = 32_000;
-pub const HISTORICAL_TOOL_RESULT_MAX_CHARS: usize = 12_000;
-pub const HISTORICAL_SKILL_RESULT_MAX_CHARS: usize = 48_000;
-pub const HISTORICAL_TOOL_ARGUMENTS_MAX_CHARS: usize = 8_000;
+pub const HISTORICAL_USER_MAX_CHARS: usize = 96_000;
+pub const HISTORICAL_ASSISTANT_MAX_CHARS: usize = 64_000;
+pub const HISTORICAL_TOOL_RESULT_MAX_CHARS: usize = 24_000;
+pub const HISTORICAL_SKILL_RESULT_MAX_CHARS: usize = 64_000;
+pub const HISTORICAL_TOOL_ARGUMENTS_MAX_CHARS: usize = 16_000;
 
-const CHECKPOINT_MAX_CHARS: usize = 28_000;
+const CHECKPOINT_MAX_CHARS: usize = 48_000;
 const ATTACHMENT_TOKEN_ALLOWANCE: u32 = 1_024;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -307,9 +312,7 @@ pub fn estimate_message_tokens(message: &AgentMessage) -> u32 {
     if let Some(call_id) = &message.tool_call_id {
         tokens = tokens.saturating_add(estimate_tokens(call_id, 4));
     }
-    tokens.saturating_add(
-        (message.attachments.len() as u32).saturating_mul(ATTACHMENT_TOKEN_ALLOWANCE),
-    )
+    tokens.saturating_add(estimate_attachment_tokens(message))
 }
 
 pub fn estimate_history_tokens(messages: &[AgentMessage]) -> u32 {
@@ -356,9 +359,40 @@ fn estimate_resend_message_tokens(message: &AgentMessage, is_current_user: bool)
     if let Some(call_id) = &message.tool_call_id {
         tokens = tokens.saturating_add(estimate_tokens(call_id, 4));
     }
-    tokens.saturating_add(
-        (message.attachments.len() as u32).saturating_mul(ATTACHMENT_TOKEN_ALLOWANCE),
-    )
+    tokens.saturating_add(estimate_attachment_tokens(message))
+}
+
+/// Estimate the content that the provider adapter will actually resend.
+///
+/// The previous implementation charged every attachment a flat 1,024-token
+/// allowance. That was safe for metadata-only historical references but badly
+/// underestimated an active image's base64 or an extracted document's text.
+/// Use the resolved payload when it is available and retain the flat allowance
+/// only for an unresolved attachment object.
+fn estimate_attachment_tokens(message: &AgentMessage) -> u32 {
+    message.attachments.iter().fold(0u32, |total, attachment| {
+        let name_tokens = estimate_tokens(&attachment.name, 4);
+        let mime_tokens = estimate_tokens(&attachment.mime_type, 4);
+        let payload_tokens = attachment
+            .data_base64
+            .as_deref()
+            .map(|value| estimate_tokens(value, 4))
+            .or_else(|| {
+                attachment
+                    .text_content
+                    .as_deref()
+                    .map(|value| estimate_tokens(value, 4))
+            })
+            .unwrap_or({
+                // Unresolved attachments are still represented by a small
+                // managed-reference block in the provider request.
+                ATTACHMENT_TOKEN_ALLOWANCE
+            });
+        total
+            .saturating_add(name_tokens)
+            .saturating_add(mime_tokens)
+            .saturating_add(payload_tokens)
+    })
 }
 
 fn bounded_token_estimate(
@@ -381,6 +415,27 @@ pub fn prepare_local_context(
     previous_checkpoint: Option<&LocalCheckpoint>,
     fixed_tokens: u32,
 ) -> Result<LocalContextPlan, String> {
+    prepare_local_context_with_window(
+        raw_history,
+        previous_checkpoint,
+        fixed_tokens,
+        CONTEXT_WINDOW_TOKENS,
+    )
+}
+
+/// Prepare the local context against an explicitly selected soft window.
+///
+/// The normal path uses [`CONTEXT_WINDOW_TOKENS`]. A smaller window is used
+/// only for the one-shot recovery path after a Provider explicitly reports a
+/// context-length error; it lets a smaller model recover older history without
+/// imposing that model's limit on every connection up front.
+pub fn prepare_local_context_with_window(
+    raw_history: &[AgentMessage],
+    previous_checkpoint: Option<&LocalCheckpoint>,
+    fixed_tokens: u32,
+    context_window_tokens: u32,
+) -> Result<LocalContextPlan, String> {
+    let context_window_tokens = context_window_tokens.max(1);
     let previous_checkpoint = previous_checkpoint
         .filter(|checkpoint| checkpoint_matches(checkpoint, raw_history))
         .cloned();
@@ -389,19 +444,8 @@ pub fn prepare_local_context(
         .map_or(0, |checkpoint| checkpoint.source_message_count);
     let active_messages = context_from_checkpoint(raw_history, previous_checkpoint.as_ref());
     let tokens_before = fixed_tokens.saturating_add(estimate_history_tokens(&active_messages));
-    let input_capacity = CONTEXT_WINDOW_TOKENS
-        .saturating_sub(RESERVE_OUTPUT_TOKENS.saturating_add(SAFETY_MARGIN_TOKENS));
-    let soft_threshold = percent_of(CONTEXT_WINDOW_TOKENS, SOFT_COMPACTION_PERCENT);
-    let hard_threshold = percent_of(CONTEXT_WINDOW_TOKENS, HARD_COMPACTION_PERCENT);
-
-    if let Some(current_user) = raw_history.iter().rfind(|message| message.role == "user") {
-        let required = fixed_tokens.saturating_add(estimate_message_tokens(current_user));
-        if required > input_capacity {
-            return Err(format!(
-                "CURRENT_INPUT_TOO_LARGE: the current user message needs about {required} input tokens, but the local request budget is {input_capacity}; the message was not truncated"
-            ));
-        }
-    }
+    let soft_threshold = percent_of(context_window_tokens, SOFT_COMPACTION_PERCENT);
+    let hard_threshold = percent_of(context_window_tokens, HARD_COMPACTION_PERCENT);
 
     let pressure = if tokens_before >= hard_threshold {
         Some(CompactionPressure::Hard)
@@ -429,7 +473,10 @@ pub fn prepare_local_context(
         CompactionPressure::Hard => RECENT_TURNS_TO_KEEP.min(turn_starts.len().saturating_sub(1)),
     };
     let max_keep = preferred_keep.max(MIN_RECENT_TURNS);
-    let target_tokens = percent_of(CONTEXT_WINDOW_TOKENS, TARGET_CONTEXT_PERCENT);
+    let target_tokens = percent_of(context_window_tokens, TARGET_CONTEXT_PERCENT).min(
+        context_window_tokens
+            .saturating_sub(RESERVE_OUTPUT_TOKENS.saturating_add(SAFETY_MARGIN_TOKENS)),
+    );
     let units = message_units(raw_history);
     let mut best: Option<(LocalCheckpoint, Vec<AgentMessage>, u32)> = None;
 
@@ -464,11 +511,6 @@ pub fn prepare_local_context(
     }
 
     let Some((checkpoint, messages, tokens_after)) = best else {
-        if tokens_before > input_capacity {
-            return Err(format!(
-                "LOCAL_CONTEXT_OVERFLOW: the two most recent conversation turns need about {tokens_before} input tokens, exceeding the local request budget of {input_capacity}"
-            ));
-        }
         return Ok(LocalContextPlan {
             messages: active_messages,
             checkpoint: previous_checkpoint,
@@ -482,11 +524,6 @@ pub fn prepare_local_context(
     };
 
     if tokens_after >= tokens_before {
-        if tokens_before > input_capacity {
-            return Err(format!(
-                "LOCAL_CONTEXT_OVERFLOW: local compaction cannot reduce the minimum request below its {tokens_before}-token estimate; the request budget is {input_capacity}"
-            ));
-        }
         return Ok(LocalContextPlan {
             messages: active_messages,
             checkpoint: previous_checkpoint,
@@ -498,11 +535,11 @@ pub fn prepare_local_context(
             source_message_count: base_source_count,
         });
     }
-    if tokens_after > input_capacity {
-        return Err(format!(
-            "LOCAL_CONTEXT_OVERFLOW: local compaction still needs about {tokens_after} input tokens, exceeding the request budget of {input_capacity}"
-        ));
-    }
+    // Best effort is intentional here. The local estimate is provider-neutral
+    // and may differ from the model's tokenizer or capability. Send the
+    // largest safe, protocol-valid context and let the Provider accept it or
+    // return a precise upstream limit error; do not block a user solely on our
+    // heuristic estimate.
     let source_message_count = checkpoint.source_message_count;
     Ok(LocalContextPlan {
         messages,
@@ -866,11 +903,11 @@ mod tests {
         for turn in 0..turns {
             messages.push(message(
                 "user",
-                format!("Goal {turn}: {}", "u".repeat(11_000)),
+                format!("Goal {turn}: {}", "u".repeat(26_000)),
             ));
             messages.push(message(
                 "assistant",
-                format!("Progress {turn}: {}", "a".repeat(11_000)),
+                format!("Progress {turn}: {}", "a".repeat(26_000)),
             ));
         }
         messages
@@ -970,16 +1007,28 @@ mod tests {
     }
 
     #[test]
+    fn emergency_window_recompacts_history_without_dropping_the_current_turn() {
+        let history = long_history(3);
+        let plan =
+            prepare_local_context_with_window(&history, None, 0, EMERGENCY_CONTEXT_WINDOW_TOKENS)
+                .unwrap();
+
+        assert!(plan.compacted);
+        assert!(plan.tokens_after < plan.tokens_before);
+        assert_eq!(plan.messages.last(), history.last());
+    }
+
+    #[test]
     fn chinese_history_reaches_the_compaction_threshold_without_ascii_underestimation() {
         let mut history = Vec::new();
         for turn in 0..8 {
             history.push(message(
                 "user",
-                format!("任务 {turn}：{}", "中".repeat(3_000)),
+                format!("任务 {turn}：{}", "中".repeat(7_000)),
             ));
             history.push(message(
                 "assistant",
-                format!("进展 {turn}：{}", "文".repeat(3_000)),
+                format!("进展 {turn}：{}", "文".repeat(7_000)),
             ));
         }
 
@@ -1097,16 +1146,34 @@ mod tests {
     }
 
     #[test]
-    fn oversized_current_input_fails_instead_of_being_truncated() {
+    fn oversized_current_input_is_sent_best_effort_instead_of_being_truncated() {
         let input_capacity =
             CONTEXT_WINDOW_TOKENS.saturating_sub(RESERVE_OUTPUT_TOKENS + SAFETY_MARGIN_TOKENS);
         let history = vec![message(
             "user",
             "x".repeat(input_capacity.saturating_mul(4).saturating_add(1) as usize),
         )];
-        let error = prepare_local_context(&history, None, 0).unwrap_err();
-        assert!(error.contains("CURRENT_INPUT_TOO_LARGE"));
-        assert!(error.contains("was not truncated"));
+        let plan = prepare_local_context(&history, None, 0).unwrap();
+        assert!(!plan.compacted);
+        assert_eq!(plan.messages, history);
+        assert!(plan.tokens_before > input_capacity);
+    }
+
+    #[test]
+    fn attachment_estimate_tracks_resolved_provider_payload() {
+        let mut image = message("user", "Inspect this image");
+        image.attachments.push(crate::models::ImageAttachment {
+            id: "image-1".to_owned(),
+            name: "large.png".to_owned(),
+            mime_type: "image/png".to_owned(),
+            size_bytes: 120_000,
+            kind: crate::models::AttachmentKind::Image,
+            data_base64: Some("a".repeat(120_000)),
+            text_content: None,
+        });
+
+        let estimated = estimate_message_tokens(&image);
+        assert!(estimated > ATTACHMENT_TOKEN_ALLOWANCE.saturating_mul(20));
     }
 
     #[test]

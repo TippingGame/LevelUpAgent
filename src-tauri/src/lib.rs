@@ -4181,6 +4181,10 @@ async fn harness_run_loop(
     let theme_generation = theme_generation_run(&history, request.workspace.as_deref())?;
     let mut round = 0usize;
     let mut theme_tool_violations = 0usize;
+    // The normal request is intentionally permissive. If a Provider returns
+    // an explicit context-length error, retry this operation once with a
+    // conservative window instead of failing the conversation immediately.
+    let mut context_retry_window = None;
     let mut hatch_status_requires_action =
         request.hatch && database.harness_hatch_status_requires_action(&operation_id)?;
     loop {
@@ -4273,14 +4277,17 @@ async fn harness_run_loop(
         enforce_hatch_tool_catalog(&mut turn_request);
 
         let source_history = turn_request.messages.clone();
+        let context_window_tokens =
+            context_retry_window.unwrap_or(crate::harness::context::CONTEXT_WINDOW_TOKENS);
         let context_plan_result = (|| {
             let mut fixed_tokens = agent::estimate_fixed_context_tokens(&turn_request);
             let mut final_plan = None;
             for _ in 0..4 {
-                let plan = crate::harness::context::prepare_local_context(
+                let plan = crate::harness::context::prepare_local_context_with_window(
                     &source_history,
                     active_checkpoint.as_ref(),
                     fixed_tokens,
+                    context_window_tokens,
                 )?;
                 turn_request.messages = plan.messages.clone();
                 let adjusted_fixed_tokens = agent::estimate_fixed_context_tokens(&turn_request);
@@ -4391,12 +4398,12 @@ async fn harness_run_loop(
         let message_tokens =
             crate::harness::context::estimate_history_tokens(&turn_request.messages);
         let raw_message_tokens = crate::harness::context::estimate_history_tokens(&source_history);
-        let input_capacity = crate::harness::context::CONTEXT_WINDOW_TOKENS.saturating_sub(
+        let input_capacity = context_window_tokens.saturating_sub(
             crate::harness::context::RESERVE_OUTPUT_TOKENS
                 .saturating_add(crate::harness::context::SAFETY_MARGIN_TOKENS),
         );
         let budget = serde_json::json!({
-            "contextWindow": crate::harness::context::CONTEXT_WINDOW_TOKENS,
+            "contextWindow": context_window_tokens,
             "reserveOutputTokens": crate::harness::context::RESERVE_OUTPUT_TOKENS,
             "safetyMarginTokens": crate::harness::context::SAFETY_MARGIN_TOKENS,
             "fixedTokens": context_plan.fixed_tokens,
@@ -4542,6 +4549,7 @@ async fn harness_run_loop(
         }
         match response {
             Ok(mut response) => {
+                context_retry_window = None;
                 let duplicate_skill_reads =
                     agent::deduplicate_skill_read_calls(&mut response.tool_calls);
                 if duplicate_skill_reads > 0 {
@@ -5068,7 +5076,45 @@ async fn harness_run_loop(
                 let steered = error == "REQUEST_STEER";
                 let cancelled = error.contains("REQUEST_CANCELLED");
                 database.finish_harness_provider_attempt(&attempt_id, None, Some(&error))?;
+                if !steered
+                    && !cancelled
+                    && context_retry_window.is_none()
+                    && is_context_limit_error(&error)
+                {
+                    context_retry_window =
+                        Some(crate::harness::context::EMERGENCY_CONTEXT_WINDOW_TOKENS);
+                    logging::write(
+                        "warn",
+                        "harness",
+                        "provider_context_limit_retry",
+                        serde_json::json!({
+                            "operationId": &operation_id,
+                            "threadId": &request.thread_id,
+                            "round": round,
+                            "nextContextWindow": crate::harness::context::EMERGENCY_CONTEXT_WINDOW_TOKENS,
+                            "error": logging::safe_error(&error),
+                        }),
+                    );
+                    let payload = serde_json::json!({
+                        "round": round,
+                        "reason": "provider_context_limit",
+                        "nextContextWindow": crate::harness::context::EMERGENCY_CONTEXT_WINDOW_TOKENS,
+                    });
+                    let sequence = database.append_harness_event(
+                        &operation_id,
+                        "context_retry_scheduled",
+                        &payload,
+                    )?;
+                    let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+                        &operation_id,
+                        sequence,
+                        "context_retry_scheduled",
+                        payload,
+                    ));
+                    continue;
+                }
                 if steered {
+                    context_retry_window = None;
                     logging::write(
                         "info",
                         "harness",
@@ -5136,6 +5182,39 @@ async fn harness_run_loop(
             }
         }
     }
+}
+
+fn is_context_limit_error(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    let has_context_marker = [
+        "context",
+        "prompt",
+        "input",
+        "token",
+        "上下文",
+        "提示词",
+        "令牌",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker));
+    let has_limit_marker = [
+        "too long",
+        "too large",
+        "too many",
+        "exceed",
+        "maximum",
+        "limit",
+        "length",
+        "超出",
+        "超过",
+        "过长",
+        "过大",
+        "限制",
+        "长度",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker));
+    has_context_marker && has_limit_marker
 }
 
 #[tauri::command]
@@ -7734,6 +7813,20 @@ mod tests {
             priority,
             failover_enabled,
         }
+    }
+
+    #[test]
+    fn context_limit_detection_is_conservative_and_localized() {
+        assert!(is_context_limit_error(
+            "Provider returned 400 Bad Request: maximum context length is 128000 tokens"
+        ));
+        assert!(is_context_limit_error("上下文长度超过模型限制"));
+        assert!(!is_context_limit_error(
+            "Provider returned 400 Bad Request: this model does not support tools"
+        ));
+        assert!(!is_context_limit_error(
+            "Provider returned 413 Request Too Large"
+        ));
     }
 
     #[test]

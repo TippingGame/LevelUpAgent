@@ -12,7 +12,7 @@
     <a href="https://levelup.mom/">LevelUpAPI</a>
   </p>
   <p>
-    <img alt="Version" src="https://img.shields.io/badge/version-1.0.28-ff5a4f?style=flat-square" />
+    <img alt="Version" src="https://img.shields.io/badge/version-1.0.29-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-preview-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -45,7 +45,7 @@ Read the [Creative Studio capability audit](docs/CREATIVE_STUDIO_AUDIT.md) for t
 
 ### Install
 
-Download the package for your platform from GitHub **Releases**. The current `1.0.28` Windows x64 installers are built by GitHub Actions and signed with the Tauri updater key; they are not Authenticode-signed, so SmartScreen may show an unknown-publisher warning.
+Download the package for your platform from GitHub **Releases**. The current `1.0.29` Windows x64 installers are built by GitHub Actions and signed with the Tauri updater key; they are not Authenticode-signed, so SmartScreen may show an unknown-publisher warning.
 
 | Platform | Package | Status |
 | --- | --- | --- |
@@ -154,7 +154,7 @@ Use `pnpm build:macos` for macOS packages. Signed public updates additionally re
 
 ## Current status
 
-`1.0.28` is the current release milestone. Desktop chat, pet chat, theme generation, and Yaoguang Canying hatching use the persistent Durable Harness. Restoring a historical conversation creates a fresh operation/snapshot instead of reusing an expired operation, and approvals, Goal usage, and hatching run-directory state survive restarts. Theme generation now supports a dedicated temporary conversation, real reference-image attachments, and an optional conversation background; the standard layout also supports draggable, responsive left and right sidebars. The legacy desktop React recursive execution path has been removed; hatching commands remain constrained by package-local scripts, provenance checks, and duplicate-run circuit breakers. Windows installers use Tauri updater signatures but are not Authenticode-signed, so SmartScreen may show an unknown-publisher warning. When filing an issue, include reproduction steps, application logs, and platform details.
+`1.0.29` is the current release milestone. Context management now uses a more permissive 128K local optimistic window, keeps more recent turns by default, and estimates image/document load from the actual attachment payload. Local heuristics no longer block a current message outright; if a Provider explicitly rejects the context as too large, LevelUpAgent retries once with emergency compaction. Desktop chat, pet chat, theme generation, and Yaoguang Canying hatching use the persistent Durable Harness. Restoring a historical conversation creates a fresh operation/snapshot instead of reusing an expired operation, and approvals, Goal usage, and hatching run-directory state survive restarts. Theme generation now supports a dedicated temporary conversation, real reference-image attachments, and an optional conversation background; the standard layout also supports draggable, responsive left and right sidebars. The legacy desktop React recursive execution path has been removed; hatching commands remain constrained by package-local scripts, provenance checks, and duplicate-run circuit breakers. Windows installers use Tauri updater signatures but are not Authenticode-signed, so SmartScreen may show an unknown-publisher warning. When filing an issue, include reproduction steps, application logs, and platform details.
 
 ## License
 

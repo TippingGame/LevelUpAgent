@@ -15,8 +15,11 @@ use crate::models::{
 
 const SYSTEM_PROMPT: &str = "You are LevelUpAgent, a precise local development agent. Do not force any fixed greeting or persona slogan; keep conversation clean and answer the user's actual request. Work only inside the selected workspace. Inspect before editing, keep changes focused, explain consequential decisions, and never claim a tool action succeeded until its result is returned. Use tools whenever local evidence is needed. For existing text/code files, prefer edit_file with a small exact old_string/new_string change; it preserves the file's detected encoding, BOM, and line endings. If a legacy file is ambiguous, including a pure-ASCII file in a project known to use a legacy code page, pass its explicit encoding (utf-8, utf-16le, utf-16be, gbk/gb2312, gb18030, big5, shift-jis, or windows-1252). Use write_file for new files or deliberate full replacements only, and do not use shell commands to rewrite text files when a file tool can do the job.";
 
-const CONTEXT_MAX_CHARS: usize = 240_000;
-const CONTEXT_MAX_MESSAGES: usize = 160;
+// Keep the provider adapter aligned with the Harness' optimistic 128k local
+// ceiling. A Provider may still reject a request for its own smaller model
+// window; the adapter must not impose the old 60k-token ceiling first.
+const CONTEXT_MAX_CHARS: usize = 480_000;
+const CONTEXT_MAX_MESSAGES: usize = 240;
 const USER_MESSAGE_MAX_CHARS: usize = crate::harness::context::HISTORICAL_USER_MAX_CHARS;
 const ASSISTANT_MESSAGE_MAX_CHARS: usize = crate::harness::context::HISTORICAL_ASSISTANT_MAX_CHARS;
 const TOOL_RESULT_MAX_CHARS: usize = crate::harness::context::HISTORICAL_TOOL_RESULT_MAX_CHARS;
@@ -3882,7 +3885,7 @@ mod tests {
             messages.extend(tool_exchange(
                 &format!("call-{index}"),
                 json!({ "path": format!("src/file-{index}.rs") }),
-                format!("RESULT-{index}:{}", "x".repeat(20_000)),
+                format!("RESULT-{index}:{}", "x".repeat(40_000)),
             ));
         }
         messages.push(plain_message(
@@ -4008,7 +4011,7 @@ mod tests {
             assert!(encoded.contains("_levelup_context_omission"));
             assert!(encoded.contains("Context Window Notice"));
             assert!(!encoded.contains(&"a".repeat(10_000)));
-            assert!(!encoded.contains(&"r".repeat(15_000)));
+            assert!(!encoded.contains(&"r".repeat(25_000)));
         }
         assert_eq!(
             bodies[0].pointer("/messages/2/tool_calls/0/type"),
