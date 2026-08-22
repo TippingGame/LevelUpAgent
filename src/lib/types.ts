@@ -238,6 +238,7 @@ export interface ConversationChangeSet {
   startedAt: number;
   completedAt: number;
   files: ConversationFileChange[];
+  snapshotTruncated?: boolean;
 }
 
 export interface GitWorkspaceFileSnapshot {
@@ -255,6 +256,20 @@ export interface GitWorkspaceSnapshot {
   isAvailable: boolean;
   isRepository: boolean;
   files: GitWorkspaceFileSnapshot[];
+}
+
+export interface WorkspaceFileSnapshot {
+  path: string;
+  fingerprint: string;
+  content?: string;
+  contentTruncated: boolean;
+  binary: boolean;
+}
+
+export interface WorkspaceSnapshot {
+  isAvailable: boolean;
+  files: WorkspaceFileSnapshot[];
+  truncated: boolean;
 }
 
 export interface ImageAttachment {

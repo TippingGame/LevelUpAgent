@@ -23,6 +23,7 @@ mod text_encoding;
 mod theme;
 mod tools;
 mod web;
+mod workspace;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -44,7 +45,7 @@ use models::{
     ProviderModelCatalog, ProviderModelInfo, ProviderProfile, ProviderRequestLog, ProviderSettings,
     SkillCreateRequest, SkillDeleteRequest, SkillInfo, SkillInstallRequest, SkillInstallResult,
     SkillLocation, SkillMutationResult, SkillUpdateRequest, StoredThread, ToolCall,
-    ToolExecutionRequest, ToolExecutionResponse, WritingProjectRecord,
+    ToolExecutionRequest, ToolExecutionResponse, WorkspaceSnapshot, WritingProjectRecord,
 };
 use reqwest::Client;
 use serde::Deserialize;
@@ -8643,6 +8644,11 @@ async fn get_git_workspace_snapshot(workspace: String) -> Result<GitWorkspaceSna
 }
 
 #[tauri::command]
+async fn get_workspace_snapshot(workspace: String) -> Result<WorkspaceSnapshot, String> {
+    workspace::snapshot(&workspace).await
+}
+
+#[tauri::command]
 async fn get_git_diff(workspace: String, path: String, staged: bool) -> Result<GitDiff, String> {
     git::diff(&workspace, &path, staged).await
 }
@@ -9101,6 +9107,7 @@ pub fn run() {
             import_external_config,
             get_git_status,
             get_git_workspace_snapshot,
+            get_workspace_snapshot,
             get_git_diff,
             preview_git_rollback,
             apply_git_rollback,

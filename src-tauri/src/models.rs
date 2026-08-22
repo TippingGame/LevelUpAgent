@@ -820,6 +820,30 @@ pub struct GitWorkspaceSnapshot {
     pub files: Vec<GitWorkspaceFileSnapshot>,
 }
 
+/// A content-only workspace snapshot used to report files changed during one
+/// Agent operation.  It deliberately has no version-control fields so the
+/// turn review remains useful in a plain folder or when Git is unavailable.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceFileSnapshot {
+    pub path: String,
+    pub fingerprint: String,
+    pub content: Option<String>,
+    pub content_truncated: bool,
+    pub binary: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSnapshot {
+    pub is_available: bool,
+    pub files: Vec<WorkspaceFileSnapshot>,
+    /// True when the bounded scanner could not inspect the complete folder.
+    /// Consumers can still display the observed changes, but should avoid
+    /// claiming that the list is exhaustive.
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitDiff {

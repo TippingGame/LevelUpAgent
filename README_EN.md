@@ -25,7 +25,7 @@
 
 ### Agent workbench
 
-Keep project files, references, commands, MCP, Skills, Git review, and long-running goals in one traceable conversation. Every side-effecting action stays behind an explicit permission boundary.
+Keep project files, references, commands, MCP, Skills, local turn-change review, optional Git review, and long-running goals in one traceable conversation. Every side-effecting action stays behind an explicit permission boundary.
 
 ### Creative Studio
 
@@ -73,7 +73,7 @@ LevelUpAgent supports LevelUpAPI plus OpenAI Responses, Chat Completions, Anthro
 
 | Entry | Best for | Core capabilities |
 | --- | --- | --- |
-| Agent workbench | “Finish a task that needs files, tools, and judgment.” | Project context, approvals, MCP, Skills, Goals, Git review |
+| Agent workbench | “Finish a task that needs files, tools, and judgment.” | Project context, approvals, MCP, Skills, Goals, turn-change review, optional Git review |
 | Creative Studio | “Generate, edit, and manage media quickly.” | Image/video/speech, references, parallel prompts, history, preview |
 | Constellation blueprints | “Connect steps and reuse them later.” | Typed ports, DAG execution, box select, batch move, auto-layout, import/export |
 | Writing workspace | “Keep a book, screenplay, or narrative project moving.” | Codex, reference library, Goal mode, snapshots, Yarn export |

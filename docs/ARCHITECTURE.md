@@ -16,6 +16,7 @@ Rust host |-- OS credential vault
           |     |-- Anthropic Messages
           |     `-- Gemini GenerateContent
           |-- workspace guard
+          |-- Git-independent per-operation workspace snapshots
           |-- local tools
           |     |-- list/read/search (encoding-aware text boundary)
           |     |-- edit file (exact replacement, format-preserving)
@@ -162,6 +163,18 @@ canonicalize 后必须以工作区 canonical path 开头；新文件则验证最
 
 该边界防止模型通过 `../` 或符号链接逃出用户选定项目。命令执行仍具备完整 shell 能力，
 因此必须由用户逐轮批准；后续版本会加入持久化规则和 sandbox profile。
+
+## 本轮变更与 Git 边界
+
+会话消息里的“本轮变更”不依赖 Git。每个有工作区的 operation 在开始和结束时调用
+`get_workspace_snapshot`，由 Rust 的 `workspace` 模块扫描选定目录中的普通文件，排除 `.git`、
+依赖和常见构建目录，按文件字节生成指纹，并在预算内保留可解码正文。前端对两个快照做确定性
+before/after 对比，因此新增、修改和删除在普通文件夹、没有 Git 的机器上也能显示；正文无法解码、
+过大或超出扫描上限的文件仍会列出，但只提示“无可显示 diff”。
+对比和 diff 预算集中在 `src/lib/workspaceChanges.ts`，不与聊天组件或 Git API 互相耦合。
+
+Git 仍是独立的可选能力：右侧项目状态、仓库 diff、带确认令牌的回滚，以及 detached worktree
+子 Agent 需要 Git 的提交/索引语义。它们不会阻塞聊天、文件工具或本轮变更审查。
 
 ## 密钥边界
 

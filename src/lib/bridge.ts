@@ -13,6 +13,7 @@ import type {
   ExternalConfigTarget,
   GitDiff,
   GitWorkspaceSnapshot,
+  WorkspaceSnapshot,
   GitRollbackPreview,
   GitRollbackResult,
   GitStatus,
@@ -1217,6 +1218,13 @@ export async function getGitWorkspaceSnapshot(workspace: string): Promise<GitWor
     return { isAvailable: false, isRepository: false, files: [] };
   }
   return invoke<GitWorkspaceSnapshot>("get_git_workspace_snapshot", { workspace });
+}
+
+export async function getWorkspaceSnapshot(workspace: string): Promise<WorkspaceSnapshot> {
+  if (!isDesktop()) {
+    return { isAvailable: false, files: [], truncated: false };
+  }
+  return invoke<WorkspaceSnapshot>("get_workspace_snapshot", { workspace });
 }
 
 export async function getGitDiff(

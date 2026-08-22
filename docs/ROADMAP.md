@@ -22,6 +22,7 @@
 - [x] LevelUpAPI 用量、余额和请求 ID 诊断
 - [x] request-id 消息关联
 - [x] Git 状态与 diff 审查
+- [x] 不依赖 Git 的本轮文件变更快照与 diff 审查
 - [x] Git 变更回滚（完整预览、一次性令牌、快照复核）
 - [x] 文件附件和上下文选择（图片、UTF-8 文本/代码、PDF 与 Office）
 - [x] Windows Tauri 签名更新运行时与发布凭据门禁

@@ -95,7 +95,7 @@ import {
   fetchModels,
   getGitDiff,
   getGitStatus,
-  getGitWorkspaceSnapshot,
+  getWorkspaceSnapshot,
   getGoal,
   getDefaultWorkspace,
   getGatewayDiagnostics,
@@ -218,6 +218,7 @@ import {
 import { getAppLocale, setAppLocale, tr, type AppLocale } from "./lib/i18n";
 import { executeCallsWithParallelMedia } from "./lib/mediaConcurrency";
 import { isConversationNearBottom, shouldFollowConversationUpdate } from "./lib/conversationScroll";
+import { compareWorkspaceSnapshots } from "./lib/workspaceChanges";
 import {
   appendAssistantDelta,
   finalizeAssistantMessage,
@@ -286,7 +287,7 @@ import type {
   GitFileChange,
   GitRollbackPreview,
   GitStatus,
-  GitWorkspaceSnapshot,
+  WorkspaceSnapshot,
   GoalState,
   GatewayDiagnostics,
   HatchEnvironment,
@@ -567,136 +568,10 @@ interface WorkspaceRunBaseline {
   threadId: string;
   workspace: string;
   startedAt: number;
-  snapshot: GitWorkspaceSnapshot;
+  snapshot: WorkspaceSnapshot;
 }
 
 type InspectorTab = "details" | "changes";
-
-function conversationChangeKind(
-  indexStatus: string,
-  worktreeStatus: string,
-  fallback?: ConversationFileChange["kind"],
-): ConversationFileChange["kind"] {
-  const status = `${indexStatus}${worktreeStatus}`;
-  if (status.includes("R")) return "renamed";
-  if (status.includes("D")) return "deleted";
-  if (status.includes("A") || status.includes("?")) return "added";
-  return fallback ?? "modified";
-}
-
-const MAX_TURN_DIFF_LINES = 4_000;
-const MAX_TURN_DIFF_CHARS = 512 * 1024;
-const MAX_CHANGE_SET_DIFF_CHARS = 2 * 1024 * 1024;
-
-function buildTurnDiff(before: string | null, after: string | null, path: string) {
-  const beforeLines = before == null ? [] : before.split("\n");
-  const afterLines = after == null ? [] : after.split("\n");
-  let prefix = 0;
-  while (prefix < beforeLines.length && prefix < afterLines.length && beforeLines[prefix] === afterLines[prefix]) prefix += 1;
-  let suffix = 0;
-  while (
-    suffix < beforeLines.length - prefix
-    && suffix < afterLines.length - prefix
-    && beforeLines[beforeLines.length - 1 - suffix] === afterLines[afterLines.length - 1 - suffix]
-  ) suffix += 1;
-  const context = 3;
-  const oldStart = Math.max(0, prefix - context);
-  const newStart = Math.max(0, prefix - context);
-  const oldChangeEnd = beforeLines.length - suffix;
-  const newChangeEnd = afterLines.length - suffix;
-  const oldEnd = Math.min(beforeLines.length, oldChangeEnd + context);
-  const newEnd = Math.min(afterLines.length, newChangeEnd + context);
-  const lines = [
-    `--- ${before == null ? "/dev/null" : `a/${path}`}`,
-    `+++ ${after == null ? "/dev/null" : `b/${path}`}`,
-    `@@ -${oldStart + 1},${oldEnd - oldStart} +${newStart + 1},${newEnd - newStart} @@`,
-    ...beforeLines.slice(oldStart, prefix).map((line) => ` ${line}`),
-    ...beforeLines.slice(prefix, oldChangeEnd).map((line) => `-${line}`),
-    ...afterLines.slice(prefix, newChangeEnd).map((line) => `+${line}`),
-    ...afterLines.slice(newChangeEnd, newEnd).map((line) => ` ${line}`),
-  ];
-  const additions = Math.max(0, newChangeEnd - prefix);
-  const deletions = Math.max(0, oldChangeEnd - prefix);
-  const truncated = lines.length > MAX_TURN_DIFF_LINES || lines.join("\n").length > MAX_TURN_DIFF_CHARS;
-  return {
-    content: lines.slice(0, MAX_TURN_DIFF_LINES).join("\n").slice(0, MAX_TURN_DIFF_CHARS),
-    additions,
-    deletions,
-    truncated,
-  };
-}
-
-function compareWorkspaceSnapshots(
-  before: GitWorkspaceSnapshot,
-  after: GitWorkspaceSnapshot,
-): ConversationFileChange[] {
-  if (!before.isRepository || !after.isRepository) return [];
-  const beforeFiles = new Map(before.files.map((file) => [file.path, file]));
-  const afterFiles = new Map(after.files.map((file) => [file.path, file]));
-  const paths = new Set([...beforeFiles.keys(), ...afterFiles.keys()]);
-  const changes: ConversationFileChange[] = [];
-  for (const path of paths) {
-    const previous = beforeFiles.get(path);
-    const current = afterFiles.get(path);
-    if (previous?.fingerprint === current?.fingerprint) continue;
-    if (!current) {
-      const wasUntracked = `${previous?.indexStatus}${previous?.worktreeStatus}`.includes("?");
-      const turnDiff = wasUntracked && previous?.content != null
-        ? buildTurnDiff(previous.content, null, path)
-        : null;
-      changes.push({
-        path,
-        kind: wasUntracked ? "deleted" : "modified",
-        indexStatus: " ",
-        worktreeStatus: " ",
-        additions: turnDiff?.additions,
-        deletions: turnDiff?.deletions,
-        diffAvailable: Boolean(turnDiff),
-        turnDiff: turnDiff?.content,
-        turnDiffTruncated: turnDiff?.truncated,
-      });
-      continue;
-    }
-    const kind = conversationChangeKind(current.indexStatus, current.worktreeStatus);
-    const turnDiff = previous?.content != null && current.content != null
-      ? buildTurnDiff(previous.content, current.content, path)
-      : previous?.content != null && kind === "deleted"
-        ? buildTurnDiff(previous.content, null, path)
-        : !previous && current.content != null && current.baseContent != null
-          ? buildTurnDiff(current.baseContent, current.content, path)
-          : !previous && kind === "added" && current.content != null
-            ? buildTurnDiff(null, current.content, path)
-            : null;
-    changes.push({
-      path,
-      kind,
-      indexStatus: current.indexStatus,
-      worktreeStatus: current.worktreeStatus,
-      additions: turnDiff?.additions,
-      deletions: turnDiff?.deletions,
-      diffAvailable: Boolean(turnDiff) || current.indexStatus !== " " || current.worktreeStatus !== " ",
-      turnDiff: turnDiff?.content,
-      turnDiffTruncated: turnDiff?.truncated,
-    });
-  }
-  const sorted = changes.sort((left, right) => left.path.localeCompare(right.path));
-  let remainingDiffChars = MAX_CHANGE_SET_DIFF_CHARS;
-  for (const change of sorted) {
-    if (!change.turnDiff) continue;
-    if (remainingDiffChars <= 0) {
-      change.turnDiff = undefined;
-      change.turnDiffTruncated = true;
-      change.diffAvailable = change.indexStatus !== " " || change.worktreeStatus !== " ";
-      continue;
-    }
-    if (change.turnDiff.length > remainingDiffChars) {
-      change.turnDiff = change.turnDiff.slice(0, remainingDiffChars);
-      change.turnDiffTruncated = true;
-    }
-    remainingDiffChars -= change.turnDiff.length;
-  }
-  return sorted;
-}
 
 function terminalChangeStatus(state?: HarnessOperationState): ConversationChangeStatus | null {
   if (state === "completed" || state === "failed" || state === "cancelled" || state === "interrupted") return state;
@@ -2126,8 +2001,8 @@ function App() {
     const startedAt = Date.now();
     const pending = !workspace?.trim() || !isDesktop()
       ? Promise.resolve(null)
-      : getGitWorkspaceSnapshot(workspace)
-          .then((snapshot) => snapshot.isRepository
+      : getWorkspaceSnapshot(workspace)
+          .then((snapshot) => snapshot.isAvailable
             ? { threadId, workspace, startedAt, snapshot }
             : null)
           .catch(() => null);
@@ -2146,8 +2021,8 @@ function App() {
     if (!pending) return;
     const baseline = await pending;
     if (!baseline || baseline.threadId !== threadId) return;
-    const after = await getGitWorkspaceSnapshot(baseline.workspace).catch(() => null);
-    if (!after?.isRepository) return;
+    const after = await getWorkspaceSnapshot(baseline.workspace).catch(() => null);
+    if (!after?.isAvailable) return;
     const files = compareWorkspaceSnapshots(baseline.snapshot, after);
     const changeSet: ConversationChangeSet = {
       operationId,
@@ -2156,6 +2031,7 @@ function App() {
       startedAt: baseline.startedAt,
       completedAt,
       files,
+      snapshotTruncated: baseline.snapshot.truncated || after.truncated,
     };
     const current = threadsRef.current.find((thread) => thread.id === threadId);
     if (!current) return;
@@ -2179,12 +2055,8 @@ function App() {
         setInspectorTab("changes");
         setRightPanelOpen(true);
       }
-      setGitStatus((currentStatus) => ({
-        isAvailable: after.isAvailable,
-        isRepository: after.isRepository,
-        branch: currentStatus?.branch,
-        changes: after.files.map(({ path, indexStatus, worktreeStatus }) => ({ path, indexStatus, worktreeStatus })),
-      }));
+      // Git status is refreshed separately for the repository inspector.  A
+      // plain workspace's turn changes stay independent of that optional view.
     }
   };
 
@@ -2272,9 +2144,9 @@ function App() {
     if (harnessState === "completed" && thread) recordTaskCompletion(thread);
     const operationId = expectedOperationId ?? operationIdsRef.current.get(threadId);
     const changeStatus = terminalChangeStatus(harnessState);
-      if (operationId && changeStatus && thread && isDesktop()) {
-        void finalizeWorkspaceRunChanges(threadId, operationId, changeStatus, Date.now());
-      }
+    if (operationId && changeStatus && thread && isDesktop()) {
+      void finalizeWorkspaceRunChanges(threadId, operationId, changeStatus, Date.now());
+    }
     operationIdsRef.current.delete(threadId);
     runModesRef.current.delete(threadId);
     setThreadRunning(threadId, false);
@@ -5661,6 +5533,11 @@ function ChangeSetSummary({
               counts.deleted ? tr(`删除 ${counts.deleted}`, `${counts.deleted} deleted`) : "",
               counts.renamed ? tr(`重命名 ${counts.renamed}`, `${counts.renamed} renamed`) : "",
             ].filter(Boolean).join(" · ")}</small>
+        {changeSet.snapshotTruncated && (
+          <small className="change-set-summary-warning">
+            {tr("目录较大，仅显示已扫描范围", "Large folder; showing the scanned range only")}
+          </small>
+        )}
       </span>
       <span className="change-set-summary-action">{tr("在侧栏查看", "Review in side panel")}<ChevronRight size={14} /></span>
     </button>
@@ -6254,13 +6131,15 @@ function Inspector({
         <div className="detail-row" title={gitUnavailable ? tr("Git 是可选功能，不影响聊天、模型调用和文件操作", "Git is optional and does not affect chat, model calls, or file operations") : undefined}>
           <GitBranch size={14} />
           <span>{gitUnavailable
-            ? tr("未安装 Git（可选）", "Git not installed (optional)")
+            ? tr("本地工作区（Git 可选）", "Local workspace (Git optional)")
             : !gitStatus
               ? tr("正在检查版本控制", "Checking version control")
               : gitStatus.isRepository
                 ? gitStatus.branch ?? tr("Git 仓库", "Git repository")
-                : tr("未启用版本控制", "Version control not enabled")}</span>
-          <small>{gitUnavailable ? tr("正常可用", "Agent ready") : gitStatus?.isRepository ? "Git" : tr("本地", "Local")}</small>
+                : tr("本地工作区", "Local workspace")}</span>
+          <small>{gitUnavailable || !gitStatus?.isRepository
+            ? tr("本轮变更可用", "Turn review available")
+            : "Git"}</small>
         </div>
       </section>
       {gitStatus?.isRepository && (
@@ -6384,6 +6263,7 @@ function ChangeInspectorPanel({
       <div className="change-review-summary">
         <strong>{changeSet.files.length} {tr("个文件", "files")}</strong>
         <span>{changeSetStatusLabel(changeSet.status)} · {formatTime(changeSet.completedAt)}</span>
+        {changeSet.snapshotTruncated && <span className="change-review-warning"><CircleAlert size={13} />{tr("目录较大，本轮结果仅覆盖已扫描范围", "Large folder; this turn covers the scanned range only")}</span>}
       </div>
       {changeSet.files.length === 0 ? (
         <div className="change-review-empty">
