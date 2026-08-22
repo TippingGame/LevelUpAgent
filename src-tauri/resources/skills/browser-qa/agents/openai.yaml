@@ -1,0 +1,3 @@
+display_name: Browser QA
+short_description: Test local web apps in an isolated browser
+default_prompt: Run the app, exercise its main workflow in the isolated browser, and report visual and behavioral evidence.

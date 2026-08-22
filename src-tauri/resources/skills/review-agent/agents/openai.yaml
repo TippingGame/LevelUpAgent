@@ -1,0 +1,3 @@
+display_name: Review Agent
+short_description: Find concrete regressions in code changes
+default_prompt: Review the requested change read-only, inspect the full diff, and report actionable findings by severity.

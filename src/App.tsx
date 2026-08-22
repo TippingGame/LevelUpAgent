@@ -84,6 +84,7 @@ import {
   checkAppUpdate,
   checkAppUpdateOnStartup,
   changeGoalStatus,
+  createSkill,
   configurePetHatch,
   createGoal,
   deletePersistedThread,
@@ -122,9 +123,12 @@ import {
   importClipboardAttachments,
   importHatchedPets,
   installAppUpdate,
+  installSkill,
   isDesktop,
   deleteMcpServer,
+  deleteSkill,
   listMcpServers,
+  listSkillLocations,
   listProviderHealth,
   listProviderRequests,
   learnPetMemory,
@@ -139,6 +143,7 @@ import {
   resetProviderHealth,
   recordPetUsage,
   recordPetKnowledge,
+  readSkillContent,
   rollbackExternalConfigWrite,
   rollbackExternalPromptWrite,
   scanExternalConfigs,
@@ -150,6 +155,7 @@ import {
   startMcpServer,
   stopMcpServer,
   upsertMcpServer,
+  updateSkill,
   listThemes,
   loadTheme,
   loadThemeGenerationGuidance,
@@ -309,6 +315,7 @@ import type {
   ProviderProtocol,
   ReasoningEffort,
   SkillInfo,
+  SkillLocation,
   ToolCall,
   ThemeManifest,
   ThemeGenerationTarget,
@@ -7835,12 +7842,26 @@ function SkillsDialog({
   const [loading, setLoading] = useState(isDesktop());
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [locations, setLocations] = useState<SkillLocation[]>([]);
+  const [editorMode, setEditorMode] = useState<"create" | "edit" | null>(null);
+  const [editingSkill, setEditingSkill] = useState<SkillInfo | null>(null);
+  const [editorName, setEditorName] = useState("");
+  const [editorDescription, setEditorDescription] = useState("");
+  const [editorContent, setEditorContent] = useState("");
+  const [editorScope, setEditorScope] = useState(workspace ? "workspace" : "user");
+  const [installSource, setInstallSource] = useState("");
+  const [showLocations, setShowLocations] = useState(false);
 
   const refresh = async () => {
     setLoading(true);
     setError(null);
     try {
-      setSkills(await scanSkills(workspace));
+      const [nextSkills, nextLocations] = await Promise.all([
+        scanSkills(workspace),
+        listSkillLocations(workspace),
+      ]);
+      setSkills(nextSkills);
+      setLocations(nextLocations);
     } catch (reason) {
       setError(errorText(reason));
     } finally {
@@ -7851,6 +7872,87 @@ function SkillsDialog({
   useEffect(() => {
     void refresh();
   }, [workspace]);
+
+  const openCreate = () => {
+    setEditorMode("create");
+    setEditingSkill(null);
+    setEditorName("");
+    setEditorDescription("");
+    setEditorContent("# Instructions\n\nDescribe the repeatable workflow this Skill should follow.\n");
+    setEditorScope(workspace ? "workspace" : "user");
+    setError(null);
+  };
+
+  const openEdit = async (skill: SkillInfo) => {
+    setBusyId(skill.id);
+    setError(null);
+    try {
+      setEditorContent(await readSkillContent(skill.id, workspace));
+      setEditingSkill(skill);
+      setEditorMode("edit");
+      setEditorName(skill.name);
+      setEditorDescription(skill.description);
+    } catch (reason) {
+      setError(errorText(reason));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const saveEditor = async () => {
+    setBusyId(editingSkill?.id ?? "new-skill");
+    setError(null);
+    try {
+      if (editorMode === "create") {
+        await createSkill({
+          name: editorName,
+          description: editorDescription,
+          instructions: editorContent,
+          scope: editorScope,
+          workspace,
+        });
+      } else if (editingSkill) {
+        await updateSkill({ skillId: editingSkill.id, content: editorContent, workspace });
+      }
+      setEditorMode(null);
+      setEditingSkill(null);
+      await refresh();
+    } catch (reason) {
+      setError(errorText(reason));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const installFromSource = async () => {
+    const source = installSource.trim();
+    if (!source) return;
+    setBusyId("install");
+    setError(null);
+    try {
+      await installSkill({ source, scope: editorScope, workspace });
+      setInstallSource("");
+      await refresh();
+    } catch (reason) {
+      setError(errorText(reason));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const removeSkill = async (skill: SkillInfo) => {
+    if (!window.confirm(tr(`将 Skill “${skill.name}”移入可恢复回收区？`, `Move “${skill.name}” to recoverable Skill trash?`))) return;
+    setBusyId(skill.id);
+    setError(null);
+    try {
+      await deleteSkill({ skillId: skill.id, workspace });
+      await refresh();
+    } catch (reason) {
+      setError(errorText(reason));
+    } finally {
+      setBusyId(null);
+    }
+  };
 
   const toggle = async (skill: SkillInfo, enabled: boolean) => {
     setBusyId(skill.id);
@@ -7879,6 +7981,12 @@ function SkillsDialog({
         <div className="dialog-header">
           <div><strong>Skills</strong><span>{tr("发现、校验与按需加载", "Discover, validate, and load on demand")}</span></div>
           <div className="dialog-header-actions">
+            <IconButton label={tr("创建 Skill", "Create Skill")} onClick={openCreate} disabled={loading || Boolean(busyId)}>
+              <Plus size={16} />
+            </IconButton>
+            <IconButton label={tr("显示安装位置", "Show Skill locations")} onClick={() => setShowLocations((value) => !value)}>
+              <FolderOpen size={16} />
+            </IconButton>
             <IconButton label={tr("重新扫描 Skills", "Rescan Skills")} onClick={refresh} disabled={loading}>
               <RefreshCw size={16} className={loading ? "spin" : ""} />
             </IconButton>
@@ -7893,6 +8001,48 @@ function SkillsDialog({
           </div>
           <span>{workspace ? `${tr("包含", "Including")} ${shortPath(workspace)} ${tr("的工作区 Skills", "workspace Skills")}` : tr("全局 Skills", "Global Skills")}</span>
         </div>
+        {showLocations && (
+          <div className="skills-locations">
+            <div className="skills-location-heading"><strong>{tr("Skill 安装位置", "Skill locations")}</strong><span>{tr("内置目录只读；新 Skill 会写入下方可写根目录", "Bundled roots are read-only; new Skills use the writable roots below")}</span></div>
+            {locations.map((location) => (
+              <div className="skills-location-row" key={`${location.scope}:${location.path}`}>
+                <span><strong>{location.label}</strong><small>{location.writable ? tr("可写", "Writable") : tr("只读", "Read-only")} · {location.exists ? tr("已存在", "Present") : tr("将按需创建", "Created on demand")}</small></span>
+                <code title={location.path}>{location.path}</code>
+              </div>
+            ))}
+            <div className="skills-install-line">
+              <input value={installSource} onChange={(event) => setInstallSource(event.target.value)} placeholder={tr("本地目录、zip 或 GitHub HTTPS 地址", "Local directory, zip, or GitHub HTTPS URL")} />
+              <select value={editorScope} onChange={(event) => setEditorScope(event.target.value)} aria-label={tr("安装位置", "Install location")}>
+                <option value="workspace">{tr("当前工作区", "Workspace")}</option>
+                <option value="user">{tr("用户 .agents", "User .agents")}</option>
+                <option value="codex">{tr("用户 .codex", "User .codex")}</option>
+                <option value="claude">{tr("用户 .claude", "User .claude")}</option>
+                <option value="app">{tr("LevelUpAgent", "LevelUpAgent")}</option>
+              </select>
+              <button className="secondary-button" disabled={!installSource.trim() || busyId === "install"} onClick={() => void installFromSource()}><Download size={14} />{tr("安装", "Install")}</button>
+            </div>
+          </div>
+        )}
+        {editorMode && (
+          <div className="skills-editor">
+            <div className="skills-editor-heading"><strong>{editorMode === "create" ? tr("创建 Skill", "Create Skill") : tr("编辑 Skill", "Edit Skill")}</strong><button className="icon-button" onClick={() => setEditorMode(null)} aria-label={tr("取消编辑", "Cancel editing")}><X size={14} /></button></div>
+            {editorMode === "create" && (
+              <div className="skills-editor-meta">
+                <input value={editorName} onChange={(event) => setEditorName(event.target.value)} placeholder={tr("Skill 名称", "Skill name")} />
+                <input value={editorDescription} onChange={(event) => setEditorDescription(event.target.value)} placeholder={tr("何时使用这个 Skill", "When to use this Skill")} />
+                <select value={editorScope} onChange={(event) => setEditorScope(event.target.value)} aria-label={tr("创建位置", "Create location")}>
+                  <option value="workspace">{tr("当前工作区", "Workspace")}</option>
+                  <option value="user">{tr("用户 .agents", "User .agents")}</option>
+                  <option value="codex">{tr("用户 .codex", "User .codex")}</option>
+                  <option value="claude">{tr("用户 .claude", "User .claude")}</option>
+                  <option value="app">{tr("LevelUpAgent", "LevelUpAgent")}</option>
+                </select>
+              </div>
+            )}
+            <textarea value={editorContent} onChange={(event) => setEditorContent(event.target.value)} spellCheck={false} aria-label="SKILL.md" />
+            <div className="skills-editor-actions"><span>{editorMode === "create" ? tr("只需填写正文，系统会生成标准 YAML frontmatter", "Write the body; standard YAML frontmatter is generated") : tr("必须保留有效的 name 与 description frontmatter", "Keep valid name and description frontmatter")}</span><button className="primary-button" disabled={!editorContent.trim() || (editorMode === "create" && (!editorName.trim() || !editorDescription.trim())) || Boolean(busyId)} onClick={() => void saveEditor()}><Save size={14} />{tr("保存", "Save")}</button></div>
+          </div>
+        )}
         <div className="skills-list">
           {visible.map((skill) => (
             <div className={`skill-row ${!skill.valid ? "invalid" : ""}`} key={skill.id}>
@@ -7911,6 +8061,12 @@ function SkillsDialog({
                 />
                 <span>{skill.valid ? (skill.enabled ? tr("已启用", "Enabled") : tr("启用", "Enable")) : tr("无效", "Invalid")}</span>
               </label>
+              {skill.valid && skill.source !== "LevelUpAgent built-in" && skill.source !== "Codex system" && (
+                <div className="skill-row-actions">
+                  <IconButton label={tr("编辑 Skill", "Edit Skill")} onClick={() => void openEdit(skill)} disabled={busyId === skill.id}><Pencil size={14} /></IconButton>
+                  <IconButton label={tr("删除 Skill", "Delete Skill")} onClick={() => void removeSkill(skill)} disabled={busyId === skill.id}><Trash2 size={14} /></IconButton>
+                </div>
+              )}
             </div>
           ))}
           {!loading && visible.length === 0 && (
@@ -8014,6 +8170,7 @@ function McpDialog({ onClose }: { onClose: () => void }) {
   };
 
   const selectedSnapshot = servers.find((item) => item.server.id === draft.id);
+  const selectedTools = selectedSnapshot?.tools ?? [];
   const isPersisted = Boolean(selectedSnapshot);
 
   return (
@@ -8071,12 +8228,20 @@ function McpDialog({ onClose }: { onClose: () => void }) {
               <label className="field"><span>{tr("敏感", "Secret ")}{draft.transport === "stdio" ? tr("变量", "variables") : tr("请求头", "headers")} <small>{tr("存入系统凭据库", "Stored in OS credential vault")}</small></span><textarea value={draft.transport === "stdio" ? secretEnvironmentText : secretHeadersText} onChange={(event) => draft.transport === "stdio" ? setSecretEnvironmentText(event.target.value) : setSecretHeadersText(event.target.value)} placeholder={draft.transport === "stdio" ? "API_TOKEN=" : "Authorization=Bearer …"} autoComplete="off" /></label>
             </div>
             {selectedSnapshot?.lastError && <div className="dialog-error">{selectedSnapshot.lastError}</div>}
+            {selectedSnapshot?.instructions && <div className="mcp-instructions"><strong>{tr("服务器说明", "Server instructions")}</strong><span>{selectedSnapshot.instructions}</span></div>}
+            {selectedTools.length > 0 && (
+              <details className="mcp-tools-inspector">
+                <summary>{tr("已发现工具", "Discovered tools")} ({selectedTools.length})</summary>
+                <div>{selectedTools.map((tool) => <div className="mcp-tool-row" key={tool.exposedName}><span className={tool.readOnly ? "mcp-tool-read" : "mcp-tool-write"}>{tool.readOnly ? tr("只读", "read") : tr("写入", "write")}</span><code>{tool.name}</code><small>{tool.description}</small></div>)}</div>
+              </details>
+            )}
             {error && <div className="dialog-error">{error}</div>}
           </div>
         </div>
         <div className="mcp-footer">
           <div>
             {isPersisted && <button className="danger-text-button" disabled={busy} onClick={async () => {
+              if (!window.confirm(tr(`删除 MCP 服务器“${draft.name}”？其系统凭据也会从凭据库移除。`, `Delete MCP server “${draft.name}” and remove its stored credentials?`))) return;
               setBusy(true);
               try {
                 await deleteMcpServer(draft.id);
@@ -8203,7 +8368,8 @@ function toolIcon(call: ToolCall) {
   if (call.name === "check_media_jobs") return <RefreshCw size={15} />;
   if (call.name === "get_goal" || call.name === "update_goal") return <Flag size={15} />;
   if (call.name === "delegate_task" || call.name === "apply_subagent_patch") return <GitMerge size={15} />;
-  if (call.name === "read_skill") return <BookOpen size={15} />;
+  if (call.name === "read_skill" || call.name === "inspect_skill") return <BookOpen size={15} />;
+  if (call.name.endsWith("_process") || call.name === "process_output" || call.name === "list_processes") return <Command size={15} />;
   if (call.name.startsWith("mcp_")) return <Network size={15} />;
   if (call.name === "run_command") return <TerminalSquare size={15} />;
   if (call.name === "write_file") return <FileCode2 size={15} />;
@@ -8223,6 +8389,30 @@ function toolLabel(call: ToolCall) {
     delete_file: tr("删除文件", "Delete file"),
     run_command: tr("运行命令", "Run command"),
     read_skill: tr("读取 Skill", "Read Skill"),
+    scan_skills: tr("扫描 Skills", "Scan Skills"),
+    inspect_skill: tr("检查 Skill", "Inspect Skill"),
+    skill_locations: tr("查看 Skill 位置", "List Skill locations"),
+    create_skill: tr("创建 Skill", "Create Skill"),
+    update_skill: tr("更新 Skill", "Update Skill"),
+    install_skill: tr("安装 Skill", "Install Skill"),
+    delete_skill: tr("删除 Skill", "Delete Skill"),
+    web_search: tr("联网检索", "Web search"),
+    web_fetch: tr("读取网页", "Fetch web page"),
+    start_process: tr("启动后台进程", "Start background process"),
+    list_processes: tr("查看后台进程", "List background processes"),
+    process_output: tr("读取进程输出", "Read process output"),
+    stop_process: tr("停止后台进程", "Stop background process"),
+    browser_start: tr("启动浏览器沙箱", "Start browser sandbox"),
+    browser_snapshot: tr("检查页面快照", "Inspect page snapshot"),
+    browser_console: tr("读取浏览器控制台", "Read browser console"),
+    browser_screenshot: tr("捕获浏览器截图", "Capture browser screenshot"),
+    browser_navigate: tr("浏览器导航", "Browser navigation"),
+    browser_click: tr("浏览器点击", "Browser click"),
+    browser_type: tr("浏览器输入", "Browser type"),
+    browser_assert: tr("浏览器断言", "Browser assertion"),
+    browser_wait: tr("等待页面状态", "Wait for page"),
+    browser_set_viewport: tr("设置浏览器视口", "Set browser viewport"),
+    browser_close: tr("关闭浏览器沙箱", "Close browser sandbox"),
     get_goal: tr("读取 Goal", "Read Goal"),
     update_goal: tr("更新 Goal", "Update Goal"),
     generate_images: tr("生成图片", "Generate images"),
@@ -8953,7 +9143,7 @@ function permissionLabel(level: PermissionLevel) {
 function permissionDescription(level: PermissionLevel) {
   if (level === "request") return tr("编辑文件和运行命令时始终询问", "Always ask before editing files or running commands");
   if (level === "agent") return tr("仅对检测到的风险操作请求批准", "Ask only for operations detected as risky");
-  return tr("无需批准即可运行工具和访问您的电脑", "Run tools and access your computer without approval");
+  return tr("本地工具可访问绝对路径并自动运行；凭据和未知外部工具仍会保护", "Local tools may use absolute paths and run automatically; credentials and unknown external tools remain protected");
 }
 
 function permissionBehaviorLabel(level: PermissionLevel, mode: AgentMode) {

@@ -1,0 +1,3 @@
+display_name: Skill Installer
+short_description: Discover and safely install Skills
+default_prompt: Inspect a Skill source, install it into an explicit scope, and verify the result.

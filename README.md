@@ -12,7 +12,7 @@
     <a href="https://levelup.mom/">LevelUpAPI</a>
   </p>
   <p>
-    <img alt="Version" src="https://img.shields.io/badge/version-1.0.30-ff5a4f?style=flat-square" />
+    <img alt="Version" src="https://img.shields.io/badge/version-1.0.31-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-可用预览-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -45,7 +45,7 @@
 
 ### 安装
 
-从 GitHub Releases 下载对应平台的安装包。当前 `1.0.30` Windows x64 安装包由 GitHub Actions 构建并通过 Tauri updater 签名；未配置 Authenticode，Windows SmartScreen 可能提示“未知发布者”。
+从 GitHub Releases 下载对应平台的安装包。当前 `1.0.31` Windows x64 安装包由 GitHub Actions 构建并通过 Tauri updater 签名；未配置 Authenticode，Windows SmartScreen 可能提示“未知发布者”。
 
 | 平台 | 包格式 | 状态 |
 | --- | --- | --- |
@@ -144,6 +144,7 @@ macOS 安装包使用 `pnpm build:macos`。正式更新还需要仓库所有者�
 - [星图协议与交互](docs/CONSTELLATION.md)
 - [创作空间能力审计](docs/CREATIVE_STUDIO_AUDIT.md)
 - [架构与安全边界](docs/ARCHITECTURE.md)
+- [Skills、MCP、联网与浏览器工具](docs/SKILLS_AND_TOOLS.md)
 - [安全审计](docs/SECURITY_AUDIT.md)
 - [LevelUpAPI 兼容性证据](docs/LEVELUPAPI_COMPATIBILITY.md)
 - [功能路线图](docs/ROADMAP.md)
@@ -152,7 +153,7 @@ macOS 安装包使用 `pnpm build:macos`。正式更新还需要仓库所有者�
 
 ## 当前状态
 
-`1.0.30` 是当前发布里程碑。上下文管理改为更宽松的 128K 本地乐观窗口，默认保留更多近期轮次，并按实际附件内容估算图片与文档负载；本地不再因启发式预算直接阻断当前消息，Provider 明确返回上下文超限时会自动进行一次紧急压缩重试。桌面端普通聊天、宠物聊天、主题生成和“摇光残影”孵化统一使用持久化 Durable Harness；历史会话恢复时会创建新的 operation/snapshot，避免旧 operation 失效，并在重启后恢复审批、Goal 用量和孵化运行目录状态。主题生成支持独立临时会话、真实参考图附件和可选会话背景；标准布局的左右侧栏支持拖拽调整并在窄屏自适应。旧的桌面 React 递归执行链路已移除，孵化命令继续受到包内脚本、来源证明和重复执行熔断等最小权限约束。Windows 安装包使用 Tauri updater 签名但仍未配置 Authenticode，SmartScreen 可能提示“未知发布者”。提交 Issue 时请附上复现步骤、应用日志和平台信息。
+`1.0.31` 是当前发布里程碑。除原有 Agent、创作空间和星图蓝图外，桌面端现在支持会话内创建、编辑、安装和审查 Skills，连接并管理 MCP，执行受控联网检索，并通过隔离浏览器与开发进程完成应用自测。上下文管理改为更宽松的 128K 本地乐观窗口，默认保留更多近期轮次，并按实际附件内容估算图片与文档负载；本地不再因启发式预算直接阻断当前消息，Provider 明确返回上下文超限时会自动进行一次紧急压缩重试。Windows 安装包使用 Tauri updater 签名但仍未配置 Authenticode，SmartScreen 可能提示“未知发布者”。提交 Issue 时请附上复现步骤、应用日志和平台信息。
 
 ## 许可证
 

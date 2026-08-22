@@ -1,0 +1,3 @@
+display_name: Web Research
+short_description: Search and verify current external information
+default_prompt: Research the question with bounded web tools and cite the evidence.

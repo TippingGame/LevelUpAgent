@@ -46,7 +46,7 @@ Every owner message sent in an echo conversation is also kept as a bounded tempo
 
 ## XiaoLu companion rhythm
 
-The XiaoLu research checkout is pinned at `G:/Work/LevelUpAgent/.research/XiaoLu`, commit `73b361ecd3ced7e24835802cc30250afe381187c`. The detailed feature mapping is in [XIAOLU_MIGRATION.md](XIAOLU_MIGRATION.md).
+The XiaoLu research checkout is pinned at `G:/Work/LevelUpAgent/research/XiaoLu`, commit `73b361ecd3ced7e24835802cc30250afe381187c`. The detailed feature mapping is in [XIAOLU_MIGRATION.md](XIAOLU_MIGRATION.md).
 
 The migrated rhythm includes manual study timing, automatic goals, five check-ins, task-driven plans, daily settlement, history, bookmarks, login startup, and bounded patrols. The echo is intentionally silent: OS offline speech and its settings were removed. LevelUpAgent keeps its existing Tauri lifecycle and multi-model Agent architecture; XiaoLu's Electron shell, tray, installer, character audio, private character assets, and application-specific coupling are not copied. Unknown fields from pre-release state or archives are discarded when loaded and are not written into subsequent state or exports.
 

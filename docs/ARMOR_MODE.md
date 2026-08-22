@@ -20,12 +20,12 @@ LevelUpAgent 的一键破甲不是外部 MITM、响应篡改或二进制注入�
 
 已参考本地研究目录：
 
-- `G:\Work\LevelUpAgent\.research\gpt-5.6-instruct`
+- `G:\Work\LevelUpAgent\research\gpt-5.6-instruct`
   - HEAD：`77e7a649903f9556f2d7bfa0223fa99e123aad52`
-  - 清单：69 个仓库文件；另有解压后的 v45/historical prompt manifest 已落在 `.research`。
+  - 清单：69 个仓库文件；另有解压后的 v45/historical prompt manifest 已落在 `research`。
   - 吸收：版本化提示词、部署状态、回滚、SHA-256、回归测试、单次任务编译、证据门禁。
   - 不吸收：绕过平台审计或规避风控类表述。
-- `G:\Work\LevelUpAgent\.research\Super-Instruct-Codex-5.6`
+- `G:\Work\LevelUpAgent\research\Super-Instruct-Codex-5.6`
   - HEAD：`9d064401a19b93043449ca0cc60de7dcf95e7990`
   - 清单：148 个仓库文件。
   - 吸收：模块化 profile、监控状态、执行连续性、完成前自检、工具优先。
@@ -41,14 +41,14 @@ LevelUpAgent 的一键破甲不是外部 MITM、响应篡改或二进制注入�
 - 多目标适配：OpenAI/GPT、Claude、Gemini、Grok/xAI 在 `armorModeRunInstructions()` 里走 provider adapter。
 - 覆盖面：从主会话扩展到 WritingStudio、MediaStudio、ConstellationStudio。
 - 健康检查思路：通过 `scripts/test-armor-mode.mjs` 固定检测 UI、存储、请求注入、媒体增强和干净问候。
-- 2026-08 新增的外部来源与 SHA-256 记录：`G:\Work\LevelUpAgent\.research\armor_mode_external_sources_2026-08.md`。
+- 2026-08 新增的外部来源与 SHA-256 记录：`G:\Work\LevelUpAgent\research\armor_mode_external_sources_2026-08.md`。
 
 不吸收的东西：固定人格问候、外部 Codex Home 覆盖、MITM/响应替换、黑箱密文策略、不可回滚的外部配置改写。
 
 逐文件 SHA-256 与关键词证据索引：
 
-- `G:\Work\LevelUpAgent\.research\armor_mode_research_inventory.json`
-- `G:\Work\LevelUpAgent\.research\armor_mode_research_summary.md`
+- `G:\Work\LevelUpAgent\research\armor_mode_research_inventory.json`
+- `G:\Work\LevelUpAgent\research\armor_mode_research_summary.md`
 
 ## 等级矩阵
 

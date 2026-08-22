@@ -530,6 +530,17 @@ export interface McpServerSnapshot {
   status: "disabled" | "connected" | "error" | "stopped";
   toolCount: number;
   lastError?: string;
+  instructions?: string;
+  tools: McpToolSnapshot[];
+}
+
+export interface McpToolSnapshot {
+  name: string;
+  exposedName: string;
+  description: string;
+  readOnly: boolean;
+  destructive?: boolean;
+  openWorld?: boolean;
 }
 
 export interface SkillInfo {
@@ -541,6 +552,26 @@ export interface SkillInfo {
   enabled: boolean;
   valid: boolean;
   warning?: string;
+}
+
+export interface SkillLocation {
+  scope: "workspace" | "user" | "codex" | "claude" | "app" | string;
+  label: string;
+  path: string;
+  writable: boolean;
+  exists: boolean;
+}
+
+export interface SkillMutationResult {
+  skill: SkillInfo;
+  path: string;
+  created: boolean;
+  backupPath?: string;
+}
+
+export interface SkillInstallResult {
+  source: string;
+  skills: SkillInfo[];
 }
 
 export interface ModelInfo {

@@ -91,7 +91,7 @@
 
 ## 参考研究
 
-参考仓库只保存在工作区外层 `.research`，不会进入产品包：
+参考仓库只保存在工作区外层 `research`，不会进入产品包：
 
 - ComfyUI `6f7cd7fceaaf60d2669b554936394a7412c6fde5`
 - ComfyUI frontend `24d6c309d187fd5ef7af55cdfb7d970b06f013fc`

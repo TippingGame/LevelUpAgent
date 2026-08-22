@@ -1,0 +1,3 @@
+display_name: MCP Operator
+short_description: Connect and diagnose MCP servers safely
+default_prompt: Configure an MCP server, test its health, and explain its tool risk and status.

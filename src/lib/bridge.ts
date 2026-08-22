@@ -62,6 +62,9 @@ import type {
   ProviderRequestLog,
   ReasoningEffort,
   SkillInfo,
+  SkillInstallResult,
+  SkillLocation,
+  SkillMutationResult,
   ToolCall,
   ToolExecutionResponse,
   ThemeManifest,
@@ -1114,6 +1117,74 @@ export async function setSkillEnabled(
     skillId,
     enabled,
     workspace: workspace || null,
+  });
+}
+
+export async function readSkillContent(skillId: string, workspace?: string): Promise<string> {
+  return invoke<string>("read_skill_content", {
+    skillId,
+    workspace: workspace || null,
+  });
+}
+
+export async function listSkillLocations(workspace?: string): Promise<SkillLocation[]> {
+  if (!isDesktop()) return [];
+  return invoke<SkillLocation[]>("skill_locations", { workspace: workspace || null });
+}
+
+export async function createSkill(input: {
+  name: string;
+  description: string;
+  instructions: string;
+  scope?: string;
+  workspace?: string;
+  overwrite?: boolean;
+}): Promise<SkillMutationResult> {
+  return invoke<SkillMutationResult>("create_skill", {
+    request: {
+      name: input.name,
+      description: input.description,
+      instructions: input.instructions,
+      scope: input.scope || null,
+      workspace: input.workspace || null,
+      overwrite: input.overwrite ?? false,
+    },
+  });
+}
+
+export async function updateSkill(input: {
+  skillId: string;
+  content: string;
+  workspace?: string;
+}): Promise<SkillMutationResult> {
+  return invoke<SkillMutationResult>("update_skill", {
+    request: {
+      skillId: input.skillId,
+      content: input.content,
+      workspace: input.workspace || null,
+    },
+  });
+}
+
+export async function deleteSkill(input: { skillId: string; workspace?: string }): Promise<SkillMutationResult> {
+  return invoke<SkillMutationResult>("delete_skill", {
+    request: { skillId: input.skillId, workspace: input.workspace || null },
+  });
+}
+
+export async function installSkill(input: {
+  source: string;
+  scope?: string;
+  workspace?: string;
+  overwrite?: boolean;
+}): Promise<SkillInstallResult> {
+  return invoke<SkillInstallResult>("install_skill", {
+    request: {
+      source: input.source,
+      scope: input.scope || null,
+      workspace: input.workspace || null,
+      overwrite: input.overwrite ?? false,
+    },
   });
 }
 

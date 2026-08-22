@@ -1,0 +1,3 @@
+display_name: Skill Creator
+short_description: Author and validate reusable Skills
+default_prompt: Create or improve a Skill and verify it through the host Skill tools.

@@ -8,9 +8,9 @@
 
 | 项目 | 本地位置 | 参考提交 |
 | --- | --- | --- |
-| Image Studio | `../.research/Image-Studio` | `13c3ebeaaed8d56ff8fb3680880f3cf7ba70aec5` |
-| ComfyUI | `../.research/ComfyUI` | `6f7cd7fceaaf60d2669b554936394a7412c6fde5` |
-| ComfyUI frontend | `../.research/ComfyUI-frontend` | `24d6c309d187fd5ef7af55cdfb7d970b06f013fc` |
+| Image Studio | `../../research/Image-Studio` | `13c3ebeaaed8d56ff8fb3680880f3cf7ba70aec5` |
+| ComfyUI | `../../research/ComfyUI` | `6f7cd7fceaaf60d2669b554936394a7412c6fde5` |
+| ComfyUI frontend | `../../research/ComfyUI_frontend` | `24d6c309d187fd5ef7af55cdfb7d970b06f013fc` |
 
 参考仓库只用于研究，不会进入应用安装包。
 

@@ -1,6 +1,6 @@
 [package]
 name = "levelup-agent"
-version = "1.0.30"
+version = "1.0.31"
 description = "A local-first, multi-model AI agent for LevelUpAPI"
 authors = ["LevelUpAgent contributors"]
 license = "LGPL-3.0-only"
@@ -28,9 +28,10 @@ tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "multipart"] }
-tokio = { version = "1", features = ["process", "fs", "io-util", "macros", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["process", "fs", "io-util", "macros", "net", "rt-multi-thread", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 futures-util = "0.3"
+tokio-tungstenite = { version = "0.27", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 eventsource-stream = "0.2"
 url = "2"
 uuid = { version = "1", features = ["v4"] }

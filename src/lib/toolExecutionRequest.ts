@@ -61,6 +61,7 @@ export function createToolExecutionRequest({
     mode,
     permissionLevel,
     approvalGranted,
+    allowOutsideWorkspace: permissionLevel === "full",
   };
 }
 

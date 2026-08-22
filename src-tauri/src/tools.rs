@@ -33,33 +33,42 @@ pub async fn execute(request: ToolExecutionRequest) -> ToolExecutionResponse {
 async fn execute_inner(request: &ToolExecutionRequest) -> Result<String, String> {
     let root = std::fs::canonicalize(&request.workspace)
         .map_err(|error| format!("Workspace is unavailable: {error}"))?;
+    let allow_outside = request.allow_outside_workspace;
     match request.name.as_str() {
-        "list_files" => list_files(&root, string_arg(&request.arguments, "path").unwrap_or(".")),
+        "list_files" => list_files_scoped(
+            &root,
+            string_arg(&request.arguments, "path").unwrap_or("."),
+            allow_outside,
+        ),
         "read_file" => {
-            read_file(
+            read_file_scoped(
                 &root,
                 required_arg(&request.arguments, "path")?,
                 optional_encoding(&request.arguments)?,
+                allow_outside,
             )
             .await
         }
-        "search_files" => search_files(
+        "search_files" => search_files_scoped(
             &root,
             required_arg(&request.arguments, "query")?,
             string_arg(&request.arguments, "glob"),
             optional_encoding(&request.arguments)?,
+            allow_outside,
+            string_arg(&request.arguments, "path"),
         ),
         "write_file" => {
-            write_file(
+            write_file_scoped(
                 &root,
                 required_arg(&request.arguments, "path")?,
                 required_arg(&request.arguments, "content")?,
                 optional_encoding(&request.arguments)?,
+                allow_outside,
             )
             .await
         }
         "edit_file" => {
-            edit_file(
+            edit_file_scoped(
                 &root,
                 required_arg(&request.arguments, "path")?,
                 required_arg_any(&request.arguments, &["old_string", "oldText"])?,
@@ -71,17 +80,31 @@ async fn execute_inner(request: &ToolExecutionRequest) -> Result<String, String>
                     .or_else(|| request.arguments.get("replaceAll"))
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
+                allow_outside,
             )
             .await
         }
-        "delete_file" => delete_file(&root, required_arg(&request.arguments, "path")?).await,
+        "delete_file" => {
+            delete_file_scoped(
+                &root,
+                required_arg(&request.arguments, "path")?,
+                allow_outside,
+            )
+            .await
+        }
         "run_command" => run_command(&root, required_arg(&request.arguments, "command")?).await,
         _ => Err(format!("Unknown tool: {}", request.name)),
     }
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn list_files(root: &Path, relative: &str) -> Result<String, String> {
-    let target = resolve_existing(root, relative)?;
+    list_files_scoped(root, relative, false)
+}
+
+fn list_files_scoped(root: &Path, relative: &str, allow_outside: bool) -> Result<String, String> {
+    let target = resolve_existing_scoped(root, relative, allow_outside)?;
     if target.is_file() {
         return Ok(relative.to_owned());
     }
@@ -106,12 +129,23 @@ fn list_files(root: &Path, relative: &str) -> Result<String, String> {
     Ok(entries.join("\n"))
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 async fn read_file(
     root: &Path,
     relative: &str,
     encoding: Option<text_encoding::TextEncoding>,
 ) -> Result<String, String> {
-    let path = resolve_existing(root, relative)?;
+    read_file_scoped(root, relative, encoding, false).await
+}
+
+async fn read_file_scoped(
+    root: &Path,
+    relative: &str,
+    encoding: Option<text_encoding::TextEncoding>,
+    allow_outside: bool,
+) -> Result<String, String> {
+    let path = resolve_existing_scoped(root, relative, allow_outside)?;
     Ok(
         read_text_file_with_encoding(&path, MAX_FILE_BYTES, encoding)
             .await?
@@ -119,12 +153,28 @@ async fn read_file(
     )
 }
 
+#[cfg(test)]
 fn search_files(
     root: &Path,
     query: &str,
     pattern: Option<&str>,
     encoding: Option<text_encoding::TextEncoding>,
 ) -> Result<String, String> {
+    search_files_scoped(root, query, pattern, encoding, false, None)
+}
+
+fn search_files_scoped(
+    root: &Path,
+    query: &str,
+    pattern: Option<&str>,
+    encoding: Option<text_encoding::TextEncoding>,
+    allow_outside: bool,
+    search_path: Option<&str>,
+) -> Result<String, String> {
+    let root = search_path
+        .map(|path| resolve_existing_scoped(root, path, allow_outside))
+        .transpose()?
+        .unwrap_or_else(|| root.to_path_buf());
     let matcher = pattern
         .filter(|value| !value.trim().is_empty())
         .map(|value| {
@@ -135,13 +185,13 @@ fn search_files(
         .transpose()?;
     let needle = query.to_lowercase();
     let mut results = Vec::new();
-    for entry in WalkDir::new(root)
+    for entry in WalkDir::new(&root)
         .into_iter()
         .filter_entry(visible_entry)
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file() && !entry.file_type().is_symlink())
     {
-        let relative = entry.path().strip_prefix(root).unwrap_or(entry.path());
+        let relative = entry.path().strip_prefix(&root).unwrap_or(entry.path());
         if matcher
             .as_ref()
             .is_some_and(|matcher| !matcher.is_match(relative))
@@ -186,16 +236,27 @@ fn search_files(
     })
 }
 
+#[cfg(test)]
 async fn write_file(
     root: &Path,
     relative: &str,
     content: &str,
     encoding_hint: Option<text_encoding::TextEncoding>,
 ) -> Result<String, String> {
+    write_file_scoped(root, relative, content, encoding_hint, false).await
+}
+
+async fn write_file_scoped(
+    root: &Path,
+    relative: &str,
+    content: &str,
+    encoding_hint: Option<text_encoding::TextEncoding>,
+    allow_outside: bool,
+) -> Result<String, String> {
     if content.len() > MAX_WRITE_BYTES {
         return Err("File writes may contain at most 1 MiB".to_owned());
     }
-    let path = resolve_for_write(root, relative)?;
+    let path = resolve_for_write_scoped(root, relative, allow_outside)?;
     let existing = if path.is_file() {
         Some(read_text_file_snapshot(&path, MAX_WRITE_BYTES as u64, encoding_hint).await?)
     } else if path.exists() {
@@ -265,6 +326,7 @@ async fn write_file(
 /// encoding, BOM, and dominant line-ending style.  This is the safe path for
 /// normal code edits: unchanged Chinese text never has to be serialized by
 /// the model again.
+#[cfg(test)]
 async fn edit_file(
     root: &Path,
     relative: &str,
@@ -272,6 +334,27 @@ async fn edit_file(
     new_string: &str,
     encoding_hint: Option<text_encoding::TextEncoding>,
     replace_all: bool,
+) -> Result<String, String> {
+    edit_file_scoped(
+        root,
+        relative,
+        old_string,
+        new_string,
+        encoding_hint,
+        replace_all,
+        false,
+    )
+    .await
+}
+
+async fn edit_file_scoped(
+    root: &Path,
+    relative: &str,
+    old_string: &str,
+    new_string: &str,
+    encoding_hint: Option<text_encoding::TextEncoding>,
+    replace_all: bool,
+    allow_outside: bool,
 ) -> Result<String, String> {
     if old_string.is_empty() {
         return Err(
@@ -281,7 +364,7 @@ async fn edit_file(
     if old_string.len().saturating_add(new_string.len()) > MAX_WRITE_BYTES {
         return Err("An edit request may contain at most 1 MiB of old/new text".to_owned());
     }
-    let path = resolve_existing(root, relative)?;
+    let path = resolve_existing_scoped(root, relative, allow_outside)?;
     let (original_bytes, metadata) =
         read_text_file_snapshot(&path, MAX_FILE_BYTES, encoding_hint).await?;
     let old_string = text_encoding::normalize_line_endings(old_string);
@@ -535,15 +618,24 @@ fn strip_transport_bom<'a>(
     }
 }
 
+#[cfg(test)]
 async fn delete_file(root: &Path, relative: &str) -> Result<String, String> {
-    let requested = requested_path(root, relative)?;
+    delete_file_scoped(root, relative, false).await
+}
+
+async fn delete_file_scoped(
+    root: &Path,
+    relative: &str,
+    allow_outside: bool,
+) -> Result<String, String> {
+    let requested = requested_path_scoped(root, relative, allow_outside)?;
     let link_metadata = tokio::fs::symlink_metadata(&requested)
         .await
         .map_err(|error| format!("Could not inspect file: {error}"))?;
     if link_metadata.file_type().is_symlink() {
         return Err("Deleting symbolic links is not allowed".to_owned());
     }
-    let path = resolve_existing(root, relative)?;
+    let path = resolve_existing_scoped(root, relative, allow_outside)?;
     let metadata = tokio::fs::metadata(&path)
         .await
         .map_err(|error| format!("Could not inspect file: {error}"))?;
@@ -594,31 +686,53 @@ async fn run_command(root: &Path, command: &str) -> Result<String, String> {
     ))
 }
 
+#[cfg(test)]
 fn resolve_existing(root: &Path, relative: &str) -> Result<PathBuf, String> {
-    let path = std::fs::canonicalize(requested_path(root, relative)?)
+    resolve_existing_scoped(root, relative, false)
+}
+
+fn resolve_existing_scoped(
+    root: &Path,
+    relative: &str,
+    allow_outside: bool,
+) -> Result<PathBuf, String> {
+    let path = std::fs::canonicalize(requested_path_scoped(root, relative, allow_outside)?)
         .map_err(|error| format!("Path is unavailable: {error}"))?;
-    ensure_inside(root, &path)?;
+    if !allow_outside {
+        ensure_inside(root, &path)?;
+    }
     Ok(path)
 }
 
+#[cfg(test)]
 fn resolve_for_write(root: &Path, relative: &str) -> Result<PathBuf, String> {
-    let candidate = requested_path(root, relative)?;
+    resolve_for_write_scoped(root, relative, false)
+}
+
+fn resolve_for_write_scoped(
+    root: &Path,
+    relative: &str,
+    allow_outside: bool,
+) -> Result<PathBuf, String> {
+    let candidate = requested_path_scoped(root, relative, allow_outside)?;
     if let Ok(metadata) = std::fs::symlink_metadata(&candidate)
         && metadata.file_type().is_symlink()
     {
         // Resolve existing links so an external target is rejected; a
         // dangling link must not be silently replaced by an atomic rename.
-        return resolve_existing(root, relative);
+        return resolve_existing_scoped(root, relative, allow_outside);
     }
     if candidate.exists() {
-        return resolve_existing(root, relative);
+        return resolve_existing_scoped(root, relative, allow_outside);
     }
     let mut ancestor = candidate.parent();
     while let Some(path) = ancestor {
         if path.exists() {
             let canonical = std::fs::canonicalize(path)
                 .map_err(|error| format!("Could not resolve parent path: {error}"))?;
-            ensure_inside(root, &canonical)?;
+            if !allow_outside {
+                ensure_inside(root, &canonical)?;
+            }
             return Ok(candidate);
         }
         ancestor = path.parent();
@@ -626,7 +740,21 @@ fn resolve_for_write(root: &Path, relative: &str) -> Result<PathBuf, String> {
     Err("Could not resolve destination path".to_owned())
 }
 
+#[cfg(test)]
 fn requested_path(root: &Path, requested: &str) -> Result<PathBuf, String> {
+    requested_path_scoped(root, requested, false)
+}
+
+/// Resolve a model-supplied path.  Normal requests reject parent components
+/// before touching the filesystem.  Full permission is an explicit opt-in for
+/// broader local automation, so it may use absolute paths and `..` traversal;
+/// the caller still canonicalizes existing paths and retains regular-file and
+/// symlink checks before reads/writes/deletes.
+fn requested_path_scoped(
+    root: &Path,
+    requested: &str,
+    allow_outside: bool,
+) -> Result<PathBuf, String> {
     let path = Path::new(requested);
     let has_parent = path
         .components()
@@ -634,7 +762,7 @@ fn requested_path(root: &Path, requested: &str) -> Result<PathBuf, String> {
     let has_root_or_prefix = path
         .components()
         .any(|part| matches!(part, Component::RootDir | Component::Prefix(_)));
-    if has_parent || (!path.is_absolute() && has_root_or_prefix) {
+    if (!allow_outside && has_parent) || (!path.is_absolute() && has_root_or_prefix) {
         return Err("Tool paths must stay inside the selected workspace".to_owned());
     }
     Ok(if path.is_absolute() {
@@ -755,6 +883,45 @@ mod tests {
             resolve_for_write(&root, &prefix_match.join("new.txt").to_string_lossy(),).is_err()
         );
 
+        let _ = std::fs::remove_dir_all(suite);
+    }
+
+    #[test]
+    fn full_scope_accepts_parent_components_after_explicit_opt_in() {
+        let suite =
+            std::env::temp_dir().join(format!("levelup-full-relative-{}", uuid::Uuid::new_v4()));
+        let root = suite.join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = suite.join("outside.txt");
+        std::fs::write(&outside, "outside").unwrap();
+        let canonical_root = std::fs::canonicalize(&root).unwrap();
+
+        assert!(requested_path(&canonical_root, "../outside.txt").is_err());
+        let resolved = resolve_existing_scoped(&canonical_root, "../outside.txt", true).unwrap();
+        assert_eq!(resolved, std::fs::canonicalize(outside).unwrap());
+
+        let _ = std::fs::remove_dir_all(suite);
+    }
+
+    #[test]
+    fn full_scope_accepts_an_absolute_path_outside_the_workspace() {
+        let suite =
+            std::env::temp_dir().join(format!("levelup-full-path-{}", uuid::Uuid::new_v4()));
+        let root = suite.join("workspace");
+        let outside = suite.join("shared");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("shared.txt"), "shared").unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        let outside = std::fs::canonicalize(outside).unwrap();
+        assert!(
+            resolve_existing_scoped(&root, &outside.join("shared.txt").to_string_lossy(), true)
+                .is_ok()
+        );
+        assert!(
+            resolve_for_write_scoped(&root, &outside.join("new.txt").to_string_lossy(), true)
+                .is_ok()
+        );
         let _ = std::fs::remove_dir_all(suite);
     }
 

@@ -9,10 +9,22 @@ use super::types::{HarnessMode, PermissionLevel, PolicyDecision, ToolRisk};
 pub fn classify_tool(name: &str) -> ToolRisk {
     match name {
         "list_files" | "read_file" | "search_files" | "get_goal" | "read_skill"
-        | "check_media_jobs" | "update_goal" => ToolRisk::ReadOnly,
-        "write_file" | "edit_file" => ToolRisk::WorkspaceWrite,
-        "delete_file" | "apply_subagent_patch" => ToolRisk::Destructive,
+        | "check_media_jobs" | "update_goal" | "skill_locations" | "scan_skills"
+        | "inspect_skill" | "web_search" | "web_fetch" | "list_processes" | "process_output"
+        | "browser_list" | "browser_snapshot" | "browser_assert" | "browser_screenshot"
+        | "browser_wait" | "browser_console" | "mcp_status" => ToolRisk::ReadOnly,
+        "write_file" | "edit_file" | "create_skill" | "update_skill" => ToolRisk::WorkspaceWrite,
+        "delete_file" | "delete_skill" | "apply_subagent_patch" => ToolRisk::Destructive,
         "run_command" => ToolRisk::Process,
+        "browser_start"
+        | "browser_navigate"
+        | "browser_click"
+        | "browser_type"
+        | "browser_set_viewport"
+        | "browser_close" => ToolRisk::External,
+        "start_process" | "stop_process" => ToolRisk::External,
+        "install_skill" | "mcp_register" | "mcp_start" | "mcp_stop" => ToolRisk::External,
+        "mcp_remove" => ToolRisk::Destructive,
         "delegate_task" => ToolRisk::Delegation,
         "generate_images" | "generate_videos" | "generate_speech" => ToolRisk::Costly,
         name if name.starts_with("mcp_") => ToolRisk::External,
@@ -448,5 +460,22 @@ mod tests {
             ),
             PolicyDecision::NeedsApproval
         );
+    }
+
+    #[test]
+    fn full_allows_known_local_and_external_tools() {
+        for name in [
+            "run_command",
+            "create_skill",
+            "install_skill",
+            "mcp_register",
+            "browser_start",
+        ] {
+            assert_eq!(
+                evaluate_tool_call(HarnessMode::Agent, PermissionLevel::Full, &call(name)),
+                PolicyDecision::Allow,
+                "tool={name}"
+            );
+        }
     }
 }

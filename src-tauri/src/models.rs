@@ -321,6 +321,11 @@ pub struct ToolExecutionRequest {
     pub permission_level: Option<String>,
     #[serde(default)]
     pub approval_granted: bool,
+    /// Full permission explicitly opts local file tools into absolute paths.
+    /// The default remains workspace-scoped for older clients and for all
+    /// request/agent runs.
+    #[serde(default)]
+    pub allow_outside_workspace: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -342,6 +347,7 @@ pub enum McpTransport {
 pub struct McpServerConfig {
     pub id: String,
     pub name: String,
+    #[serde(default = "default_mcp_enabled")]
     pub enabled: bool,
     pub transport: McpTransport,
     pub command: Option<String>,
@@ -382,6 +388,25 @@ pub struct McpServerSnapshot {
     pub status: String,
     pub tool_count: usize,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub instructions: Option<String>,
+    #[serde(default)]
+    pub tools: Vec<McpToolSnapshot>,
+}
+
+fn default_mcp_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolSnapshot {
+    pub name: String,
+    pub exposed_name: String,
+    pub description: String,
+    pub read_only: bool,
+    pub destructive: Option<bool>,
+    pub open_world: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -413,6 +438,80 @@ pub struct SkillInfo {
     pub enabled: bool,
     pub valid: bool,
     pub warning: Option<String>,
+}
+
+/// A host-side request for creating a new Agent Skill.  Skills are authored as
+/// UTF-8 directories with a required `SKILL.md`; the host, rather than the
+/// model, chooses the destination root and validates the manifest.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillCreateRequest {
+    pub name: String,
+    pub description: String,
+    pub instructions: String,
+    #[serde(default)]
+    pub workspace: Option<String>,
+    /// `workspace`, `user`, `codex`, `claude`, or `app` (defaults to workspace
+    /// when available).
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillUpdateRequest {
+    pub skill_id: String,
+    pub content: String,
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillDeleteRequest {
+    pub skill_id: String,
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInstallRequest {
+    pub source: String,
+    #[serde(default)]
+    pub workspace: Option<String>,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillLocation {
+    pub scope: String,
+    pub label: String,
+    pub path: String,
+    pub writable: bool,
+    pub exists: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillMutationResult {
+    pub skill: SkillInfo,
+    pub path: String,
+    pub created: bool,
+    pub backup_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInstallResult {
+    pub source: String,
+    pub skills: Vec<SkillInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
