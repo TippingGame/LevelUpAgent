@@ -7,9 +7,78 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.release.outputs.release_id }}
+    steps:
+      - name: Create or reuse draft release
+        id: release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = context.ref.replace(/^refs\/tags\//, "");
+            let release;
+            try {
+              release = (await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag,
+              })).data;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              release = (await github.rest.repos.createRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag_name: tag,
+                name: `LevelUpAgent ${tag}`,
+                body: "See the repository changelog and release notes.",
+                draft: true,
+                prerelease: false,
+              })).data;
+            }
+            if (!release.draft) {
+              core.setFailed(`Release ${tag} already exists and is not a draft`);
+              return;
+            }
+            core.setOutput("release_id", String(release.id));
+
   bundle:
-    runs-on: windows-latest
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: "--bundles nsis,msi"
+            config_args: "--config src-tauri/tauri.release.conf.json"
+            rust_target: ""
+            include_updater_json: true
+            updater_json_prefer_nsis: true
+          - platform: macos-latest
+            args: "--target aarch64-apple-darwin --bundles dmg --no-sign"
+            config_args: ""
+            rust_target: aarch64-apple-darwin
+            include_updater_json: false
+            updater_json_prefer_nsis: false
+          - platform: macos-15-intel
+            args: "--target x86_64-apple-darwin --bundles dmg --no-sign"
+            config_args: ""
+            rust_target: x86_64-apple-darwin
+            include_updater_json: false
+            updater_json_prefer_nsis: false
+          - platform: ubuntu-22.04
+            args: "--bundles appimage,deb,rpm --no-sign"
+            config_args: ""
+            rust_target: ""
+            include_updater_json: false
+            updater_json_prefer_nsis: false
+    runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -20,29 +89,47 @@ jobs:
           node-version: 24
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
+      - name: Add macOS Rust target
+        if: matrix.rust_target != ''
+        run: rustup target add ${{ matrix.rust_target }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+      - name: Install Linux system packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            rpm
       - run: pnpm install --frozen-lockfile
       - name: Prepare signed updater configuration
+        if: matrix.config_args != ''
         env:
           TAURI_UPDATER_PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
           TAURI_UPDATER_ENDPOINT: ${{ vars.TAURI_UPDATER_ENDPOINT }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: node scripts/write-release-config.mjs
+      - name: Enable updater support for Windows
+        if: matrix.config_args != ''
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_ENV -Value "LEVELUP_ENABLE_UPDATER=1"
       - uses: tauri-apps/tauri-action@v0
         env:
-          LEVELUP_ENABLE_UPDATER: "1"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
+          releaseId: ${{ needs.create-release.outputs.release_id }}
           tagName: ${{ github.ref_name }}
           releaseName: LevelUpAgent ${{ github.ref_name }}
           releaseBody: See the repository changelog and release notes.
           releaseDraft: true
           prerelease: false
-          includeUpdaterJson: true
-          updaterJsonPreferNsis: true
-          args: --config src-tauri/tauri.release.conf.json
+          includeUpdaterJson: ${{ matrix.include_updater_json }}
+          updaterJsonPreferNsis: ${{ matrix.updater_json_prefer_nsis }}
+          args: ${{ matrix.config_args }} ${{ matrix.args }}
