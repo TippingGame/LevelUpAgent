@@ -57,24 +57,28 @@ jobs:
           - platform: windows-latest
             args: "--bundles nsis,msi"
             config_args: "--config src-tauri/tauri.release.conf.json"
+            asset_name_pattern: "LevelUpAgent_[version]_Windows_x64[setup][ext]"
             rust_target: ""
             include_updater_json: true
             updater_json_prefer_nsis: true
           - platform: macos-latest
             args: "--target aarch64-apple-darwin --bundles dmg --no-sign"
             config_args: ""
+            asset_name_pattern: "LevelUpAgent_[version]_macOS_Apple-Silicon[ext]"
             rust_target: aarch64-apple-darwin
             include_updater_json: false
             updater_json_prefer_nsis: false
           - platform: macos-15-intel
             args: "--target x86_64-apple-darwin --bundles dmg --no-sign"
             config_args: ""
+            asset_name_pattern: "LevelUpAgent_[version]_macOS_Intel-x64[ext]"
             rust_target: x86_64-apple-darwin
             include_updater_json: false
             updater_json_prefer_nsis: false
           - platform: ubuntu-22.04
             args: "--bundles appimage,deb,rpm --no-sign"
             config_args: ""
+            asset_name_pattern: "LevelUpAgent_[version]_Linux_x64[ext]"
             rust_target: ""
             include_updater_json: false
             updater_json_prefer_nsis: false
@@ -130,6 +134,7 @@ jobs:
           releaseBody: See the repository changelog and release notes.
           releaseDraft: true
           prerelease: false
+          releaseAssetNamePattern: ${{ matrix.asset_name_pattern }}
           includeUpdaterJson: ${{ matrix.include_updater_json }}
           updaterJsonPreferNsis: ${{ matrix.updater_json_prefer_nsis }}
           args: ${{ matrix.config_args }} ${{ matrix.args }}
