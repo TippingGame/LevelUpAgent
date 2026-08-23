@@ -1121,6 +1121,16 @@ export async function setSkillEnabled(
   });
 }
 
+export async function setAllSkillsEnabled(
+  enabled: boolean,
+  workspace?: string,
+): Promise<SkillInfo[]> {
+  return invoke<SkillInfo[]>("set_all_skills_enabled", {
+    enabled,
+    workspace: workspace || null,
+  });
+}
+
 export async function readSkillContent(skillId: string, workspace?: string): Promise<string> {
   return invoke<string>("read_skill_content", {
     skillId,

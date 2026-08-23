@@ -151,6 +151,7 @@ import {
   selectImageReferences,
   selectPet,
   selectWorkspace,
+  setAllSkillsEnabled,
   setSkillEnabled,
   startMcpServer,
   stopMcpServer,
@@ -219,6 +220,12 @@ import { getAppLocale, setAppLocale, tr, type AppLocale } from "./lib/i18n";
 import { executeCallsWithParallelMedia } from "./lib/mediaConcurrency";
 import { isConversationNearBottom, shouldFollowConversationUpdate } from "./lib/conversationScroll";
 import { compareWorkspaceSnapshots } from "./lib/workspaceChanges";
+import {
+  CLIENT_ACTION_EVENT,
+  dispatchClientAction,
+  isClientActionEvent,
+  type ClientDialog,
+} from "./lib/clientCapabilities";
 import {
   appendAssistantDelta,
   finalizeAssistantMessage,
@@ -2767,6 +2774,40 @@ function App() {
       unlisten?.();
     };
   }, [acknowledgeTaskCompletion]);
+
+  useEffect(() => {
+    if (!isDesktop()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    const showDialog = (dialog: ClientDialog | null) => {
+      setSettingsOpen(dialog === "settings");
+      setThemesOpen(dialog === "themes");
+      setMcpOpen(dialog === "extensions");
+      setSkillsOpen(dialog === "skills");
+      setInstructionsOpen(dialog === "instructions");
+      setLogsOpen(dialog === "logs");
+      setPetOpen(dialog === "pet");
+      setArmorStudioOpen(dialog === "armor");
+    };
+    void import("@tauri-apps/api/event")
+      .then(({ listen }) => listen<unknown>(CLIENT_ACTION_EVENT, (event) => {
+        if (!isClientActionEvent(event.payload)) return;
+        dispatchClientAction(event.payload.action, {
+          showView: setWorkspaceView,
+          setPanelOpen: setRightPanelOpen,
+          showDialog,
+        });
+      }))
+      .then((stop) => {
+        if (disposed) stop();
+        else unlisten = stop;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   const openProject = async () => {
     if (!isDesktop()) {
@@ -7847,6 +7888,18 @@ function SkillsDialog({
     }
   };
 
+  const toggleAll = async (enabled: boolean) => {
+    setBusyId("all-skills");
+    setError(null);
+    try {
+      setSkills(await setAllSkillsEnabled(enabled, workspace));
+    } catch (reason) {
+      setError(errorText(reason));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   const visible = skills.filter((skill) => {
     if (filter === "enabled") return skill.enabled;
     if (filter === "issues") return !skill.valid;
@@ -7854,6 +7907,8 @@ function SkillsDialog({
   });
   const enabledCount = skills.filter((skill) => skill.enabled).length;
   const issueCount = skills.filter((skill) => !skill.valid).length;
+  const canEnableAll = skills.some((skill) => skill.valid && !skill.enabled);
+  const canDisableAll = skills.some((skill) => skill.valid && skill.enabled);
 
   return (
     <div className="dialog-backdrop" onMouseDown={onClose}>
@@ -7867,7 +7922,7 @@ function SkillsDialog({
             <IconButton label={tr("显示安装位置", "Show Skill locations")} onClick={() => setShowLocations((value) => !value)}>
               <FolderOpen size={16} />
             </IconButton>
-            <IconButton label={tr("重新扫描 Skills", "Rescan Skills")} onClick={refresh} disabled={loading}>
+            <IconButton label={tr("重新扫描 Skills", "Rescan Skills")} onClick={refresh} disabled={loading || Boolean(busyId)}>
               <RefreshCw size={16} className={loading ? "spin" : ""} />
             </IconButton>
             <IconButton label={tr("关闭", "Close")} onClick={onClose}><X size={18} /></IconButton>
@@ -7879,7 +7934,13 @@ function SkillsDialog({
             <button aria-pressed={filter === "enabled"} className={filter === "enabled" ? "active" : ""} onClick={() => setFilter("enabled")}>{tr("已启用", "Enabled")} {enabledCount}</button>
             <button aria-pressed={filter === "issues"} className={filter === "issues" ? "active" : ""} onClick={() => setFilter("issues")}>{tr("问题", "Issues")} {issueCount}</button>
           </div>
-          <span>{workspace ? `${tr("包含", "Including")} ${shortPath(workspace)} ${tr("的工作区 Skills", "workspace Skills")}` : tr("全局 Skills", "Global Skills")}</span>
+          <div className="skills-toolbar-actions">
+            <span>{workspace ? `${tr("包含", "Including")} ${shortPath(workspace)} ${tr("的工作区 Skills", "workspace Skills")}` : tr("全局 Skills", "Global Skills")}</span>
+            <div className="skills-bulk-actions">
+              <button className="secondary-button" disabled={loading || Boolean(busyId) || !canEnableAll} onClick={() => void toggleAll(true)}><Check size={14} />{tr("启用全部", "Enable all")}</button>
+              <button className="secondary-button" disabled={loading || Boolean(busyId) || !canDisableAll} onClick={() => void toggleAll(false)}><CircleStop size={14} />{tr("禁用全部", "Disable all")}</button>
+            </div>
+          </div>
         </div>
         {showLocations && (
           <div className="skills-locations">
@@ -7936,15 +7997,15 @@ function SkillsDialog({
                 <input
                   type="checkbox"
                   checked={skill.enabled}
-                  disabled={!skill.valid || busyId === skill.id}
+                  disabled={!skill.valid || busyId === skill.id || busyId === "all-skills"}
                   onChange={(event) => toggle(skill, event.target.checked)}
                 />
                 <span>{skill.valid ? (skill.enabled ? tr("已启用", "Enabled") : tr("启用", "Enable")) : tr("无效", "Invalid")}</span>
               </label>
               {skill.valid && skill.source !== "LevelUpAgent built-in" && skill.source !== "Codex system" && (
                 <div className="skill-row-actions">
-                  <IconButton label={tr("编辑 Skill", "Edit Skill")} onClick={() => void openEdit(skill)} disabled={busyId === skill.id}><Pencil size={14} /></IconButton>
-                  <IconButton label={tr("删除 Skill", "Delete Skill")} onClick={() => void removeSkill(skill)} disabled={busyId === skill.id}><Trash2 size={14} /></IconButton>
+                  <IconButton label={tr("编辑 Skill", "Edit Skill")} onClick={() => void openEdit(skill)} disabled={busyId === skill.id || busyId === "all-skills"}><Pencil size={14} /></IconButton>
+                  <IconButton label={tr("删除 Skill", "Delete Skill")} onClick={() => void removeSkill(skill)} disabled={busyId === skill.id || busyId === "all-skills"}><Trash2 size={14} /></IconButton>
                 </div>
               )}
             </div>
@@ -8242,6 +8303,7 @@ function parseMediaToolAssets(content: string): MediaAsset[] | null {
 }
 
 function toolIcon(call: ToolCall) {
+  if (call.name === "client_action") return <Command size={15} />;
   if (call.name === "generate_images") return <ImagePlus size={15} />;
   if (call.name === "generate_videos") return <Video size={15} />;
   if (call.name === "generate_speech") return <AudioLines size={15} />;
@@ -8261,6 +8323,7 @@ function toolIcon(call: ToolCall) {
 
 function toolLabel(call: ToolCall) {
   const labels: Record<string, string> = {
+    client_action: tr("操控 LevelUpAgent", "Control LevelUpAgent"),
     list_files: tr("浏览文件", "Browse files"),
     read_file: tr("读取文件", "Read file"),
     search_files: tr("搜索项目", "Search project"),
@@ -8312,7 +8375,7 @@ function toolLabel(call: ToolCall) {
 
 function toolSummary(call: ToolCall) {
   if (typeof call.arguments.prompt === "string") return call.arguments.prompt;
-  const value = call.arguments.path ?? call.arguments.command ?? call.arguments.query ?? call.arguments.task ?? call.arguments.runId;
+  const value = call.arguments.path ?? call.arguments.command ?? call.arguments.query ?? call.arguments.action ?? call.arguments.task ?? call.arguments.runId;
   if (value !== undefined) return String(value).slice(0, 100);
   return JSON.stringify(call.arguments).slice(0, 100);
 }

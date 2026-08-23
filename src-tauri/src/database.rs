@@ -792,6 +792,35 @@ impl Database {
         Ok(())
     }
 
+    pub fn set_skills_enabled(
+        &self,
+        skills: &[(String, String)],
+        enabled: bool,
+    ) -> Result<(), String> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let transaction = connection.transaction().map_err(database_error)?;
+        {
+            let mut statement = transaction
+                .prepare(
+                    "INSERT INTO skill_preferences (id, path, enabled, updated_at)
+                     VALUES (?1, ?2, ?3, CAST(strftime('%s', 'now') AS INTEGER) * 1000)
+                     ON CONFLICT(id, path) DO UPDATE SET
+                        enabled = excluded.enabled,
+                        updated_at = excluded.updated_at",
+                )
+                .map_err(database_error)?;
+            for (id, path) in skills {
+                statement
+                    .execute(params![id, path, i64::from(enabled)])
+                    .map_err(database_error)?;
+            }
+        }
+        transaction.commit().map_err(database_error)
+    }
+
     pub fn create_goal(&self, request: &GoalCreateRequest) -> Result<GoalState, String> {
         let objective = request.objective.trim();
         if request.thread_id.trim().is_empty() || objective.is_empty() {
@@ -4030,6 +4059,42 @@ mod tests {
                 .unwrap()
                 .get(&("skill-one".to_owned(), "C:/skills/one/SKILL.md".to_owned())),
             Some(&false)
+        );
+
+        database
+            .set_skills_enabled(
+                &[
+                    ("skill-one".to_owned(), "C:/skills/one/SKILL.md".to_owned()),
+                    ("skill-two".to_owned(), "C:/skills/two/SKILL.md".to_owned()),
+                ],
+                true,
+            )
+            .unwrap();
+        let preferences = database.skill_preferences().unwrap();
+        assert_eq!(
+            preferences.get(&("skill-one".to_owned(), "C:/skills/one/SKILL.md".to_owned())),
+            Some(&true)
+        );
+        assert_eq!(
+            preferences.get(&("skill-two".to_owned(), "C:/skills/two/SKILL.md".to_owned())),
+            Some(&true)
+        );
+
+        database
+            .set_skills_enabled(
+                &[
+                    ("skill-one".to_owned(), "C:/skills/one/SKILL.md".to_owned()),
+                    ("skill-two".to_owned(), "C:/skills/two/SKILL.md".to_owned()),
+                ],
+                false,
+            )
+            .unwrap();
+        assert!(
+            database
+                .skill_preferences()
+                .unwrap()
+                .values()
+                .all(|enabled| !enabled)
         );
     }
 

@@ -1,6 +1,7 @@
 mod agent;
 mod attachment;
 mod browser;
+mod capability;
 mod config_writeback;
 mod database;
 mod filesystem;
@@ -562,16 +563,16 @@ fn attach_subagent_tools(request: &mut AgentTurnRequest) {
 /// Attach host-owned authoring, web, and browser tools.  These are deliberately
 /// described in one place so every desktop turn (including resumed turns after
 /// compaction) receives the same capability catalog before the provider call.
-fn attach_extended_tools(request: &mut AgentTurnRequest) {
+fn attach_extended_tools(request: &mut AgentTurnRequest) -> Result<(), String> {
     if request.hatch {
-        return;
+        return Ok(());
     }
     if agent::theme_generation_bootstrapped(&request.messages) {
-        return;
+        return Ok(());
     }
     let mode = request.mode.as_str();
     if !matches!(mode, "agent" | "goal" | "plan") {
-        return;
+        return Ok(());
     }
     request.available_tools.extend([
         AgentToolDefinition {
@@ -710,6 +711,7 @@ fn attach_extended_tools(request: &mut AgentTurnRequest) {
     ]);
     if matches!(mode, "agent" | "goal") {
         request.available_tools.extend([
+            capability::client_action_tool()?,
             AgentToolDefinition {
                 name: "start_process".to_owned(),
                 description: "Start a bounded background shell process in the selected workspace, typically a local dev server for browser QA. The host returns a process ID; stop it when testing finishes.".to_owned(),
@@ -927,6 +929,7 @@ fn attach_extended_tools(request: &mut AgentTurnRequest) {
     if mode == "plan" {
         request.available_tools.retain(|tool| tool.read_only);
     }
+    Ok(())
 }
 
 fn attach_media_tools(request: &mut AgentTurnRequest) {
@@ -4026,7 +4029,7 @@ async fn agent_turn(
         attach_subagent_tools(&mut request);
         attach_media_tools(&mut request);
         attach_skills(&app, &database, &mut request)?;
-        attach_extended_tools(&mut request);
+        attach_extended_tools(&mut request)?;
         attach_mcp_tools(&database, &manager, &mut request).await?;
         enforce_theme_generation_tool_catalog(&mut request);
         enforce_hatch_tool_catalog(&mut request);
@@ -4151,7 +4154,7 @@ async fn agent_turn_stream_inner(
     attach_subagent_tools(&mut request);
     attach_media_tools(&mut request);
     attach_skills(&app, &database, &mut request)?;
-    attach_extended_tools(&mut request);
+    attach_extended_tools(&mut request)?;
     attach_mcp_tools(&database, &manager, &mut request).await?;
     enforce_theme_generation_tool_catalog(&mut request);
     enforce_hatch_tool_catalog(&mut request);
@@ -4766,7 +4769,7 @@ async fn harness_run_loop(
         attach_subagent_tools(&mut turn_request);
         attach_media_tools(&mut turn_request);
         attach_skills(app, database, &mut turn_request)?;
-        attach_extended_tools(&mut turn_request);
+        attach_extended_tools(&mut turn_request)?;
         attach_mcp_tools(database, manager, &mut turn_request).await?;
         enforce_theme_generation_tool_catalog(&mut turn_request);
         enforce_hatch_tool_catalog(&mut turn_request);
@@ -7607,7 +7610,17 @@ async fn execute_tool_inner(
             &request.arguments,
         )?;
     }
-    let response = if matches!(
+    let response = if request.name == "client_action" {
+        let dispatch = capability::client_action_dispatch(&request.arguments)?;
+        app.emit(&dispatch.event, &dispatch.payload)
+            .map_err(|error| format!("Could not dispatch LevelUpAgent client action: {error}"))?;
+        json_tool_output(&serde_json::json!({
+            "status": "dispatched",
+            "capabilityId": dispatch.payload.capability_id,
+            "contractVersion": dispatch.payload.contract_version,
+            "action": dispatch.payload.action,
+        }))
+    } else if matches!(
         request.name.as_str(),
         "generate_images" | "generate_videos" | "generate_speech"
     ) {
@@ -8153,6 +8166,23 @@ fn set_skill_enabled(
         .into_iter()
         .find(|skill| skill.id == skill_id)
         .ok_or_else(|| "Skill is no longer available".to_owned())
+}
+
+#[tauri::command]
+fn set_all_skills_enabled(
+    app: tauri::AppHandle,
+    database: tauri::State<'_, database::Database>,
+    workspace: Option<String>,
+    enabled: bool,
+) -> Result<Vec<SkillInfo>, String> {
+    let skills = discover_skills(&app, &database, workspace.as_deref())?;
+    let valid_skills = skills
+        .iter()
+        .filter(|skill| skill.valid)
+        .map(|skill| (skill.id.clone(), skill.path.clone()))
+        .collect::<Vec<_>>();
+    database.set_skills_enabled(&valid_skills, enabled)?;
+    discover_skills(&app, &database, workspace.as_deref())
 }
 
 #[tauri::command]
@@ -9085,6 +9115,7 @@ pub fn run() {
             change_goal_status,
             scan_skills,
             set_skill_enabled,
+            set_all_skills_enabled,
             read_skill_content,
             skill_locations,
             create_skill,
@@ -9256,7 +9287,7 @@ mod tests {
             custom_instructions: None,
             reasoning_effort: None,
         };
-        attach_extended_tools(&mut request);
+        attach_extended_tools(&mut request).unwrap();
         assert!(request.available_tools.iter().all(|tool| tool.read_only));
         assert!(
             request
@@ -9282,6 +9313,46 @@ mod tests {
                 .iter()
                 .any(|tool| tool.name == "create_skill")
         );
+    }
+
+    #[test]
+    fn agent_catalog_exposes_native_client_and_browser_capabilities() {
+        let mut request = AgentTurnRequest {
+            profile: profile("agent", 1, true),
+            messages: Vec::new(),
+            mode: "agent".to_owned(),
+            workspace: Some("C:\\workspace".to_owned()),
+            thread_id: Some("client-capability-test".to_owned()),
+            hatch: false,
+            hatch_skill_loaded: false,
+            available_tools: Vec::new(),
+            available_skills: Vec::new(),
+            goal: None,
+            fallback_profiles: Vec::new(),
+            custom_instructions: None,
+            reasoning_effort: None,
+        };
+        attach_extended_tools(&mut request).unwrap();
+        for name in [
+            "client_action",
+            "browser_start",
+            "browser_snapshot",
+            "browser_click",
+            "browser_type",
+            "browser_assert",
+            "browser_screenshot",
+            "browser_close",
+        ] {
+            assert!(
+                request.available_tools.iter().any(|tool| tool.name == name),
+                "missing capability: {name}"
+            );
+            assert_ne!(
+                crate::harness::policy::classify_tool(name),
+                crate::harness::types::ToolRisk::CredentialSensitive,
+                "capability has no explicit policy classification: {name}"
+            );
+        }
     }
 
     #[test]

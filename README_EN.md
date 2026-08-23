@@ -12,7 +12,7 @@
     <a href="https://levelup.mom/">LevelUpAPI</a>
   </p>
   <p>
-    <img alt="Version" src="https://img.shields.io/badge/version-1.0.31-ff5a4f?style=flat-square" />
+    <img alt="Version" src="https://img.shields.io/badge/version-1.0.32-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-preview-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -45,7 +45,7 @@ Read the [Creative Studio capability audit](docs/CREATIVE_STUDIO_AUDIT.md) for t
 
 ### Install
 
-Download the package for your platform from GitHub **Releases**. The current `1.0.31` Windows x64 installers are built by GitHub Actions and signed with the Tauri updater key; they are not Authenticode-signed, so SmartScreen may show an unknown-publisher warning.
+Download the package for your platform from GitHub **Releases**. The current `1.0.32` Windows x64 installers are built by GitHub Actions and signed with the Tauri updater key; they are not Authenticode-signed, so SmartScreen may show an unknown-publisher warning.
 
 | Platform | Package | Status |
 | --- | --- | --- |
@@ -155,7 +155,7 @@ Use `pnpm build:macos` for macOS packages. Signed public updates additionally re
 
 ## Current status
 
-`1.0.31` is the current release milestone. In addition to the existing Agent, Creative Studio, and Constellation workflows, the desktop app now supports creating, editing, installing, and reviewing Skills from a conversation; managing MCP connections; controlled web research; and isolated browser/process QA for generated applications. Context management now uses a more permissive 128K local optimistic window, keeps more recent turns by default, and estimates image/document load from the actual attachment payload. Local heuristics no longer block a current message outright; if a Provider explicitly rejects the context as too large, LevelUpAgent retries once with emergency compaction. Windows installers use Tauri updater signatures but are not Authenticode-signed, so SmartScreen may show an unknown-publisher warning. When filing an issue, include reproduction steps, application logs, and platform details.
+`1.0.32` is the current release milestone. The desktop app adds a versioned native client-action contract so the Agent can switch workspaces, control the details panel, and open application dialogs directly. Isolated-browser coverage now includes provider tool-call round trips and a real Chromium acceptance flow. Skill management can enable or disable every valid Skill at once, with the bulk preference update committed in one database transaction. Windows installers use Tauri updater signatures but are not Authenticode-signed, so SmartScreen may show an unknown-publisher warning. When filing an issue, include reproduction steps, application logs, and platform details.
 
 ## License
 

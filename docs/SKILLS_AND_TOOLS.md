@@ -64,6 +64,10 @@ mutation calls. Public web and Skill downloads filter local/private DNS answers
 before connecting, then re-check the response address. Set
 `LEVELUP_BROWSER_EXECUTABLE` when Chrome is installed in a non-standard path.
 
+The model-facing client capability rules, browser conformance checks, and
+copy-ready manual acceptance prompts are defined in
+[`CLIENT_CAPABILITIES.md`](CLIENT_CAPABILITIES.md).
+
 MCP sessions can inspect `mcp_status`, register non-secret configuration with
 `mcp_register`, and start/stop/remove saved servers from a conversation. The
 registration tool deliberately rejects token-like values; put those values in

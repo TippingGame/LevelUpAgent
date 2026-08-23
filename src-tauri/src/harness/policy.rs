@@ -12,7 +12,7 @@ pub fn classify_tool(name: &str) -> ToolRisk {
         | "check_media_jobs" | "update_goal" | "skill_locations" | "scan_skills"
         | "inspect_skill" | "web_search" | "web_fetch" | "list_processes" | "process_output"
         | "browser_list" | "browser_snapshot" | "browser_assert" | "browser_screenshot"
-        | "browser_wait" | "browser_console" | "mcp_status" => ToolRisk::ReadOnly,
+        | "browser_wait" | "browser_console" | "mcp_status" | "client_action" => ToolRisk::ReadOnly,
         "write_file" | "edit_file" | "create_skill" | "update_skill" => ToolRisk::WorkspaceWrite,
         "delete_file" | "delete_skill" | "apply_subagent_patch" => ToolRisk::Destructive,
         "run_command" => ToolRisk::Process,

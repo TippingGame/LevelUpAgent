@@ -275,7 +275,7 @@ impl BrowserManager {
         let text = serde_json::to_string(text.unwrap_or("")).unwrap();
         let index = index.unwrap_or(0);
         let script = format!(
-            "({{const selector={selector}, text={text}, index={index}; const roots=selector?[...document.querySelectorAll(selector)]:[...document.querySelectorAll('button,a,[role=button],input[type=submit],input[type=button]')]; const matches=roots.filter((el)=>!text || (el.innerText||el.value||el.getAttribute('aria-label')||'').toLowerCase().includes(text.toLowerCase())); const el=matches[index]; if(!el) return {{ok:false,error:'No matching interactive element',count:matches.length}}; el.scrollIntoView({{block:'center',inline:'center'}}); el.click(); return {{ok:true,tag:el.tagName,label:(el.innerText||el.value||el.getAttribute('aria-label')||'').trim().slice(0,300)}};}}}})()"
+            "(()=>{{const selector={selector}, text={text}, index={index}; const roots=selector?[...document.querySelectorAll(selector)]:[...document.querySelectorAll('button,a,[role=button],input[type=submit],input[type=button]')]; const matches=roots.filter((el)=>!text || (el.innerText||el.value||el.getAttribute('aria-label')||'').toLowerCase().includes(text.toLowerCase())); const el=matches[index]; if(!el) return {{ok:false,error:'No matching interactive element',count:matches.length}}; el.scrollIntoView({{block:'center',inline:'center'}}); el.click(); return {{ok:true,tag:el.tagName,label:(el.innerText||el.value||el.getAttribute('aria-label')||'').trim().slice(0,300)}};}})()"
         );
         let value = self.evaluate(&session, &script).await?;
         let result = value.get("value").cloned().unwrap_or(Value::Null);
@@ -311,7 +311,7 @@ impl BrowserManager {
         let text = serde_json::to_string(text).unwrap();
         let index = index.unwrap_or(0);
         let script = format!(
-            "({{const selector={selector}, text={text}, index={index}; const els=[...document.querySelectorAll(selector)]; const el=els[index]; if(!el) return {{ok:false,error:'No matching editable element',count:els.length}}; el.focus(); if(el.isContentEditable) el.textContent=text; else {{const setter=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el),'value')?.set; if(setter) setter.call(el,text); else el.value=text;}} el.dispatchEvent(new InputEvent('input',{{bubbles:true,inputType:'insertText',data:text}})); el.dispatchEvent(new Event('change',{{bubbles:true}})); return {{ok:true,tag:el.tagName}};}}}})()"
+            "(()=>{{const selector={selector}, text={text}, index={index}; const els=[...document.querySelectorAll(selector)]; const el=els[index]; if(!el) return {{ok:false,error:'No matching editable element',count:els.length}}; el.focus(); if(el.isContentEditable) el.textContent=text; else {{const setter=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el),'value')?.set; if(setter) setter.call(el,text); else el.value=text;}} el.dispatchEvent(new InputEvent('input',{{bubbles:true,inputType:'insertText',data:text}})); el.dispatchEvent(new Event('change',{{bubbles:true}})); return {{ok:true,tag:el.tagName}};}})()"
         );
         let value = self.evaluate(&session, &script).await?;
         let result = value.get("value").cloned().unwrap_or(Value::Null);
@@ -857,22 +857,63 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("levelup-browser-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
+        let fixture = root.join("browser-agent-fixture.html");
+        std::fs::write(
+            &fixture,
+            r#"<!doctype html>
+<html>
+  <head><title>LevelUpAgent browser QA</title></head>
+  <body>
+    <main>
+      <h1>Browser capability ready</h1>
+      <label>Agent name <input id="agent-name" /></label>
+      <button id="apply">Apply</button>
+      <p id="status">Waiting</p>
+    </main>
+    <script>
+      document.querySelector('#apply').addEventListener('click', () => {
+        const name = document.querySelector('#agent-name').value;
+        document.querySelector('#status').textContent = `Hello ${name}`;
+        console.error(`browser-qa-applied:${name}`);
+      });
+    </script>
+  </body>
+</html>"#,
+        )
+        .unwrap();
+        let fixture_url = Url::from_file_path(&fixture).unwrap().to_string();
         let manager = BrowserManager::default();
         let session = manager
-            .start(&root, Some("about:blank"), Vec::new(), Some(&root))
+            .start(&root, Some(&fixture_url), Vec::new(), Some(&root))
+            .await
+            .unwrap();
+        manager
+            .set_viewport(&session, 390, 844, true)
             .await
             .unwrap();
         let snapshot = manager.snapshot(&session).await.unwrap();
         assert!(snapshot.contains("UNTRUSTED BROWSER PAGE"));
-        assert!(snapshot.contains("about:blank"));
-        let session_ref = manager.session(&session).await.unwrap();
+        assert!(snapshot.contains("Browser capability ready"));
         manager
-            .evaluate(&session_ref, "console.error('browser-qa-fixture')")
+            .type_text(&session, Some("#agent-name"), "LevelUpAgent", None, false)
             .await
             .unwrap();
+        manager
+            .click(&session, Some("#apply"), None, None)
+            .await
+            .unwrap();
+        manager
+            .assert(
+                &session,
+                "document.querySelector('#status').textContent === 'Hello LevelUpAgent'",
+            )
+            .await
+            .unwrap();
+        let updated = manager.snapshot(&session).await.unwrap();
+        assert!(updated.contains("Hello LevelUpAgent"));
         let console = manager.console(&session).await.unwrap();
         assert!(console.contains("UNTRUSTED BROWSER CONSOLE"));
-        assert!(console.contains("browser-qa-fixture"));
+        assert!(console.contains("browser-qa-applied:LevelUpAgent"));
         let screenshot = manager.screenshot(&root, &session).await.unwrap();
         assert!(Path::new(&screenshot).is_file());
         std::fs::remove_file(screenshot).unwrap();

@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "capabilityId": "client.ui",
+  "version": 1,
+  "toolName": "client_action",
+  "event": "levelup://client-action",
+  "actions": [
+    { "id": "view.chat", "description": "Show the conversation workspace." },
+    { "id": "view.media", "description": "Show the media studio." },
+    { "id": "view.writing", "description": "Show the writing studio." },
+    { "id": "view.constellation", "description": "Show the constellation studio." },
+    { "id": "panel.open", "description": "Open the conversation details panel." },
+    { "id": "panel.close", "description": "Close the conversation details panel." },
+    { "id": "dialog.settings", "description": "Open connection and application settings." },
+    { "id": "dialog.themes", "description": "Open theme management." },
+    { "id": "dialog.extensions", "description": "Open MCP extension management." },
+    { "id": "dialog.skills", "description": "Open Skill management." },
+    { "id": "dialog.instructions", "description": "Open custom Instructions." },
+    { "id": "dialog.logs", "description": "Open provider request logs." },
+    { "id": "dialog.pet", "description": "Open the Starlight Echo workspace." },
+    { "id": "dialog.armor", "description": "Open the Armor Mode console." },
+    { "id": "dialog.close", "description": "Close all application dialogs." }
+  ]
+}

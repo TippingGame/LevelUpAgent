@@ -12,7 +12,7 @@
     <a href="https://levelup.mom/">LevelUpAPI</a>
   </p>
   <p>
-    <img alt="Version" src="https://img.shields.io/badge/version-1.0.31-ff5a4f?style=flat-square" />
+    <img alt="Version" src="https://img.shields.io/badge/version-1.0.32-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-可用预览-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -45,7 +45,7 @@
 
 ### 安装
 
-从 GitHub Releases 下载对应平台的安装包。当前 `1.0.31` Windows x64 安装包由 GitHub Actions 构建并通过 Tauri updater 签名；未配置 Authenticode，Windows SmartScreen 可能提示“未知发布者”。
+从 GitHub Releases 下载对应平台的安装包。当前 `1.0.32` Windows x64 安装包由 GitHub Actions 构建并通过 Tauri updater 签名；未配置 Authenticode，Windows SmartScreen 可能提示“未知发布者”。
 
 | 平台 | 包格式 | 状态 |
 | --- | --- | --- |
@@ -153,7 +153,7 @@ macOS 安装包使用 `pnpm build:macos`。正式更新还需要仓库所有者�
 
 ## 当前状态
 
-`1.0.31` 是当前发布里程碑。除原有 Agent、创作空间和星图蓝图外，桌面端现在支持会话内创建、编辑、安装和审查 Skills，连接并管理 MCP，执行受控联网检索，并通过隔离浏览器与开发进程完成应用自测。上下文管理改为更宽松的 128K 本地乐观窗口，默认保留更多近期轮次，并按实际附件内容估算图片与文档负载；本地不再因启发式预算直接阻断当前消息，Provider 明确返回上下文超限时会自动进行一次紧急压缩重试。Windows 安装包使用 Tauri updater 签名但仍未配置 Authenticode，SmartScreen 可能提示“未知发布者”。提交 Issue 时请附上复现步骤、应用日志和平台信息。
+`1.0.32` 是当前发布里程碑。桌面端新增版本化的原生客户端动作契约，让 Agent 可以直接切换工作区、打开面板和管理对话框，并补强了隔离浏览器的模型工具往返与真实 Chromium 验收。Skills 管理界面现在支持一次启用或禁用全部有效 Skills，批量状态通过单个数据库事务持久化。Windows 安装包使用 Tauri updater 签名但仍未配置 Authenticode，SmartScreen 可能提示“未知发布者”。提交 Issue 时请附上复现步骤、应用日志和平台信息。
 
 ## 许可证
 
