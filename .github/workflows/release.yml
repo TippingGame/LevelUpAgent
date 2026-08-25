@@ -134,7 +134,7 @@ jobs:
           releaseBody: See the repository changelog and release notes.
           releaseDraft: true
           prerelease: false
-          releaseAssetNamePattern: ${{ matrix.asset_name_pattern }}
+          assetNamePattern: ${{ matrix.asset_name_pattern }}
           includeUpdaterJson: ${{ matrix.include_updater_json }}
           updaterJsonPreferNsis: ${{ matrix.updater_json_prefer_nsis }}
           args: ${{ matrix.config_args }} ${{ matrix.args }}
