@@ -1,5 +1,4 @@
 import { invoke } from "@tauri-apps/api/core";
-import { openPath } from "@tauri-apps/plugin-opener";
 
 export type FrontendLogLevel = "info" | "warn" | "error";
 
@@ -122,5 +121,5 @@ export async function getAppLogInfo(): Promise<AppLogInfo | null> {
 
 export async function openAppLogDirectory(): Promise<void> {
   const info = await getAppLogInfo();
-  if (info) await openPath(info.directory);
+  if (info) await invoke("open_local_directory", { path: info.directory });
 }

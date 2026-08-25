@@ -9,14 +9,15 @@ use zip::ZipArchive;
 
 use crate::models::{AgentMessage, AttachmentKind, AttachmentPreview, ImageAttachment};
 
-const MAX_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
+const MAX_ATTACHMENT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_NON_IMAGE_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_MEDIA_REFERENCE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_PREVIEW_CHARS: usize = 4_000;
 const MAX_TEXT_BYTES: u64 = 1024 * 1024;
 const MAX_IMAGES_PER_MESSAGE: usize = 8;
 const MAX_DOCUMENTS_PER_MESSAGE: usize = 8;
 const MAX_ATTACHMENTS_PER_MESSAGE: usize = 12;
-const MAX_REQUEST_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_REQUEST_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_REQUEST_TEXT_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_REQUEST_DOCUMENT_BYTES: u64 = 48 * 1024 * 1024;
 const MAX_CONTEXT_CHARS_PER_FILE: usize = 48_000;
@@ -95,7 +96,7 @@ fn import_path(
         return Err(if allow_video {
             "Media references must be between 1 byte and 64 MiB".to_owned()
         } else {
-            "Attachments must be between 1 byte and 20 MiB".to_owned()
+            "Attachments must be between 1 byte and 64 MiB".to_owned()
         });
     }
     let bytes = std::fs::read(source)
@@ -133,7 +134,7 @@ pub fn import_base64_attachment(
         .trim();
     let maximum_encoded_len = (MAX_ATTACHMENT_BYTES as usize).div_ceil(3) * 4;
     if encoded.is_empty() || encoded.len() > maximum_encoded_len {
-        return Err("Pasted files must be between 1 byte and 20 MiB".to_owned());
+        return Err("Pasted files must be between 1 byte and 64 MiB".to_owned());
     }
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(encoded)
@@ -156,8 +157,14 @@ fn import_bytes(
         return Err(if allow_video {
             "Media references must be between 1 byte and 64 MiB".to_owned()
         } else {
-            "Attachments must be between 1 byte and 20 MiB".to_owned()
+            "Attachments must be between 1 byte and 64 MiB".to_owned()
         });
+    }
+    if !allow_video
+        && bytes.len() as u64 > MAX_NON_IMAGE_ATTACHMENT_BYTES
+        && detect_image_mime(&bytes).is_none()
+    {
+        return Err("Only image attachments may exceed 20 MiB".to_owned());
     }
     let name = name
         .chars()
@@ -376,6 +383,14 @@ pub fn resolve(storage: &Path, messages: &mut [AgentMessage]) -> Result<(), Stri
             let bytes = std::fs::read(&path).map_err(|error| {
                 format!("Could not read attachment '{}': {error}", attachment.name)
             })?;
+            if bytes.len() as u64 > MAX_NON_IMAGE_ATTACHMENT_BYTES
+                && detect_image_mime(&bytes).is_none()
+            {
+                return Err(format!(
+                    "Only image attachments may exceed 20 MiB ('{}')",
+                    attachment.name
+                ));
+            }
             let (kind, mime_type) = classify_attachment(&attachment.name, &bytes)?;
             attachment.kind = kind;
             attachment.mime_type = mime_type;
@@ -388,7 +403,7 @@ pub fn resolve(storage: &Path, messages: &mut [AgentMessage]) -> Result<(), Stri
                     }
                     image_total = image_total.saturating_add(bytes.len() as u64);
                     if image_total > MAX_REQUEST_IMAGE_BYTES {
-                        return Err("Images in one request may total at most 32 MiB".to_owned());
+                        return Err("Images in one request may total at most 64 MiB".to_owned());
                     }
                     attachment.data_base64 =
                         Some(base64::engine::general_purpose::STANDARD.encode(bytes));
@@ -1234,6 +1249,21 @@ mod tests {
         resolve(&storage, &mut messages).unwrap();
         assert_eq!(messages[0].attachments[0].mime_type, "image/png");
         assert!(messages[0].attachments[0].data_base64.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn accepts_images_above_the_previous_twenty_mib_limit() {
+        assert_eq!(MAX_ATTACHMENT_BYTES, 64 * 1024 * 1024);
+        assert_eq!(MAX_REQUEST_IMAGE_BYTES, 64 * 1024 * 1024);
+        let root = root("large-image-attachment");
+        let source = root.join("large.png");
+        let mut bytes = vec![0_u8; 20 * 1024 * 1024 + 1];
+        bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        std::fs::write(&source, bytes).unwrap();
+        let attachment = import(&root.join("managed"), &source).unwrap();
+        assert_eq!(attachment.kind, AttachmentKind::Image);
+        assert!(attachment.size_bytes > 20 * 1024 * 1024);
         let _ = std::fs::remove_dir_all(root);
     }
 

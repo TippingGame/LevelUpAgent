@@ -20,6 +20,7 @@ use crate::models::{
 
 const MAX_PROMPT_CHARS: usize = 32_000;
 const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_IMAGE_REFERENCE_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 const MAX_AUDIO_BYTES: usize = 64 * 1024 * 1024;
 const MAX_VIDEO_BYTES: usize = 1024 * 1024 * 1024;
 const MAX_JSON_BYTES: usize = 128 * 1024 * 1024;
@@ -647,8 +648,8 @@ fn validate_request(
                 .iter()
                 .map(|item| item.bytes.len())
                 .sum::<usize>();
-            if references.len() > 8 || total > 32 * 1024 * 1024 {
-                return Err("Reference images are limited to 8 files and 32 MiB total".to_owned());
+            if references.len() > 8 || total > MAX_IMAGE_REFERENCE_TOTAL_BYTES {
+                return Err("Reference images are limited to 8 files and 64 MiB total".to_owned());
             }
             if let Some(mask) = mask {
                 if references.is_empty() {

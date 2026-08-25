@@ -12,7 +12,7 @@
     <a href="https://levelup.mom/">LevelUpAPI</a>
   </p>
   <p>
-    <img alt="Version" src="https://img.shields.io/badge/version-1.0.32-ff5a4f?style=flat-square" />
+    <img alt="Version" src="https://img.shields.io/badge/version-1.0.34-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-preview-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -45,7 +45,7 @@ Read the [Creative Studio capability audit](docs/CREATIVE_STUDIO_AUDIT.md) for t
 
 ### Install
 
-Download the package for your platform from GitHub **Releases**. The current `1.0.32` Windows x64 installers are built by GitHub Actions and signed with the Tauri updater key; they are not Authenticode-signed, so SmartScreen may show an unknown-publisher warning.
+Download the package for your platform from GitHub **Releases**. The current `1.0.34` Windows x64 installers are built by GitHub Actions and signed with the Tauri updater key; they are not Authenticode-signed, so SmartScreen may show an unknown-publisher warning.
 
 | Platform | Package | Status |
 | --- | --- | --- |
@@ -155,7 +155,7 @@ Use `pnpm build:macos` for macOS packages. Signed public updates additionally re
 
 ## Current status
 
-`1.0.32` is the current release milestone. The desktop app adds a versioned native client-action contract so the Agent can switch workspaces, control the details panel, and open application dialogs directly. Isolated-browser coverage now includes provider tool-call round trips and a real Chromium acceptance flow. Skill management can enable or disable every valid Skill at once, with the bulk preference update committed in one database transaction. Windows installers use Tauri updater signatures but are not Authenticode-signed, so SmartScreen may show an unknown-publisher warning. When filing an issue, include reproduction steps, application logs, and platform details.
+`1.0.34` is the current release milestone. Conversations now support message editing, import/export, and smoother long-history rendering; composer height and side layouts resize more responsively, and attachments allow up to 64 MiB. Project menus can open workspace folders across platforms, and Grok 4.6 is the default Grok model. Starlight Echoes now use signal-driven autonomous learning grounded in their name and setting, with source tracking and a tightly bounded Agent web-tool loop. Windows installers use Tauri updater signatures but are not Authenticode-signed, so SmartScreen may show an unknown-publisher warning. When filing an issue, include reproduction steps, application logs, and platform details.
 
 ## License
 

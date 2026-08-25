@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::pet::PetMemory;
 
-pub const PET_LIFE_VERSION: u32 = 6;
+pub const PET_LIFE_VERSION: u32 = 8;
 const MAX_DAYS: usize = 180;
 const MAX_TASKS: usize = 240;
 const MAX_KNOWLEDGE: usize = 400;
@@ -15,7 +15,11 @@ const MAX_REWARDS: usize = 240;
 const MAX_ACTIVITY_LOG: usize = 500;
 const MAX_TICK_MINUTES: f64 = 360.0;
 const PERSIST_TICK_INTERVAL_MS: i64 = 60_000;
-const AUTONOMOUS_LEARNING_MIN_INTERVAL_MS: i64 = 90 * 60_000;
+const AUTONOMOUS_CONTEXT_INTERVAL_MS: i64 = 15 * 60_000;
+const AUTONOMOUS_IDENTITY_INTERVAL_MS: i64 = 7 * 24 * 60 * 60_000;
+const AUTONOMOUS_IDENTITY_INITIAL_DELAY_MS: i64 = 30 * 60_000;
+const AUTONOMOUS_DEEPENING_INTERVAL_MS: i64 = 3 * 60 * 60_000;
+const AUTONOMOUS_EXPLORATION_INTERVAL_MS: i64 = 6 * 60 * 60_000;
 const AUTONOMOUS_LEARNING_RETRY_BASE_MS: i64 = 20 * 60_000;
 const AUTONOMOUS_LEARNING_STALE_MS: i64 = 10 * 60_000;
 const RECENT_OBSERVATION_TTL_MS: i64 = 72 * 60 * 60_000;
@@ -222,6 +226,8 @@ pub struct PetLearningQuest {
     pub id: String,
     pub question: String,
     pub topic: String,
+    #[serde(default = "default_learning_mode")]
+    pub learning_mode: String,
     pub status: String,
     pub created_at: i64,
     pub started_at: Option<i64>,
@@ -402,6 +408,7 @@ impl StoredPetLife {
         for quest in &mut self.learning_quests {
             quest.question = shorten(quest.question.trim(), 280);
             quest.topic = shorten(quest.topic.trim(), 90);
+            quest.learning_mode = normalize_learning_mode(&quest.learning_mode);
             quest.rationale = quest
                 .rationale
                 .as_deref()
@@ -1910,19 +1917,22 @@ impl StoredPetLife {
         if completed_today >= self.settings.knowledge_goal {
             return;
         }
-        if self
+        let attempts_today = self
             .learning_quests
             .iter()
-            .map(|quest| quest.created_at)
-            .max()
-            .is_some_and(|last| now.saturating_sub(last) < AUTONOMOUS_LEARNING_MIN_INTERVAL_MS)
-        {
+            .filter(|quest| local_date_key(quest.created_at) == date)
+            .count() as u32;
+        if attempts_today >= self.settings.knowledge_goal.saturating_mul(2).max(2) {
             return;
         }
+        let Some(learning_mode) = self.next_autonomous_learning_mode(now) else {
+            return;
+        };
         self.learning_quests.push(PetLearningQuest {
             id: uuid::Uuid::new_v4().to_string(),
             question: String::new(),
             topic: String::new(),
+            learning_mode: learning_mode.to_owned(),
             status: "formation-pending".to_owned(),
             created_at: now,
             started_at: None,
@@ -1938,6 +1948,49 @@ impl StoredPetLife {
             error: None,
         });
         trim_oldest(&mut self.learning_quests, MAX_LEARNING_QUESTS);
+    }
+
+    fn next_autonomous_learning_mode(&self, now: i64) -> Option<&'static str> {
+        let last_created_at = self
+            .learning_quests
+            .iter()
+            .map(|quest| quest.created_at)
+            .max();
+        let reference_time = last_created_at.unwrap_or(self.born_at);
+        let elapsed = now.saturating_sub(reference_time);
+        let has_fresh_observation = self
+            .recent_observations
+            .iter()
+            .any(|observation| observation.created_at > reference_time);
+        if has_fresh_observation && elapsed >= AUTONOMOUS_CONTEXT_INTERVAL_MS {
+            return Some("context");
+        }
+
+        let last_identity_at = self
+            .learning_quests
+            .iter()
+            .filter(|quest| quest.learning_mode == "identity")
+            .map(|quest| quest.created_at)
+            .max();
+        let identity_due = last_identity_at
+            .map(|last| now.saturating_sub(last) >= AUTONOMOUS_IDENTITY_INTERVAL_MS)
+            .unwrap_or_else(|| {
+                now.saturating_sub(self.born_at) >= AUTONOMOUS_IDENTITY_INITIAL_DELAY_MS
+            });
+        if identity_due && elapsed >= AUTONOMOUS_IDENTITY_INITIAL_DELAY_MS {
+            return Some("identity");
+        }
+
+        if !self.knowledge.is_empty()
+            && self.needs.curiosity >= 72.0
+            && elapsed >= AUTONOMOUS_DEEPENING_INTERVAL_MS
+        {
+            return Some("deepening");
+        }
+        if self.needs.curiosity >= 82.0 && elapsed >= AUTONOMOUS_EXPLORATION_INTERVAL_MS {
+            return Some("exploration");
+        }
+        None
     }
 
     fn reconcile_check_ins(&mut self, now: i64) {
@@ -2837,7 +2890,21 @@ fn canonical(value: &str) -> String {
         .collect()
 }
 
-fn learning_question_is_sensitive(text: &str) -> bool {
+fn default_learning_mode() -> String {
+    "context".to_owned()
+}
+
+fn normalize_learning_mode(value: &str) -> String {
+    match value.trim() {
+        "identity" => "identity",
+        "deepening" => "deepening",
+        "exploration" => "exploration",
+        _ => "context",
+    }
+    .to_owned()
+}
+
+pub(crate) fn learning_question_is_sensitive(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     [
         "api key",
@@ -2919,6 +2986,28 @@ mod tests {
             .keys()
             .map(String::as_str)
             .collect()
+    }
+
+    fn completed_learning_quest(mode: &str, created_at: i64) -> PetLearningQuest {
+        PetLearningQuest {
+            id: format!("completed-{mode}-{created_at}"),
+            question: "已经处理的问题？".to_owned(),
+            topic: "既有主题".to_owned(),
+            learning_mode: mode.to_owned(),
+            status: "completed".to_owned(),
+            created_at,
+            started_at: Some(created_at),
+            completed_at: Some(created_at + 1),
+            next_retry_at: None,
+            attempts: 1,
+            formation_attempts: 1,
+            rationale: Some("测试已完成的求知记录。".to_owned()),
+            question_provider_id: None,
+            answer_title: Some("已有答案".to_owned()),
+            knowledge_id: None,
+            provider_id: None,
+            error: None,
+        }
     }
 
     #[test]
@@ -3162,12 +3251,14 @@ mod tests {
     #[test]
     fn autonomous_learning_does_not_require_a_manual_study_session() {
         let now = local_time(2026, 8, 12, 10, 10);
-        let mut life = StoredPetLife::new(now - 60_000);
-        life.born_at = now - 60_000;
+        let born_at = now - AUTONOMOUS_CONTEXT_INTERVAL_MS - 60_000;
+        let mut life = StoredPetLife::new(born_at);
+        assert!(life.observe_user_input(now - 60_000, "今天正在整理复杂任务的验证边界"));
         assert!(life.study_sessions.is_empty());
         life.tick(now, "Yui", &[]);
         assert_eq!(life.learning_quests.len(), 1);
         assert_eq!(life.learning_quests[0].status, "formation-pending");
+        assert_eq!(life.learning_quests[0].learning_mode, "context");
         assert!(life.study_sessions.is_empty());
 
         assert!(life.claim_learning_quest(now + 1_000).is_none());
@@ -3224,8 +3315,9 @@ mod tests {
     #[test]
     fn autonomous_learning_retries_without_writing_fake_knowledge() {
         let now = local_time(2026, 8, 12, 10, 10);
-        let mut life = StoredPetLife::new(now - 60_000);
-        life.born_at = now - 60_000;
+        let born_at = now - AUTONOMOUS_CONTEXT_INTERVAL_MS - 60_000;
+        let mut life = StoredPetLife::new(born_at);
+        assert!(life.observe_user_input(now - 60_000, "今天的长期计划里有一些待验证假设"));
         life.tick(now, "Yui", &[]);
         let forming = life.claim_learning_question_formation(now + 1_000).unwrap();
         life.complete_learning_question_formation(
@@ -3262,10 +3354,120 @@ mod tests {
     }
 
     #[test]
+    fn autonomous_learning_waits_for_a_real_signal_instead_of_filling_a_quota() {
+        let now = local_time(2026, 8, 12, 16, 0);
+        let mut life = StoredPetLife::new(now - 10 * 60_000);
+        life.tick(now, "Yui", &[]);
+
+        assert!(life.learning_quests.is_empty());
+    }
+
+    #[test]
+    fn periodic_identity_learning_does_not_require_owner_context() {
+        let now = local_time(2026, 8, 12, 10, 10);
+        let mut life = StoredPetLife::new(now - AUTONOMOUS_IDENTITY_INITIAL_DELAY_MS - 1);
+        life.tick(now, "Yui", &[]);
+
+        assert_eq!(life.learning_quests.len(), 1);
+        assert_eq!(life.learning_quests[0].learning_mode, "identity");
+
+        life.learning_quests[0].status = "deferred".to_owned();
+        life.learning_quests[0].completed_at = Some(now + 1_000);
+        life.tick(now + AUTONOMOUS_DEEPENING_INTERVAL_MS, "Yui", &[]);
+        assert_eq!(life.learning_quests.len(), 1);
+    }
+
+    #[test]
+    fn fresh_owner_context_takes_priority_over_due_identity_research() {
+        let now = local_time(2026, 8, 12, 10, 10);
+        let born_at = now - AUTONOMOUS_IDENTITY_INITIAL_DELAY_MS - 60_000;
+        let mut life = StoredPetLife::new(born_at);
+        assert!(life.observe_user_input(now - 60_000, "我正在研究怎样让自主学习更自然"));
+        life.tick(now, "Yui", &[]);
+
+        assert_eq!(life.learning_quests.len(), 1);
+        assert_eq!(life.learning_quests[0].learning_mode, "context");
+    }
+
+    #[test]
+    fn curiosity_and_existing_knowledge_choose_distinct_learning_modes() {
+        let now = local_time(2026, 8, 12, 16, 0);
+        let mut deepening = StoredPetLife::new(now - AUTONOMOUS_DEEPENING_INTERVAL_MS - 1);
+        deepening
+            .record_knowledge(
+                now - AUTONOMOUS_DEEPENING_INTERVAL_MS,
+                PetKnowledgeInput {
+                    title: "已有概念",
+                    summary: "这是一条仍然存在适用边界和延伸关系、值得继续深化的既有知识。",
+                    source: "Conversation",
+                    source_kind: "conversation",
+                    source_ref: Some("thread:test"),
+                    tags: Vec::new(),
+                    confidence: 0.8,
+                },
+            )
+            .unwrap();
+        deepening.learning_quests.push(completed_learning_quest(
+            "identity",
+            now - AUTONOMOUS_DEEPENING_INTERVAL_MS - 1,
+        ));
+        deepening.needs.curiosity = 100.0;
+        deepening.tick(now, "Yui", &[]);
+        assert_eq!(
+            deepening.learning_quests.last().unwrap().learning_mode,
+            "deepening"
+        );
+
+        let mut exploration = StoredPetLife::new(now - AUTONOMOUS_EXPLORATION_INTERVAL_MS - 1);
+        exploration.learning_quests.push(completed_learning_quest(
+            "identity",
+            now - AUTONOMOUS_EXPLORATION_INTERVAL_MS - 1,
+        ));
+        exploration.needs.curiosity = 100.0;
+        exploration.tick(now, "Yui", &[]);
+        assert_eq!(
+            exploration.learning_quests.last().unwrap().learning_mode,
+            "exploration"
+        );
+    }
+
+    #[test]
+    fn daily_learning_cap_also_bounds_declined_question_attempts() {
+        let now = local_time(2026, 8, 12, 16, 0);
+        let mut life = StoredPetLife::new(now - 12 * 60 * 60_000);
+        life.needs.curiosity = 90.0;
+        for index in 0..4 {
+            life.learning_quests.push(PetLearningQuest {
+                id: format!("declined-{index}"),
+                question: String::new(),
+                topic: String::new(),
+                learning_mode: "exploration".to_owned(),
+                status: "deferred".to_owned(),
+                created_at: now - 7 * 60 * 60_000 + index,
+                started_at: None,
+                completed_at: Some(now - 7 * 60 * 60_000 + index),
+                next_retry_at: None,
+                attempts: 0,
+                formation_attempts: 1,
+                rationale: Some("这次没有值得强行提出的问题。".to_owned()),
+                question_provider_id: None,
+                answer_title: None,
+                knowledge_id: None,
+                provider_id: None,
+                error: None,
+            });
+        }
+
+        life.tick(now, "Yui", &[]);
+        assert_eq!(life.learning_quests.len(), 4);
+    }
+
+    #[test]
     fn curiosity_can_decide_not_to_force_a_question() {
         let now = local_time(2026, 8, 12, 10, 10);
-        let mut life = StoredPetLife::new(now - 60_000);
-        life.born_at = now - 60_000;
+        let born_at = now - AUTONOMOUS_CONTEXT_INTERVAL_MS - 60_000;
+        let mut life = StoredPetLife::new(born_at);
+        assert!(life.observe_user_input(now - 60_000, "今天没有出现需要强行求解的新问题"));
         life.tick(now, "Yui", &[]);
         let forming = life.claim_learning_question_formation(now + 1_000).unwrap();
         assert!(life.defer_learning_question_formation(
@@ -3284,8 +3486,9 @@ mod tests {
     #[test]
     fn question_formation_rejects_duplicates_and_sensitive_rationale() {
         let now = local_time(2026, 8, 12, 10, 10);
-        let mut life = StoredPetLife::new(now - 60_000);
-        life.born_at = now - 60_000;
+        let born_at = now - AUTONOMOUS_CONTEXT_INTERVAL_MS - 60_000;
+        let mut life = StoredPetLife::new(born_at);
+        assert!(life.observe_user_input(now - 60_000, "今天安排了多个需要拆分的复杂任务"));
         life.tick(now, "Yui", &[]);
         let first = life.claim_learning_question_formation(now + 1_000).unwrap();
         life.complete_learning_question_formation(
@@ -3304,9 +3507,10 @@ mod tests {
             id: "second".to_owned(),
             question: String::new(),
             topic: String::new(),
+            learning_mode: "context".to_owned(),
             status: "formulating".to_owned(),
-            created_at: now + AUTONOMOUS_LEARNING_MIN_INTERVAL_MS,
-            started_at: Some(now + AUTONOMOUS_LEARNING_MIN_INTERVAL_MS),
+            created_at: now + AUTONOMOUS_CONTEXT_INTERVAL_MS,
+            started_at: Some(now + AUTONOMOUS_CONTEXT_INTERVAL_MS),
             completed_at: None,
             next_retry_at: None,
             attempts: 0,
@@ -3319,7 +3523,7 @@ mod tests {
             error: None,
         });
         let duplicate = life.complete_learning_question_formation(
-            now + AUTONOMOUS_LEARNING_MIN_INTERVAL_MS + 1,
+            now + AUTONOMOUS_CONTEXT_INTERVAL_MS + 1,
             "second",
             PetLearningQuestionInput {
                 question: "如何验证任务拆分是否真的降低了行动门槛？",
@@ -3330,7 +3534,7 @@ mod tests {
         );
         assert!(duplicate.is_err());
         let sensitive = life.complete_learning_question_formation(
-            now + AUTONOMOUS_LEARNING_MIN_INTERVAL_MS + 2,
+            now + AUTONOMOUS_CONTEXT_INTERVAL_MS + 2,
             "second",
             PetLearningQuestionInput {
                 question: "怎样验证一个任务拆分方法的实际效果？",

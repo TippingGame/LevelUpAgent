@@ -1251,14 +1251,15 @@ fn ensure_default_pet(root: &Path) -> Result<(), String> {
     let manifest = directory.join("pet.json");
     let spritesheet = directory.join("spritesheet.webp");
     if validate_package(&directory).is_err() {
-        std::fs::write(&manifest, DEFAULT_MANIFEST)
-            .map_err(|error| format!("Could not install built-in desktop pet metadata: {error}"))?;
-        crate::filesystem::restrict_file(&manifest)?;
         std::fs::write(&spritesheet, DEFAULT_SPRITESHEET).map_err(|error| {
             format!("Could not install built-in desktop pet spritesheet: {error}")
         })?;
         crate::filesystem::restrict_file(&spritesheet)?;
     }
+    // Built-in identity metadata evolves with the app and is not user-replaceable.
+    std::fs::write(&manifest, DEFAULT_MANIFEST)
+        .map_err(|error| format!("Could not install built-in desktop pet metadata: {error}"))?;
+    crate::filesystem::restrict_file(&manifest)?;
     let _ = validate_package(&directory)?;
     Ok(())
 }
@@ -1987,6 +1988,30 @@ mod tests {
         std::fs::write(yui.join("spritesheet.webp"), DEFAULT_SPRITESHEET).unwrap();
         let package = validate_package(&yui).unwrap();
         assert_eq!(package.0.id, "yui");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn built_in_yui_identity_metadata_updates_existing_installations() {
+        let root =
+            std::env::temp_dir().join(format!("levelup-pet-identity-{}", uuid::Uuid::new_v4()));
+        ensure_default_pet(&root).unwrap();
+        let manifest_path = root.join("yui").join("pet.json");
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(DEFAULT_MANIFEST).expect("bundled manifest is valid JSON");
+        legacy.as_object_mut().unwrap().remove("personality");
+        std::fs::write(&manifest_path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+        assert!(validate_package(&root.join("yui")).is_ok());
+
+        ensure_default_pet(&root).unwrap();
+        let (manifest, _, _) = validate_package(&root.join("yui")).unwrap();
+        assert!(
+            manifest
+                .personality
+                .as_deref()
+                .is_some_and(|value| { value.contains("Warm, observant, and curious") })
+        );
+
         let _ = std::fs::remove_dir_all(root);
     }
 

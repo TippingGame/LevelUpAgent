@@ -907,6 +907,7 @@ export interface PetLearningQuest {
   id: string;
   question: string;
   topic: string;
+  learningMode: "context" | "identity" | "deepening" | "exploration" | string;
   status: "formation-pending" | "formulating" | "formation-retrying" | "formation-failed" | "deferred" | "pending" | "asking" | "retrying" | "completed" | "failed" | string;
   createdAt: number;
   startedAt?: number;

@@ -54,6 +54,19 @@ test("autonomy switches cannot programmatically scroll the studio root", () => {
   assert.doesNotMatch(component, /className="pet-toggle"[^\n]*type="checkbox"/);
 });
 
+test("autonomous learning owns optional web tools and is presented as a daily cap", () => {
+  const component = readFileSync(new URL("../src/components/PetLifeWorkspace.tsx", import.meta.url), "utf8");
+  const bridge = readFileSync(new URL("../src/lib/bridge.ts", import.meta.url), "utf8");
+  const backend = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+  const manifest = JSON.parse(readFileSync(new URL("../src-tauri/resources/pets/yui/pet.json", import.meta.url), "utf8"));
+
+  assert.doesNotMatch(component, /webResearchEnabled|联网求知/);
+  assert.match(component, /每日求知上限/);
+  assert.doesNotMatch(bridge, /webResearchEnabled/);
+  assert.match(backend, /AUTONOMOUS_PET_MAX_WEB_SEARCHES/);
+  assert.match(manifest.personality, /Warm, observant, and curious/);
+});
+
 test("patrol targets stay inside a negative-origin monitor work area", () => {
   const area = { x: -1920, y: 24, width: 1920, height: 1040 };
   const windowSize = { x: 430, y: 580 };

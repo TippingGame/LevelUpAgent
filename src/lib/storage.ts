@@ -27,6 +27,11 @@ const PINNED_THREADS_KEY = "levelup-agent.pinned-threads.v1";
 const ACTIVE_THEME_KEY = "levelup-agent.active-theme.v1";
 const DIFF_VIEW_SETTINGS_KEY = "levelup-agent.diff-view-settings.v1";
 const TASK_COMPLETIONS_KEY = "levelup-agent.task-completions.v1";
+const COMPOSER_HEIGHT_KEY = "levelup-agent.composer-height.v1";
+
+export const DEFAULT_COMPOSER_HEIGHT = 64;
+export const MIN_COMPOSER_HEIGHT = 48;
+export const MAX_COMPOSER_HEIGHT = 420;
 
 export const DEFAULT_DIFF_VIEW_SETTINGS: DiffViewSettings = {
   fontFamily: "system",
@@ -367,6 +372,20 @@ export function saveDiffViewSettings(settings: DiffViewSettings) {
     fontFamily: settings.fontFamily,
     fontSize: Math.min(24, Math.max(10, Math.round(settings.fontSize))),
   } satisfies DiffViewSettings));
+}
+
+function normalizeComposerHeight(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_COMPOSER_HEIGHT;
+  return Math.min(MAX_COMPOSER_HEIGHT, Math.max(MIN_COMPOSER_HEIGHT, Math.round(value)));
+}
+
+export function loadComposerHeight(): number {
+  const stored = readStorageValue(COMPOSER_HEIGHT_KEY);
+  return stored === null ? DEFAULT_COMPOSER_HEIGHT : normalizeComposerHeight(Number(stored));
+}
+
+export function saveComposerHeight(height: number) {
+  writeStorageValue(COMPOSER_HEIGHT_KEY, String(normalizeComposerHeight(height)));
 }
 
 export function clearLegacyThreads() {

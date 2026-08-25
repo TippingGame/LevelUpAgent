@@ -28,6 +28,13 @@ const openCodeProfile = {
   model: "",
   protocol: "opencode_go",
 };
+const grokProfile = {
+  id: "grok",
+  name: "Grok",
+  baseUrl: "https://api.x.ai/v1",
+  model: "",
+  protocol: "openai_responses",
+};
 const models = (...ids) => ids.map((id) => ({ id }));
 
 test("Gemini discovery recommends 3.6 Flash over older general models", () => {
@@ -48,6 +55,18 @@ test("Gemini Flash-Lite models remain ordered fallbacks", () => {
   ));
 
   assert.equal(selected?.id, "gemini-3.5-flash-lite");
+});
+
+test("Grok discovery recommends 4.6 and keeps 4.5 as a fallback", () => {
+  assert.equal(selection.preferredDetectedModel(grokProfile, models(
+    "grok-4",
+    "grok-4.5",
+    "grok-4.6",
+  ))?.id, "grok-4.6");
+  assert.equal(selection.preferredDetectedModel(grokProfile, models(
+    "grok-4",
+    "grok-4.5",
+  ))?.id, "grok-4.5");
 });
 
 test("Nano Banana image models are never selected as the default text model", () => {
@@ -115,6 +134,7 @@ test("reasoning levels follow the selected model instead of one global list", ()
   });
 
   assert.deepEqual(efforts("gpt-5.6-luna"), ["auto", "none", "low", "medium", "high", "xhigh", "max"]);
+  assert.deepEqual(efforts("grok-4.6", "openai_responses"), ["auto", "low", "medium", "high", "xhigh"]);
   assert.deepEqual(efforts("grok-4.5"), ["auto", "low", "medium", "high"]);
   assert.deepEqual(efforts("glm-5.3"), ["auto", "high", "max"]);
   assert.deepEqual(efforts("deepseek-v4-pro"), ["auto", "high", "max"]);

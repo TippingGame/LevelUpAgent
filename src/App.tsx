@@ -1,4 +1,4 @@
-import { Children, isValidElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type CSSProperties, type DragEvent as ReactDragEvent, type HTMLAttributes, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { Children, isValidElement, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type CSSProperties, type DragEvent as ReactDragEvent, type HTMLAttributes, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfmCompatible from "./lib/remarkGfmCompatible";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -60,6 +60,7 @@ import {
   TerminalSquare,
   Timer,
   Trash2,
+  Upload,
   Video,
   X,
 } from "lucide-react";
@@ -90,6 +91,7 @@ import {
   deletePersistedThread,
   deleteApiKey,
   deleteImageAttachment,
+  exportConversationFile,
   executeHatchBootstrapTool,
   executeTool,
   fetchModels,
@@ -132,6 +134,7 @@ import {
   listProviderHealth,
   listProviderRequests,
   learnPetMemory,
+  openLocalDirectory,
   previewExternalConfigWrite,
   previewExternalPromptWrite,
   previewGitRollback,
@@ -149,6 +152,7 @@ import {
   scanExternalConfigs,
   scanSkills,
   selectImageReferences,
+  selectConversationFile,
   selectPet,
   selectWorkspace,
   setAllSkillsEnabled,
@@ -170,15 +174,24 @@ import {
   updatePetActivities,
 } from "./lib/bridge";
 import {
+  parseConversationExport,
+  serializeConversationExport,
+  type ImportedConversation,
+} from "./lib/conversationExport";
+import {
   createThread,
   clearLegacyProfiles,
   clearLegacyThreads,
+  DEFAULT_COMPOSER_HEIGHT,
+  MAX_COMPOSER_HEIGHT,
+  MIN_COMPOSER_HEIGHT,
   loadActiveProfileId,
   loadArmorMode,
   loadArmorModeLevel,
   loadArmorModeSkills,
   loadArmorWritingIntensity,
   loadActiveThreadId,
+  loadComposerHeight,
   loadHiddenProjectKeys,
   loadProfiles,
   loadActiveThemeId,
@@ -201,6 +214,7 @@ import {
   saveTaskCompletionNotices,
   saveActiveProfileId,
   saveActiveThreadId,
+  saveComposerHeight,
   saveHiddenProjectKeys,
   saveThreads,
   saveActiveThemeId,
@@ -758,6 +772,7 @@ function App() {
   const [conversationNearBottom, setConversationNearBottom] = useState(true);
   const [conversationHasNewMessages, setConversationHasNewMessages] = useState(false);
   const conversationRef = useRef<HTMLElement>(null);
+  const composerInputRef = useRef<HTMLTextAreaElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const followConversationRef = useRef(true);
   const conversationSnapshotRef = useRef<{ threadId: string; messages: AgentMessage[] }>({ threadId: "", messages: [] });
@@ -827,38 +842,67 @@ function App() {
     }
   }, [acknowledgeTaskCompletion, commitTaskCompletionNotices]);
 
-  const activeProfile =
-    profiles.find((profile) => profile.id === activeProfileId) ?? profiles[0];
+  const activeProfile = useMemo(
+    () => profiles.find((profile) => profile.id === activeProfileId) ?? profiles[0],
+    [profiles, activeProfileId],
+  );
   const reasoningEfforts = useMemo(
     () => reasoningEffortsForProfile(activeProfile),
     [activeProfile.model, activeProfile.protocol],
   );
   const effectiveReasoningEffort = reasoningEffortForProfile(activeProfile, reasoningEffort);
-  const activeThread =
-    threads.find((thread) => thread.id === activeThreadId) ?? threads[0];
+  const activeThread = useMemo(
+    () => threads.find((thread) => thread.id === activeThreadId) ?? threads[0],
+    [threads, activeThreadId],
+  );
   const visibleConversationMessages = useMemo(
     () => activeThread.messages.filter((item) => !item.internal || item.status),
     [activeThread.messages],
+  );
+  const conversationBlocks = useMemo(
+    () => groupConversationMessages(visibleConversationMessages),
+    [visibleConversationMessages],
   );
   activeThreadIdRef.current = activeThread.id;
   workspaceViewRef.current = workspaceView;
   activePetIdRef.current = activePetId;
   const running = runningThreadIds.has(activeThread.id);
   const pending = pendingApprovals[activeThread.id] ?? null;
-  const latestUserCreatedAt = [...activeThread.messages].reverse().find((item) => item.role === "user")?.createdAt ?? 0;
-  const latestConnectionMessage = [...activeThread.messages]
-    .reverse()
-    .find((item) => item.status && item.createdAt >= latestUserCreatedAt);
+  const latestUserCreatedAt = useMemo(() => {
+    for (let index = activeThread.messages.length - 1; index >= 0; index -= 1) {
+      if (activeThread.messages[index].role === "user") return activeThread.messages[index].createdAt;
+    }
+    return 0;
+  }, [activeThread.messages]);
+  const latestConnectionMessage = useMemo(() => {
+    for (let index = activeThread.messages.length - 1; index >= 0; index -= 1) {
+      const item = activeThread.messages[index];
+      if (item.status && item.createdAt >= latestUserCreatedAt) return item;
+    }
+    return undefined;
+  }, [activeThread.messages, latestUserCreatedAt]);
   const latestConnectionStatus = latestConnectionMessage?.status;
   const activeReconnectMessageId = running && latestConnectionMessage?.status === "reconnecting"
     ? latestConnectionMessage.id
     : undefined;
   const queuedItems = harnessQueueItems[activeThread.id] ?? [];
-  const latestChangeSet = [...activeThread.messages].reverse().find((item) => item.changeSet)?.changeSet ?? null;
+  const latestChangeSet = useMemo(() => {
+    for (let index = activeThread.messages.length - 1; index >= 0; index -= 1) {
+      const changeSet = activeThread.messages[index].changeSet;
+      if (changeSet) return changeSet;
+    }
+    return null;
+  }, [activeThread.messages]);
   const visibleChangeSet = reviewedChangeSet ?? latestChangeSet;
   const persistentThreads = threads;
-  const projectGroups = groupThreadsByWorkspace(persistentThreads, pinnedThreadIds, defaultWorkspace);
-  const displayedProjectGroups = projectGroups.filter((project) => !project.workspace || !hiddenProjectKeys.has(project.key));
+  const projectGroups = useMemo(
+    () => groupThreadsByWorkspace(persistentThreads, pinnedThreadIds, defaultWorkspace),
+    [persistentThreads, pinnedThreadIds, defaultWorkspace],
+  );
+  const displayedProjectGroups = useMemo(
+    () => projectGroups.filter((project) => !project.workspace || !hiddenProjectKeys.has(project.key)),
+    [projectGroups, hiddenProjectKeys],
+  );
   const activeProjectKey = workspaceKey(activeThread.workspace);
   const activeUsesDefaultWorkspace = isDefaultWorkspace(activeThread.workspace, defaultWorkspace);
   const connectionReady = keyStatusLoaded
@@ -866,18 +910,22 @@ function App() {
     && Boolean(activeProfile.model.trim());
   const connectionNeedsSetup = keyStatusLoaded && !connectionReady;
   const normalizedSidebarQuery = sidebarQuery.trim().toLocaleLowerCase(locale);
-  const visibleProjectGroups = normalizedSidebarQuery
-    ? displayedProjectGroups
-        .map((project) => {
-          if (project.name.toLocaleLowerCase(locale).includes(normalizedSidebarQuery)) return project;
-          return {
-            ...project,
-            threads: project.threads.filter((thread) => localizedThreadTitle(thread.title).toLocaleLowerCase(locale).includes(normalizedSidebarQuery)),
-          };
-        })
-        .filter((project) => project.threads.length > 0)
-    : displayedProjectGroups;
-  const activePetProfile = petProfiles.find((profile) => profile.id === activeThread.petId);
+  const visibleProjectGroups = useMemo(() => {
+    if (!normalizedSidebarQuery) return displayedProjectGroups;
+    return displayedProjectGroups
+      .map((project) => {
+        if (project.name.toLocaleLowerCase(locale).includes(normalizedSidebarQuery)) return project;
+        return {
+          ...project,
+          threads: project.threads.filter((thread) => localizedThreadTitle(thread.title).toLocaleLowerCase(locale).includes(normalizedSidebarQuery)),
+        };
+      })
+      .filter((project) => project.threads.length > 0);
+  }, [displayedProjectGroups, normalizedSidebarQuery, locale]);
+  const activePetProfile = useMemo(
+    () => petProfiles.find((profile) => profile.id === activeThread.petId),
+    [petProfiles, activeThread.petId],
+  );
   const petActivities = useMemo(
     () => buildPetActivities(threads, runningThreadIds, pendingApprovals, mediaPendingCount, petProfiles, taskCompletionNotices, locale),
     [threads, runningThreadIds, pendingApprovals, mediaPendingCount, petProfiles, taskCompletionNotices, locale],
@@ -890,7 +938,10 @@ function App() {
     () => new Set(taskCompletionNotices.filter((notice) => notice.unread).map((notice) => notice.threadId)),
     [taskCompletionNotices],
   );
-  const latestUnreadTaskCompletion = taskCompletionNotices.find((notice) => notice.unread);
+  const latestUnreadTaskCompletion = useMemo(
+    () => taskCompletionNotices.find((notice) => notice.unread),
+    [taskCompletionNotices],
+  );
 
   useEffect(() => {
     document.documentElement.lang = locale;
@@ -2067,13 +2118,23 @@ function App() {
     }
   };
 
-  const reviewChangeSet = (changeSet: ConversationChangeSet) => {
+  const reviewChangeSet = useCallback((changeSet: ConversationChangeSet) => {
     setReviewedChangeSet(changeSet);
     setReviewedFile(null);
     setReviewedDiff(null);
     setInspectorTab("changes");
     setRightPanelOpen(true);
-  };
+  }, []);
+
+  const editConversationMessage = useCallback((content: string) => {
+    setDraft(content);
+    window.requestAnimationFrame(() => {
+      const input = composerInputRef.current;
+      if (!input) return;
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    });
+  }, []);
 
   const reviewChangedFile = async (changeSet: ConversationChangeSet, file: ConversationFileChange) => {
     setReviewedChangeSet(changeSet);
@@ -2524,6 +2585,61 @@ function App() {
     setRenameDraft(localizedThreadTitle(activeThread.title));
     setThreadMenuOpen(false);
     setRenamingThread(true);
+  };
+
+  const exportActiveConversation = async () => {
+    if (activeThread.messages.length === 0) {
+      setNotice(tr("当前会话没有可导出的消息", "The current conversation has no messages to export"));
+      setThreadMenuOpen(false);
+      return;
+    }
+    try {
+      const safeTitle = (localizedThreadTitle(activeThread.title) || "conversation")
+        .replace(/[\\/:*?\"<>|]+/g, "-")
+        .trim()
+        .slice(0, 72);
+      const fileName = `${safeTitle || "conversation"}.json`;
+      const destination = await exportConversationFile(fileName, serializeConversationExport(activeThread));
+      setThreadMenuOpen(false);
+      if (destination) setNotice(`${tr("会话已导出", "Conversation exported")}: ${destination}`);
+    } catch (error) {
+      setThreadMenuOpen(false);
+      setNotice(`${tr("导出会话失败", "Could not export conversation")}: ${errorText(error)}`);
+    }
+  };
+
+  const importConversationIntoProject = async (workspace?: string) => {
+    setProjectMenuKey(null);
+    try {
+      const content = await selectConversationFile();
+      if (!content) return;
+      const imported = parseConversationExport(content);
+      const importedThread = importedConversationThread(imported, workspace ?? defaultWorkspace);
+      commitThread(importedThread);
+      revealProject(workspaceKey(importedThread.workspace));
+      expandProject(workspaceKey(importedThread.workspace));
+      setActiveThreadId(importedThread.id);
+      setNotice(`${tr("会话已导入", "Conversation imported")}: ${localizedThreadTitle(importedThread.title)}`);
+    } catch (error) {
+      setNotice(`${tr("导入会话失败", "Could not import conversation")}: ${errorText(error)}`);
+    }
+  };
+
+  const openProjectFolder = async (workspace?: string) => {
+    setProjectMenuKey(null);
+    if (!workspace) {
+      setNotice(tr("该项目没有可打开的本地路径", "This project has no local folder to open"));
+      return;
+    }
+    if (!isDesktop()) {
+      setNotice(tr("浏览器预览无法打开本地文件夹", "Browser preview cannot open local folders"));
+      return;
+    }
+    try {
+      await openLocalDirectory(workspace);
+    } catch (error) {
+      setNotice(`${tr("打开文件夹失败", "Could not open folder")}: ${errorText(error)}`);
+    }
   };
 
   const forkActiveThread = async () => {
@@ -4272,7 +4388,7 @@ function App() {
                       <small>{project.threads.length} {tr("个会话", "conversations")}</small>
                     </span>
                   </button>
-                  {project.workspace && !isDefaultWorkspace(project.workspace, defaultWorkspace) && (
+                  {project.workspace && (
                     <div className="project-menu-control">
                       <IconButton
                         className="project-menu-trigger"
@@ -4284,10 +4400,20 @@ function App() {
                       </IconButton>
                       {projectMenuKey === project.key && (
                         <div className="project-menu-popover" role="menu" aria-label={`${tr("项目操作", "Project actions")} ${project.name}`}>
-                          <button type="button" role="menuitem" onClick={() => removeProjectFromList(project.key)}>
-                            <FolderMinus size={14} />
-                            <span>{tr("从列表移除", "Remove from list")}</span>
+                          <button type="button" role="menuitem" onClick={() => { void openProjectFolder(project.workspace); }}>
+                            <FolderOpen size={14} />
+                            <span>{tr("打开文件夹", "Open folder")}</span>
                           </button>
+                          <button type="button" role="menuitem" onClick={() => { void importConversationIntoProject(project.workspace); }}>
+                            <Upload size={14} />
+                            <span>{tr("导入会话", "Import conversation")}</span>
+                          </button>
+                          {!isDefaultWorkspace(project.workspace, defaultWorkspace) && (
+                            <button className="danger" type="button" role="menuitem" onClick={() => removeProjectFromList(project.key)}>
+                              <FolderMinus size={14} />
+                              <span>{tr("从列表移除", "Remove from list")}</span>
+                            </button>
+                          )}
                         </div>
                       )}
                     </div>
@@ -4484,6 +4610,10 @@ function App() {
               </IconButton>
               {threadMenuOpen && (
                 <div className="thread-menu-popover" role="menu" aria-label={tr("会话操作", "Conversation actions")}>
+                  <button role="menuitem" onClick={() => { void exportActiveConversation(); }}>
+                    <Download size={14} />
+                    <span>{tr("导出会话", "Export conversation")}</span>
+                  </button>
                   <button role="menuitem" onClick={beginThreadRename}>
                     <Pencil size={14} />
                     <span>{tr("重命名会话", "Rename conversation")}</span>
@@ -4566,20 +4696,18 @@ function App() {
               />
             ) : (
               <div className="message-stream">
-                {groupConversationMessages(visibleConversationMessages).map((block) => block.kind === "user" ? (
-                  <MessageRow key={block.item.id} item={block.item} />
-                ) : (
-                  <AssistantMessageGroup
-                    key={block.items[0]?.id ?? "assistant"}
-                    items={block.items}
-                    pending={pending}
-                    activeReconnectMessageId={activeReconnectMessageId}
-                    pet={activePetProfile}
-                    onReviewChanges={reviewChangeSet}
-                  />
-                ))}
-                {running && latestConnectionStatus !== "reconnecting" && <ThinkingRow />}
-                <div ref={endRef} />
+                <ConversationMessageList
+                  key={locale}
+                  blocks={conversationBlocks}
+                  pending={pending}
+                  activeReconnectMessageId={activeReconnectMessageId}
+                  latestConnectionStatus={latestConnectionStatus}
+                  running={running}
+                  pet={activePetProfile}
+                  endRef={endRef}
+                  onReviewChanges={reviewChangeSet}
+                  onEdit={editConversationMessage}
+                />
               </div>
             )}
           </section>
@@ -4639,6 +4767,7 @@ function App() {
         )}
 
         <Composer
+          inputRef={composerInputRef}
           draft={draft}
           attachments={draftAttachments}
           mode={activeThread.kind === "pet" ? "chat" : mode}
@@ -4700,7 +4829,7 @@ function App() {
   ) : null;
 
   function startSidebarResize(event: ReactPointerEvent<HTMLDivElement>) {
-    if (window.matchMedia("(max-width: 820px)").matches) return;
+    if (window.matchMedia("(max-width: 820px)").matches || (event.pointerType !== "touch" && event.button !== 0)) return;
     event.preventDefault();
     const startX = event.clientX;
     const startWidth = event.currentTarget.parentElement?.getBoundingClientRect().width
@@ -4713,13 +4842,25 @@ function App() {
       : 0;
     const mainMinWidth = window.matchMedia("(max-width: 1180px)").matches ? 500 : 520;
     const maxWidth = Math.min(480, Math.max(180, window.innerWidth - mainMinWidth - inspectorOccupancy));
+    const shell = document.querySelector<HTMLElement>(".app-shell");
+    let latestWidth = startWidth;
+    let frame: number | null = null;
     const onMove = (moveEvent: PointerEvent) => {
-      const nextWidth = Math.min(maxWidth, Math.max(180, startWidth + moveEvent.clientX - startX));
-      setSidebarWidth(nextWidth);
+      latestWidth = Math.min(maxWidth, Math.max(180, startWidth + moveEvent.clientX - startX));
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(() => {
+        shell?.style.setProperty("--sidebar-width", `${latestWidth}px`);
+        frame = null;
+      });
     };
     const onUp = () => {
+      if (frame !== null) window.cancelAnimationFrame(frame);
+      frame = null;
+      shell?.style.setProperty("--sidebar-width", `${latestWidth}px`);
+      setSidebarWidth(latestWidth);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
       document.body.style.removeProperty("cursor");
       document.body.style.removeProperty("user-select");
     };
@@ -4727,21 +4868,34 @@ function App() {
     document.body.style.userSelect = "none";
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp, { once: true });
+    window.addEventListener("pointercancel", onUp, { once: true });
   }
 
   const startInspectorResize = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (window.matchMedia("(max-width: 680px)").matches) return;
+    if (window.matchMedia("(max-width: 680px)").matches || (event.pointerType !== "touch" && event.button !== 0)) return;
     event.preventDefault();
     const startX = event.clientX;
     const startWidth = inspectorWidth;
     const maxWidth = Math.min(560, Math.max(260, window.innerWidth - 764));
+    const shell = document.querySelector<HTMLElement>(".app-shell");
+    let latestWidth = startWidth;
+    let frame: number | null = null;
     const onMove = (moveEvent: PointerEvent) => {
-      const nextWidth = Math.min(maxWidth, Math.max(260, startWidth + startX - moveEvent.clientX));
-      setInspectorWidth(nextWidth);
+      latestWidth = Math.min(maxWidth, Math.max(260, startWidth + startX - moveEvent.clientX));
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(() => {
+        shell?.style.setProperty("--inspector-width", `${latestWidth}px`);
+        frame = null;
+      });
     };
     const onUp = () => {
+      if (frame !== null) window.cancelAnimationFrame(frame);
+      frame = null;
+      shell?.style.setProperty("--inspector-width", `${latestWidth}px`);
+      setInspectorWidth(latestWidth);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
       document.body.style.removeProperty("cursor");
       document.body.style.removeProperty("user-select");
     };
@@ -4749,6 +4903,7 @@ function App() {
     document.body.style.userSelect = "none";
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp, { once: true });
+    window.addEventListener("pointercancel", onUp, { once: true });
   };
 
   const updateDiffViewSettings = (next: DiffViewSettings) => {
@@ -5390,13 +5545,13 @@ type ConversationBlock =
   | { kind: "user"; item: AgentMessage }
   | { kind: "assistant"; items: AgentMessage[] };
 
-function MarkdownContent({ content }: { content: string }) {
+const MarkdownContent = memo(function MarkdownContent({ content }: { content: string }) {
   return (
     <ReactMarkdown remarkPlugins={[remarkGfmCompatible]} components={MARKDOWN_COMPONENTS}>
       {content}
     </ReactMarkdown>
   );
-}
+});
 
 function diffFontStack(fontFamily: DiffFontFamily): string {
   if (fontFamily === "consolas") return 'Consolas, ui-monospace, "Cascadia Mono", monospace';
@@ -5457,7 +5612,7 @@ function groupConversationMessages(messages: AgentMessage[]): ConversationBlock[
   return blocks;
 }
 
-function MessageRow({ item }: { item: AgentMessage }) {
+function MessageRow({ item, onEdit }: { item: AgentMessage; onEdit: (content: string) => void }) {
   return (
     <article className={`message user ${item.isError ? "error" : ""}`}>
       <div className="message-avatar"><span>{tr("你", "You")}</span></div>
@@ -5472,7 +5627,7 @@ function MessageRow({ item }: { item: AgentMessage }) {
             <MarkdownContent content={item.content} />
           </div>
         )}
-        <MessageCopyButton content={item.content} />
+        <MessageCopyButton content={item.content} onEdit={onEdit} />
       </div>
     </article>
   );
@@ -5525,7 +5680,7 @@ function AssistantMessageGroup({
         </div>
         <div className="assistant-message-content">
           {items.map((item) => (
-            <AssistantMessageSegment
+            <MemoizedAssistantMessageSegment
               item={item}
               pending={pending}
               reconnectingActive={item.id === activeReconnectMessageId}
@@ -5595,7 +5750,7 @@ function AssistantAvatar({ brand, modelName }: { brand: ModelProviderBrand; mode
   );
 }
 
-function MessageCopyButton({ content }: { content: string }) {
+function MessageCopyButton({ content, onEdit }: { content: string; onEdit?: (content: string) => void }) {
   const [status, setStatus] = useState<"idle" | "copied" | "error">("idle");
   if (!content.trim()) return null;
   const copy = async () => {
@@ -5609,6 +5764,12 @@ function MessageCopyButton({ content }: { content: string }) {
   };
   return (
     <div className="message-copy-action">
+      {onEdit && (
+        <button type="button" onClick={() => onEdit(content)} title={tr("编辑这段内容", "Edit this message")}>
+          <Pencil size={13} />
+          {tr("编辑", "Edit")}
+        </button>
+      )}
       <button type="button" onClick={() => void copy()} title={tr("复制这段内容", "Copy this message")}>
         {status === "copied" ? <Check size={13} /> : <Copy size={13} />}
         {status === "copied" ? tr("已复制", "Copied") : status === "error" ? tr("复制失败", "Copy failed") : tr("复制", "Copy")}
@@ -5716,6 +5877,12 @@ function AssistantMessageSegment({
   );
 }
 
+const MemoizedAssistantMessageSegment = memo(AssistantMessageSegment, (previous, next) => (
+  previous.item === next.item
+  && previous.pending === next.pending
+  && previous.reconnectingActive === next.reconnectingActive
+));
+
 function ThinkingRow() {
   return (
     <div className="thinking-row">
@@ -5725,6 +5892,57 @@ function ThinkingRow() {
     </div>
   );
 }
+
+// Composer keystrokes should not re-parse the complete historical message tree.
+const MemoizedMessageRow = memo(MessageRow);
+
+const MemoizedAssistantMessageGroup = memo(AssistantMessageGroup, (previous, next) => (
+  previous.pending === next.pending
+  && previous.activeReconnectMessageId === next.activeReconnectMessageId
+  && previous.pet === next.pet
+  && previous.onReviewChanges === next.onReviewChanges
+  && previous.items.length === next.items.length
+  && previous.items.every((item, index) => item === next.items[index])
+));
+
+const ConversationMessageList = memo(({
+  blocks,
+  pending,
+  activeReconnectMessageId,
+  latestConnectionStatus,
+  running,
+  pet,
+  endRef,
+  onReviewChanges,
+  onEdit,
+}: {
+  blocks: ConversationBlock[];
+  pending: PendingApproval | null;
+  activeReconnectMessageId?: string;
+  latestConnectionStatus?: AgentMessage["status"];
+  running: boolean;
+  pet?: PetProfile;
+  endRef: RefObject<HTMLDivElement | null>;
+  onReviewChanges: (changeSet: ConversationChangeSet) => void;
+  onEdit: (content: string) => void;
+}) => (
+  <>
+    {blocks.map((block) => block.kind === "user" ? (
+      <MemoizedMessageRow key={block.item.id} item={block.item} onEdit={onEdit} />
+    ) : (
+      <MemoizedAssistantMessageGroup
+        key={block.items[0]?.id ?? "assistant"}
+        items={block.items}
+        pending={pending}
+        activeReconnectMessageId={activeReconnectMessageId}
+        pet={pet}
+        onReviewChanges={onReviewChanges}
+      />
+    ))}
+    {running && latestConnectionStatus !== "reconnecting" && <ThinkingRow />}
+    <div ref={endRef} />
+  </>
+));
 
 function reasoningEffortLabel(effort: ReasoningEffort) {
   if (effort === "auto") return tr("自动", "Auto");
@@ -5832,6 +6050,7 @@ function ReasoningPicker({
 }
 
 function Composer({
+  inputRef,
   draft,
   attachments,
   mode,
@@ -5854,6 +6073,7 @@ function Composer({
   onSend,
   onStop,
 }: {
+  inputRef: RefObject<HTMLTextAreaElement | null>;
   draft: string;
   attachments: ImageAttachment[];
   mode: AgentMode;
@@ -5878,8 +6098,54 @@ function Composer({
 }) {
   const [permissionMenuOpen, setPermissionMenuOpen] = useState(false);
   const [armorLevelMenuOpen, setArmorLevelMenuOpen] = useState(false);
+  const [composerHeight, setComposerHeight] = useState(() => loadComposerHeight());
   const permissionMenuRef = useRef<HTMLDivElement>(null);
   const armorLevelMenuRef = useRef<HTMLDivElement>(null);
+  const composerHeightRef = useRef(composerHeight);
+  const resizeCleanupRef = useRef<(() => void) | null>(null);
+
+  const clampComposerHeight = (value: number) => Math.min(
+    MAX_COMPOSER_HEIGHT,
+    Math.max(MIN_COMPOSER_HEIGHT, Math.round(value)),
+  );
+
+  const applyComposerHeight = (value: number, persist: boolean) => {
+    const next = clampComposerHeight(value);
+    composerHeightRef.current = next;
+    setComposerHeight(next);
+    if (persist) saveComposerHeight(next);
+  };
+
+  const startComposerResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    resizeCleanupRef.current?.();
+    const startY = event.clientY;
+    const startHeight = inputRef.current?.getBoundingClientRect().height ?? DEFAULT_COMPOSER_HEIGHT;
+    const onMove = (moveEvent: PointerEvent) => {
+      // Moving the top edge upward gives the textarea more room.
+      applyComposerHeight(startHeight + startY - moveEvent.clientY, false);
+    };
+    const onUp = () => {
+      saveComposerHeight(composerHeightRef.current);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      document.body.style.removeProperty("cursor");
+      document.body.style.removeProperty("user-select");
+      resizeCleanupRef.current = null;
+    };
+    resizeCleanupRef.current = onUp;
+    document.body.style.cursor = "ns-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp, { once: true });
+    window.addEventListener("pointercancel", onUp, { once: true });
+  };
+
+  useEffect(() => () => {
+    resizeCleanupRef.current?.();
+  }, []);
 
   useEffect(() => {
     if (!permissionMenuOpen) return;
@@ -5922,6 +6188,25 @@ function Composer({
   return (
     <div className="composer-wrap">
       <div className={`composer${modelMenuOpen || permissionMenuOpen || (armorMode && armorLevelMenuOpen) ? " menu-open" : ""}`}>
+        <div
+          className="composer-resize-handle"
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label={tr("调整输入框高度", "Resize composer height")}
+          aria-valuemin={MIN_COMPOSER_HEIGHT}
+          aria-valuemax={MAX_COMPOSER_HEIGHT}
+          aria-valuenow={composerHeight}
+          tabIndex={0}
+          onPointerDown={startComposerResize}
+          onKeyDown={(event) => {
+            if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+            event.preventDefault();
+            const current = inputRef.current?.getBoundingClientRect().height ?? DEFAULT_COMPOSER_HEIGHT;
+            applyComposerHeight(current + (event.key === "ArrowUp" ? 16 : -16), true);
+          }}
+        >
+          <span aria-hidden="true" />
+        </div>
         {attachments.length > 0 && (
           <div className="composer-attachments" aria-label={tr("待发送附件", "Attachments to send")}>
             {attachments.map((attachment) => (
@@ -5930,7 +6215,12 @@ function Composer({
           </div>
         )}
         <textarea
+          ref={inputRef}
           value={draft}
+          style={composerHeight === DEFAULT_COMPOSER_HEIGHT ? undefined : {
+            height: `${composerHeight}px`,
+            minHeight: `${MIN_COMPOSER_HEIGHT}px`,
+          }}
           onChange={(event) => onDraftChange(event.target.value)}
           onPaste={(event) => {
             const files = clipboardFiles(event.clipboardData);
@@ -8402,6 +8692,43 @@ function workspaceKey(workspace?: string) {
   if (!workspace) return "__no_project__";
   const normalized = workspace.replace(/\\/g, "/").replace(/\/+$/, "");
   return /^[a-z]:\//i.test(normalized) ? normalized.toLocaleLowerCase("en-US") : normalized;
+}
+
+function importedConversationThread(imported: ImportedConversation, workspace?: string): AgentThread {
+  const toolCallIds = new Map<string, string>();
+  for (const item of imported.messages) {
+    for (const call of item.toolCalls) toolCallIds.set(call.id, crypto.randomUUID());
+  }
+  const messages = imported.messages.map((item) => ({
+    id: crypto.randomUUID(),
+    role: item.role,
+    content: item.content,
+    toolCalls: item.toolCalls.map((call) => ({
+      ...call,
+      id: toolCallIds.get(call.id) ?? crypto.randomUUID(),
+    })),
+    toolCallId: item.toolCallId ? toolCallIds.get(item.toolCallId) : undefined,
+    createdAt: item.createdAt,
+    isError: item.isError,
+    requestId: item.requestId,
+    modelName: item.modelName,
+    providerBrand: item.providerBrand,
+    internal: item.internal,
+    changeSet: item.changeSet,
+    attachments: [],
+  } satisfies AgentMessage));
+  const latestMessageAt = messages.reduce((latest, item) => Math.max(latest, item.createdAt), 0);
+  return {
+    id: crypto.randomUUID(),
+    title: `${imported.title || tr("导入会话", "Imported conversation")} · ${tr("导入", "Imported")}`.slice(0, 80),
+    workspace,
+    kind: imported.kind === "pet" && imported.petId ? "pet" : "standard",
+    petId: imported.kind === "pet" && imported.petId ? imported.petId : undefined,
+    messages,
+    updatedAt: Math.max(Date.now(), latestMessageAt),
+    inputTokens: imported.inputTokens,
+    outputTokens: imported.outputTokens,
+  };
 }
 
 function isDefaultWorkspace(workspace?: string, defaultWorkspace?: string) {

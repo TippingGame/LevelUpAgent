@@ -17,6 +17,11 @@ __pycache__/
 *.local
 src-tauri/tauri.release.conf.json
 
+# Workspace-local Agent/Armor state and recoverable installer backups
+.agents/
+.levelup-armor/
+backups/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

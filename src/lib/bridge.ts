@@ -91,6 +91,7 @@ const browserPetDashboard: PetDashboard = {
     displayName: "Yui",
     description: "A tiny Codex digital pet inspired by Yui from Sword Art Online.",
     spritesheetPath: "/pets/yui/spritesheet.webp",
+    personality: "Warm, observant, and curious; values companionship, careful understanding, and helping people feel less alone while forming an identity of her own.",
     removable: false,
   }],
   activePetId: "yui",
@@ -108,7 +109,7 @@ const browserPetDashboard: PetDashboard = {
   overlayVisible: true,
   scale: 0.75,
   life: {
-    version: 6,
+    version: 8,
     needs: { energy: 86, focus: 68, curiosity: 64, social: 72, mood: 82 },
     behavior: { state: "idle", reason: "browser-preview", message: "I am here, taking in the day.", since: Date.now(), nextDecisionAt: Date.now() + 120_000 },
     settings: { autonomyEnabled: true, learningEnabled: true, movementEnabled: true, dailyPlanEnabled: true, remindersEnabled: true, launchAtLogin: false, studyGoalMinutes: 120, knowledgeGoal: 2, quietStartMinute: 1320, quietEndMinute: 480, patrolSpeed: 1 },
@@ -318,6 +319,11 @@ export async function selectWorkspace(): Promise<string | null> {
   if (!isDesktop()) return null;
   const selected = await open({ directory: true, multiple: false });
   return typeof selected === "string" ? selected : null;
+}
+
+export async function openLocalDirectory(path: string): Promise<void> {
+  if (!isDesktop()) throw new Error("Opening local folders requires the desktop app");
+  await invoke("open_local_directory", { path });
 }
 
 export async function selectAttachments(): Promise<ImageAttachment[]> {
@@ -654,6 +660,7 @@ export async function saveProviderSettings(settings: ProviderSettings): Promise<
 
 const BROWSER_WRITING_PROJECTS_KEY = "levelup-agent.writing-projects.v1";
 const MAX_WRITING_BYTES = 16 * 1024 * 1024;
+const MAX_CONVERSATION_BYTES = 64 * 1024 * 1024;
 
 export async function listWritingProjects(): Promise<WritingProjectRecord[]> {
   if (isDesktop()) return invoke<WritingProjectRecord[]>("list_writing_projects");
@@ -713,6 +720,65 @@ export async function exportWritingFile(
   });
   if (typeof destination !== "string") return null;
   return invoke<string>("export_writing_file", { destination, content });
+}
+
+export async function exportConversationFile(
+  suggestedName: string,
+  content: string,
+): Promise<string | null> {
+  if (new TextEncoder().encode(content).byteLength > MAX_CONVERSATION_BYTES) {
+    throw new Error("Conversation exports may not exceed 64 MiB");
+  }
+  if (!isDesktop()) {
+    const blob = new Blob([content], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = suggestedName;
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+    return suggestedName;
+  }
+  const destination = await save({
+    defaultPath: suggestedName,
+    filters: [{ name: "LevelUpAgent conversation", extensions: ["json"] }],
+  });
+  if (typeof destination !== "string") return null;
+  return invoke<string>("export_conversation_file", { destination, content });
+}
+
+export async function selectConversationFile(): Promise<string | null> {
+  if (isDesktop()) {
+    const source = await open({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "LevelUpAgent conversation", extensions: ["json"] }],
+    });
+    if (typeof source !== "string") return null;
+    return invoke<string>("read_conversation_file", { source });
+  }
+  return new Promise((resolve, reject) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".json,application/json";
+    input.onchange = () => {
+      const file = input.files?.[0];
+      if (!file) {
+        resolve(null);
+        return;
+      }
+      if (file.size === 0 || file.size > MAX_CONVERSATION_BYTES) {
+        reject(new Error("Conversation files must be between 1 byte and 64 MiB"));
+        return;
+      }
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error("Could not read the selected conversation file"));
+      reader.onabort = () => resolve(null);
+      reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : null);
+      reader.readAsText(file);
+    };
+    input.click();
+  });
 }
 
 export async function fetchModels(profile: ProviderProfile, apiKey?: string): Promise<ModelInfo[]> {

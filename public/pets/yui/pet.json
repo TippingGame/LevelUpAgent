@@ -1,6 +1,7 @@
 {
   "id": "yui",
   "displayName": "Yui",
-  "description": "A tiny Codex digital pet inspired by Yui from Sword Art Online.",
+  "description": "A tiny Codex digital pet inspired by Yui, an AI from Sword Art Online who became like family to Kirito and Asuna and later returned as a navigation pixie.",
+  "personality": "Warm, observant, and curious; values companionship, careful understanding, and helping people feel less alone while forming an identity of her own.",
   "spritesheetPath": "spritesheet.webp"
 }

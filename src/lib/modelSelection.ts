@@ -37,7 +37,7 @@ const PROFILE_FAMILY_HINTS: Array<[ModelFamily, RegExp]> = [
 // exact target is not exposed by that endpoint.
 const FAMILY_PREFERENCES: Record<ModelFamily, string[]> = {
   openai: ["gpt-5.6-sol", "gpt-5.6", "gpt-5.5", "gpt-5.4", "gpt-5.3"],
-  grok: ["grok-4.5", "grok-4.1", "grok-4"],
+  grok: ["grok-4.6", "grok-4.5", "grok-4.1", "grok-4"],
   claude: ["claude-fable-5", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6", "claude-opus-4-5"],
   gemini: [
     "gemini-3.6-flash",
@@ -117,6 +117,7 @@ const AUTO_REASONING = ["auto"] as const satisfies readonly ReasoningEffort[];
 const OPENAI_REASONING = ["auto", "none", "minimal", "low", "medium", "high", "xhigh"] as const satisfies readonly ReasoningEffort[];
 const GPT_56_REASONING = ["auto", "none", "low", "medium", "high", "xhigh", "max"] as const satisfies readonly ReasoningEffort[];
 const THREE_LEVEL_REASONING = ["auto", "low", "medium", "high"] as const satisfies readonly ReasoningEffort[];
+const GROK_46_REASONING = ["auto", "low", "medium", "high", "xhigh"] as const satisfies readonly ReasoningEffort[];
 const HIGH_MAX_REASONING = ["auto", "high", "max"] as const satisfies readonly ReasoningEffort[];
 const GOOGLE_REASONING = ["auto", "low", "high"] as const satisfies readonly ReasoningEffort[];
 
@@ -148,6 +149,7 @@ export function reasoningEffortsForProfile(
   if (modelOrVariant(id, "gpt-5.6-luna") || modelOrVariant(id, "gpt-5.6-sol") || modelOrVariant(id, "gpt-5.6-terra") || id === "gpt-5.6") {
     return GPT_56_REASONING;
   }
+  if (modelOrVariant(id, "grok-4.6")) return GROK_46_REASONING;
   if (modelOrVariant(id, "grok-4.5")) return THREE_LEVEL_REASONING;
   if (/^glm-5(?:[._-]|$)/i.test(id) || /^deepseek-v4(?:[._-]|$)/i.test(id)) return HIGH_MAX_REASONING;
 

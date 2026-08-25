@@ -35,8 +35,13 @@ const HATCH_BOOTSTRAP_MARKER: &str = "[LEVELUP_HATCH_BOOTSTRAP_COMPLETE]";
 const THEME_GENERATION_BOOTSTRAP_MARKER: &str = "[LEVELUP_THEME_GENERATION_BOOTSTRAP_COMPLETE]";
 const THEME_GENERATION_TARGET_MARKER: &str = "[LEVELUP_THEME_GENERATION_TARGET]";
 const THEME_GENERATION_REQUEST_TIMEOUT_SECS: u64 = 360;
+// Vision requests are sent as inline Base64. A 6 MiB image becomes roughly
+// 8 MiB before JSON framing, and some providers need more than 30 seconds to
+// receive/process that body before emitting the first SSE event. Keep the
+// timeout long enough to avoid reconnecting the same large request repeatedly;
+// the outer provider round timeout still bounds the whole attempt.
 #[cfg(not(test))]
-const PROVIDER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const PROVIDER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 #[cfg(test)]
 const PROVIDER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_millis(250);
 const PROVIDER_STREAM_INTERRUPTED: &str = "Provider stream ended before completion";
@@ -1258,12 +1263,16 @@ fn supported_reasoning_efforts(profile: &ProviderProfile) -> &'static [&'static 
     const OPENAI: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh"];
     const GPT_56: &[&str] = &["none", "low", "medium", "high", "xhigh", "max"];
     const THREE_LEVEL: &[&str] = &["low", "medium", "high"];
+    const GROK_46: &[&str] = &["low", "medium", "high", "xhigh"];
     const HIGH_MAX: &[&str] = &["high", "max"];
     const GOOGLE: &[&str] = &["low", "high"];
 
     let id = reasoning_model_id(profile);
     if opencode_model_or_variant(&id, "gpt-5.6") {
         return GPT_56;
+    }
+    if opencode_model_or_variant(&id, "grok-4.6") {
+        return GROK_46;
     }
     if opencode_model_or_variant(&id, "grok-4.5") {
         return THREE_LEVEL;
@@ -4755,6 +4764,7 @@ mod tests {
                 "gpt-5.6-luna",
                 &["none", "low", "medium", "high", "xhigh", "max"],
             ),
+            ("grok-4.6", &["low", "medium", "high", "xhigh"]),
             ("grok-4.5", &["low", "medium", "high"]),
             ("glm-5.3", &["high", "max"]),
             ("deepseek-v4-pro", &["high", "max"]),

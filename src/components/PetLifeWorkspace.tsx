@@ -233,7 +233,7 @@ export function PetLifeWorkspace({
             <Toggle label={text("开机陪伴", "Launch at login")} checked={settings.launchAtLogin} onChange={(value) => setSettings({ ...settings, launchAtLogin: value })} />
           </div>
           <label className="pet-setting-row"><span>{text("共学目标", "Study goal")}</span><input type="number" min={15} max={960} step={15} value={settings.studyGoalMinutes} onChange={(event) => setSettings({ ...settings, studyGoalMinutes: Number(event.target.value) })} /><small>{text("分钟", "min")}</small></label>
-          <label className="pet-setting-row"><span>{text("求知目标", "Knowledge goal")}</span><input type="number" min={1} max={50} value={settings.knowledgeGoal} onChange={(event) => setSettings({ ...settings, knowledgeGoal: Number(event.target.value) })} /><small>{text("条", "items")}</small></label>
+          <label className="pet-setting-row"><span>{text("每日求知上限", "Daily learning cap")}</span><input type="number" min={1} max={50} value={settings.knowledgeGoal} onChange={(event) => setSettings({ ...settings, knowledgeGoal: Number(event.target.value) })} /><small>{text("条", "items")}</small></label>
           <label className="pet-setting-slider"><span><Footprints size={13} />{text("走动速度", "Walking speed")}</span><input type="range" min={50} max={200} step={10} value={Math.round(settings.patrolSpeed * 100)} onChange={(event) => setSettings({ ...settings, patrolSpeed: Number(event.target.value) / 100 })} /><output>{Math.round(settings.patrolSpeed * 100)}%</output></label>
           <div className="pet-quiet-hours">
             <Moon size={13} /><span>{text("安静时段", "Quiet hours")}</span>
@@ -384,7 +384,13 @@ function learningQuestMeta(quest: PetDashboard["life"]["learningQuests"][number]
     completed: text("已经学会", "Learned"),
     failed: text("未得到可靠答案", "No reliable answer"),
   };
-  const details = [states[quest.status] ?? quest.status];
+  const modes: Record<string, string> = {
+    context: text("近期脉络", "Recent context"),
+    identity: text("自我记忆", "Identity"),
+    deepening: text("知识深化", "Deepening"),
+    exploration: text("自由探索", "Exploration"),
+  };
+  const details = [modes[quest.learningMode] ?? quest.learningMode, states[quest.status] ?? quest.status];
   if (quest.formationAttempts > 0) details.push(`${text("成问", "formation")} ${quest.formationAttempts}`);
   if (quest.attempts > 0) details.push(`${text("求解", "answer")} ${quest.attempts}`);
   if (quest.questionProviderId) details.push(`${text("成问 Agent", "question Agent")}: ${quest.questionProviderId}`);
