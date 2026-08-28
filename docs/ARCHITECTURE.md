@@ -276,7 +276,8 @@ Agent 和 Plan 每回合最多注入 64 个启用 Skill 的截断元数据，正
 
 Goal 与普通会话分离持久化，状态为 Active、Paused、Auditing、Completed、Blocked 或 Cancelled。
 每次模型响应由 Rust 记录输入/输出 Token 与回合数。前端只在 Active 或 Auditing 状态生成隐藏的
-内部继续消息，并有单次 48 回合上限；达到上限后暂停，用户核对结果后可以继续。
+内部继续消息。Goal 没有固定回合上限，会持续到进入终态、用户暂停/取消或发生终止错误；非 Goal
+Durable Harness 仍保留 64 回合保护上限。
 
 `update_goal(complete)` 在 Active 状态只能进入 Auditing。模型必须在新回合重新核对目标需求与
 权威当前状态，才能再次提交证据完成。阻塞报告按完全相同的证据累计，第三次才转为 Blocked；

@@ -63,6 +63,7 @@ const LARGE_INLINE_IMAGE_BYTES: u64 = 4 * 1024 * 1024;
 const PROVIDER_ROUND_TIMEOUT: Duration = Duration::from_secs(240);
 const LONG_PROVIDER_ROUND_TIMEOUT: Duration = Duration::from_secs(360);
 const PROVIDER_ROUND_TIMEOUT_PREFIX: &str = "Provider round timed out";
+const NON_GOAL_HARNESS_MAX_ROUNDS: usize = 64;
 const AUTONOMOUS_PET_MAX_AGENT_TURNS: usize = 4;
 const AUTONOMOUS_PET_MAX_WEB_SEARCHES: usize = 1;
 const AUTONOMOUS_PET_MAX_WEB_FETCHES: usize = 2;
@@ -5086,6 +5087,19 @@ async fn harness_run_inner(
     result
 }
 
+fn harness_round_limit(mode: crate::harness::types::HarnessMode) -> Option<usize> {
+    (!matches!(mode, crate::harness::types::HarnessMode::Goal))
+        .then_some(NON_GOAL_HARNESS_MAX_ROUNDS)
+}
+
+fn goal_completion_ends_harness(
+    mode: crate::harness::types::HarnessMode,
+    status: &models::GoalStatus,
+) -> bool {
+    matches!(mode, crate::harness::types::HarnessMode::Goal)
+        && matches!(status, models::GoalStatus::Completed)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn harness_run_loop(
     app: &tauri::AppHandle,
@@ -5127,14 +5141,16 @@ async fn harness_run_loop(
     let mut hatch_status_requires_action =
         request.hatch && database.harness_hatch_status_requires_action(&operation_id)?;
     loop {
-        if round >= 64 {
+        if let Some(limit) = harness_round_limit(request.mode)
+            && round >= limit
+        {
             database.update_harness_operation_state(
                 &operation_id,
                 &crate::harness::types::RuntimeState::Failed,
             )?;
-            return Err("Harness tool loop exceeded 64 rounds".to_owned());
+            return Err(format!("Harness tool loop exceeded {limit} rounds"));
         }
-        round += 1;
+        round = round.saturating_add(1);
         let round_started = Instant::now();
         if cancellation.is_cancelled() {
             database.update_harness_operation_state(
@@ -6007,6 +6023,45 @@ async fn harness_run_loop(
                             hatch_status_requires_action = false;
                         }
                     }
+                }
+                if database
+                    .get_goal(&request.thread_id)?
+                    .is_some_and(|goal| goal_completion_ends_harness(request.mode, &goal.status))
+                {
+                    logging::write(
+                        "info",
+                        "harness",
+                        "round_completed",
+                        serde_json::json!({
+                            "operationId": &operation_id,
+                            "threadId": &request.thread_id,
+                            "round": round,
+                            "outcome": "goal_completed",
+                            "latencyMs": round_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                        }),
+                    );
+                    database.update_harness_operation_state(
+                        &operation_id,
+                        &crate::harness::types::RuntimeState::Completed,
+                    )?;
+                    let payload = serde_json::json!({
+                        "round": round,
+                        "reason": "goal_completed",
+                    });
+                    let sequence = database.append_harness_event(
+                        &operation_id,
+                        "operation_completed",
+                        &payload,
+                    )?;
+                    let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+                        &operation_id,
+                        sequence,
+                        "operation_completed",
+                        payload,
+                    ));
+                    return Ok(crate::harness::types::HarnessRunOutcome {
+                        state: crate::harness::types::RuntimeState::Completed,
+                    });
                 }
                 logging::write(
                     "info",
@@ -9803,6 +9858,37 @@ mod tests {
         ));
         assert!(!is_context_limit_error(
             "Provider returned 413 Request Too Large"
+        ));
+    }
+
+    #[test]
+    fn goal_harness_has_no_round_limit() {
+        assert_eq!(
+            harness_round_limit(crate::harness::types::HarnessMode::Goal),
+            None
+        );
+        for mode in [
+            crate::harness::types::HarnessMode::Chat,
+            crate::harness::types::HarnessMode::Plan,
+            crate::harness::types::HarnessMode::Agent,
+        ] {
+            assert_eq!(harness_round_limit(mode), Some(NON_GOAL_HARNESS_MAX_ROUNDS));
+        }
+    }
+
+    #[test]
+    fn completed_goal_ends_harness_without_another_provider_round() {
+        assert!(goal_completion_ends_harness(
+            crate::harness::types::HarnessMode::Goal,
+            &models::GoalStatus::Completed,
+        ));
+        assert!(!goal_completion_ends_harness(
+            crate::harness::types::HarnessMode::Goal,
+            &models::GoalStatus::Auditing,
+        ));
+        assert!(!goal_completion_ends_harness(
+            crate::harness::types::HarnessMode::Agent,
+            &models::GoalStatus::Completed,
         ));
     }
 

@@ -6,6 +6,7 @@ import {
   finalizeAssistantMessage,
   providerRetryProgressLabel,
   providerThreadId,
+  settleProviderReconnect,
   usesDurableHarness,
 } from "../src/lib/threadExecution.ts";
 
@@ -49,6 +50,17 @@ test("provider retry progress identifies the active request and keeps ticking", 
     providerRetryProgressLabel(1, 5, 73_900, "en-US"),
     "Request 2/6 in progress · waiting 73s (previous request failed)",
   );
+});
+
+test("a successful provider reconnect clears the active retry marker", () => {
+  assert.deepEqual(settleProviderReconnect(1), {
+    completedAttempt: 1,
+    lastReconnectAttempt: 0,
+  });
+  assert.deepEqual(settleProviderReconnect(1, 2), {
+    completedAttempt: 2,
+    lastReconnectAttempt: 0,
+  });
 });
 
 test("assistant deltas append to one placeholder and add it for a later round", () => {

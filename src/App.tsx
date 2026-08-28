@@ -245,6 +245,7 @@ import {
   finalizeAssistantMessage,
   providerRetryProgressLabel,
   providerThreadId,
+  settleProviderReconnect,
   usesDurableHarness,
 } from "./lib/threadExecution";
 import {
@@ -2394,7 +2395,10 @@ function App() {
         } else if (event.kind === "provider_reconnected") {
           stopReconnectProgress();
           const payload = event.payload as { retryAttempts?: number };
-          const content = `${tr("重连", "Reconnect")} ${payload.retryAttempts ?? lastReconnectAttempt}/${maxReconnectAttempts} ${tr("已恢复，继续后面的对话", "succeeded; continuing the conversation")}`;
+          const settledReconnect = settleProviderReconnect(lastReconnectAttempt, payload.retryAttempts);
+          lastReconnectAttempt = settledReconnect.lastReconnectAttempt;
+          reconnectStartedAt = 0;
+          const content = `${tr("重连", "Reconnect")} ${settledReconnect.completedAttempt}/${maxReconnectAttempts} ${tr("已恢复，继续后面的对话", "succeeded; continuing the conversation")}`;
           if (reconnectStatusMessageId) {
             projected = projected.map((item) => item.id === reconnectStatusMessageId
               ? { ...item, content, status: "reconnected" as const }
@@ -3106,7 +3110,9 @@ function App() {
           });
         },
         (retryAttempt) => {
-          const content = `${tr("重连", "Reconnect")} ${retryAttempt ?? lastReconnectAttempt}/5 ${tr("已恢复，继续后面的对话", "succeeded; continuing the conversation")}`;
+          const settledReconnect = settleProviderReconnect(lastReconnectAttempt, retryAttempt);
+          lastReconnectAttempt = settledReconnect.lastReconnectAttempt;
+          const content = `${tr("重连", "Reconnect")} ${settledReconnect.completedAttempt}/5 ${tr("已恢复，继续后面的对话", "succeeded; continuing the conversation")}`;
           if (reconnectStatusMessageId) {
             retryStatusMessages = retryStatusMessages.map((item) => item.id === reconnectStatusMessageId
               ? { ...item, content, status: "reconnected" as const }

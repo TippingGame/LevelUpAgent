@@ -219,10 +219,10 @@ MCP：
 
 | 模式 | 最大连续轮数 |
 | --- | ---: |
-| 普通模式 | 12 |
-| Goal | 48 |
+| Durable Harness 非 Goal 模式 | 64 |
+| Goal | 无固定上限 |
 
-Goal 在模型没有发出工具调用但目标仍处于 `active` 或 `auditing` 时，会添加隐藏的内部 `user` 续跑消息。`internal` 字段只控制 UI 隐藏和持久化，协议适配器仍将其作为普通 `user` 消息发送。
+Goal 在模型没有发出工具调用但目标仍处于 `active` 或 `auditing` 时，会添加隐藏的内部 `user` 续跑消息。Goal 不按轮数停止，只在进入终态、用户暂停/取消、Provider 或工具发生终止错误时结束。`internal` 字段只控制 UI 隐藏和持久化，协议适配器仍将其作为普通 `user` 消息发送。
 
 工具执行错误的 `isError` 目前只用于前端显示，没有进入 Rust `AgentMessage`。模型只能根据工具结果文本判断调用是否失败。
 

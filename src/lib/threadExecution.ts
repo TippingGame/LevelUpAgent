@@ -72,3 +72,13 @@ export function providerRetryProgressLabel(
     ? `第 ${currentAttempt}/${totalAttempts} 次请求进行中 · 已等待 ${elapsedSeconds} 秒（上一请求失败）`
     : `Request ${currentAttempt}/${totalAttempts} in progress · waiting ${elapsedSeconds}s (previous request failed)`;
 }
+
+export function settleProviderReconnect(
+  lastReconnectAttempt: number,
+  reportedRetryAttempt?: number,
+): { completedAttempt: number; lastReconnectAttempt: number } {
+  return {
+    completedAttempt: reportedRetryAttempt ?? lastReconnectAttempt,
+    lastReconnectAttempt: 0,
+  };
+}
