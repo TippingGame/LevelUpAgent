@@ -895,6 +895,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .workspace-shell.armor-mode .message-stream { filter: drop-shadow(0 0 20px rgba(34,211,238,.05)); }
 .workspace-shell.armor-mode .assistant-message-segment,
 .workspace-shell.armor-mode .tool-result,
+.workspace-shell.armor-mode .tool-activity,
 .workspace-shell.armor-mode .change-set-summary {
   border-color: rgba(34,211,238,.18);
   background: rgba(2,6,23,.72);
@@ -906,6 +907,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .workspace-shell.armor-mode .tool-call,
 .workspace-shell.armor-mode .tool-call strong,
 .workspace-shell.armor-mode .tool-result,
+.workspace-shell.armor-mode .tool-activity,
 .workspace-shell.armor-mode .change-set-summary { color: #dff8ff; }
 .workspace-shell.armor-mode .assistant-message-segment .markdown-body h1,
 .workspace-shell.armor-mode .assistant-message-segment .markdown-body h2,
@@ -1092,6 +1094,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .workspace-button:hover { border-color: rgba(31,34,30,0.32); box-shadow: 0 3px 12px rgba(31,34,30,0.08); }
 
 .message { min-width: 0; display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 12px; margin-bottom: 28px; }
+.message-stream > .message { content-visibility: auto; contain-intrinsic-size: auto 120px; }
 .message.assistant { grid-template-columns: 36px minmax(0, 1fr); }
 .message.user { grid-template-columns: minmax(0, auto) 30px; justify-content: end; margin-left: 72px; }
 .message-avatar { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: #484b46; }
@@ -1101,7 +1104,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .message.user .message-avatar { background: #2b2d2a; border-color: #2b2d2a; color: #fff; }
 .message-body { min-width: 0; }
 .message.user .message-avatar { grid-column: 2; grid-row: 1; }
-.message.user .message-body { grid-column: 1; grid-row: 1; min-width: 0; max-width: min(680px, 100%); justify-self: end; }
+.message.user .message-body { grid-column: 1; grid-row: 1; min-width: 0; width: fit-content; max-width: min(680px, 100%); justify-self: end; }
 .message-meta { height: 24px; display: flex; align-items: baseline; gap: 8px; }
 .message.user .message-meta { justify-content: flex-end; }
 .message-meta strong { font-size: var(--font-body); font-weight: 650; }
@@ -1115,6 +1118,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   line-height: 1.72;
   overflow-wrap: anywhere;
 }
+.markdown-plain-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .markdown-body > :first-child { margin-top: 0; }
 .markdown-body > :last-child { margin-bottom: 0; }
 .markdown-body p { margin: 0 0 1em; }
@@ -1214,6 +1218,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .markdown-body th, .markdown-body td { padding: 8px 10px; border: 1px solid #e5e7eb; text-align: left; }
 .markdown-body th { background: #f8fafc; color: #374151; font-weight: 650; }
 .message.user .markdown-body {
+  display: inline-block;
+  width: fit-content;
+  max-width: 100%;
   padding: 10px 14px;
   border: 1px solid #e4e7eb;
   border-radius: 14px 5px 14px 14px;
@@ -1260,6 +1267,23 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .tool-result.error summary:focus-visible { outline-color: rgba(170,70,56,.3); }
 .assistant-message-content > .tool-result { width: calc(100% - 26px); margin: 1px 0 9px 26px; }
 .assistant-message-content > .subagent-result { width: calc(100% - 36px); margin: 4px 0 11px 36px; }
+.tool-activity { width: min(100%, 720px); min-width: 0; margin: 9px 0 3px; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: color-mix(in srgb, var(--surface) 54%, transparent); color: var(--muted); }
+.tool-activity > summary { min-width: 0; min-height: 36px; display: grid; grid-template-columns: 24px minmax(0, 1fr) 16px; align-items: center; gap: 7px; padding: 5px 9px; cursor: pointer; list-style: none; }
+.tool-activity > summary::-webkit-details-marker { display: none; }
+.tool-activity > summary:hover { background: color-mix(in srgb, var(--surface) 72%, transparent); color: var(--text); }
+.tool-activity > summary:focus { outline: none; }
+.tool-activity > summary:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 38%, transparent); outline-offset: -2px; }
+.tool-activity-icon { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 5px; background: color-mix(in srgb, var(--teal) 12%, transparent); color: var(--teal); }
+.tool-activity-copy { min-width: 0; display: flex; align-items: baseline; gap: 8px; }
+.tool-activity-copy strong { flex: 0 0 auto; color: var(--text); font-size: var(--font-caption); font-weight: 650; }
+.tool-activity-copy small { min-width: 0; overflow: hidden; color: var(--muted); font-size: var(--font-compact); text-overflow: ellipsis; white-space: nowrap; }
+.tool-activity-chevron { color: var(--faint); transition: transform .16s ease; }
+.tool-activity[open] .tool-activity-chevron { transform: rotate(180deg); }
+.tool-activity-content { display: grid; gap: 2px; padding: 4px 8px 8px; border-top: 1px solid var(--line); }
+.tool-activity-content .tool-call-list { margin-top: 0; }
+.tool-activity-content .tool-result,
+.tool-activity-content .subagent-result { width: 100%; margin: 1px 0 4px; }
+.tool-activity-content .tool-media-result { margin: 4px 0; }
 .message-duration { width: fit-content; min-height: 26px; display: flex; align-items: center; gap: 5px; margin-top: 14px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 999px; background: rgba(255,255,255,.58); color: var(--muted); font-size: var(--font-caption); font-variant-numeric: tabular-nums; }
 .message-copy-action { min-height: 27px; display: flex; align-items: center; gap: 5px; margin-top: 6px; opacity: 0; pointer-events: none; transition: opacity .16s ease; }
 .message.user .message-copy-action { justify-content: flex-end; }

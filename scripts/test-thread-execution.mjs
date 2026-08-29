@@ -72,6 +72,17 @@ test("assistant deltas append to one placeholder and add it for a later round", 
   assert.equal(second[0].id, "assistant-1");
 });
 
+test("stream updates preserve the non-streaming message references", () => {
+  const previous = assistant("previous", "old");
+  const placeholder = assistant("assistant-1", "Hello");
+  const next = appendAssistantDelta([previous, placeholder], placeholder, " world");
+
+  assert.equal(next[0], previous);
+  assert.notEqual(next[1], placeholder);
+  assert.equal(next[1].content, "Hello world");
+  assert.equal(appendAssistantDelta(next, placeholder, ""), next);
+});
+
 test("finalizing a streamed assistant preserves placeholder identity", () => {
   const placeholder = assistant("assistant-1", "partial", 321);
   const completed = assistant("provider-id", "complete", 999);

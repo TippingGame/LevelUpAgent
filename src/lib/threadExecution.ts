@@ -28,6 +28,13 @@ export function appendAssistantDelta(
   placeholder: AgentMessage,
   delta: string,
 ): AgentMessage[] {
+  const lastIndex = messages.length - 1;
+  if (messages[lastIndex]?.id === placeholder.id) {
+    if (!delta) return messages;
+    const next = messages.slice();
+    next[lastIndex] = { ...next[lastIndex], content: `${next[lastIndex].content}${delta}` };
+    return next;
+  }
   const index = messages.findIndex((item) => item.id === placeholder.id);
   if (index < 0) {
     return [...messages, { ...placeholder, content: delta }];
@@ -52,6 +59,12 @@ export function finalizeAssistantMessage(
     id: placeholder.id,
     createdAt: placeholder.createdAt,
   };
+  const lastIndex = messages.length - 1;
+  if (messages[lastIndex]?.id === placeholder.id) {
+    const next = messages.slice();
+    next[lastIndex] = replacement;
+    return next;
+  }
   const index = messages.findIndex((item) => item.id === placeholder.id);
   if (index < 0) return [...messages, replacement];
   return messages.map((item, itemIndex) => itemIndex === index ? replacement : item);

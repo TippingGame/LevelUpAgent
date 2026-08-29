@@ -1,4 +1,4 @@
-import { Children, isValidElement, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type CSSProperties, type DragEvent as ReactDragEvent, type HTMLAttributes, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from "react";
+import { Children, Fragment, isValidElement, memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type CSSProperties, type DragEvent as ReactDragEvent, type HTMLAttributes, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfmCompatible from "./lib/remarkGfmCompatible";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -776,7 +776,17 @@ function App() {
   const composerInputRef = useRef<HTMLTextAreaElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const followConversationRef = useRef(true);
-  const conversationSnapshotRef = useRef<{ threadId: string; messages: AgentMessage[] }>({ threadId: "", messages: [] });
+  const conversationSnapshotRef = useRef<{
+    threadId: string;
+    sourceMessages: AgentMessage[];
+    visibleLength: number;
+    latestUserMessageId?: string;
+  }>({ threadId: "", sourceMessages: [], visibleLength: 0 });
+  const conversationBlocksCacheRef = useRef<{
+    threadId: string;
+    source: AgentMessage[];
+    blocks: ConversationBlock[];
+  } | null>(null);
   const runningThreadIdsRef = useRef<Set<string>>(new Set());
   const pendingApprovalsRef = useRef<Record<string, PendingApproval>>({});
   const operationIdsRef = useRef<Map<string, string>>(new Map());
@@ -797,6 +807,11 @@ function App() {
   const databaseReadyRef = useRef(false);
   const databasePersistenceFailedRef = useRef(false);
   const persistenceQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const pendingThreadPersistenceRef = useRef<Map<string, AgentThread>>(new Map());
+  const threadPersistenceTimerRef = useRef<number | undefined>(undefined);
+  const flushThreadPersistenceRef = useRef<() => void>(() => undefined);
+  const threadsPersistenceTimerRef = useRef<number | undefined>(undefined);
+  const threadsPersistenceMaxTimerRef = useRef<number | undefined>(undefined);
   const petHatchImportingRef = useRef<string | null>(null);
   const taskCompletionNoticesRef = useRef(taskCompletionNotices);
   const taskCompletionTimersRef = useRef<Map<string, number>>(new Map());
@@ -856,44 +871,48 @@ function App() {
     () => threads.find((thread) => thread.id === activeThreadId) ?? threads[0],
     [threads, activeThreadId],
   );
-  const visibleConversationMessages = useMemo(
-    () => activeThread.messages.filter((item) => !item.internal || item.status),
-    [activeThread.messages],
-  );
-  const conversationBlocks = useMemo(
-    () => groupConversationMessages(visibleConversationMessages),
-    [visibleConversationMessages],
-  );
+  const conversationView = useMemo(() => {
+    const messages: AgentMessage[] = [];
+    let latestUserMessageId: string | undefined;
+    let latestUserCreatedAt = 0;
+    let messageCount = 0;
+    let latestConnectionMessage: AgentMessage | undefined;
+    let latestChangeSet: ConversationChangeSet | undefined;
+    for (const item of activeThread.messages) {
+      if (!item.internal) messageCount += 1;
+      if (item.role === "user") {
+        latestUserCreatedAt = item.createdAt;
+        latestConnectionMessage = undefined;
+      }
+      if (item.status && item.createdAt >= latestUserCreatedAt) latestConnectionMessage = item;
+      if (item.changeSet) latestChangeSet = item.changeSet;
+      if (item.internal && !item.status) continue;
+      messages.push(item);
+      if (item.role === "user") latestUserMessageId = item.id;
+    }
+    return { messages, latestUserMessageId, messageCount, latestConnectionMessage, latestChangeSet };
+  }, [activeThread.messages]);
+  const visibleConversationMessages = conversationView.messages;
+  const latestVisibleUserMessageId = conversationView.latestUserMessageId;
+  const conversationBlocks = useMemo(() => {
+    const cached = conversationBlocksCacheRef.current;
+    const previous = cached?.threadId === activeThread.id ? cached : undefined;
+    const blocks = groupConversationMessages(visibleConversationMessages, previous);
+    conversationBlocksCacheRef.current = { threadId: activeThread.id, source: visibleConversationMessages, blocks };
+    return blocks;
+  }, [activeThread.id, visibleConversationMessages]);
   activeThreadIdRef.current = activeThread.id;
   workspaceViewRef.current = workspaceView;
   activePetIdRef.current = activePetId;
   const running = runningThreadIds.has(activeThread.id);
   const pending = pendingApprovals[activeThread.id] ?? null;
-  const latestUserCreatedAt = useMemo(() => {
-    for (let index = activeThread.messages.length - 1; index >= 0; index -= 1) {
-      if (activeThread.messages[index].role === "user") return activeThread.messages[index].createdAt;
-    }
-    return 0;
-  }, [activeThread.messages]);
-  const latestConnectionMessage = useMemo(() => {
-    for (let index = activeThread.messages.length - 1; index >= 0; index -= 1) {
-      const item = activeThread.messages[index];
-      if (item.status && item.createdAt >= latestUserCreatedAt) return item;
-    }
-    return undefined;
-  }, [activeThread.messages, latestUserCreatedAt]);
+  const latestConnectionMessage = conversationView.latestConnectionMessage;
   const latestConnectionStatus = latestConnectionMessage?.status;
   const activeReconnectMessageId = running && latestConnectionMessage?.status === "reconnecting"
     ? latestConnectionMessage.id
     : undefined;
   const queuedItems = harnessQueueItems[activeThread.id] ?? [];
-  const latestChangeSet = useMemo(() => {
-    for (let index = activeThread.messages.length - 1; index >= 0; index -= 1) {
-      const changeSet = activeThread.messages[index].changeSet;
-      if (changeSet) return changeSet;
-    }
-    return null;
-  }, [activeThread.messages]);
+  const latestChangeSet = conversationView.latestChangeSet ?? null;
   const visibleChangeSet = reviewedChangeSet ?? latestChangeSet;
   const persistentThreads = threads;
   const projectGroups = useMemo(
@@ -1197,7 +1216,7 @@ function App() {
         updatedAt: Date.now(),
       };
       commitThread(failedThread);
-      await savePersistedThread(failedThread).catch(() => undefined);
+      await persistThreadNow(failedThread).catch(() => undefined);
       setThemeGeneration((current) => current?.threadId === preparationThread.id ? null : current);
       setNotice(`${tr("主题生成准备失败", "Theme generation preparation failed")}: ${detail}`);
       writeFrontendLog("error", "theme_generation_preparation_failed", {
@@ -1206,7 +1225,7 @@ function App() {
     };
 
     try {
-      await savePersistedThread(preparationThread);
+      await persistThreadNow(preparationThread);
     } catch (error) {
       await failPreparation(error);
       return;
@@ -1320,7 +1339,7 @@ function App() {
         // Persist the generated user turn before harness_start validates the
         // thread foreign key. This is the same durable submission boundary as
         // the normal composer path.
-        await savePersistedThread(nextThread);
+        await persistThreadNow(nextThread);
         const harnessRequest = {
           threadId: nextThread.id,
           rawUserInput: prompt,
@@ -1473,7 +1492,7 @@ function App() {
       try {
         // The thread/Goal predate the operation by design, but bootstrap must
         // not execute until the durable snapshot exists.
-        await savePersistedThread(nextThread);
+        await persistThreadNow(nextThread);
         const harnessRequest = {
           threadId: nextThread.id,
           rawUserInput: summary,
@@ -1642,12 +1661,49 @@ function App() {
     setLocale(next);
   };
 
+  const flushBrowserThreads = useCallback(() => {
+    if (isDesktop()) return;
+    if (threadsPersistenceTimerRef.current !== undefined) {
+      window.clearTimeout(threadsPersistenceTimerRef.current);
+      threadsPersistenceTimerRef.current = undefined;
+    }
+    if (threadsPersistenceMaxTimerRef.current !== undefined) {
+      window.clearTimeout(threadsPersistenceMaxTimerRef.current);
+      threadsPersistenceMaxTimerRef.current = undefined;
+    }
+    // JSON.stringify/localStorage is synchronous. Keep it off the streamed
+    // update path while still flushing periodically and when the page hides.
+    saveThreads(threadsRef.current);
+  }, []);
+
   useEffect(() => {
     threadsRef.current = threads;
-    // Desktop conversations are persisted in SQLite. Keeping the full thread
-    // payload in WebView localStorage can exceed its quota during hydration.
-    if (!isDesktop()) saveThreads(threads);
-  }, [threads]);
+    // Desktop conversations are persisted in SQLite. Browser previews keep a
+    // debounced localStorage snapshot so a large transcript is not serialized
+    // for every streamed delta.
+    if (isDesktop()) return;
+    if (threadsPersistenceTimerRef.current !== undefined) {
+      window.clearTimeout(threadsPersistenceTimerRef.current);
+    }
+    threadsPersistenceTimerRef.current = window.setTimeout(flushBrowserThreads, 300);
+    if (threadsPersistenceMaxTimerRef.current === undefined) {
+      threadsPersistenceMaxTimerRef.current = window.setTimeout(flushBrowserThreads, 2_000);
+    }
+  }, [flushBrowserThreads, threads]);
+
+  useEffect(() => {
+    if (isDesktop()) return;
+    const flushWhenHidden = () => {
+      if (document.visibilityState === "hidden") flushBrowserThreads();
+    };
+    window.addEventListener("pagehide", flushBrowserThreads);
+    document.addEventListener("visibilitychange", flushWhenHidden);
+    return () => {
+      window.removeEventListener("pagehide", flushBrowserThreads);
+      document.removeEventListener("visibilitychange", flushWhenHidden);
+      flushBrowserThreads();
+    };
+  }, [flushBrowserThreads]);
 
   useEffect(() => {
     draftAttachmentsRef.current = draftAttachments;
@@ -1969,14 +2025,19 @@ function App() {
   useEffect(() => {
     const previous = conversationSnapshotRef.current;
     const threadChanged = previous.threadId !== activeThread.id;
-    const messagesChanged = !threadChanged && (
-      previous.messages.length !== visibleConversationMessages.length
-      || visibleConversationMessages.some((item, index) => item !== previous.messages[index])
-    );
-    const messageAdded = messagesChanged && visibleConversationMessages.length > previous.messages.length;
-    const userMessageAdded = messageAdded
-      && visibleConversationMessages.slice(previous.messages.length).some((item) => item.role === "user");
-    conversationSnapshotRef.current = { threadId: activeThread.id, messages: visibleConversationMessages };
+    // Message arrays are immutable and every conversation commit replaces the
+    // source array. Comparing that reference avoids scanning a long transcript
+    // on every streamed delta just to discover that the tail changed.
+    const messagesChanged = !threadChanged && previous.sourceMessages !== activeThread.messages;
+    const messageAdded = messagesChanged && visibleConversationMessages.length > previous.visibleLength;
+    const userMessageAdded = messagesChanged
+      && latestVisibleUserMessageId !== previous.latestUserMessageId;
+    conversationSnapshotRef.current = {
+      threadId: activeThread.id,
+      sourceMessages: activeThread.messages,
+      visibleLength: visibleConversationMessages.length,
+      latestUserMessageId: latestVisibleUserMessageId,
+    };
 
     if (workspaceView !== "chat" || threadChanged) return;
     if (shouldFollowConversationUpdate(followConversationRef.current, userMessageAdded)) {
@@ -1984,7 +2045,7 @@ function App() {
     } else if (messagesChanged) {
       setConversationHasNewMessages(true);
     }
-  }, [activeThread.id, pending, running, scrollConversationToBottom, visibleConversationMessages, workspaceView]);
+  }, [activeThread.id, activeThread.messages, latestVisibleUserMessageId, pending, running, scrollConversationToBottom, visibleConversationMessages, workspaceView]);
 
   useLayoutEffect(() => {
     if (workspaceView !== "chat") return;
@@ -2008,6 +2069,47 @@ function App() {
       });
   };
 
+  const flushThreadPersistence = () => {
+    if (threadPersistenceTimerRef.current !== undefined) {
+      window.clearTimeout(threadPersistenceTimerRef.current);
+      threadPersistenceTimerRef.current = undefined;
+    }
+    const pending = [...pendingThreadPersistenceRef.current.values()];
+    pendingThreadPersistenceRef.current.clear();
+    if (pending.length === 0) return;
+    enqueuePersistence(async () => {
+      for (const thread of pending) await savePersistedThread(thread);
+    });
+  };
+  flushThreadPersistenceRef.current = flushThreadPersistence;
+
+  useEffect(() => {
+    if (!isDesktop()) return;
+    const flushBeforeClose = () => flushThreadPersistenceRef.current();
+    window.addEventListener("pagehide", flushBeforeClose);
+    return () => {
+      window.removeEventListener("pagehide", flushBeforeClose);
+      flushBeforeClose();
+    };
+  }, []);
+
+  const enqueueThreadPersistence = (thread: AgentThread) => {
+    pendingThreadPersistenceRef.current.set(thread.id, thread);
+    if (threadPersistenceTimerRef.current !== undefined) return;
+    threadPersistenceTimerRef.current = window.setTimeout(flushThreadPersistence, 120);
+  };
+
+  const persistThreadNow = async (thread: AgentThread) => {
+    if (!isDesktop()) return;
+    // A direct save is a durable boundary (for example, before harness_start)
+    // and must run after any coalesced snapshot for this thread.
+    pendingThreadPersistenceRef.current.delete(thread.id);
+    flushThreadPersistence();
+    const operation = persistenceQueueRef.current.then(() => savePersistedThread(thread));
+    persistenceQueueRef.current = operation.catch(() => undefined);
+    await operation;
+  };
+
   const commitThread = (next: AgentThread, persist = true) => {
     if (persist && isDesktop() && !databaseReadyRef.current) {
       setNotice(databasePersistenceFailedRef.current
@@ -2026,7 +2128,7 @@ function App() {
     setThreads(updated);
     if (persist && isDesktop()
       && databaseReadyRef.current && !databasePersistenceFailedRef.current) {
-      enqueuePersistence(() => savePersistedThread(next));
+      enqueueThreadPersistence(next);
     }
   };
 
@@ -2253,8 +2355,15 @@ function App() {
     let cumulativeOutputTokens = thread.outputTokens;
     let streamingAssistantMessageId: string | undefined;
     let streamingAssistantMessage: AgentMessage | undefined;
-    let streamedContent = "";
+    // Keep provider chunks as pieces until a UI commit. Concatenating the
+    // complete transcript for every tiny delta turns a long response into an
+    // avoidable O(n^2) string-copy loop.
+    let streamedContentParts: string[] = [];
+    let pendingStreamDeltas: string[] = [];
+    let pendingStreamChars = 0;
     let streamingFrameId: number | undefined;
+    let streamingCommitTimerId: number | undefined;
+    let lastStreamingCommitAt = 0;
     let lastReconnectAttempt = 0;
     let maxReconnectAttempts = 5;
     let reconnectStatusMessageId: string | undefined;
@@ -2292,17 +2401,39 @@ function App() {
       const placeholder = message("assistant", "", assistantMessageIdentity(runProfile));
       streamingAssistantMessage = placeholder;
       streamingAssistantMessageId = placeholder.id;
-      streamedContent = "";
+      streamedContentParts = [];
+      pendingStreamDeltas = [];
+      pendingStreamChars = 0;
       projected = appendAssistantDelta(projected, placeholder, "");
       return placeholder;
     };
+    const flushStreamingDelta = () => {
+      if (pendingStreamDeltas.length === 0) return;
+      const delta = pendingStreamDeltas.join("");
+      pendingStreamDeltas = [];
+      pendingStreamChars = 0;
+      streamedContentParts.push(delta);
+      const placeholder = streamingAssistantMessage;
+      if (placeholder && streamingAssistantMessageId) {
+        projected = appendAssistantDelta(projected, placeholder, delta);
+      }
+    };
+    const currentStreamContent = () => streamedContentParts.join("");
     const cancelStreamingFrame = () => {
-      if (streamingFrameId === undefined) return;
-      window.cancelAnimationFrame(streamingFrameId);
-      streamingFrameId = undefined;
+      if (streamingCommitTimerId !== undefined) {
+        window.clearTimeout(streamingCommitTimerId);
+        streamingCommitTimerId = undefined;
+      }
+      if (streamingFrameId !== undefined) {
+        window.cancelAnimationFrame(streamingFrameId);
+        streamingFrameId = undefined;
+      }
     };
     const settleStreamingAssistant = (keepPartial: boolean) => {
+      cancelStreamingFrame();
+      flushStreamingDelta();
       const placeholder = streamingAssistantMessage;
+      const streamedContent = currentStreamContent();
       if (placeholder && streamingAssistantMessageId) {
         if (keepPartial && streamedContent) {
           projected = finalizeAssistantMessage(
@@ -2316,20 +2447,32 @@ function App() {
       }
       streamingAssistantMessage = undefined;
       streamingAssistantMessageId = undefined;
-      streamedContent = "";
+      streamedContentParts = [];
+      pendingStreamDeltas = [];
+      pendingStreamChars = 0;
     };
     const scheduleStreamingCommit = () => {
-      if (streamingFrameId !== undefined) return;
-      streamingFrameId = window.requestAnimationFrame(() => {
-        streamingFrameId = undefined;
-        commitThread(projectedThread(projected), false);
-      });
+      if (streamingFrameId !== undefined || streamingCommitTimerId !== undefined) return;
+      const elapsed = performance.now() - lastStreamingCommitAt;
+      const delay = pendingStreamChars >= STREAMING_COMMIT_CHAR_THRESHOLD
+        ? 0
+        : Math.max(0, STREAMING_COMMIT_INTERVAL_MS - elapsed);
+      streamingCommitTimerId = window.setTimeout(() => {
+        streamingCommitTimerId = undefined;
+        streamingFrameId = window.requestAnimationFrame(() => {
+          streamingFrameId = undefined;
+          flushStreamingDelta();
+          lastStreamingCommitAt = performance.now();
+          commitThread(projectedThread(projected), false);
+        });
+      }, delay);
     };
     try {
       // Keep a stable, non-persistent placeholder visible while the Harness
       // is waiting for its first provider event.
       ensureStreamingAssistant();
       commitThread(projectedThread(projected), false);
+      lastStreamingCommitAt = performance.now();
       const outcome = await harnessRun({
         operationId,
         threadId: thread.id,
@@ -2351,11 +2494,13 @@ function App() {
         if (event.kind === "assistant_delta") {
           const payload = event.payload as { delta?: unknown };
           if (typeof payload.delta !== "string" || payload.delta.length === 0) return;
-          const placeholder = ensureStreamingAssistant();
-          streamedContent += payload.delta;
-          projected = appendAssistantDelta(projected, placeholder, payload.delta);
+          ensureStreamingAssistant();
+          pendingStreamDeltas.push(payload.delta);
+          pendingStreamChars += payload.delta.length;
           scheduleStreamingCommit();
         } else if (event.kind === "provider_reconnecting") {
+          cancelStreamingFrame();
+          flushStreamingDelta();
           const payload = event.payload as { retryAttempt?: number; maxRetryAttempts?: number };
           const retryAttempt = payload.retryAttempt ?? 1;
           const maxRetryAttempts = payload.maxRetryAttempts ?? 5;
@@ -2393,6 +2538,8 @@ function App() {
             updateReconnectProgress(false);
           }, 1_000);
         } else if (event.kind === "provider_reconnected") {
+          cancelStreamingFrame();
+          flushStreamingDelta();
           stopReconnectProgress();
           const payload = event.payload as { retryAttempts?: number };
           const settledReconnect = settleProviderReconnect(lastReconnectAttempt, payload.retryAttempts);
@@ -2414,6 +2561,7 @@ function App() {
           commitThread(projectedThread(projected));
         } else if (event.kind === "assistant_completed") {
           cancelStreamingFrame();
+          flushStreamingDelta();
           const payload = event.payload as {
             content?: string;
             toolCalls?: ToolCall[];
@@ -2426,7 +2574,7 @@ function App() {
             ? [runProfile, ...runFallbackProfiles].find((profile) => profile.id === payload.providerId) ?? runProfile
             : runProfile;
           const placeholder = ensureStreamingAssistant();
-          const assistant: AgentMessage = message("assistant", payload.content || streamedContent, {
+          const assistant: AgentMessage = message("assistant", payload.content || currentStreamContent(), {
             toolCalls: payload.toolCalls ?? [],
             requestId: payload.requestId,
             ...assistantMessageIdentity(respondingProfile),
@@ -2438,7 +2586,9 @@ function App() {
           projected = finalizeAssistantMessage(projected, placeholder, assistant);
           streamingAssistantMessage = undefined;
           streamingAssistantMessageId = undefined;
-          streamedContent = "";
+          streamedContentParts = [];
+          pendingStreamDeltas = [];
+          pendingStreamChars = 0;
           cumulativeInputTokens += payload.inputTokens ?? 0;
           cumulativeOutputTokens += payload.outputTokens ?? 0;
           const rewardPetId = thread.petId ?? activePetIdRef.current;
@@ -2471,6 +2621,7 @@ function App() {
           }
           commitThread(projectedThread(projected));
         } else if (event.kind === "tool_execution_completed") {
+          flushStreamingDelta();
           const payload = event.payload as { callId?: string; output?: string; isError?: boolean };
           projected = [...projected, message("tool", payload.output ?? "", {
             toolCallId: payload.callId,
@@ -2478,10 +2629,15 @@ function App() {
           })];
           commitThread(projectedThread(projected));
         } else if (event.kind === "queue_injected") {
+          flushStreamingDelta();
           const payload = event.payload as { queueId?: string; body?: string };
           if (payload.body) {
             projected = [...projected, message("user", payload.body)];
             commitThread(projectedThread(projected));
+          } else {
+            // A queue event can arrive after the last stream frame without a
+            // visible user message. Publish the flushed assistant tail too.
+            commitThread(projectedThread(projected), false);
           }
           if (payload.queueId) {
             setThreadQueue(
@@ -2490,7 +2646,11 @@ function App() {
             );
           }
         } else if (event.kind === "approval_required") {
+          flushStreamingDelta();
           const payload = event.payload as { token?: string; call?: ToolCall };
+          // Approval UI can become the next render immediately; do not leave
+          // the just-flushed assistant delta only in the local projection.
+          commitThread(projectedThread(projected), false);
           if (payload.call) {
             setThreadPending(thread.id, {
               calls: [payload.call],
@@ -2507,6 +2667,7 @@ function App() {
         }
       });
       cancelStreamingFrame();
+      flushStreamingDelta();
       if (outcome.state === "awaiting_approval" || pendingApprovalsRef.current[thread.id]) {
         // Keep the operation owner while the approval bar is visible. The
         // resolver needs the same operation ID to finalize a deny or resume
@@ -2781,7 +2942,7 @@ function App() {
         ? current.map((thread) => thread.id === next.id ? next : thread)
         : [next, ...current];
       if (isDesktop() && databaseReadyRef.current) {
-        await savePersistedThread(next);
+        await persistThreadNow(next);
       }
       threadsRef.current = updated;
       setThreads(updated);
@@ -3048,11 +3209,60 @@ function App() {
       await harnessUpdateState(operationId, "running").catch(() => undefined);
     }
     const streamingAssistant = message("assistant", "", assistantMessageIdentity(runProfile));
-    let streamedContent = "";
+    let streamedContentParts: string[] = [];
+    let pendingStreamDeltas: string[] = [];
+    let pendingStreamChars = 0;
     let frameId: number | null = null;
+    let frameTimerId: number | null = null;
+    let lastStreamingCommitAt = performance.now();
     let retryStatusMessages: AgentMessage[] = [];
     let lastReconnectAttempt = 0;
     let reconnectStatusMessageId: string | undefined;
+    const flushStreamingDelta = () => {
+      if (pendingStreamDeltas.length === 0) return;
+      const delta = pendingStreamDeltas.join("");
+      pendingStreamDeltas = [];
+      pendingStreamChars = 0;
+      streamedContentParts.push(delta);
+    };
+    const currentStreamContent = () => streamedContentParts.join("");
+    const cancelStreamingFrame = () => {
+      if (frameTimerId !== null) {
+        window.clearTimeout(frameTimerId);
+        frameTimerId = null;
+      }
+      if (frameId !== null) {
+        window.cancelAnimationFrame(frameId);
+        frameId = null;
+      }
+    };
+    const commitStreamingSnapshot = () => {
+      flushStreamingDelta();
+      lastStreamingCommitAt = performance.now();
+      commitThread({
+        ...thread,
+        messages: [
+          ...history,
+          ...retryStatusMessages,
+          { ...streamingAssistant, content: currentStreamContent() },
+        ],
+        updatedAt: Date.now(),
+      }, false);
+    };
+    const scheduleStreamingCommit = () => {
+      if (frameId !== null || frameTimerId !== null) return;
+      const elapsed = performance.now() - lastStreamingCommitAt;
+      const delay = pendingStreamChars >= STREAMING_COMMIT_CHAR_THRESHOLD
+        ? 0
+        : Math.max(0, STREAMING_COMMIT_INTERVAL_MS - elapsed);
+      frameTimerId = window.setTimeout(() => {
+        frameTimerId = null;
+        frameId = window.requestAnimationFrame(() => {
+          frameId = null;
+          commitStreamingSnapshot();
+        });
+      }, delay);
+    };
     commitThread({
       ...thread,
       messages: [...history, streamingAssistant],
@@ -3066,26 +3276,18 @@ function App() {
         thread.workspace,
         operationId,
         (delta) => {
-          streamedContent += delta;
-          if (frameId !== null) return;
-          frameId = window.requestAnimationFrame(() => {
-            frameId = null;
-            commitThread({
-              ...thread,
-              messages: [
-                ...history,
-                ...retryStatusMessages,
-                { ...streamingAssistant, content: streamedContent },
-              ],
-              updatedAt: Date.now(),
-            }, false);
-          });
+          if (!delta) return;
+          pendingStreamDeltas.push(delta);
+          pendingStreamChars += delta.length;
+          scheduleStreamingCommit();
         },
         providerThreadId(thread),
         runFallbackProfiles,
         hatchRun,
         hatchSkillLoaded,
         (retryAttempt, maxRetryAttempts) => {
+          cancelStreamingFrame();
+          flushStreamingDelta();
           lastReconnectAttempt = retryAttempt;
           const content = `${tr("正在重连", "Reconnecting")} ${retryAttempt}/${maxRetryAttempts}`;
           retryStatusMessages = collapseReconnectStatusMessages(retryStatusMessages);
@@ -3103,13 +3305,11 @@ function App() {
             reconnectStatusMessageId = reconnectStatus.id;
             retryStatusMessages = [...retryStatusMessages, reconnectStatus];
           }
-          commitThread({
-            ...thread,
-            messages: [...history, ...retryStatusMessages, streamingAssistant],
-            updatedAt: Date.now(),
-          });
+          commitStreamingSnapshot();
         },
         (retryAttempt) => {
+          cancelStreamingFrame();
+          flushStreamingDelta();
           const settledReconnect = settleProviderReconnect(lastReconnectAttempt, retryAttempt);
           lastReconnectAttempt = settledReconnect.lastReconnectAttempt;
           const content = `${tr("重连", "Reconnect")} ${settledReconnect.completedAttempt}/5 ${tr("已恢复，继续后面的对话", "succeeded; continuing the conversation")}`;
@@ -3125,11 +3325,7 @@ function App() {
             })];
           }
           reconnectStatusMessageId = undefined;
-          commitThread({
-            ...thread,
-            messages: [...history, ...retryStatusMessages, streamingAssistant],
-            updatedAt: Date.now(),
-          });
+          commitStreamingSnapshot();
         },
         armorModeRunInstructions(armorMode, armorModeLevel, {
           model: runProfile.model,
@@ -3138,7 +3334,8 @@ function App() {
         }),
         reasoningEffortForProfile(runProfile, effectiveReasoningEffort),
       );
-      if (frameId !== null) window.cancelAnimationFrame(frameId);
+      cancelStreamingFrame();
+      flushStreamingDelta();
       if (!hatchRunStillCurrent()) {
         finishThreadRun(threadId, operationId, "interrupted");
         return;
@@ -3148,7 +3345,7 @@ function App() {
         : runProfile;
       const assistant: AgentMessage = {
         ...streamingAssistant,
-        content: result.content || streamedContent,
+        content: result.content || currentStreamContent(),
         toolCalls: hatchRun
           ? normalizeHatchProviderToolCalls(result.toolCalls, history)
           : result.toolCalls,
@@ -3327,7 +3524,8 @@ function App() {
         finishThreadRun(threadId, operationId, "completed");
       }
     } catch (error) {
-      if (frameId !== null) window.cancelAnimationFrame(frameId);
+      cancelStreamingFrame();
+      flushStreamingDelta();
       // Keep the operation ownership check in the final cleanup below. The
       // provider may return a late cancellation/error after a newer hatch run
       // has taken over this thread.
@@ -3338,8 +3536,9 @@ function App() {
       const reason = error instanceof Error ? error.message : String(error);
       if (reason.includes("REQUEST_CANCELLED")) {
         if (hatchRun && runMode === "goal" && hatchRunStillCurrent()) await pausePetHatchGoal(threadId);
-        const cancelledHistory = finalizeConversationMessages(streamedContent
-          ? [...history, { ...streamingAssistant, content: streamedContent }]
+        const partialContent = currentStreamContent();
+        const cancelledHistory = finalizeConversationMessages(partialContent
+          ? [...history, { ...streamingAssistant, content: partialContent }]
           : history, runStartedAt);
         commitThread({
           ...thread,
@@ -3564,7 +3763,7 @@ function App() {
         // `harness_start` has a foreign key to the durable thread. Wait for
         // this exact user turn to reach SQLite instead of racing the queued
         // persistence scheduled by commitThread.
-        await savePersistedThread(next);
+        await persistThreadNow(next);
         const hatchRunDir = isPetHatchThread(thread)
           ? hatchRunDirectoryFromHistory(next.messages)
             ?? await harnessLatestHatchRunDir(thread.id)
@@ -4018,7 +4217,11 @@ function App() {
     const removed = threadsRef.current.find((thread) => thread.id === threadId);
     const remaining = threadsRef.current.filter((thread) => thread.id !== threadId);
     const nextThreads = remaining.length > 0 ? remaining : [createThread(defaultWorkspace)];
+    pendingThreadPersistenceRef.current.delete(threadId);
     if (isDesktop() && databaseReadyRef.current) {
+      // A debounced save may still be waiting; flush it before the delete so
+      // the serialized operation order remains deterministic.
+      flushThreadPersistence();
       const persistence = persistenceQueueRef.current.then(async () => {
         await deletePersistedThread(threadId);
         if (remaining.length === 0) await savePersistedThread(nextThreads[0]);
@@ -4145,7 +4348,7 @@ function App() {
           if (!hatchRunDir) {
             throw new Error("The persisted hatch conversation does not contain its canonical run directory");
           }
-          await savePersistedThread({ ...activeThread, workspace: resumeWorkspace });
+          await persistThreadNow({ ...activeThread, workspace: resumeWorkspace });
           const harnessRequest = {
             threadId: activeThread.id,
             rawUserInput: resumePrompt,
@@ -4187,7 +4390,7 @@ function App() {
             messages: nextHistory,
             updatedAt: Date.now(),
           };
-          await savePersistedThread(durableThread);
+          await persistThreadNow(durableThread);
           const harnessRequest = {
             threadId: activeThread.id,
             rawUserInput: resumePrompt,
@@ -5138,7 +5341,7 @@ function App() {
       id: activeThread.id,
       title: localizedThreadTitle(activeThread.title),
       workspace: activeThread.workspace ?? "",
-      messageCount: activeThread.messages.filter((item) => !item.internal).length,
+      messageCount: conversationView.messageCount,
       running,
       pendingApproval: Boolean(pending),
     },
@@ -5548,15 +5751,81 @@ function DeleteThreadDialog({
 }
 
 type ConversationBlock =
-  | { kind: "user"; item: AgentMessage }
-  | { kind: "assistant"; items: AgentMessage[] };
+  | { kind: "user"; item: AgentMessage; startIndex: number; endIndex: number }
+  | { kind: "assistant"; items: AgentMessage[]; startIndex: number; endIndex: number };
 
-const MarkdownContent = memo(function MarkdownContent({ content }: { content: string }) {
+const STREAMING_MARKDOWN_THRESHOLD = 16_000;
+const DEFERRED_MARKDOWN_THRESHOLD = 32_000;
+const STREAMING_COMMIT_INTERVAL_MS = 50;
+const STREAMING_COMMIT_CHAR_THRESHOLD = 8_192;
+
+function PlainTextMarkdown({ content }: { content: string }) {
+  return <div className="markdown-plain-text">{content}</div>;
+}
+
+function RenderedMarkdown({ content }: { content: string }) {
   return (
-    <ReactMarkdown remarkPlugins={[remarkGfmCompatible]} components={MARKDOWN_COMPONENTS}>
+    <ReactMarkdown remarkPlugins={MARKDOWN_PLUGINS} components={MARKDOWN_COMPONENTS}>
       {content}
     </ReactMarkdown>
   );
+}
+
+const DeferredLargeMarkdown = memo(function DeferredLargeMarkdown({
+  content,
+  deferWhileStreaming = false,
+}: {
+  content: string;
+  deferWhileStreaming?: boolean;
+}) {
+  const [largeContentReady, setLargeContentReady] = useState(false);
+  const plainTextRef = useRef<HTMLDivElement>(null);
+  const deferredContent = useDeferredValue(content);
+  useEffect(() => {
+    if (deferWhileStreaming) {
+      if (largeContentReady) setLargeContentReady(false);
+      return;
+    }
+    if (largeContentReady) return;
+    const element = plainTextRef.current;
+    if (!element || typeof IntersectionObserver === "undefined") {
+      setLargeContentReady(true);
+      return;
+    }
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      setLargeContentReady(true);
+      observer.disconnect();
+    }, { rootMargin: "800px 0px" });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [deferWhileStreaming, largeContentReady]);
+  if (deferWhileStreaming) {
+    return <PlainTextMarkdown content={content} />;
+  }
+  if (!largeContentReady) {
+    return <div ref={plainTextRef} className="markdown-plain-text">{content}</div>;
+  }
+  if (deferredContent !== content) {
+    return <PlainTextMarkdown content={content} />;
+  }
+  return <RenderedMarkdown content={deferredContent} />;
+});
+
+const MarkdownContent = memo(function MarkdownContent({
+  content,
+  deferWhileStreaming = false,
+}: {
+  content: string;
+  deferWhileStreaming?: boolean;
+}) {
+  if (deferWhileStreaming && content.length >= STREAMING_MARKDOWN_THRESHOLD) {
+    return <PlainTextMarkdown content={content} />;
+  }
+  if (content.length >= DEFERRED_MARKDOWN_THRESHOLD) {
+    return <DeferredLargeMarkdown content={content} deferWhileStreaming={deferWhileStreaming} />;
+  }
+  return <RenderedMarkdown content={content} />;
 });
 
 function diffFontStack(fontFamily: DiffFontFamily): string {
@@ -5603,19 +5872,57 @@ const MARKDOWN_COMPONENTS: Components = {
     <a href={href} target="_blank" rel="noreferrer" {...props}>{children}</a>
   ),
 };
+const MARKDOWN_PLUGINS = [remarkGfmCompatible];
 
-function groupConversationMessages(messages: AgentMessage[]): ConversationBlock[] {
+function groupConversationMessages(
+  messages: AgentMessage[],
+  previous?: { source: AgentMessage[]; blocks: ConversationBlock[] },
+): ConversationBlock[] {
   const blocks: ConversationBlock[] = [];
-  for (const item of messages) {
+  let assistantItems: AgentMessage[] | null = null;
+  let assistantStartIndex = -1;
+  let assistantUnchanged = true;
+  const flushAssistant = (endIndex: number) => {
+    if (!assistantItems) return;
+    const previousBlock = previous?.blocks[blocks.length];
+    const canReuse = previousBlock?.kind === "assistant"
+      && previousBlock.startIndex === assistantStartIndex
+      && previousBlock.endIndex === endIndex
+      && assistantUnchanged;
+    blocks.push(canReuse
+      ? previousBlock
+      : { kind: "assistant", items: assistantItems, startIndex: assistantStartIndex, endIndex });
+    assistantItems = null;
+    assistantStartIndex = -1;
+    assistantUnchanged = true;
+  };
+  for (let index = 0; index < messages.length; index += 1) {
+    const item = messages[index];
     if (item.role === "user") {
-      blocks.push({ kind: "user", item });
+      flushAssistant(index);
+      const previousBlock = previous?.blocks[blocks.length];
+      blocks.push(previousBlock?.kind === "user"
+        && previousBlock.startIndex === index
+        && previousBlock.endIndex === index + 1
+        && previousBlock.item === item
+        ? previousBlock
+        : { kind: "user", item, startIndex: index, endIndex: index + 1 });
       continue;
     }
-    const previous = blocks[blocks.length - 1];
-    if (previous?.kind === "assistant") previous.items.push(item);
-    else blocks.push({ kind: "assistant", items: [item] });
+    if (!assistantItems) {
+      assistantItems = [];
+      assistantStartIndex = index;
+      assistantUnchanged = true;
+    }
+    assistantItems.push(item);
+    if (previous?.source[index] !== item) assistantUnchanged = false;
   }
+  flushAssistant(messages.length);
   return blocks;
+}
+
+function isToolActivityMessage(item: AgentMessage) {
+  return item.role === "tool" || (item.role === "assistant" && item.toolCalls.length > 0);
 }
 
 function MessageRow({ item, onEdit }: { item: AgentMessage; onEdit: (content: string) => void }) {
@@ -5643,34 +5950,77 @@ function AssistantMessageGroup({
   items,
   pending,
   activeReconnectMessageId,
+  streamingMessageId,
   pet,
   onReviewChanges,
 }: {
   items: AgentMessage[];
   pending: PendingApproval | null;
   activeReconnectMessageId?: string;
+  streamingMessageId?: string;
   pet?: PetProfile;
   onReviewChanges: (changeSet: ConversationChangeSet) => void;
 }) {
-  const identity = items.find((item) => item.role === "assistant" && (item.modelName?.trim() || item.providerBrand));
+  let identity: AgentMessage | undefined;
+  const requestIds: string[] = [];
+  let changeSet: ConversationChangeSet | undefined;
+  let hasCopyContent = false;
+  let durationMs: number | undefined;
+  let firstToolActivityIndex = -1;
+  const toolActivityItems: AgentMessage[] = [];
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    if (!identity && item.role === "assistant" && (item.modelName?.trim() || item.providerBrand)) identity = item;
+    if (item.requestId) requestIds.push(item.requestId);
+    if (item.changeSet) changeSet = item.changeSet;
+    if (item.role === "assistant" && !item.status && item.content.trim()) hasCopyContent = true;
+    if (item.durationMs != null) durationMs = item.durationMs;
+    if (isToolActivityMessage(item)) {
+      if (firstToolActivityIndex < 0) firstToolActivityIndex = index;
+      toolActivityItems.push(item);
+    }
+  }
   const identityModelName = identity?.modelName?.trim();
   const providerBrand = identity?.providerBrand ?? (identityModelName
     ? modelProviderBrandFromName(identityModelName)
     : "levelup");
   const modelName = identityModelName || providerBrandLabel(providerBrand);
-  const requestIds = items.flatMap((item) => item.requestId ? [item.requestId] : []);
-  const changeSet = [...items].reverse().find((item) => item.changeSet)?.changeSet;
-  const copyContent = items
-    .filter((item) => item.role === "assistant" && !item.status && item.content.trim())
-    .map((item) => item.content.trim())
-    .join("\n\n");
-  let durationMs: number | undefined;
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    if (items[index].durationMs != null) {
-      durationMs = items[index].durationMs;
-      break;
+  const renderedSegments = items.map((item, index) => {
+    if (!isToolActivityMessage(item)) {
+      return (
+        <MemoizedAssistantMessageSegment
+          item={item}
+          pending={pending}
+          reconnectingActive={item.id === activeReconnectMessageId}
+          showToolCalls
+          deferMarkdown={item.id === streamingMessageId}
+          key={item.id}
+        />
+      );
     }
-  }
+
+    const contentSegment = item.role === "assistant"
+      && (Boolean(item.status) || Boolean(item.content.trim()) || item.attachments.length > 0 || Boolean(item.isError))
+      ? (
+        <MemoizedAssistantMessageSegment
+          item={item}
+          pending={pending}
+          reconnectingActive={item.id === activeReconnectMessageId}
+          showToolCalls={false}
+          deferMarkdown={item.id === streamingMessageId}
+          key={`${item.id}-content`}
+        />
+      )
+      : null;
+
+    if (index !== firstToolActivityIndex) return contentSegment;
+    return (
+      <Fragment key={`tool-activity-${item.id}`}>
+        {contentSegment}
+        <ToolActivitySummary items={toolActivityItems} pending={pending} />
+      </Fragment>
+    );
+  });
   return (
     <article className="message assistant assistant-message-group">
       {pet ? (
@@ -5685,16 +6035,15 @@ function AssistantMessageGroup({
           {requestIds.length > 1 && <span title={requestIds.join("\n")}>{requestIds.length} {tr("次请求", "requests")}</span>}
         </div>
         <div className="assistant-message-content">
-          {items.map((item) => (
-            <MemoizedAssistantMessageSegment
-              item={item}
-              pending={pending}
-              reconnectingActive={item.id === activeReconnectMessageId}
-              key={item.id}
-            />
-          ))}
+          {renderedSegments}
         </div>
-        <MessageCopyButton content={copyContent} />
+        <MessageCopyButton
+          hasContent={hasCopyContent}
+          getContent={() => items
+            .filter((item) => item.role === "assistant" && !item.status && item.content.trim())
+            .map((item) => item.content.trim())
+            .join("\n\n")}
+        />
         {durationMs != null && (
           <div className="message-duration"><Timer size={13} />{tr("处理总时长", "Total processing time")} {formatDuration(durationMs)}</div>
         )}
@@ -5756,12 +6105,23 @@ function AssistantAvatar({ brand, modelName }: { brand: ModelProviderBrand; mode
   );
 }
 
-function MessageCopyButton({ content, onEdit }: { content: string; onEdit?: (content: string) => void }) {
+function MessageCopyButton({
+  content,
+  getContent,
+  hasContent = Boolean(content?.trim()),
+  onEdit,
+}: {
+  content?: string;
+  getContent?: () => string;
+  hasContent?: boolean;
+  onEdit?: (content: string) => void;
+}) {
   const [status, setStatus] = useState<"idle" | "copied" | "error">("idle");
-  if (!content.trim()) return null;
+  if (!hasContent) return null;
+  const readContent = () => getContent?.() ?? content ?? "";
   const copy = async () => {
     try {
-      await copyText(content);
+      await copyText(readContent());
       setStatus("copied");
       window.setTimeout(() => setStatus("idle"), 1_500);
     } catch {
@@ -5770,16 +6130,16 @@ function MessageCopyButton({ content, onEdit }: { content: string; onEdit?: (con
   };
   return (
     <div className="message-copy-action">
-      {onEdit && (
-        <button type="button" onClick={() => onEdit(content)} title={tr("编辑这段内容", "Edit this message")}>
-          <Pencil size={13} />
-          {tr("编辑", "Edit")}
-        </button>
-      )}
       <button type="button" onClick={() => void copy()} title={tr("复制这段内容", "Copy this message")}>
         {status === "copied" ? <Check size={13} /> : <Copy size={13} />}
         {status === "copied" ? tr("已复制", "Copied") : status === "error" ? tr("复制失败", "Copy failed") : tr("复制", "Copy")}
       </button>
+      {onEdit && (
+        <button type="button" onClick={() => onEdit(readContent())} title={tr("编辑这段内容", "Edit this message")}>
+          <Pencil size={13} />
+          {tr("编辑", "Edit")}
+        </button>
+      )}
     </div>
   );
 }
@@ -5795,14 +6155,159 @@ function MessageAttachments({ item }: { item: AgentMessage }) {
   );
 }
 
+function ToolCallRows({
+  calls,
+  pending,
+}: {
+  calls: ToolCall[];
+  pending: PendingApproval | null;
+}) {
+  if (calls.length === 0) return null;
+  const pendingIds = new Set(pending?.calls.map((call) => call.id) ?? []);
+  return (
+    <div className="tool-call-list">
+      {calls.map((call) => (
+        <div className={`tool-call${typeof call.arguments.prompt === "string" ? " prompt-tool-call" : ""}`} key={call.id}>
+          <span className="tool-kind">{toolIcon(call)}</span>
+          <span>
+            <strong>{toolLabel(call)}</strong>
+            <small title={toolFullSummary(call)}>{toolSummary(call)}</small>
+          </span>
+          <span className={`tool-status ${pendingIds.has(call.id) ? "waiting" : ""}`}>
+            {pendingIds.has(call.id) ? tr("待批准", "Awaiting approval") : tr("已提交", "Submitted")}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function CollapsibleSubagentResult({ item, runId }: { item: AgentMessage; runId?: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <details className="subagent-result" onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary>
+        <span className="tool-kind"><GitMerge size={15} /></span>
+        <span><strong>{tr("子 Agent 补丁待审查", "Sub-Agent patch awaiting review")}</strong><small>{runId ? `Run ${runId.slice(0, 10)}` : tr("隔离工作树已清理", "Isolated worktree cleaned")}</small></span>
+        <ChevronDown size={15} />
+      </summary>
+      {open && (
+        <div className="markdown-body">
+          <MarkdownContent content={item.content} />
+        </div>
+      )}
+    </details>
+  );
+}
+
+function CollapsibleToolResult({
+  item,
+  firstLine,
+  firstLineBreak,
+}: {
+  item: AgentMessage;
+  firstLine: string;
+  firstLineBreak: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const firstLinePreview = firstLine.length > 300 ? `${firstLine.slice(0, 300)}…` : firstLine;
+  return (
+    <details className={`tool-result ${item.isError ? "error" : ""}`} onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary title={firstLinePreview}>
+        {item.isError ? <X size={14} /> : <Check size={14} />}
+        <span>{firstLinePreview}</span>
+        <ChevronDown className="tool-result-chevron" size={14} />
+      </summary>
+      {open && <pre>{firstLineBreak >= 0 ? item.content.slice(firstLineBreak + 1) || firstLine : item.content}</pre>}
+    </details>
+  );
+}
+
+function ToolResultItem({ item }: { item: AgentMessage }) {
+  const firstLineBreak = item.content.indexOf("\n");
+  const firstLine = (firstLineBreak >= 0 ? item.content.slice(0, firstLineBreak) : item.content).replace(/\r$/, "")
+    || tr("工具已完成", "Tool completed");
+  if (item.content.startsWith("Sub-Agent completed in an isolated worktree.")) {
+    const runId = item.content.match(/Run ID: ([0-9a-f]{32})/)?.[1];
+    return <CollapsibleSubagentResult item={item} runId={runId} />;
+  }
+  const mediaAssets = parseMediaToolAssets(item.content);
+  if (mediaAssets) {
+    return (
+      <div className={`tool-media-result ${item.isError ? "error" : ""}`}>
+        <div>
+          {item.isError ? <CircleAlert size={14} /> : <Check size={14} />}
+          <strong>{mediaAssets.length > 0 ? tr(`${mediaAssets.length} 个媒体结果`, `${mediaAssets.length} media results`) : tr("媒体任务已检查", "Media jobs checked")}</strong>
+        </div>
+        {mediaAssets.length > 0 && <div className="tool-media-grid">{mediaAssets.map((asset) => <MediaAssetCard asset={asset} locale={getAppLocale()} key={asset.id} />)}</div>}
+      </div>
+    );
+  }
+  return <CollapsibleToolResult item={item} firstLine={firstLine} firstLineBreak={firstLineBreak} />;
+}
+
+function ToolActivitySummary({
+  items,
+  pending,
+}: {
+  items: AgentMessage[];
+  pending: PendingApproval | null;
+}) {
+  const [open, setOpen] = useState(false);
+  const calls: ToolCall[] = [];
+  let resultCount = 0;
+  let errorCount = 0;
+  for (const item of items) {
+    if (item.role === "assistant") calls.push(...item.toolCalls);
+    else if (item.role === "tool") {
+      resultCount += 1;
+      if (item.isError) errorCount += 1;
+    }
+  }
+  const pendingIds = new Set(pending?.calls.map((call) => call.id) ?? []);
+  const pendingCount = calls.reduce((count, call) => count + (pendingIds.has(call.id) ? 1 : 0), 0);
+  const summary = [
+    `${calls.length} ${tr("次调用", calls.length === 1 ? "call" : "calls")}`,
+    resultCount > 0 ? `${resultCount} ${tr("个结果", resultCount === 1 ? "result" : "results")}` : "",
+    pendingCount > 0 ? `${pendingCount} ${tr("待批准", "awaiting approval")}` : "",
+    errorCount > 0 ? `${errorCount} ${tr("个失败", "failed")}` : "",
+  ].filter(Boolean).join(" · ");
+  const summaryLabel = open
+    ? tr("收起工具调用详情", "Collapse tool call details")
+    : tr("展开工具调用详情", "Expand tool call details");
+  return (
+    <details className="tool-activity" onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary aria-label={summaryLabel}>
+        <span className="tool-activity-icon"><TerminalSquare size={14} /></span>
+        <span className="tool-activity-copy">
+          <strong>{tr("工具调用", "Tool calls")}</strong>
+          <small>{summary || tr("暂无调用", "No calls")}</small>
+        </span>
+        <ChevronDown className="tool-activity-chevron" size={15} />
+      </summary>
+      {open && (
+        <div className="tool-activity-content">
+          {items.map((item) => item.role === "assistant"
+            ? <ToolCallRows calls={item.toolCalls} pending={pending} key={`calls-${item.id}`} />
+            : <ToolResultItem item={item} key={item.id} />)}
+        </div>
+      )}
+    </details>
+  );
+}
+
 function AssistantMessageSegment({
   item,
   pending,
   reconnectingActive,
+  showToolCalls,
+  deferMarkdown,
 }: {
   item: AgentMessage;
   pending: PendingApproval | null;
   reconnectingActive: boolean;
+  showToolCalls: boolean;
+  deferMarkdown: boolean;
 }) {
   if (item.status) {
     return (
@@ -5813,72 +6318,17 @@ function AssistantMessageSegment({
     );
   }
   if (item.role === "tool") {
-    const firstLineBreak = item.content.indexOf("\n");
-    const firstLine = (firstLineBreak >= 0 ? item.content.slice(0, firstLineBreak) : item.content).replace(/\r$/, "")
-      || tr("工具已完成", "Tool completed");
-    if (item.content.startsWith("Sub-Agent completed in an isolated worktree.")) {
-      const runId = item.content.match(/Run ID: ([0-9a-f]{32})/)?.[1];
-      return (
-        <details className="subagent-result">
-          <summary>
-            <span className="tool-kind"><GitMerge size={15} /></span>
-            <span><strong>{tr("子 Agent 补丁待审查", "Sub-Agent patch awaiting review")}</strong><small>{runId ? `Run ${runId.slice(0, 10)}` : tr("隔离工作树已清理", "Isolated worktree cleaned")}</small></span>
-            <ChevronDown size={15} />
-          </summary>
-          <div className="markdown-body">
-            <MarkdownContent content={item.content} />
-          </div>
-        </details>
-      );
-    }
-    const mediaAssets = parseMediaToolAssets(item.content);
-    if (mediaAssets) {
-      return (
-        <div className={`tool-media-result ${item.isError ? "error" : ""}`}>
-          <div>
-            {item.isError ? <CircleAlert size={14} /> : <Check size={14} />}
-            <strong>{mediaAssets.length > 0 ? tr(`${mediaAssets.length} 个媒体结果`, `${mediaAssets.length} media results`) : tr("媒体任务已检查", "Media jobs checked")}</strong>
-          </div>
-          {mediaAssets.length > 0 && <div className="tool-media-grid">{mediaAssets.map((asset) => <MediaAssetCard asset={asset} locale={getAppLocale()} key={asset.id} />)}</div>}
-        </div>
-      );
-    }
-    const expandedContent = firstLineBreak >= 0 ? item.content.slice(firstLineBreak + 1) : item.content;
-    return (
-      <details className={`tool-result ${item.isError ? "error" : ""}`}>
-        <summary title={firstLine.length > 300 ? `${firstLine.slice(0, 300)}…` : firstLine}>
-          {item.isError ? <X size={14} /> : <Check size={14} />}
-          <span>{firstLine}</span>
-          <ChevronDown className="tool-result-chevron" size={14} />
-        </summary>
-        <pre>{expandedContent || firstLine}</pre>
-      </details>
-    );
+    return <ToolResultItem item={item} />;
   }
   return (
     <section className={`assistant-message-segment ${item.isError ? "error" : ""}`}>
-        <MessageAttachments item={item} />
-        {item.content && (
-          <div className="markdown-body">
-            <MarkdownContent content={item.content} />
-          </div>
-        )}
-        {item.toolCalls.length > 0 && (
-          <div className="tool-call-list">
-            {item.toolCalls.map((call) => (
-              <div className={`tool-call${typeof call.arguments.prompt === "string" ? " prompt-tool-call" : ""}`} key={call.id}>
-                <span className="tool-kind">{toolIcon(call)}</span>
-                <span>
-                  <strong>{toolLabel(call)}</strong>
-                  <small title={toolFullSummary(call)}>{toolSummary(call)}</small>
-                </span>
-                <span className={`tool-status ${pending?.calls.some((item) => item.id === call.id) ? "waiting" : ""}`}>
-                  {pending?.calls.some((item) => item.id === call.id) ? tr("待批准", "Awaiting approval") : tr("已提交", "Submitted")}
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
+      <MessageAttachments item={item} />
+      {item.content && (
+        <div className="markdown-body">
+          <MarkdownContent content={item.content} deferWhileStreaming={deferMarkdown} />
+        </div>
+      )}
+      {showToolCalls && item.toolCalls.length > 0 && <ToolCallRows calls={item.toolCalls} pending={pending} />}
     </section>
   );
 }
@@ -5887,6 +6337,8 @@ const MemoizedAssistantMessageSegment = memo(AssistantMessageSegment, (previous,
   previous.item === next.item
   && previous.pending === next.pending
   && previous.reconnectingActive === next.reconnectingActive
+  && previous.showToolCalls === next.showToolCalls
+  && previous.deferMarkdown === next.deferMarkdown
 ));
 
 function ThinkingRow() {
@@ -5905,10 +6357,10 @@ const MemoizedMessageRow = memo(MessageRow);
 const MemoizedAssistantMessageGroup = memo(AssistantMessageGroup, (previous, next) => (
   previous.pending === next.pending
   && previous.activeReconnectMessageId === next.activeReconnectMessageId
+  && previous.streamingMessageId === next.streamingMessageId
   && previous.pet === next.pet
   && previous.onReviewChanges === next.onReviewChanges
-  && previous.items.length === next.items.length
-  && previous.items.every((item, index) => item === next.items[index])
+  && previous.items === next.items
 ));
 
 const ConversationMessageList = memo(({
@@ -5931,24 +6383,42 @@ const ConversationMessageList = memo(({
   endRef: RefObject<HTMLDivElement | null>;
   onReviewChanges: (changeSet: ConversationChangeSet) => void;
   onEdit: (content: string) => void;
-}) => (
-  <>
-    {blocks.map((block) => block.kind === "user" ? (
-      <MemoizedMessageRow key={block.item.id} item={block.item} onEdit={onEdit} />
-    ) : (
-      <MemoizedAssistantMessageGroup
-        key={block.items[0]?.id ?? "assistant"}
-        items={block.items}
-        pending={pending}
-        activeReconnectMessageId={activeReconnectMessageId}
-        pet={pet}
-        onReviewChanges={onReviewChanges}
-      />
-    ))}
-    {running && latestConnectionStatus !== "reconnecting" && <ThinkingRow />}
-    <div ref={endRef} />
-  </>
-));
+}) => {
+  const streamingMessageId = useMemo(() => {
+    if (!running) return undefined;
+    for (let blockIndex = blocks.length - 1; blockIndex >= 0; blockIndex -= 1) {
+      const block = blocks[blockIndex];
+      if (block.kind !== "assistant") continue;
+      for (let itemIndex = block.items.length - 1; itemIndex >= 0; itemIndex -= 1) {
+        const item = block.items[itemIndex];
+        if (item.role === "assistant" && !item.status) return item.id;
+      }
+    }
+    return undefined;
+  }, [blocks, running]);
+
+  return (
+    <>
+      {blocks.map((block) => block.kind === "user" ? (
+        <MemoizedMessageRow key={block.item.id} item={block.item} onEdit={onEdit} />
+      ) : (
+        <MemoizedAssistantMessageGroup
+          key={block.items[0]?.id ?? "assistant"}
+          items={block.items}
+          pending={pending}
+          activeReconnectMessageId={activeReconnectMessageId}
+          streamingMessageId={streamingMessageId && block.items.some((item) => item.id === streamingMessageId)
+            ? streamingMessageId
+            : undefined}
+          pet={pet}
+          onReviewChanges={onReviewChanges}
+        />
+      ))}
+      {running && latestConnectionStatus !== "reconnecting" && <ThinkingRow />}
+      <div ref={endRef} />
+    </>
+  );
+});
 
 function reasoningEffortLabel(effort: ReasoningEffort) {
   if (effort === "auto") return tr("自动", "Auto");
@@ -9435,8 +9905,16 @@ function permissionIcon(level: PermissionLevel, size: number) {
   return <ShieldAlert size={size} />;
 }
 
+const timeFormatterCache = new Map<string, Intl.DateTimeFormat>();
+
 function formatTime(value: number) {
-  return new Intl.DateTimeFormat(getAppLocale(), { hour: "2-digit", minute: "2-digit" }).format(value);
+  const locale = getAppLocale();
+  let formatter = timeFormatterCache.get(locale);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(locale, { hour: "2-digit", minute: "2-digit" });
+    timeFormatterCache.set(locale, formatter);
+  }
+  return formatter.format(value);
 }
 
 export default App;

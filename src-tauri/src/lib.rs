@@ -304,14 +304,36 @@ fn discover_skills(
         .map_err(|error| format!("Could not locate the home directory: {error}"))?;
     let built_in_skills = built_in_skill_root(app);
     let codex_home = configured_codex_home(&home);
-    Ok(skill::scan(
+    let workspace_path = workspace.map(std::path::Path::new);
+    let preferences = database.skill_preferences()?;
+    let mut skills = skill::scan(
         &app_data,
         &home,
         built_in_skills.as_deref(),
         codex_home.as_deref(),
-        workspace.map(std::path::Path::new),
-        &database.skill_preferences()?,
-    ))
+        workspace_path,
+        &preferences,
+    );
+
+    // Skills copied into LevelUpAgent's writable app-data directory are
+    // externally installable user Skills (for example, from LevelUpAxion).
+    // Enable each newly discovered valid Skill once, while preserving an
+    // explicit disable preference on subsequent scans.  This keeps filesystem
+    // installs and the Agent's SQLite preference state in sync without making
+    // bundled, workspace, or shared Skills opt-in behavior change.
+    let newly_discovered = new_user_skill_preferences(&skills, &preferences);
+    if !newly_discovered.is_empty() {
+        database.set_skills_enabled(&newly_discovered, true)?;
+        skills = skill::scan(
+            &app_data,
+            &home,
+            built_in_skills.as_deref(),
+            codex_home.as_deref(),
+            workspace_path,
+            &database.skill_preferences()?,
+        );
+    }
+    Ok(skills)
 }
 
 fn skill_storage_paths(app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf), String> {
@@ -331,6 +353,18 @@ fn configured_codex_home(home: &Path) -> Option<PathBuf> {
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
         .or_else(|| Some(home.join(".codex")))
+}
+
+fn new_user_skill_preferences(
+    skills: &[SkillInfo],
+    preferences: &HashMap<(String, String), bool>,
+) -> Vec<(String, String)> {
+    skills
+        .iter()
+        .filter(|skill| skill.valid && skill.source == "LevelUpAgent")
+        .filter(|skill| !preferences.contains_key(&(skill.id.clone(), skill.path.clone())))
+        .map(|skill| (skill.id.clone(), skill.path.clone()))
+        .collect()
 }
 
 fn selected_skill(
@@ -9823,6 +9857,44 @@ mod tests {
             priority,
             failover_enabled,
         }
+    }
+
+    #[test]
+    fn new_user_skills_are_enabled_once_without_overriding_preferences() {
+        let fresh = SkillInfo {
+            id: "fresh".to_owned(),
+            name: "Fresh".to_owned(),
+            description: String::new(),
+            path: "C:/app-data/skills/fresh/SKILL.md".to_owned(),
+            source: "LevelUpAgent".to_owned(),
+            enabled: false,
+            valid: true,
+            warning: None,
+        };
+        let disabled = SkillInfo {
+            id: "disabled".to_owned(),
+            name: "Disabled".to_owned(),
+            description: String::new(),
+            path: "C:/app-data/skills/disabled/SKILL.md".to_owned(),
+            source: "LevelUpAgent".to_owned(),
+            enabled: false,
+            valid: true,
+            warning: None,
+        };
+        let shared = SkillInfo {
+            id: "shared".to_owned(),
+            name: "Shared".to_owned(),
+            description: String::new(),
+            path: "C:/users/.agents/skills/shared/SKILL.md".to_owned(),
+            source: "Agents".to_owned(),
+            enabled: false,
+            valid: true,
+            warning: None,
+        };
+        let preferences = HashMap::from([((disabled.id.clone(), disabled.path.clone()), false)]);
+
+        let pending = new_user_skill_preferences(&[fresh.clone(), disabled, shared], &preferences);
+        assert_eq!(pending, vec![(fresh.id, fresh.path)]);
     }
 
     fn learning_quest(mode: &str) -> pet_life::PetLearningQuest {

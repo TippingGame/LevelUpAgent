@@ -22,6 +22,12 @@ registry as the dialog and as Agent turns. Updates create a backup under
 `<app-data>/skill-backups/`; deletes move the Skill to
 `<app-data>/skill-trash/` instead of deleting it permanently.
 
+Valid Skills newly discovered under `<app-data>/skills/` are enabled
+automatically on their first scan (including Skills installed by
+LevelUpAxion). A later explicit disable is persisted and is never overridden
+by rescans; bundled, workspace, and shared compatibility roots keep their
+existing preference behavior.
+
 When `CODEX_HOME` is set, its `skills/` directory is used for the Codex scope
 and is mutable through the same host-validated operations. Without it, the
 Codex scope falls back to `~/.codex/skills/`.
