@@ -270,6 +270,8 @@ GitHub Secret 进入构建进程。当前 tag workflow 只构建 Windows，缺�
 扫描器识别 LevelUpAgent、Codex、Claude、Agents 与当前工作区的兼容 Skill 目录，不跟随目录
 链接，最多返回 300 个 `SKILL.md`。发现阶段只解析受限 frontmatter；无效 Skill 不能启用。
 Agent 和 Plan 每回合最多注入 64 个启用 Skill 的截断元数据，正文只在模型调用只读工具时加载。
+声明 `activation: router` 的启用 Skill 例外：应用会在 Provider 调用前确定性加载第一个 Router
+Skill，并将其标记为已加载；这适合负责后续 Skill 分派的统一入口，避免把入口选择交给模型。
 被引用文件必须是 Skill 根目录内的现有 UTF-8 普通文件，拒绝绝对路径、`..` 和符号链接逃逸。
 
 ## Goal 状态机

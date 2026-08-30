@@ -425,6 +425,8 @@ pub struct AgentSkillSummary {
     pub id: String,
     pub name: String,
     pub description: String,
+    #[serde(default)]
+    pub preloaded: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -433,6 +435,7 @@ pub struct SkillInfo {
     pub id: String,
     pub name: String,
     pub description: String,
+    pub activation: String,
     pub path: String,
     pub source: String,
     pub enabled: bool,

@@ -562,6 +562,7 @@ export interface SkillInfo {
   id: string;
   name: string;
   description: string;
+  activation: "auto" | "router";
   path: string;
   source: string;
   enabled: boolean;

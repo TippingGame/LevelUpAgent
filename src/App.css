@@ -1233,6 +1233,21 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .assistant-message-content { min-width: 0; }
 .assistant-message-segment { min-width: 0; }
 .assistant-message-segment:not(:first-child) { margin-top: 14px; }
+.assistant-turn-details { min-width: 0; }
+.assistant-turn-summary { min-width: 0; min-height: 48px; display: grid; grid-template-columns: 28px minmax(0, 1fr) auto 16px; align-items: center; gap: 8px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; background: color-mix(in srgb, var(--surface) 68%, transparent); color: var(--muted); cursor: pointer; list-style: none; transition: border-color .14s ease, background .14s ease, color .14s ease; }
+.assistant-turn-summary::-webkit-details-marker { display: none; }
+.assistant-turn-summary:hover { border-color: var(--line-strong); background: var(--surface); color: var(--text); }
+.assistant-turn-summary:focus { outline: none; }
+.assistant-turn-summary:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 38%, transparent); outline-offset: 2px; }
+.assistant-turn-status-icon { width: 26px; height: 26px; display: grid; place-items: center; border-radius: 6px; background: rgba(16,185,129,.1); color: #059669; }
+.assistant-turn-status-icon.error { background: rgba(170,70,56,.1); color: #aa4638; }
+.assistant-turn-summary-copy { min-width: 0; display: flex; align-items: baseline; gap: 8px; }
+.assistant-turn-summary-copy strong { flex: 0 0 auto; color: var(--text); font-size: var(--font-caption); font-weight: 680; }
+.assistant-turn-summary-copy small { min-width: 0; overflow: hidden; color: var(--muted); font-size: var(--font-compact); text-overflow: ellipsis; white-space: nowrap; }
+.assistant-turn-duration { color: var(--faint); font-size: var(--font-compact); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.assistant-turn-chevron { color: var(--faint); transition: transform .16s ease; }
+.assistant-turn-details[open] .assistant-turn-chevron { transform: rotate(180deg); }
+.assistant-turn-details-content { min-width: 0; padding-top: 9px; }
 .assistant-status-segment { display: flex; align-items: center; gap: 7px; min-height: 28px; color: var(--muted); font-size: var(--font-small); }
 .assistant-status-segment.reconnected { color: var(--teal); }
 .assistant-status-segment.failed { color: #aa4638; }

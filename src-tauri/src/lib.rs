@@ -435,12 +435,14 @@ fn attach_skills(
         })
         .take(64)
         .collect();
+    let router_skill_id = preload_router_skill(request, &enabled)?;
     request.available_skills = enabled
         .iter()
         .map(|skill| AgentSkillSummary {
             id: skill.id.clone(),
             name: skill.name.clone(),
             description: skill.description.chars().take(500).collect(),
+            preloaded: router_skill_id.as_deref() == Some(skill.id.as_str()),
         })
         .collect();
     // Keep this phase explicit as well as history-derived. The frontend sends
@@ -479,6 +481,24 @@ fn attach_skills(
         });
     }
     Ok(())
+}
+
+fn preload_router_skill(
+    request: &mut AgentTurnRequest,
+    enabled: &[SkillInfo],
+) -> Result<Option<String>, String> {
+    let Some(router_skill) = enabled.iter().find(|skill| skill.activation == "router") else {
+        return Ok(None);
+    };
+    let content = skill::read_enabled(enabled, &router_skill.id, None)?;
+    let router_instructions = format!(
+        "LevelUpAgent Router Skill\nThe enabled Skill below declares activation: router. It is application-selected and already loaded for this turn. Apply it before choosing any additional Skill, and do not call read_skill for its SKILL.md again.\n\n{content}"
+    );
+    request.custom_instructions = merge_custom_instructions([
+        request.custom_instructions.take().unwrap_or_default(),
+        router_instructions,
+    ]);
+    Ok(Some(router_skill.id.clone()))
 }
 
 fn attach_goal(
@@ -9865,6 +9885,7 @@ mod tests {
             id: "fresh".to_owned(),
             name: "Fresh".to_owned(),
             description: String::new(),
+            activation: "auto".to_owned(),
             path: "C:/app-data/skills/fresh/SKILL.md".to_owned(),
             source: "LevelUpAgent".to_owned(),
             enabled: false,
@@ -9875,6 +9896,7 @@ mod tests {
             id: "disabled".to_owned(),
             name: "Disabled".to_owned(),
             description: String::new(),
+            activation: "auto".to_owned(),
             path: "C:/app-data/skills/disabled/SKILL.md".to_owned(),
             source: "LevelUpAgent".to_owned(),
             enabled: false,
@@ -9885,6 +9907,7 @@ mod tests {
             id: "shared".to_owned(),
             name: "Shared".to_owned(),
             description: String::new(),
+            activation: "auto".to_owned(),
             path: "C:/users/.agents/skills/shared/SKILL.md".to_owned(),
             source: "Agents".to_owned(),
             enabled: false,
@@ -10707,6 +10730,57 @@ mod tests {
     }
 
     #[test]
+    fn router_skill_is_preloaded_before_the_provider_turn() {
+        let root = std::env::temp_dir().join(format!(
+            "levelup-router-skill-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let skill_root = root.join("router");
+        std::fs::create_dir_all(&skill_root).unwrap();
+        let manifest = skill_root.join("SKILL.md");
+        std::fs::write(
+            &manifest,
+            "---\nname: router\ndescription: Route every task.\nactivation: router\n---\n\n# Router contract\nSelect the primary workflow.\n",
+        )
+        .unwrap();
+        let skill = SkillInfo {
+            id: skill::id_for_path(&manifest),
+            name: "router".to_owned(),
+            description: "Route every task.".to_owned(),
+            activation: "router".to_owned(),
+            path: manifest.to_string_lossy().into_owned(),
+            source: "LevelUpAgent".to_owned(),
+            enabled: true,
+            valid: true,
+            warning: None,
+        };
+        let mut request = AgentTurnRequest {
+            profile: profile("primary", 10, true),
+            messages: Vec::new(),
+            mode: "agent".to_owned(),
+            workspace: Some(root.to_string_lossy().into_owned()),
+            thread_id: Some("thread-router".to_owned()),
+            hatch: false,
+            hatch_skill_loaded: false,
+            available_tools: Vec::new(),
+            available_skills: Vec::new(),
+            goal: None,
+            fallback_profiles: Vec::new(),
+            custom_instructions: Some("Persisted instructions.".to_owned()),
+            reasoning_effort: None,
+        };
+
+        let selected = preload_router_skill(&mut request, std::slice::from_ref(&skill)).unwrap();
+        assert_eq!(selected.as_deref(), Some(skill.id.as_str()));
+        let instructions = request.custom_instructions.unwrap();
+        assert!(instructions.starts_with("Persisted instructions."));
+        assert!(instructions.contains("LevelUpAgent Router Skill"));
+        assert!(instructions.contains("Select the primary workflow."));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn provider_candidates_keep_primary_first_and_sort_enabled_fallbacks() {
         let request = AgentTurnRequest {
             profile: profile("primary", 999, false),
@@ -10783,6 +10857,7 @@ mod tests {
                 id: "theme-skill".to_owned(),
                 name: "theme".to_owned(),
                 description: "Theme guidance".to_owned(),
+                preloaded: false,
             }],
             goal: None,
             fallback_profiles: Vec::new(),

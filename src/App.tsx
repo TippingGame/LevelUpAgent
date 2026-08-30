@@ -5925,6 +5925,35 @@ function isToolActivityMessage(item: AgentMessage) {
   return item.role === "tool" || (item.role === "assistant" && item.toolCalls.length > 0);
 }
 
+function assistantCompletionState(items: AgentMessage[]) {
+  if (items.some((item) => item.status === "failed" || item.isError)) return "failed" as const;
+  const changeStatus = [...items].reverse().find((item) => item.changeSet)?.changeSet?.status;
+  if (changeStatus === "cancelled") return "cancelled" as const;
+  if (changeStatus === "interrupted") return "interrupted" as const;
+  if (changeStatus === "failed") return "failed" as const;
+  return "completed" as const;
+}
+
+function assistantCompletionLabel(items: AgentMessage[]) {
+  const state = assistantCompletionState(items);
+  if (state === "failed") return tr("任务失败", "Task failed");
+  if (state === "cancelled") return tr("任务已取消", "Task cancelled");
+  if (state === "interrupted") return tr("任务已中断", "Task interrupted");
+  return tr("任务已完成", "Task completed");
+}
+
+function assistantSummaryPreview(items: AgentMessage[]) {
+  const content = [...items]
+    .reverse()
+    .find((item) => item.role === "assistant" && !item.status && item.content.trim())
+    ?.content
+    .trim()
+    .replace(/^#+\s*/gm, "")
+    .replace(/\s+/g, " ");
+  if (!content) return tr("查看本轮完整记录", "View the complete turn");
+  return content.length > 220 ? `${content.slice(0, 220)}…` : content;
+}
+
 function MessageRow({ item, onEdit }: { item: AgentMessage; onEdit: (content: string) => void }) {
   return (
     <article className={`message user ${item.isError ? "error" : ""}`}>
@@ -5951,6 +5980,7 @@ function AssistantMessageGroup({
   pending,
   activeReconnectMessageId,
   streamingMessageId,
+  collapsible = false,
   pet,
   onReviewChanges,
 }: {
@@ -5958,9 +5988,16 @@ function AssistantMessageGroup({
   pending: PendingApproval | null;
   activeReconnectMessageId?: string;
   streamingMessageId?: string;
+  collapsible?: boolean;
   pet?: PetProfile;
   onReviewChanges: (changeSet: ConversationChangeSet) => void;
 }) {
+  const [open, setOpen] = useState(!collapsible);
+  const previousCollapsible = useRef(collapsible);
+  useEffect(() => {
+    if (previousCollapsible.current !== collapsible) setOpen(!collapsible);
+    previousCollapsible.current = collapsible;
+  }, [collapsible]);
   let identity: AgentMessage | undefined;
   const requestIds: string[] = [];
   let changeSet: ConversationChangeSet | undefined;
@@ -6021,6 +6058,35 @@ function AssistantMessageGroup({
       </Fragment>
     );
   });
+  const messageMeta = (
+    <div className="message-meta">
+      <strong>{pet?.displayName ?? modelName}</strong>
+      <span>{formatTime(items[0]?.createdAt ?? Date.now())}</span>
+      {requestIds.length > 1 && <span title={requestIds.join("\n")}>{requestIds.length} {tr("次请求", "requests")}</span>}
+    </div>
+  );
+  const messageDetails = (
+    <>
+      <div className="assistant-message-content">
+        {renderedSegments}
+      </div>
+      <MessageCopyButton
+        hasContent={hasCopyContent}
+        getContent={() => items
+          .filter((item) => item.role === "assistant" && !item.status && item.content.trim())
+          .map((item) => item.content.trim())
+          .join("\n\n")}
+      />
+      {durationMs != null && (
+        <div className="message-duration"><Timer size={13} />{tr("处理总时长", "Total processing time")} {formatDuration(durationMs)}</div>
+      )}
+      {changeSet && <ChangeSetSummary changeSet={changeSet} onReview={() => onReviewChanges(changeSet)} />}
+    </>
+  );
+  const completionState = assistantCompletionState(items);
+  const completionIcon = completionState !== "completed"
+    ? <CircleAlert size={15} />
+    : <CheckCircle2 size={15} />;
   return (
     <article className="message assistant assistant-message-group">
       {pet ? (
@@ -6029,25 +6095,28 @@ function AssistantMessageGroup({
         </div>
       ) : <AssistantAvatar key={`${providerBrand}:${modelName}`} brand={providerBrand} modelName={modelName} />}
       <div className="message-body">
-        <div className="message-meta">
-          <strong>{pet?.displayName ?? modelName}</strong>
-          <span>{formatTime(items[0]?.createdAt ?? Date.now())}</span>
-          {requestIds.length > 1 && <span title={requestIds.join("\n")}>{requestIds.length} {tr("次请求", "requests")}</span>}
-        </div>
-        <div className="assistant-message-content">
-          {renderedSegments}
-        </div>
-        <MessageCopyButton
-          hasContent={hasCopyContent}
-          getContent={() => items
-            .filter((item) => item.role === "assistant" && !item.status && item.content.trim())
-            .map((item) => item.content.trim())
-            .join("\n\n")}
-        />
-        {durationMs != null && (
-          <div className="message-duration"><Timer size={13} />{tr("处理总时长", "Total processing time")} {formatDuration(durationMs)}</div>
+        {collapsible ? (
+          <details className="assistant-turn-details" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+            <summary className="assistant-turn-summary" aria-label={open ? tr("收起本轮记录", "Collapse this turn") : tr("展开本轮记录", "Expand this turn")}>
+              <span className={`assistant-turn-status-icon${completionState !== "completed" ? " error" : ""}`}>{completionIcon}</span>
+              <span className="assistant-turn-summary-copy">
+                <strong>{assistantCompletionLabel(items)}</strong>
+                <small>{assistantSummaryPreview(items)}</small>
+              </span>
+              {durationMs != null && <span className="assistant-turn-duration">{formatDuration(durationMs)}</span>}
+              <ChevronDown className="assistant-turn-chevron" size={15} />
+            </summary>
+            <div className="assistant-turn-details-content">
+              {messageMeta}
+              {messageDetails}
+            </div>
+          </details>
+        ) : (
+          <>
+            {messageMeta}
+            {messageDetails}
+          </>
         )}
-        {changeSet && <ChangeSetSummary changeSet={changeSet} onReview={() => onReviewChanges(changeSet)} />}
       </div>
     </article>
   );
@@ -6358,6 +6427,7 @@ const MemoizedAssistantMessageGroup = memo(AssistantMessageGroup, (previous, nex
   previous.pending === next.pending
   && previous.activeReconnectMessageId === next.activeReconnectMessageId
   && previous.streamingMessageId === next.streamingMessageId
+  && previous.collapsible === next.collapsible
   && previous.pet === next.pet
   && previous.onReviewChanges === next.onReviewChanges
   && previous.items === next.items
@@ -6386,7 +6456,15 @@ const ConversationMessageList = memo(({
 }) => {
   const streamingMessageId = useMemo(() => {
     if (!running) return undefined;
+    let latestUserBlockIndex = -1;
+    for (let index = blocks.length - 1; index >= 0; index -= 1) {
+      if (blocks[index].kind === "user") {
+        latestUserBlockIndex = index;
+        break;
+      }
+    }
     for (let blockIndex = blocks.length - 1; blockIndex >= 0; blockIndex -= 1) {
+      if (blockIndex <= latestUserBlockIndex) break;
       const block = blocks[blockIndex];
       if (block.kind !== "assistant") continue;
       for (let itemIndex = block.items.length - 1; itemIndex >= 0; itemIndex -= 1) {
@@ -6396,7 +6474,6 @@ const ConversationMessageList = memo(({
     }
     return undefined;
   }, [blocks, running]);
-
   return (
     <>
       {blocks.map((block) => block.kind === "user" ? (
@@ -6410,6 +6487,7 @@ const ConversationMessageList = memo(({
           streamingMessageId={streamingMessageId && block.items.some((item) => item.id === streamingMessageId)
             ? streamingMessageId
             : undefined}
+          collapsible={!streamingMessageId || !block.items.some((item) => item.id === streamingMessageId)}
           pet={pet}
           onReviewChanges={onReviewChanges}
         />
@@ -8680,7 +8758,7 @@ function SkillsDialog({
     <div className="dialog-backdrop" onMouseDown={onClose}>
       <div ref={dialogRef} className="skills-dialog" onMouseDown={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-label="Skills">
         <div className="dialog-header">
-          <div><strong>Skills</strong><span>{tr("发现、校验与按需加载", "Discover, validate, and load on demand")}</span></div>
+          <div><strong>Skills</strong><span>{tr("发现、校验、Router 预载与按需加载", "Discover, validate, preload routers, and load on demand")}</span></div>
           <div className="dialog-header-actions">
             <IconButton label={tr("创建 Skill", "Create Skill")} onClick={openCreate} disabled={loading || Boolean(busyId)}>
               <Plus size={16} />
@@ -8755,7 +8833,7 @@ function SkillsDialog({
             <div className={`skill-row ${!skill.valid ? "invalid" : ""}`} key={skill.id}>
               <div className="skill-glyph"><BookOpen size={16} /></div>
               <div className="skill-detail">
-                <div><strong>{skill.name}</strong><span>{skill.source}</span></div>
+                <div><strong>{skill.name}</strong><span>{skill.source}</span>{skill.activation === "router" && <span>Router</span>}</div>
                 <p>{skill.valid ? skill.description : skill.warning}</p>
                 <small title={skill.path}>{skill.path}</small>
               </div>
@@ -8786,7 +8864,7 @@ function SkillsDialog({
           {loading && <div className="skills-empty"><RefreshCw size={22} className="spin" /><span>{tr("正在扫描本机 Skills…", "Scanning local Skills…")}</span></div>}
         </div>
         <div className="skills-footer">
-          <span>{tr("只有显式启用且校验通过的 Skill 才会进入 Agent 上下文", "Only explicitly enabled and valid Skills enter Agent context")}</span>
+          <span>{tr("已启用的 Router 会预载，其余有效 Skill 按需进入 Agent 上下文", "Enabled routers are preloaded; other valid Skills enter Agent context on demand")}</span>
           <button className="primary-button" onClick={onClose}>{tr("完成", "Done")}</button>
         </div>
         {error && <button className="skills-error" onClick={() => setError(null)}>{error}<X size={13} /></button>}

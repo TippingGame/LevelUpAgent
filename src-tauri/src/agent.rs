@@ -2142,13 +2142,15 @@ fn system_prompt_with_omission(request: &AgentTurnRequest, omission: &ContextOmi
             let loaded = request
                 .available_skills
                 .iter()
-                .filter(|skill| skill_manifest_was_read(&request.messages, &skill.id))
+                .filter(|skill| {
+                    skill.preloaded || skill_manifest_was_read(&request.messages, &skill.id)
+                })
                 .map(|skill| skill.id.as_str())
                 .collect::<BTreeSet<_>>();
             if loaded.is_empty() {
                 prompt.push_str("\n\nEnabled Skills are listed below. When a Skill clearly matches the task, call read_skill before acting and follow its instructions. Read referenced files with the same tool and Skill ID.\n");
             } else {
-                prompt.push_str("\n\nEnabled Skills are listed below. A manifest marked already loaded is present in the conversation history: never read that SKILL.md again. Use its existing instructions and call read_skill only with an explicit referenced-file path when those instructions require that file.\n");
+                prompt.push_str("\n\nEnabled Skills are listed below. A manifest was preloaded by the application or is already present in conversation history: never read that SKILL.md again. Use its existing instructions and call read_skill only with an explicit referenced-file path when those instructions require that file.\n");
             }
             for skill in &request.available_skills {
                 prompt.push_str(&format!(
@@ -3209,10 +3211,32 @@ mod tests {
                 id: "skill-review".to_owned(),
                 name: "review".to_owned(),
                 description: "Review changes with evidence.".to_owned(),
+                preloaded: false,
             });
         let prompt = system_prompt(&request);
         assert!(prompt.contains("review [skill-review]"));
         assert!(prompt.contains("call read_skill before acting"));
+    }
+
+    #[test]
+    fn preloaded_router_skill_is_not_requested_again() {
+        let mut request = test_request(
+            "https://levelup.example".to_owned(),
+            ProviderProtocol::OpenaiResponses,
+        );
+        request
+            .available_skills
+            .push(crate::models::AgentSkillSummary {
+                id: "skill-router".to_owned(),
+                name: "router".to_owned(),
+                description: "Route each task.".to_owned(),
+                preloaded: true,
+            });
+
+        let prompt = system_prompt(&request);
+        assert!(prompt.contains("preloaded by the application"));
+        assert!(prompt.contains("manifest already loaded; do not reread"));
+        assert!(!prompt.contains("call read_skill before acting"));
     }
 
     #[test]
@@ -3227,6 +3251,7 @@ mod tests {
                 id: "skill-theme".to_owned(),
                 name: "customize-levelup-layout".to_owned(),
                 description: "Create a theme".to_owned(),
+                preloaded: false,
             });
         request.available_tools.push(AgentToolDefinition {
             name: "generate_images".to_owned(),
@@ -3289,6 +3314,7 @@ mod tests {
                 id: "skill-theme".to_owned(),
                 name: "customize-levelup-layout".to_owned(),
                 description: "Create a theme".to_owned(),
+                preloaded: false,
             });
         let manifest_call = ToolCall {
             id: "read-manifest".to_owned(),
@@ -3458,6 +3484,7 @@ mod tests {
                 id: "skill-hatch".to_owned(),
                 name: "hatch-pet".to_owned(),
                 description: "Create a pet".to_owned(),
+                preloaded: false,
             });
         request.messages = vec![
             AgentMessage {
@@ -3502,6 +3529,7 @@ mod tests {
                 id: "skill-hatch".to_owned(),
                 name: "hatch-pet".to_owned(),
                 description: "Create a pet".to_owned(),
+                preloaded: false,
             });
         let prompt = system_prompt(&request);
         assert!(prompt.contains("already been read successfully"));

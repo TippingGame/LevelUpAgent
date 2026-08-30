@@ -22,6 +22,7 @@ const MAX_SKILL_NAME_CHARS: usize = 80;
 struct SkillFrontmatter {
     name: String,
     description: String,
+    activation: String,
 }
 
 pub fn scan(
@@ -1099,6 +1100,7 @@ fn inspect_skill(
             id,
             name: frontmatter.name,
             description: frontmatter.description,
+            activation: frontmatter.activation,
             path: path_string,
             source: source.to_owned(),
             valid: true,
@@ -1108,6 +1110,7 @@ fn inspect_skill(
             id,
             name: fallback_name,
             description: String::new(),
+            activation: "auto".to_owned(),
             path: path_string,
             source: source.to_owned(),
             enabled: false,
@@ -1154,6 +1157,7 @@ fn parse_manifest(content: &str) -> Result<SkillFrontmatter, String> {
     let mut frontmatter = parse_frontmatter_fields(&yaml)?;
     frontmatter.name = frontmatter.name.trim().to_owned();
     frontmatter.description = frontmatter.description.trim().to_owned();
+    frontmatter.activation = frontmatter.activation.trim().to_ascii_lowercase();
     if frontmatter.name.is_empty() || frontmatter.name.chars().count() > MAX_NAME_CHARS {
         return Err(format!("Skill name must be 1-{MAX_NAME_CHARS} characters"));
     }
@@ -1164,6 +1168,9 @@ fn parse_manifest(content: &str) -> Result<SkillFrontmatter, String> {
             "Skill description must be 1-{MAX_DESCRIPTION_CHARS} characters"
         ));
     }
+    if !matches!(frontmatter.activation.as_str(), "auto" | "router") {
+        return Err("Skill activation must be auto or router".to_owned());
+    }
     Ok(frontmatter)
 }
 
@@ -1171,6 +1178,7 @@ fn parse_frontmatter_fields(yaml: &str) -> Result<SkillFrontmatter, String> {
     let lines: Vec<_> = yaml.lines().collect();
     let mut name = None;
     let mut description = None;
+    let mut activation = None;
     let mut index = 0;
     while index < lines.len() {
         let line = lines[index];
@@ -1184,7 +1192,7 @@ fn parse_frontmatter_fields(yaml: &str) -> Result<SkillFrontmatter, String> {
             continue;
         };
         let key = key.trim();
-        if !matches!(key, "name" | "description") {
+        if !matches!(key, "name" | "description" | "activation") {
             index += 1;
             continue;
         }
@@ -1215,6 +1223,7 @@ fn parse_frontmatter_fields(yaml: &str) -> Result<SkillFrontmatter, String> {
         match key {
             "name" => name = Some(value),
             "description" => description = Some(value),
+            "activation" => activation = Some(value),
             _ => {}
         }
     }
@@ -1222,6 +1231,7 @@ fn parse_frontmatter_fields(yaml: &str) -> Result<SkillFrontmatter, String> {
         name: name.ok_or_else(|| "Skill frontmatter is missing name".to_owned())?,
         description: description
             .ok_or_else(|| "Skill frontmatter is missing description".to_owned())?,
+        activation: activation.unwrap_or_else(|| "auto".to_owned()),
     })
 }
 
@@ -1358,6 +1368,21 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.name, "review");
         assert_eq!(parsed.description, "Review changes with evidence.");
+        assert_eq!(parsed.activation, "auto");
+    }
+
+    #[test]
+    fn parses_router_activation_and_rejects_unknown_modes() {
+        let parsed = parse_manifest(
+            "---\nname: router\ndescription: Route each task.\nactivation: router\n---\n\n# Router\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.activation, "router");
+
+        let invalid = parse_manifest(
+            "---\nname: router\ndescription: Route each task.\nactivation: always\n---\n\n# Router\n",
+        );
+        assert!(invalid.is_err());
     }
 
     #[test]
