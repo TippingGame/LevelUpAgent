@@ -425,20 +425,22 @@ fn attach_skills(
         request.available_tools.clear();
         return Ok(());
     }
-    let enabled: Vec<_> = discover_skills(app, database, request.workspace.as_deref())?
-        .into_iter()
+    let discovered = discover_skills(app, database, request.workspace.as_deref())?;
+    let enabled: Vec<_> = discovered
+        .iter()
         .filter(|skill| skill.enabled && skill.valid)
         .filter(|skill| {
             !request.hatch || skill.source == "LevelUpAgent built-in" && skill.name == "hatch-pet"
         })
         .take(64)
+        .cloned()
         .collect();
 
     // Mirror Codex's UserPromptSubmit contract for every normal user turn:
     // run the installed LevelUpAxion router before provider execution and
     // attach its deterministic plan as application-owned context.
     if !request.hatch {
-        run_prompt_router(request, &enabled);
+        run_prompt_router(request, &discovered);
     }
 
     // Chat mode intentionally has no dynamic tools, but it still receives
@@ -446,12 +448,32 @@ fn attach_skills(
     // LevelUpAxion dispatch path as Agent/Goal/Plan modes.
     if !matches!(request.mode.as_str(), "agent" | "goal" | "plan") {
         if !request.hatch {
-            let _ = preload_router_skill(request, &enabled)?;
+            let preloaded = preload_router_skill(request, &enabled)?;
+            logging::write(
+                if preloaded.is_some() { "info" } else { "warn" },
+                "router",
+                "router_skill_preloaded",
+                serde_json::json!({
+                    "skillId": preloaded,
+                    "availableSkillCount": enabled.len(),
+                    "mode": request.mode,
+                }),
+            );
         }
         return Ok(());
     }
 
     let router_skill_id = preload_router_skill(request, &enabled)?;
+    logging::write(
+        "info",
+        "router",
+        "router_skill_preloaded",
+        serde_json::json!({
+            "skillId": router_skill_id,
+            "availableSkillCount": enabled.len(),
+            "mode": request.mode,
+        }),
+    );
     request.available_skills = enabled
         .iter()
         .map(|skill| AgentSkillSummary {
@@ -529,14 +551,32 @@ fn run_prompt_router(request: &mut AgentTurnRequest, enabled: &[SkillInfo]) {
     if std::fs::write(&prompt_file, prompt.as_bytes()).is_err() {
         return;
     }
+    logging::write(
+        "info",
+        "router",
+        "prompt_router_started",
+        serde_json::json!({ "skillPath": router_skill.path }),
+    );
     let output = run_router_command("python", &script, &prompt_file)
         .or_else(|| run_router_command("python3", &script, &prompt_file))
         .or_else(|| run_router_command_with_args("py", &["-3"], &script, &prompt_file));
     let _ = std::fs::remove_file(&prompt_file);
     let Some(output) = output else {
+        logging::write(
+            "warn",
+            "router",
+            "prompt_router_unavailable",
+            serde_json::json!({ "skillPath": router_skill.path }),
+        );
         return;
     };
     let Ok(plan) = serde_json::from_slice::<serde_json::Value>(&output) else {
+        logging::write(
+            "warn",
+            "router",
+            "prompt_router_invalid_output",
+            serde_json::json!({ "skillPath": router_skill.path }),
+        );
         return;
     };
     let Some(context) = router_context(&plan) else {
@@ -546,6 +586,16 @@ fn run_prompt_router(request: &mut AgentTurnRequest, enabled: &[SkillInfo]) {
         request.custom_instructions.take().unwrap_or_default(),
         context,
     ]);
+    logging::write(
+        "info",
+        "router",
+        "prompt_router_applied",
+        serde_json::json!({
+            "workflow": plan.get("workflow"),
+            "primarySkill": plan.get("primary_skill"),
+            "interaction": plan.get("interaction"),
+        }),
+    );
 }
 
 fn run_router_command(program: &str, script: &Path, prompt_file: &Path) -> Option<Vec<u8>> {
@@ -558,7 +608,9 @@ fn run_router_command_with_args(
     script: &Path,
     prompt_file: &Path,
 ) -> Option<Vec<u8>> {
-    let output = std::process::Command::new(program)
+    let mut command = std::process::Command::new(program);
+    crate::process::hide_console_window_std(&mut command);
+    let output = command
         .args(prefix)
         .arg(script)
         .arg("--prompt-file")
@@ -594,7 +646,7 @@ fn router_context(plan: &serde_json::Value) -> Option<String> {
         .and_then(serde_json::Value::as_str)
         .unwrap_or("调用链：intake → classify → plan → execute → verify → deliver");
     Some(format!(
-        "LevelUpAxion UserPromptSubmit Router\nApply this application-generated route before answering the current user turn.\n- workflow: {route}\n- primary Skill: {primary}\n- interaction: {interaction}\n- {trace}"
+        "LevelUpAxion UserPromptSubmit Router\nApply this application-generated route before answering the current user turn.\n- workflow: {route}\n- primary Skill: {primary}\n- canonical LevelUpAxion Skill: axion-unlimited (application preloaded; apply it on every substantive turn)\n- interaction: {interaction}\n- {trace}"
     ))
 }
 
@@ -602,7 +654,16 @@ fn preload_router_skill(
     request: &mut AgentTurnRequest,
     enabled: &[SkillInfo],
 ) -> Result<Option<String>, String> {
-    let Some(router_skill) = enabled.iter().find(|skill| skill.activation == "router") else {
+    // axion-unlimited is the canonical LevelUpAxion entrypoint.  Prefer it
+    // explicitly so a route selected as software/general cannot fall back to
+    // the provider's default behavior merely because the model skipped
+    // read_skill.  The activation field remains the compatibility fallback
+    // for older/custom router Skills.
+    let Some(router_skill) = enabled
+        .iter()
+        .find(|skill| skill.name.eq_ignore_ascii_case("axion-unlimited"))
+        .or_else(|| enabled.iter().find(|skill| skill.activation == "router"))
+    else {
         return Ok(None);
     };
     let content = skill::read_enabled(enabled, &router_skill.id, None)?;
@@ -11021,6 +11082,64 @@ mod tests {
         assert!(instructions.contains("LevelUpAgent Router Skill"));
         assert!(instructions.contains("Select the primary workflow."));
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn canonical_unlimited_skill_wins_over_a_secondary_router_entry() {
+        let root = std::env::temp_dir().join(format!(
+            "levelup-router-priority-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let router_dir = root.join("router");
+        let unlimited_dir = root.join("unlimited");
+        std::fs::create_dir_all(&router_dir).unwrap();
+        std::fs::create_dir_all(&unlimited_dir).unwrap();
+        let router_manifest = router_dir.join("SKILL.md");
+        let unlimited_manifest = unlimited_dir.join("SKILL.md");
+        std::fs::write(
+            &router_manifest,
+            "---\nname: secondary-router\ndescription: Secondary route.\nactivation: router\n---\n\nsecondary\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &unlimited_manifest,
+            "---\nname: axion-unlimited\ndescription: Canonical route.\nactivation: router\n---\n\ncanonical\n",
+        )
+        .unwrap();
+        let skill = |manifest: &Path, name: &str| SkillInfo {
+            id: skill::id_for_path(manifest),
+            name: name.to_owned(),
+            description: "route".to_owned(),
+            activation: "router".to_owned(),
+            path: manifest.to_string_lossy().into_owned(),
+            source: "LevelUpAgent".to_owned(),
+            enabled: true,
+            valid: true,
+            warning: None,
+        };
+        let skills = vec![
+            skill(&router_manifest, "secondary-router"),
+            skill(&unlimited_manifest, "axion-unlimited"),
+        ];
+        let mut request = AgentTurnRequest {
+            profile: profile("primary", 10, true),
+            messages: Vec::new(),
+            mode: "chat".to_owned(),
+            workspace: Some(root.to_string_lossy().into_owned()),
+            thread_id: None,
+            hatch: false,
+            hatch_skill_loaded: false,
+            available_tools: Vec::new(),
+            available_skills: Vec::new(),
+            goal: None,
+            fallback_profiles: Vec::new(),
+            custom_instructions: None,
+            reasoning_effort: None,
+        };
+        let selected = preload_router_skill(&mut request, &skills).unwrap();
+        assert_eq!(selected.as_deref(), Some(skills[1].id.as_str()));
+        assert!(request.custom_instructions.unwrap().contains("canonical"));
         std::fs::remove_dir_all(root).unwrap();
     }
 

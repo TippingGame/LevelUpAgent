@@ -15,3 +15,16 @@ pub fn hide_console_window(command: &mut Command) {
     #[cfg(not(windows))]
     let _ = command;
 }
+
+/// Same console suppression for short-lived synchronous helpers such as the
+/// per-prompt router invocation.
+pub fn hide_console_window_std(command: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    #[cfg(not(windows))]
+    let _ = command;
+}
