@@ -209,7 +209,7 @@ export interface AgentMessage {
   requestId?: string;
   modelName?: string;
   providerBrand?: ModelProviderBrand;
-  status?: "reconnecting" | "reconnected" | "failed";
+  status?: "reconnecting" | "reconnected" | "failed" | "router";
   durationMs?: number;
   internal?: boolean;
   changeSet?: ConversationChangeSet;

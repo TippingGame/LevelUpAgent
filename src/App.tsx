@@ -2491,7 +2491,33 @@ function App() {
         }),
         reasoningEffort: reasoningEffortForProfile(runProfile, effectiveReasoningEffort),
       }, (event: HarnessRuntimeEvent) => {
-        if (event.kind === "assistant_delta") {
+        if (event.kind === "prompt_router_started" || event.kind === "prompt_router_applied" || event.kind === "router_skill_preloaded") {
+          flushStreamingDelta();
+          const payload = event.payload as {
+            skillPath?: string;
+            workflow?: string;
+            primarySkill?: string;
+            skillName?: string;
+            callChain?: string;
+          };
+          const content = event.kind === "prompt_router_started"
+            ? tr("路由器已启动 · axion-auto-ops", "Router started · axion-auto-ops")
+            : event.kind === "prompt_router_applied"
+              ? tr(
+                `路由已应用 · ${payload.workflow ?? "universal"} · ${payload.primarySkill ?? "axion-unlimited"}`,
+                `Route applied · ${payload.workflow ?? "universal"} · ${payload.primarySkill ?? "axion-unlimited"}`,
+              )
+              : tr(
+                `Skill 已预加载 · ${payload.skillName ?? "axion-unlimited"}`,
+                `Skill preloaded · ${payload.skillName ?? "axion-unlimited"}`,
+              );
+          projected = [...projected, message("assistant", content, {
+            internal: true,
+            status: "router",
+            ...assistantMessageIdentity(runProfile),
+          })];
+          commitThread(projectedThread(projected));
+        } else if (event.kind === "assistant_delta") {
           const payload = event.payload as { delta?: unknown };
           if (typeof payload.delta !== "string" || payload.delta.length === 0) return;
           ensureStreamingAssistant();
@@ -6386,7 +6412,7 @@ function AssistantMessageSegment({
   if (item.status) {
     return (
       <div className={`assistant-status-segment ${item.status}`} role="status">
-        {item.status === "reconnecting" ? <LoaderCircle className={reconnectingActive ? "spin" : undefined} size={14} /> : item.status === "reconnected" ? <Check size={14} /> : <CircleAlert size={14} />}
+        {item.status === "reconnecting" ? <LoaderCircle className={reconnectingActive ? "spin" : undefined} size={14} /> : item.status === "reconnected" ? <Check size={14} /> : item.status === "router" ? <Activity size={14} /> : <CircleAlert size={14} />}
         <span>{item.content}</span>
       </div>
     );

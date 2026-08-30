@@ -44,9 +44,10 @@ use models::{
     McpTransport, MediaAsset, MediaAssetPage, MediaBatchResult, MediaCatalog,
     MediaGenerationRequest, MediaKind, MediaStatus, ModelInfo, ProviderHealth,
     ProviderModelCatalog, ProviderModelInfo, ProviderProfile, ProviderRequestLog, ProviderSettings,
-    SkillCreateRequest, SkillDeleteRequest, SkillInfo, SkillInstallRequest, SkillInstallResult,
-    SkillLocation, SkillMutationResult, SkillUpdateRequest, StoredThread, ToolCall,
-    ToolExecutionRequest, ToolExecutionResponse, WorkspaceSnapshot, WritingProjectRecord,
+    RouterEvent, RouterMetadata, SkillCreateRequest, SkillDeleteRequest, SkillInfo,
+    SkillInstallRequest, SkillInstallResult, SkillLocation, SkillMutationResult,
+    SkillUpdateRequest, StoredThread, ToolCall, ToolExecutionRequest, ToolExecutionResponse,
+    WorkspaceSnapshot, WritingProjectRecord,
 };
 use reqwest::Client;
 use serde::Deserialize;
@@ -440,7 +441,7 @@ fn attach_skills(
     // run the installed LevelUpAxion router before provider execution and
     // attach its deterministic plan as application-owned context.
     if !request.hatch {
-        run_prompt_router(request, &discovered);
+        run_prompt_router(request, &enabled);
     }
 
     // Chat mode intentionally has no dynamic tools, but it still receives
@@ -557,6 +558,10 @@ fn run_prompt_router(request: &mut AgentTurnRequest, enabled: &[SkillInfo]) {
         "prompt_router_started",
         serde_json::json!({ "skillPath": router_skill.path }),
     );
+    request.router_events.push(RouterEvent::new(
+        "prompt_router_started",
+        serde_json::json!({ "skillPath": router_skill.path }),
+    ));
     let output = run_router_command("python", &script, &prompt_file)
         .or_else(|| run_router_command("python3", &script, &prompt_file))
         .or_else(|| run_router_command_with_args("py", &["-3"], &script, &prompt_file));
@@ -579,21 +584,29 @@ fn run_prompt_router(request: &mut AgentTurnRequest, enabled: &[SkillInfo]) {
         );
         return;
     };
-    let Some(context) = router_context(&plan) else {
+    let Some(metadata) = router_metadata(&plan) else {
         return;
     };
-    request.custom_instructions = merge_custom_instructions([
-        request.custom_instructions.take().unwrap_or_default(),
-        context,
-    ]);
+    request.router_metadata = Some(metadata.clone());
+    request.router_events.push(RouterEvent::new(
+        "prompt_router_applied",
+        serde_json::json!({
+            "workflow": metadata.workflow,
+            "primarySkill": metadata.primary_skill,
+            "interaction": metadata.interaction,
+            "callChain": metadata.call_chain,
+            "stages": metadata.stages,
+            "tools": metadata.tools,
+        }),
+    ));
     logging::write(
         "info",
         "router",
         "prompt_router_applied",
         serde_json::json!({
-            "workflow": plan.get("workflow"),
-            "primarySkill": plan.get("primary_skill"),
-            "interaction": plan.get("interaction"),
+            "workflow": metadata.workflow,
+            "primarySkill": metadata.primary_skill,
+            "interaction": metadata.interaction,
         }),
     );
 }
@@ -621,7 +634,7 @@ fn run_router_command_with_args(
     output.status.success().then_some(output.stdout)
 }
 
-fn router_context(plan: &serde_json::Value) -> Option<String> {
+fn router_metadata(plan: &serde_json::Value) -> Option<RouterMetadata> {
     if plan.get("kind").and_then(serde_json::Value::as_str) == Some("conversation") {
         return None;
     }
@@ -639,15 +652,59 @@ fn router_context(plan: &serde_json::Value) -> Option<String> {
         .get("interaction")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("task");
-    let trace = plan
+    let call_chain = plan
         .get("call_chain")
         .and_then(serde_json::Value::as_object)
         .and_then(|value| value.get("text"))
         .and_then(serde_json::Value::as_str)
         .unwrap_or("调用链：intake → classify → plan → execute → verify → deliver");
-    Some(format!(
-        "LevelUpAxion UserPromptSubmit Router\nApply this application-generated route before answering the current user turn.\n- workflow: {route}\n- primary Skill: {primary}\n- canonical LevelUpAxion Skill: axion-unlimited (application preloaded; apply it on every substantive turn)\n- interaction: {interaction}\n- {trace}"
-    ))
+    let stages = plan
+        .get("stages")
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let tools = plan
+        .get("call_chain")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|value| value.get("tools"))
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(RouterMetadata {
+        workflow: route.to_owned(),
+        primary_skill: primary.to_owned(),
+        canonical_skill: "axion-unlimited".to_owned(),
+        interaction: interaction.to_owned(),
+        call_chain: call_chain.to_owned(),
+        stages,
+        tools,
+    })
+}
+
+#[cfg(test)]
+fn router_context(plan: &serde_json::Value) -> Option<String> {
+    router_metadata(plan).map(|metadata| {
+        format!(
+            "LevelUpAxion UserPromptSubmit Router\nApply this application-generated route before answering the current user turn.\n- workflow: {}\n- primary Skill: {}\n- canonical LevelUpAxion Skill: {}\n- interaction: {}\n- {}",
+            metadata.workflow,
+            metadata.primary_skill,
+            metadata.canonical_skill,
+            metadata.interaction,
+            metadata.call_chain,
+        )
+    })
 }
 
 fn preload_router_skill(
@@ -674,6 +731,17 @@ fn preload_router_skill(
         request.custom_instructions.take().unwrap_or_default(),
         router_instructions,
     ]);
+    if let Some(metadata) = request.router_metadata.as_mut() {
+        metadata.canonical_skill = router_skill.name.clone();
+    }
+    request.router_events.push(RouterEvent::new(
+        "router_skill_preloaded",
+        serde_json::json!({
+            "skillId": router_skill.id,
+            "skillName": router_skill.name,
+            "mode": request.mode,
+        }),
+    ));
     Ok(Some(router_skill.id.clone()))
 }
 
@@ -1610,6 +1678,8 @@ fn isolated_pet_agent_request(
             .filter(|candidate| candidate.id != settings.active_profile_id)
             .collect(),
         custom_instructions: None,
+        router_metadata: None,
+        router_events: Vec::new(),
         reasoning_effort: None,
     })
 }
@@ -5460,6 +5530,8 @@ async fn harness_run_loop(
             goal: None,
             fallback_profiles: request.fallback_profiles.clone(),
             custom_instructions: request.custom_instructions.clone(),
+            router_metadata: None,
+            router_events: Vec::new(),
             reasoning_effort: request.reasoning_effort.clone(),
         };
         attach_default_workspace(app, &mut turn_request)?;
@@ -5469,6 +5541,19 @@ async fn harness_run_loop(
         attach_subagent_tools(&mut turn_request);
         attach_media_tools(&mut turn_request);
         attach_skills(app, database, &mut turn_request)?;
+        for router_event in std::mem::take(&mut turn_request.router_events) {
+            let sequence = database.append_harness_event(
+                &operation_id,
+                &router_event.kind,
+                &router_event.payload,
+            )?;
+            let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+                &operation_id,
+                sequence,
+                &router_event.kind,
+                router_event.payload,
+            ));
+        }
         attach_extended_tools(&mut turn_request)?;
         attach_mcp_tools(database, manager, &mut turn_request).await?;
         enforce_theme_generation_tool_catalog(&mut turn_request);
@@ -6856,6 +6941,8 @@ where
                 "This is an isolated child run. Never attempt shell commands, delegation, Goal updates, MCP calls, or access outside the selected worktree. Main-worktree application requires a separate approval."
                     .to_owned(),
             ),
+            router_metadata: None,
+            router_events: Vec::new(),
             reasoning_effort: None,
         };
         let response = run_agent_turn_with_failover(client, database, turn, |profile_id| {
@@ -10485,6 +10572,8 @@ mod tests {
             goal: None,
             fallback_profiles: Vec::new(),
             custom_instructions: None,
+            router_metadata: None,
+            router_events: Vec::new(),
             reasoning_effort: None,
         };
         attach_extended_tools(&mut request).unwrap();
@@ -10530,6 +10619,8 @@ mod tests {
             goal: None,
             fallback_profiles: Vec::new(),
             custom_instructions: None,
+            router_metadata: None,
+            router_events: Vec::new(),
             reasoning_effort: None,
         };
         attach_extended_tools(&mut request).unwrap();
@@ -11072,6 +11163,8 @@ mod tests {
             goal: None,
             fallback_profiles: Vec::new(),
             custom_instructions: Some("Persisted instructions.".to_owned()),
+            router_metadata: None,
+            router_events: Vec::new(),
             reasoning_effort: None,
         };
 
@@ -11081,6 +11174,8 @@ mod tests {
         assert!(instructions.starts_with("Persisted instructions."));
         assert!(instructions.contains("LevelUpAgent Router Skill"));
         assert!(instructions.contains("Select the primary workflow."));
+        assert_eq!(request.router_events.len(), 1);
+        assert_eq!(request.router_events[0].kind, "router_skill_preloaded");
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -11135,6 +11230,8 @@ mod tests {
             goal: None,
             fallback_profiles: Vec::new(),
             custom_instructions: None,
+            router_metadata: None,
+            router_events: Vec::new(),
             reasoning_effort: None,
         };
         let selected = preload_router_skill(&mut request, &skills).unwrap();
@@ -11153,6 +11250,9 @@ mod tests {
             "call_chain": { "text": "调用链：fingerprint → analyze → verify" }
         });
         let context = router_context(&plan).expect("technical plans produce context");
+        let metadata = router_metadata(&plan).expect("technical plans produce metadata");
+        assert_eq!(metadata.workflow, "reverse");
+        assert_eq!(metadata.primary_skill, "axion-reverse");
         assert!(context.contains("workflow: reverse"));
         assert!(context.contains("primary Skill: axion-reverse"));
         assert!(context.contains("fingerprint → analyze → verify"));
@@ -11179,6 +11279,8 @@ mod tests {
                 profile("primary", 0, true),
             ],
             custom_instructions: None,
+            router_metadata: None,
+            router_events: Vec::new(),
             reasoning_effort: None,
         };
         let ids = provider_candidates(&request)
@@ -11203,6 +11305,8 @@ mod tests {
             goal: None,
             fallback_profiles: Vec::new(),
             custom_instructions: None,
+            router_metadata: None,
+            router_events: Vec::new(),
             reasoning_effort: None,
         };
         attach_media_tools(&mut request);
@@ -11241,6 +11345,8 @@ mod tests {
             goal: None,
             fallback_profiles: Vec::new(),
             custom_instructions: None,
+            router_metadata: None,
+            router_events: Vec::new(),
             reasoning_effort: None,
         };
         attach_media_tools(&mut request);
@@ -11281,6 +11387,8 @@ mod tests {
             goal: None,
             fallback_profiles: Vec::new(),
             custom_instructions: None,
+            router_metadata: None,
+            router_events: Vec::new(),
             reasoning_effort: None,
         };
 
@@ -11331,6 +11439,8 @@ mod tests {
             goal: None,
             fallback_profiles: Vec::new(),
             custom_instructions: None,
+            router_metadata: None,
+            router_events: Vec::new(),
             reasoning_effort: None,
         };
 
@@ -11772,6 +11882,8 @@ mod tests {
             goal: None,
             fallback_profiles: Vec::new(),
             custom_instructions: None,
+            router_metadata: None,
+            router_events: Vec::new(),
             reasoning_effort: None,
         };
 
@@ -11852,6 +11964,8 @@ mod tests {
             goal: None,
             fallback_profiles: vec![fallback],
             custom_instructions: None,
+            router_metadata: None,
+            router_events: Vec::new(),
             reasoning_effort: None,
         };
         let result = run_agent_turn_with_failover(&Client::new(), &database, request, |_| {
@@ -11914,6 +12028,8 @@ mod tests {
             goal: None,
             fallback_profiles: Vec::new(),
             custom_instructions: None,
+            router_metadata: None,
+            router_events: Vec::new(),
             reasoning_effort: None,
         };
         let result = run_agent_turn_with_failover(&Client::new(), &database, request, |_| {

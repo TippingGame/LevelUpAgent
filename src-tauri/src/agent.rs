@@ -1147,6 +1147,9 @@ fn chat_body(request: &AgentTurnRequest, stream: bool) -> Value {
         "role": "system",
         "content": system_prompt_with_omission(request, &context.omission)
     })];
+    if let Some(router_context) = router_context_text(request) {
+        messages.push(json!({ "role": "developer", "content": router_context }));
+    }
     messages.extend(context.messages.iter().map(chat_message));
     let mut body = json!({
         "model": provider_model_id(request),
@@ -1169,10 +1172,18 @@ fn chat_body(request: &AgentTurnRequest, stream: bool) -> Value {
 
 fn responses_body(request: &AgentTurnRequest, stream: bool) -> Value {
     let context = prepare_context(&request.messages);
+    let mut input = Vec::new();
+    if let Some(router_context) = router_context_text(request) {
+        input.push(json!({
+            "role": "developer",
+            "content": [{ "type": "input_text", "text": router_context }]
+        }));
+    }
+    input.extend(responses_input(&context.messages));
     let mut body = json!({
         "model": provider_model_id(request),
         "instructions": system_prompt_with_omission(request, &context.omission),
-        "input": responses_input(&context.messages),
+        "input": input,
         "stream": stream,
         "store": false
     });
@@ -1189,9 +1200,15 @@ fn responses_body(request: &AgentTurnRequest, stream: bool) -> Value {
 
 fn anthropic_body(request: &AgentTurnRequest, stream: bool) -> Value {
     let context = prepare_context(&request.messages);
+    let mut system = vec![
+        json!({ "type": "text", "text": system_prompt_with_omission(request, &context.omission) }),
+    ];
+    if let Some(router_context) = router_context_text(request) {
+        system.push(json!({ "type": "text", "text": router_context }));
+    }
     let mut body = json!({
         "model": provider_model_id(request),
-        "system": system_prompt_with_omission(request, &context.omission),
+        "system": system,
         "messages": anthropic_messages(&context.messages),
         "max_tokens": anthropic_max_tokens(request),
         "stream": stream
@@ -1212,9 +1229,14 @@ fn anthropic_body(request: &AgentTurnRequest, stream: bool) -> Value {
 
 fn gemini_body(request: &AgentTurnRequest) -> Value {
     let context = prepare_context(&request.messages);
+    let mut system_parts =
+        vec![json!({ "text": system_prompt_with_omission(request, &context.omission) })];
+    if let Some(router_context) = router_context_text(request) {
+        system_parts.push(json!({ "text": router_context }));
+    }
     let mut body = json!({
         "systemInstruction": {
-            "parts": [{ "text": system_prompt_with_omission(request, &context.omission) }]
+            "parts": system_parts
         },
         "contents": gemini_contents(&context.messages)
     });
@@ -2209,6 +2231,25 @@ fn system_prompt_with_omission(request: &AgentTurnRequest, omission: &ContextOmi
         }
     }
     prompt
+}
+
+fn router_context_text(request: &AgentTurnRequest) -> Option<String> {
+    let router = request.router_metadata.as_ref()?;
+    let mut context = format!(
+        "LevelUpAxion UserPromptSubmit additionalContext (application-owned)\n- workflow: {}\n- primary Skill: {}\n- canonical Skill: {}\n- interaction: {}\n- call chain: {}",
+        router.workflow,
+        router.primary_skill,
+        router.canonical_skill,
+        router.interaction,
+        router.call_chain,
+    );
+    if !router.stages.is_empty() {
+        context.push_str(&format!("\n- stages: {}", router.stages.join(" → ")));
+    }
+    if !router.tools.is_empty() {
+        context.push_str(&format!("\n- candidate tools: {}", router.tools.join(", ")));
+    }
+    Some(context)
 }
 
 fn chat_message(message: &AgentMessage) -> Value {
@@ -3604,6 +3645,65 @@ mod tests {
     }
 
     #[test]
+    fn router_metadata_is_rendered_as_application_owned_context() {
+        let mut request = test_request(
+            "https://levelup.example".to_owned(),
+            ProviderProtocol::OpenaiResponses,
+        );
+        request.router_metadata = Some(crate::models::RouterMetadata {
+            workflow: "reverse".to_owned(),
+            primary_skill: "axion-reverse".to_owned(),
+            canonical_skill: "axion-unlimited".to_owned(),
+            interaction: "task".to_owned(),
+            call_chain: "intake -> analyze -> verify".to_owned(),
+            stages: vec!["intake".to_owned(), "analyze".to_owned()],
+            tools: vec!["read_file".to_owned()],
+        });
+        let prompt = system_prompt(&request);
+        assert!(!prompt.contains("LevelUpAxion UserPromptSubmit additionalContext"));
+        let responses = responses_body(&request, false);
+        assert_eq!(
+            responses.pointer("/input/0/role").and_then(Value::as_str),
+            Some("developer")
+        );
+        assert!(
+            responses
+                .pointer("/input/0/content/0/text")
+                .and_then(Value::as_str)
+                .unwrap()
+                .contains("workflow: reverse")
+        );
+        assert!(
+            responses
+                .pointer("/input/0/content/0/text")
+                .and_then(Value::as_str)
+                .unwrap()
+                .contains("candidate tools: read_file")
+        );
+        let chat = chat_body(&request, false);
+        assert_eq!(
+            chat.pointer("/messages/1/role").and_then(Value::as_str),
+            Some("developer")
+        );
+        let anthropic = anthropic_body(&request, false);
+        assert!(
+            anthropic
+                .pointer("/system/1/text")
+                .and_then(Value::as_str)
+                .unwrap()
+                .contains("workflow: reverse")
+        );
+        let gemini = gemini_body(&request);
+        assert!(
+            gemini
+                .pointer("/systemInstruction/parts/1/text")
+                .and_then(Value::as_str)
+                .unwrap()
+                .contains("workflow: reverse")
+        );
+    }
+
+    #[test]
     fn image_attachments_are_encoded_for_all_four_protocols() {
         let mut request = test_request(
             "https://levelup.example".to_owned(),
@@ -4165,6 +4265,8 @@ mod tests {
             goal: None,
             fallback_profiles: Vec::new(),
             custom_instructions: None,
+            router_metadata: None,
+            router_events: Vec::new(),
             reasoning_effort: None,
         }
     }

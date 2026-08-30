@@ -134,10 +134,49 @@ pub struct AgentTurnRequest {
     pub fallback_profiles: Vec<ProviderProfile>,
     #[serde(default)]
     pub custom_instructions: Option<String>,
+    /// Application-owned routing context produced before provider execution.
+    /// This is kept separate from user-editable instructions so adapters can
+    /// place it in their dedicated system/developer context.
+    #[serde(default)]
+    pub router_metadata: Option<RouterMetadata>,
+    /// Internal lifecycle records surfaced by the Harness UI. They are never
+    /// sent to providers.
+    #[serde(skip)]
+    pub router_events: Vec<RouterEvent>,
     /// Optional provider-native reasoning control. `auto` and unknown values
     /// are treated as omitted by the adapter for backward compatibility.
     #[serde(default)]
     pub reasoning_effort: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RouterMetadata {
+    pub workflow: String,
+    pub primary_skill: String,
+    pub canonical_skill: String,
+    pub interaction: String,
+    pub call_chain: String,
+    #[serde(default)]
+    pub stages: Vec<String>,
+    #[serde(default)]
+    pub tools: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RouterEvent {
+    pub kind: String,
+    pub payload: serde_json::Value,
+}
+
+impl RouterEvent {
+    pub fn new(kind: &str, payload: serde_json::Value) -> Self {
+        Self {
+            kind: kind.to_owned(),
+            payload,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

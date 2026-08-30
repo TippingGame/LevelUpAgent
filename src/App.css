@@ -1251,6 +1251,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .assistant-turn-details-content { min-width: 0; padding-top: 9px; }
 .assistant-status-segment { display: flex; align-items: center; gap: 7px; min-height: 28px; color: var(--muted); font-size: var(--font-small); }
 .assistant-status-segment.reconnected { color: var(--teal); }
+.assistant-status-segment.router { color: var(--teal); }
 .assistant-status-segment.failed { color: #aa4638; }
 .assistant-status-segment span { min-width: 0; overflow-wrap: anywhere; }
 .message-attachments { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 9px; }
