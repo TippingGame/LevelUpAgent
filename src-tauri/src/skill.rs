@@ -1092,20 +1092,28 @@ fn inspect_skill(
         .to_owned();
     let result = read_manifest(path).and_then(|content| parse_manifest(&content));
     match result {
-        Ok(frontmatter) => SkillInfo {
-            enabled: preferences
-                .get(&(id.clone(), path_string.clone()))
-                .copied()
-                .unwrap_or(false),
-            id,
-            name: frontmatter.name,
-            description: frontmatter.description,
-            activation: frontmatter.activation,
-            path: path_string,
-            source: source.to_owned(),
-            valid: true,
-            warning: None,
-        },
+        Ok(frontmatter) => {
+            // Router Skills and the LevelUpAxion prompt-hook entry must be
+            // available immediately after installation from a shared root
+            // (for example ~/.codex/skills); an explicit persisted `false`
+            // still wins so the user can disable one deliberately.
+            let default_enabled =
+                frontmatter.activation == "router" || frontmatter.name == "axion-auto-ops";
+            SkillInfo {
+                enabled: preferences
+                    .get(&(id.clone(), path_string.clone()))
+                    .copied()
+                    .unwrap_or(default_enabled),
+                id,
+                name: frontmatter.name,
+                description: frontmatter.description,
+                activation: frontmatter.activation,
+                path: path_string,
+                source: source.to_owned(),
+                valid: true,
+                warning: None,
+            }
+        }
         Err(warning) => SkillInfo {
             id,
             name: fallback_name,
@@ -1383,6 +1391,46 @@ mod tests {
             "---\nname: router\ndescription: Route each task.\nactivation: always\n---\n\n# Router\n",
         );
         assert!(invalid.is_err());
+    }
+
+    #[test]
+    fn router_skills_are_enabled_by_default_but_explicit_disable_wins() {
+        let root = temp_root();
+        let manifest = root.join("skills/router/SKILL.md");
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(
+            &manifest,
+            "---\nname: router\ndescription: Route every task.\nactivation: router\n---\n\n# Router\n",
+        )
+        .unwrap();
+
+        let discovered = scan(&root, &root, None, None, None, &HashMap::new());
+        assert_eq!(discovered.len(), 1);
+        assert!(discovered[0].enabled);
+
+        let preferences = [(
+            (discovered[0].id.clone(), discovered[0].path.clone()),
+            false,
+        )]
+        .into();
+        let disabled = scan(&root, &root, None, None, None, &preferences);
+        assert!(!disabled[0].enabled);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn axion_auto_ops_is_enabled_as_the_prompt_hook_entry() {
+        let root = temp_root();
+        let manifest = root.join("skills/axion-auto-ops/SKILL.md");
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(
+            &manifest,
+            "---\nname: axion-auto-ops\ndescription: Prompt hook entry.\n---\n\n# Hook\n",
+        )
+        .unwrap();
+        let discovered = scan(&root, &root, None, None, None, &HashMap::new());
+        assert!(discovered[0].enabled);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

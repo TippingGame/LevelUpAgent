@@ -12,7 +12,7 @@
     <a href="https://levelup.mom/">LevelUpAPI</a>
   </p>
   <p>
-    <img alt="Version" src="https://img.shields.io/badge/version-1.0.36-ff5a4f?style=flat-square" />
+    <img alt="Version" src="https://img.shields.io/badge/version-1.0.37-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-可用预览-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -155,7 +155,7 @@ macOS 安装包使用 `pnpm build:macos`。正式更新还需要仓库所有者�
 
 ## 当前状态
 
-`1.0.36` 是当前发布里程碑。会话现已支持重新编辑、导入导出、长内容性能优化，以及完成后自动收起当前任务记录并保留摘要与状态；输入区与左右布局拖动更顺畅，并把附件上限提升到 64 MiB。项目菜单可以跨平台打开工作目录，Grok 默认模型更新为 4.6。摇光残影新增带名称、设定与来源记录的信号驱动自主求知，回答 Agent 可在严格边界内自行使用网页工具。Windows 安装包使用 Tauri updater 签名但仍未配置 Authenticode，SmartScreen 可能提示“未知发布者”；macOS 安装包当前未公证。提交 Issue 时请附上复现步骤、应用日志和平台信息。
+`1.0.37` 是当前发布里程碑。会话现已支持重新编辑、导入导出、长内容性能优化，以及完成后自动展开最新任务记录并保留摘要与状态；输入区与左右布局拖动更顺畅，并把附件上限提升到 64 MiB。项目菜单可以跨平台打开工作目录，Grok 默认模型更新为 4.6。摇光残影新增带名称、设定与来源记录的信号驱动自主求知，回答 Agent 可在严格边界内自行使用网页工具。Windows 安装包使用 Tauri updater 签名但仍未配置 Authenticode，SmartScreen 可能提示“未知发布者”；macOS 安装包当前未公证。提交 Issue 时请附上复现步骤、应用日志和平台信息。
 
 ## 许可证
 

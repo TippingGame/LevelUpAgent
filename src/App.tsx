@@ -5981,6 +5981,7 @@ function AssistantMessageGroup({
   activeReconnectMessageId,
   streamingMessageId,
   collapsible = false,
+  defaultOpen = false,
   pet,
   onReviewChanges,
 }: {
@@ -5989,15 +5990,19 @@ function AssistantMessageGroup({
   activeReconnectMessageId?: string;
   streamingMessageId?: string;
   collapsible?: boolean;
+  defaultOpen?: boolean;
   pet?: PetProfile;
   onReviewChanges: (changeSet: ConversationChangeSet) => void;
 }) {
-  const [open, setOpen] = useState(!collapsible);
-  const previousCollapsible = useRef(collapsible);
+  const [open, setOpen] = useState(defaultOpen || !collapsible);
+  const previousDisplayState = useRef({ collapsible, defaultOpen });
   useEffect(() => {
-    if (previousCollapsible.current !== collapsible) setOpen(!collapsible);
-    previousCollapsible.current = collapsible;
-  }, [collapsible]);
+    const previous = previousDisplayState.current;
+    if (previous.collapsible !== collapsible || previous.defaultOpen !== defaultOpen) {
+      setOpen(defaultOpen || !collapsible);
+    }
+    previousDisplayState.current = { collapsible, defaultOpen };
+  }, [collapsible, defaultOpen]);
   let identity: AgentMessage | undefined;
   const requestIds: string[] = [];
   let changeSet: ConversationChangeSet | undefined;
@@ -6428,6 +6433,7 @@ const MemoizedAssistantMessageGroup = memo(AssistantMessageGroup, (previous, nex
   && previous.activeReconnectMessageId === next.activeReconnectMessageId
   && previous.streamingMessageId === next.streamingMessageId
   && previous.collapsible === next.collapsible
+  && previous.defaultOpen === next.defaultOpen
   && previous.pet === next.pet
   && previous.onReviewChanges === next.onReviewChanges
   && previous.items === next.items
@@ -6454,6 +6460,12 @@ const ConversationMessageList = memo(({
   onReviewChanges: (changeSet: ConversationChangeSet) => void;
   onEdit: (content: string) => void;
 }) => {
+  const latestAssistantBlockIndex = useMemo(() => {
+    for (let index = blocks.length - 1; index >= 0; index -= 1) {
+      if (blocks[index].kind === "assistant") return index;
+    }
+    return -1;
+  }, [blocks]);
   const streamingMessageId = useMemo(() => {
     if (!running) return undefined;
     let latestUserBlockIndex = -1;
@@ -6476,7 +6488,7 @@ const ConversationMessageList = memo(({
   }, [blocks, running]);
   return (
     <>
-      {blocks.map((block) => block.kind === "user" ? (
+      {blocks.map((block, blockIndex) => block.kind === "user" ? (
         <MemoizedMessageRow key={block.item.id} item={block.item} onEdit={onEdit} />
       ) : (
         <MemoizedAssistantMessageGroup
@@ -6488,6 +6500,7 @@ const ConversationMessageList = memo(({
             ? streamingMessageId
             : undefined}
           collapsible={!streamingMessageId || !block.items.some((item) => item.id === streamingMessageId)}
+          defaultOpen={!running && blockIndex === latestAssistantBlockIndex}
           pet={pet}
           onReviewChanges={onReviewChanges}
         />

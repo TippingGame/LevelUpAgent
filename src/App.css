@@ -1096,7 +1096,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .message { min-width: 0; display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 12px; margin-bottom: 28px; }
 .message-stream > .message { content-visibility: auto; contain-intrinsic-size: auto 120px; }
 .message.assistant { grid-template-columns: 36px minmax(0, 1fr); }
-.message.user { grid-template-columns: minmax(0, auto) 30px; justify-content: end; margin-left: 72px; }
+.message.user { grid-template-columns: minmax(0, 1fr) 30px; justify-content: end; margin-left: 72px; }
 .message-avatar { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: #484b46; }
 .message-avatar span { font-size: var(--font-caption); font-weight: 700; }
 .assistant-avatar { width: 36px; height: 36px; overflow: hidden; border-radius: 10px; background: #fff; }
@@ -1104,7 +1104,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .message.user .message-avatar { background: #2b2d2a; border-color: #2b2d2a; color: #fff; }
 .message-body { min-width: 0; }
 .message.user .message-avatar { grid-column: 2; grid-row: 1; }
-.message.user .message-body { grid-column: 1; grid-row: 1; min-width: 0; width: fit-content; max-width: min(680px, 100%); justify-self: end; }
+.message.user .message-body { grid-column: 1; grid-row: 1; min-width: 0; width: 100%; max-width: min(680px, 100%); justify-self: end; }
 .message-meta { height: 24px; display: flex; align-items: baseline; gap: 8px; }
 .message.user .message-meta { justify-content: flex-end; }
 .message-meta strong { font-size: var(--font-body); font-weight: 650; }
@@ -1218,9 +1218,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .markdown-body th, .markdown-body td { padding: 8px 10px; border: 1px solid #e5e7eb; text-align: left; }
 .markdown-body th { background: #f8fafc; color: #374151; font-weight: 650; }
 .message.user .markdown-body {
-  display: inline-block;
+  display: block;
   width: fit-content;
   max-width: 100%;
+  margin-left: auto;
   padding: 10px 14px;
   border: 1px solid #e4e7eb;
   border-radius: 14px 5px 14px 14px;

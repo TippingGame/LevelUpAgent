@@ -64,6 +64,7 @@ const PROVIDER_ROUND_TIMEOUT: Duration = Duration::from_secs(240);
 const LONG_PROVIDER_ROUND_TIMEOUT: Duration = Duration::from_secs(360);
 const PROVIDER_ROUND_TIMEOUT_PREFIX: &str = "Provider round timed out";
 const NON_GOAL_HARNESS_MAX_ROUNDS: usize = 64;
+const EMPTY_POST_TOOL_RESPONSE_RETRIES: usize = 2;
 const AUTONOMOUS_PET_MAX_AGENT_TURNS: usize = 4;
 const AUTONOMOUS_PET_MAX_WEB_SEARCHES: usize = 1;
 const AUTONOMOUS_PET_MAX_WEB_FETCHES: usize = 2;
@@ -415,9 +416,6 @@ fn attach_skills(
     database: &database::Database,
     request: &mut AgentTurnRequest,
 ) -> Result<(), String> {
-    if !matches!(request.mode.as_str(), "agent" | "goal" | "plan") {
-        return Ok(());
-    }
     // Theme generation receives the packaged manifest and layout reference
     // through an application-owned internal bootstrap message. Do not expose
     // the generic Skill catalog or read_skill tool afterward: some providers
@@ -435,6 +433,24 @@ fn attach_skills(
         })
         .take(64)
         .collect();
+
+    // Mirror Codex's UserPromptSubmit contract for every normal user turn:
+    // run the installed LevelUpAxion router before provider execution and
+    // attach its deterministic plan as application-owned context.
+    if !request.hatch {
+        run_prompt_router(request, &enabled);
+    }
+
+    // Chat mode intentionally has no dynamic tools, but it still receives
+    // the router Skill's instructions so a plain prompt follows the same
+    // LevelUpAxion dispatch path as Agent/Goal/Plan modes.
+    if !matches!(request.mode.as_str(), "agent" | "goal" | "plan") {
+        if !request.hatch {
+            let _ = preload_router_skill(request, &enabled)?;
+        }
+        return Ok(());
+    }
+
     let router_skill_id = preload_router_skill(request, &enabled)?;
     request.available_skills = enabled
         .iter()
@@ -481,6 +497,105 @@ fn attach_skills(
         });
     }
     Ok(())
+}
+
+fn run_prompt_router(request: &mut AgentTurnRequest, enabled: &[SkillInfo]) {
+    let Some(router_skill) = enabled.iter().find(|skill| skill.name == "axion-auto-ops") else {
+        return;
+    };
+    let Some(skill_root) = Path::new(&router_skill.path).parent() else {
+        return;
+    };
+    let script = skill_root.join("scripts").join("router.py");
+    if !script.is_file() {
+        return;
+    }
+    let prompt = request
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role.eq_ignore_ascii_case("user") && !message.internal)
+        .map(|message| message.content.trim())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default();
+    if prompt.is_empty() {
+        return;
+    }
+
+    let prompt_file = std::env::temp_dir().join(format!(
+        "levelup-router-{}.txt",
+        uuid::Uuid::new_v4().simple()
+    ));
+    if std::fs::write(&prompt_file, prompt.as_bytes()).is_err() {
+        return;
+    }
+    let output = run_router_command("python", &script, &prompt_file)
+        .or_else(|| run_router_command("python3", &script, &prompt_file))
+        .or_else(|| run_router_command_with_args("py", &["-3"], &script, &prompt_file));
+    let _ = std::fs::remove_file(&prompt_file);
+    let Some(output) = output else {
+        return;
+    };
+    let Ok(plan) = serde_json::from_slice::<serde_json::Value>(&output) else {
+        return;
+    };
+    let Some(context) = router_context(&plan) else {
+        return;
+    };
+    request.custom_instructions = merge_custom_instructions([
+        request.custom_instructions.take().unwrap_or_default(),
+        context,
+    ]);
+}
+
+fn run_router_command(program: &str, script: &Path, prompt_file: &Path) -> Option<Vec<u8>> {
+    run_router_command_with_args(program, &[], script, prompt_file)
+}
+
+fn run_router_command_with_args(
+    program: &str,
+    prefix: &[&str],
+    script: &Path,
+    prompt_file: &Path,
+) -> Option<Vec<u8>> {
+    let output = std::process::Command::new(program)
+        .args(prefix)
+        .arg(script)
+        .arg("--prompt-file")
+        .arg(prompt_file)
+        .arg("--json")
+        .output()
+        .ok()?;
+    output.status.success().then_some(output.stdout)
+}
+
+fn router_context(plan: &serde_json::Value) -> Option<String> {
+    if plan.get("kind").and_then(serde_json::Value::as_str) == Some("conversation") {
+        return None;
+    }
+    let route = plan
+        .get("route")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|value| value.get("name"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("universal");
+    let primary = plan
+        .get("primary_skill")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("axion-unlimited");
+    let interaction = plan
+        .get("interaction")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("task");
+    let trace = plan
+        .get("call_chain")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|value| value.get("text"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("调用链：intake → classify → plan → execute → verify → deliver");
+    Some(format!(
+        "LevelUpAxion UserPromptSubmit Router\nApply this application-generated route before answering the current user turn.\n- workflow: {route}\n- primary Skill: {primary}\n- interaction: {interaction}\n- {trace}"
+    ))
 }
 
 fn preload_router_skill(
@@ -5154,6 +5269,15 @@ fn goal_completion_ends_harness(
         && matches!(status, models::GoalStatus::Completed)
 }
 
+fn is_empty_post_tool_response(
+    awaiting_post_tool_answer: bool,
+    response: &AgentTurnResponse,
+) -> bool {
+    awaiting_post_tool_answer
+        && response.tool_calls.is_empty()
+        && response.content.trim().is_empty()
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn harness_run_loop(
     app: &tauri::AppHandle,
@@ -5188,6 +5312,8 @@ async fn harness_run_loop(
     let theme_generation = theme_generation_run(&history, request.workspace.as_deref())?;
     let mut round = 0usize;
     let mut theme_tool_violations = 0usize;
+    let mut awaiting_post_tool_answer = false;
+    let mut empty_post_tool_response_retries = 0usize;
     // The normal request is intentionally permissive. If a Provider returns
     // an explicit context-length error, retry this operation once with a
     // conservative window instead of failing the conversation immediately.
@@ -5598,6 +5724,101 @@ async fn harness_run_loop(
                         response.input_tokens.unwrap_or(0),
                         response.output_tokens.unwrap_or(0),
                     )?;
+                }
+                if is_empty_post_tool_response(awaiting_post_tool_answer, &response) {
+                    if empty_post_tool_response_retries < EMPTY_POST_TOOL_RESPONSE_RETRIES {
+                        empty_post_tool_response_retries += 1;
+                        history.push(AgentMessage {
+                            role: "user".to_owned(),
+                            content: "The tool execution finished, but the previous provider response contained neither a user-visible answer nor a next tool call. Continue from the tool result now: call the next required tool or provide the complete answer to the user."
+                                .to_owned(),
+                            tool_calls: Vec::new(),
+                            tool_call_id: None,
+                            internal: true,
+                            attachments: Vec::new(),
+                        });
+                        logging::write(
+                            "warn",
+                            "harness",
+                            "empty_post_tool_response_retry_scheduled",
+                            serde_json::json!({
+                                "operationId": &operation_id,
+                                "threadId": &request.thread_id,
+                                "round": round,
+                                "retry": empty_post_tool_response_retries,
+                                "maxRetries": EMPTY_POST_TOOL_RESPONSE_RETRIES,
+                            }),
+                        );
+                        let payload = serde_json::json!({
+                            "round": round,
+                            "retry": empty_post_tool_response_retries,
+                            "maxRetries": EMPTY_POST_TOOL_RESPONSE_RETRIES,
+                        });
+                        let sequence = database.append_harness_event(
+                            &operation_id,
+                            "empty_post_tool_response_retry_scheduled",
+                            &payload,
+                        )?;
+                        let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+                            &operation_id,
+                            sequence,
+                            "empty_post_tool_response_retry_scheduled",
+                            payload,
+                        ));
+                        logging::write(
+                            "info",
+                            "harness",
+                            "round_completed",
+                            serde_json::json!({
+                                "operationId": &operation_id,
+                                "threadId": &request.thread_id,
+                                "round": round,
+                                "outcome": "empty_post_tool_response_retry",
+                                "latencyMs": round_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                            }),
+                        );
+                        continue;
+                    }
+
+                    let error = format!(
+                        "Provider returned an empty assistant response after tool execution {} times",
+                        empty_post_tool_response_retries.saturating_add(1)
+                    );
+                    database.update_harness_operation_state(
+                        &operation_id,
+                        &crate::harness::types::RuntimeState::Failed,
+                    )?;
+                    let payload = serde_json::json!({
+                        "error": &error,
+                        "round": round,
+                        "reason": "empty_post_tool_response",
+                    });
+                    let sequence = database.append_harness_event(
+                        &operation_id,
+                        "operation_failed",
+                        &payload,
+                    )?;
+                    let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+                        &operation_id,
+                        sequence,
+                        "operation_failed",
+                        payload,
+                    ));
+                    logging::write(
+                        "error",
+                        "harness",
+                        "operation_failed",
+                        serde_json::json!({
+                            "operationId": &operation_id,
+                            "threadId": &request.thread_id,
+                            "round": round,
+                            "reason": "empty_post_tool_response",
+                            "error": &error,
+                        }),
+                    );
+                    return Ok(crate::harness::types::HarnessRunOutcome {
+                        state: crate::harness::types::RuntimeState::Failed,
+                    });
                 }
                 let response_payload = serde_json::to_value(&response)
                     .map_err(|error| format!("Could not encode provider response: {error}"))?;
@@ -6078,6 +6299,8 @@ async fn harness_run_loop(
                         }
                     }
                 }
+                awaiting_post_tool_answer = true;
+                empty_post_tool_response_retries = 0;
                 if database
                     .get_goal(&request.thread_id)?
                     .is_some_and(|goal| goal_completion_ends_harness(request.mode, &goal.status))
@@ -9988,6 +10211,27 @@ mod tests {
     }
 
     #[test]
+    fn empty_post_tool_responses_are_only_retried_when_a_tool_is_pending() {
+        let response = AgentTurnResponse {
+            content: String::new(),
+            tool_calls: Vec::new(),
+            input_tokens: Some(2),
+            output_tokens: Some(1),
+            request_id: None,
+            provider_id: None,
+            failover_count: 0,
+        };
+        assert!(is_empty_post_tool_response(true, &response));
+        assert!(!is_empty_post_tool_response(false, &response));
+
+        let text_response = AgentTurnResponse {
+            content: "done".to_owned(),
+            ..response.clone()
+        };
+        assert!(!is_empty_post_tool_response(true, &text_response));
+    }
+
+    #[test]
     fn local_directory_validation_accepts_temp_workspaces_and_rejects_files() {
         let root =
             std::env::temp_dir().join(format!("levelup-open-directory-{}", uuid::Uuid::new_v4()));
@@ -10778,6 +11022,22 @@ mod tests {
         assert!(instructions.contains("Select the primary workflow."));
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prompt_router_context_keeps_route_and_primary_skill() {
+        let plan = serde_json::json!({
+            "kind": "technical",
+            "route": { "name": "reverse" },
+            "primary_skill": "axion-reverse",
+            "interaction": "task",
+            "call_chain": { "text": "调用链：fingerprint → analyze → verify" }
+        });
+        let context = router_context(&plan).expect("technical plans produce context");
+        assert!(context.contains("workflow: reverse"));
+        assert!(context.contains("primary Skill: axion-reverse"));
+        assert!(context.contains("fingerprint → analyze → verify"));
+        assert!(router_context(&serde_json::json!({ "kind": "conversation" })).is_none());
     }
 
     #[test]
