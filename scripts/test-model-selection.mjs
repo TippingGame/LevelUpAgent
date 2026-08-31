@@ -5,6 +5,8 @@ import ts from "typescript";
 
 const sourceUrl = new URL("../src/lib/modelSelection.ts", import.meta.url);
 const source = readFileSync(sourceUrl, "utf8");
+const appSource = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+const appCss = readFileSync(new URL("../src/App.css", import.meta.url), "utf8");
 const compiled = ts.transpileModule(source, {
   compilerOptions: {
     module: ts.ModuleKind.ESNext,
@@ -36,6 +38,18 @@ const grokProfile = {
   protocol: "openai_responses",
 };
 const models = (...ids) => ids.map((id) => ({ id }));
+
+function protocolPlatforms(protocol) {
+  const match = appSource.match(new RegExp(`value: "${protocol}",[\\s\\S]*?platforms: \\[([^\\]]+)\\]`));
+  assert.ok(match, `${protocol} protocol option should exist`);
+  return [...match[1].matchAll(/"([^"]+)"/g)].map((entry) => entry[1]);
+}
+
+function platformPillRule(platform) {
+  const match = appCss.match(new RegExp(`(?:^|\\n)\\.platform-pill-${platform} \\{([^}]*)\\}`));
+  assert.ok(match, `${platform} platform pill should have a base color rule`);
+  return match[1];
+}
 
 test("Gemini discovery recommends 3.6 Flash over older general models", () => {
   const selected = selection.preferredDetectedModel(geminiProfile, models(
@@ -124,6 +138,26 @@ test("OpenCode Go recommends its current Luna coding model", () => {
     "gpt-5.6-luna",
   ));
   assert.equal(selected?.id, "gpt-5.6-luna");
+});
+
+test("LevelUpAPI CN platforms are shown on every compatible inbound protocol", () => {
+  const cnPlatforms = ["zhipu", "kimi", "deepseek"];
+  for (const protocol of ["openai_responses", "openai_chat", "anthropic_messages"]) {
+    const platforms = protocolPlatforms(protocol);
+    for (const platform of cnPlatforms) assert.ok(platforms.includes(platform), `${protocol}: ${platform}`);
+  }
+  for (const protocol of ["gemini_generate_content", "opencode_go"]) {
+    const platforms = protocolPlatforms(protocol);
+    for (const platform of cnPlatforms) assert.ok(!platforms.includes(platform), `${protocol}: ${platform}`);
+  }
+  assert.match(appSource, /if \(platform === "zhipu"\) return "GLM";/);
+});
+
+test("protocol platform pills use the requested and official brand colors", () => {
+  assert.match(platformPillRule("opencode"), /rgba\(14,165,233,/);
+  assert.match(platformPillRule("zhipu"), /rgba\(18,110,246,/);
+  assert.match(platformPillRule("kimi"), /rgba\(0,124,255,/);
+  assert.match(platformPillRule("deepseek"), /rgba\(77,107,254,/);
 });
 
 test("reasoning levels follow the selected model instead of one global list", () => {

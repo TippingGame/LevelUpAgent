@@ -7340,7 +7340,16 @@ function DiffDialog({
   );
 }
 
-type ProtocolPlatform = "anthropic" | "openai" | "antigravity" | "gemini" | "grok" | "opencode";
+type ProtocolPlatform =
+  | "anthropic"
+  | "openai"
+  | "antigravity"
+  | "gemini"
+  | "grok"
+  | "opencode"
+  | "zhipu"
+  | "kimi"
+  | "deepseek";
 
 const PROTOCOL_OPTIONS: Array<{
   value: ProviderProtocol;
@@ -7351,18 +7360,18 @@ const PROTOCOL_OPTIONS: Array<{
   {
     value: "openai_responses",
     label: "Responses",
-    platforms: ["openai", "anthropic", "grok", "opencode"],
+    platforms: ["openai", "anthropic", "grok", "zhipu", "kimi", "deepseek", "opencode"],
     recommended: true,
   },
   {
     value: "openai_chat",
     label: "Chat Completions",
-    platforms: ["openai", "anthropic", "grok", "opencode"],
+    platforms: ["openai", "anthropic", "grok", "zhipu", "kimi", "deepseek", "opencode"],
   },
   {
     value: "anthropic_messages",
     label: "Anthropic Messages",
-    platforms: ["anthropic", "openai", "gemini", "antigravity", "grok", "opencode"],
+    platforms: ["anthropic", "openai", "gemini", "antigravity", "grok", "zhipu", "kimi", "deepseek", "opencode"],
   },
   {
     value: "gemini_generate_content",
@@ -7383,6 +7392,9 @@ function protocolPlatformLabel(platform: ProtocolPlatform) {
   if (platform === "antigravity") return "Antigravity";
   if (platform === "gemini") return "Gemini";
   if (platform === "grok") return "Grok";
+  if (platform === "zhipu") return "GLM";
+  if (platform === "kimi") return "Kimi";
+  if (platform === "deepseek") return "DeepSeek";
   return "OpenCode";
 }
 

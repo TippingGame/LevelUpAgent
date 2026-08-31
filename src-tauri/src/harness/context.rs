@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 use serde::{Deserialize, Serialize};
 
 use super::types::{ContextBlock, ContextBudget, ContextSelection};
-use crate::models::AgentMessage;
+use crate::models::{AgentMessage, ImageAttachment};
 
 pub const LOCAL_COMPACTION_ALGORITHM_VERSION: &str = "local-checkpoint-v2";
 pub const LOCAL_CHECKPOINT_PREFIX: &str = "[LevelUpAgent local context checkpoint";
@@ -32,7 +32,12 @@ pub const HISTORICAL_SKILL_RESULT_MAX_CHARS: usize = 64_000;
 pub const HISTORICAL_TOOL_ARGUMENTS_MAX_CHARS: usize = 16_000;
 
 const CHECKPOINT_MAX_CHARS: usize = 48_000;
-const ATTACHMENT_TOKEN_ALLOWANCE: u32 = 1_024;
+const UNRESOLVED_ATTACHMENT_TOKEN_ALLOWANCE: u32 = 1_024;
+// Inline Base64 is a wire representation, not text input. Providers account
+// for it as an image modality, with model-specific costs. Keep a conservative
+// provider-neutral allowance while dimensions/detail are not part of the
+// persisted attachment metadata.
+pub(crate) const IMAGE_ATTACHMENT_TOKEN_ALLOWANCE: u32 = 4_096;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -364,35 +369,46 @@ fn estimate_resend_message_tokens(message: &AgentMessage, is_current_user: bool)
 
 /// Estimate the content that the provider adapter will actually resend.
 ///
-/// The previous implementation charged every attachment a flat 1,024-token
-/// allowance. That was safe for metadata-only historical references but badly
-/// underestimated an active image's base64 or an extracted document's text.
-/// Use the resolved payload when it is available and retain the flat allowance
-/// only for an unresolved attachment object.
+/// Images are typed multimodal input at the provider even when their wire
+/// representation is Base64, so the encoded byte string must not be charged as
+/// ordinary text. Extracted text/document content is ordinary text and remains
+/// charged from its actual payload.
 fn estimate_attachment_tokens(message: &AgentMessage) -> u32 {
     message.attachments.iter().fold(0u32, |total, attachment| {
         let name_tokens = estimate_tokens(&attachment.name, 4);
         let mime_tokens = estimate_tokens(&attachment.mime_type, 4);
-        let payload_tokens = attachment
-            .data_base64
-            .as_deref()
-            .map(|value| estimate_tokens(value, 4))
-            .or_else(|| {
-                attachment
-                    .text_content
-                    .as_deref()
-                    .map(|value| estimate_tokens(value, 4))
-            })
-            .unwrap_or({
-                // Unresolved attachments are still represented by a small
-                // managed-reference block in the provider request.
-                ATTACHMENT_TOKEN_ALLOWANCE
-            });
+        let payload_tokens = if attachment.data_base64.is_some() {
+            IMAGE_ATTACHMENT_TOKEN_ALLOWANCE
+        } else if let Some(text) = attachment.text_content.as_deref() {
+            estimate_tokens(text, 4)
+        } else {
+            // Unresolved attachments are still represented by a small
+            // managed-reference block in the provider request.
+            UNRESOLVED_ATTACHMENT_TOKEN_ALLOWANCE
+        };
         total
             .saturating_add(name_tokens)
             .saturating_add(mime_tokens)
             .saturating_add(payload_tokens)
     })
+}
+
+/// Character-budget equivalent used by the provider adapter's coarse context
+/// selector. This deliberately excludes the raw Base64 transport payload.
+pub(crate) fn attachment_context_char_cost(attachment: &ImageAttachment) -> usize {
+    let payload_chars = if attachment.data_base64.is_some() {
+        (IMAGE_ATTACHMENT_TOKEN_ALLOWANCE as usize).saturating_mul(4)
+    } else if let Some(text) = attachment.text_content.as_deref() {
+        text.chars().count()
+    } else {
+        (UNRESOLVED_ATTACHMENT_TOKEN_ALLOWANCE as usize).saturating_mul(4)
+    };
+    attachment
+        .name
+        .chars()
+        .count()
+        .saturating_add(attachment.mime_type.chars().count())
+        .saturating_add(payload_chars)
 }
 
 fn bounded_token_estimate(
@@ -1160,7 +1176,7 @@ mod tests {
     }
 
     #[test]
-    fn attachment_estimate_tracks_resolved_provider_payload() {
+    fn attachment_estimate_counts_image_as_visual_input_not_base64_text() {
         let mut image = message("user", "Inspect this image");
         image.attachments.push(crate::models::ImageAttachment {
             id: "image-1".to_owned(),
@@ -1168,12 +1184,33 @@ mod tests {
             mime_type: "image/png".to_owned(),
             size_bytes: 120_000,
             kind: crate::models::AttachmentKind::Image,
-            data_base64: Some("a".repeat(120_000)),
+            data_base64: Some("aW1hZ2U=".to_owned()),
             text_content: None,
         });
 
-        let estimated = estimate_message_tokens(&image);
-        assert!(estimated > ATTACHMENT_TOKEN_ALLOWANCE.saturating_mul(20));
+        let small_payload_estimate = estimate_message_tokens(&image);
+        image.attachments[0].data_base64 = Some("a".repeat(1_000_000));
+        let large_payload_estimate = estimate_message_tokens(&image);
+
+        assert_eq!(large_payload_estimate, small_payload_estimate);
+        assert!(large_payload_estimate >= IMAGE_ATTACHMENT_TOKEN_ALLOWANCE);
+        assert!(large_payload_estimate < IMAGE_ATTACHMENT_TOKEN_ALLOWANCE.saturating_add(100));
+    }
+
+    #[test]
+    fn attachment_estimate_still_counts_extracted_document_text() {
+        let mut document = message("user", "Inspect this document");
+        document.attachments.push(crate::models::ImageAttachment {
+            id: "document-1".to_owned(),
+            name: "large.txt".to_owned(),
+            mime_type: "text/plain".to_owned(),
+            size_bytes: 120_000,
+            kind: crate::models::AttachmentKind::Text,
+            data_base64: None,
+            text_content: Some("a".repeat(120_000)),
+        });
+
+        assert!(estimate_message_tokens(&document) > 30_000);
     }
 
     #[test]

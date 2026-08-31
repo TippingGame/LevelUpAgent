@@ -1651,15 +1651,9 @@ fn prepare_context(messages: &[AgentMessage]) -> PreparedContext {
             id: format!("unit-{index}"),
             source_kind: "conversation".to_owned(),
             content_hash: format!("unit-{index}-{}", unit.original_chars),
-            estimated_tokens: crate::harness::context::estimate_tokens(
-                &unit
-                    .messages
-                    .iter()
-                    .map(|message| message.content.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                4,
-            ),
+            estimated_tokens: unit.messages.iter().fold(0_u32, |total, message| {
+                total.saturating_add(crate::harness::context::estimate_message_tokens(message))
+            }),
             trust: crate::harness::types::TrustLevel::User,
             inclusion: crate::harness::types::ContextInclusion::Include,
             group_id: Some(format!("unit-{index}")),
@@ -1925,22 +1919,7 @@ fn message_char_cost(message: &AgentMessage) -> usize {
         + message
             .attachments
             .iter()
-            .map(|attachment| {
-                attachment.name.chars().count()
-                    + attachment.mime_type.chars().count()
-                    + attachment
-                        .data_base64
-                        .as_deref()
-                        .map(str::chars)
-                        .map(Iterator::count)
-                        .unwrap_or_default()
-                    + attachment
-                        .text_content
-                        .as_deref()
-                        .map(str::chars)
-                        .map(Iterator::count)
-                        .unwrap_or_default()
-            })
+            .map(crate::harness::context::attachment_context_char_cost)
             .sum::<usize>()
 }
 
@@ -4376,6 +4355,42 @@ mod tests {
                 }));
             }
         }
+    }
+
+    #[test]
+    fn inline_image_base64_does_not_displace_following_tool_result() {
+        let mut image_message = plain_message("user", "Inspect this image, then use the tools");
+        image_message.attachments.push(ImageAttachment {
+            id: "0123456789abcdef0123456789abcdef".to_owned(),
+            name: "large.png".to_owned(),
+            mime_type: "image/png".to_owned(),
+            size_bytes: 720_000,
+            kind: AttachmentKind::Image,
+            data_base64: Some("a".repeat(CONTEXT_MAX_CHARS.saturating_mul(2))),
+            text_content: None,
+        });
+        let mut messages = vec![image_message];
+        messages.extend(tool_exchange(
+            "call-after-image",
+            json!({ "path": "src/main.rs" }),
+            "verified tool result".to_owned(),
+        ));
+
+        let context = prepare_context(&messages);
+
+        assert_eq!(context.messages.len(), 3);
+        assert_eq!(context.omission.omitted_messages, 0);
+        assert!(
+            context.messages[1]
+                .tool_calls
+                .iter()
+                .any(|call| call.id == "call-after-image")
+        );
+        assert_eq!(
+            context.messages[2].tool_call_id.as_deref(),
+            Some("call-after-image")
+        );
+        assert!(message_char_cost(&context.messages[0]) < CONTEXT_MAX_CHARS);
     }
 
     #[test]
