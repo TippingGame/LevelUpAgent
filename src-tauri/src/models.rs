@@ -70,6 +70,11 @@ pub struct AgentMessage {
     #[serde(default)]
     pub tool_calls: Vec<ToolCall>,
     pub tool_call_id: Option<String>,
+    /// Provider-native reasoning blocks that must be replayed verbatim on a
+    /// later turn. Anthropic signs thinking blocks, so reducing them to the
+    /// visible assistant text breaks multi-turn tool use.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_reasoning_blocks: Vec<serde_json::Value>,
     #[serde(default)]
     pub internal: bool,
     #[serde(default)]
@@ -184,6 +189,8 @@ impl RouterEvent {
 pub struct AgentTurnResponse {
     pub content: String,
     pub tool_calls: Vec<ToolCall>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub provider_reasoning_blocks: Vec<serde_json::Value>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub request_id: Option<String>,
@@ -739,6 +746,8 @@ pub struct StoredMessage {
     #[serde(default)]
     pub tool_calls: Vec<ToolCall>,
     pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_reasoning_blocks: Vec<serde_json::Value>,
     pub created_at: i64,
     #[serde(default)]
     pub is_error: bool,

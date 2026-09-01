@@ -25,6 +25,7 @@ const thread = {
       role: "assistant",
       content: "I can inspect it.",
       toolCalls: [],
+      providerReasoningBlocks: [{ type: "thinking", thinking: "signed", signature: "sig-1" }],
       createdAt: 1_700_000_000_100,
       attachments: [],
     },
@@ -38,6 +39,7 @@ test("conversation export carries structured messages and readable transcript", 
   const parsed = JSON.parse(serializeConversationExport(thread));
   assert.equal(parsed.format, CONVERSATION_EXPORT_FORMAT);
   assert.equal(parsed.messages.length, 2);
+  assert.deepEqual(parsed.messages[1].providerReasoningBlocks, thread.messages[1].providerReasoningBlocks);
   assert.match(parsed.transcript, /Inspect this image/);
   assert.match(parsed.transcript, /screen\.png/);
 });
@@ -48,6 +50,7 @@ test("conversation import accepts exported JSON and does not require attachment 
   assert.equal(imported.messages.length, 2);
   assert.match(imported.messages[0].content, /Attachment: screen\.png/);
   assert.deepEqual(imported.messages[0].toolCalls, []);
+  assert.deepEqual(imported.messages[1].providerReasoningBlocks, thread.messages[1].providerReasoningBlocks);
 });
 
 test("conversation import accepts OpenAI-style content arrays", () => {

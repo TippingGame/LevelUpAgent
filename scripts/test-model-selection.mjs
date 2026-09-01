@@ -7,6 +7,10 @@ const sourceUrl = new URL("../src/lib/modelSelection.ts", import.meta.url);
 const source = readFileSync(sourceUrl, "utf8");
 const appSource = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
 const appCss = readFileSync(new URL("../src/App.css", import.meta.url), "utf8");
+const bridgeSource = readFileSync(new URL("../src/lib/bridge.ts", import.meta.url), "utf8");
+const storageSource = readFileSync(new URL("../src/lib/storage.ts", import.meta.url), "utf8");
+const writingStudioSource = readFileSync(new URL("../src/components/WritingStudio.tsx", import.meta.url), "utf8");
+const constellationStudioSource = readFileSync(new URL("../src/components/ConstellationStudio.tsx", import.meta.url), "utf8");
 const compiled = ts.transpileModule(source, {
   compilerOptions: {
     module: ts.ModuleKind.ESNext,
@@ -170,8 +174,9 @@ test("reasoning levels follow the selected model instead of one global list", ()
   assert.deepEqual(efforts("gpt-5.6-luna"), ["auto", "none", "low", "medium", "high", "xhigh", "max"]);
   assert.deepEqual(efforts("grok-4.6", "openai_responses"), ["auto", "low", "medium", "high", "xhigh"]);
   assert.deepEqual(efforts("grok-4.5"), ["auto", "low", "medium", "high"]);
-  assert.deepEqual(efforts("glm-5.3"), ["auto", "high", "max"]);
-  assert.deepEqual(efforts("deepseek-v4-pro"), ["auto", "high", "max"]);
+  assert.deepEqual(efforts("glm-5.3"), ["auto"]);
+  assert.deepEqual(efforts("glm-5.2"), ["auto"]);
+  assert.deepEqual(efforts("deepseek-v4-pro"), ["auto", "low", "high", "max"]);
 
   // These models expose reasoning output, but OpenCode Go does not publish a
   // configurable effort scale for them. The selector must not invent one.
@@ -179,11 +184,45 @@ test("reasoning levels follow the selected model instead of one global list", ()
     assert.deepEqual(efforts(model), ["auto"], model);
   }
 
-  assert.deepEqual(efforts("claude-opus-4-7", "anthropic_messages"), ["auto", "high", "max"]);
-  assert.deepEqual(efforts("gemini-3.6-flash", "gemini_generate_content"), ["auto", "low", "high"]);
-  assert.deepEqual(efforts("gpt-5.5", "openai_responses"), ["auto", "none", "minimal", "low", "medium", "high", "xhigh"]);
+  assert.deepEqual(efforts("claude-opus-4-5", "anthropic_messages"), ["auto", "low", "medium", "high"]);
+  assert.deepEqual(efforts("claude-opus-4-6", "anthropic_messages"), ["auto", "low", "medium", "high", "max"]);
+  assert.deepEqual(efforts("claude-opus-4-7", "anthropic_messages"), ["auto", "low", "medium", "high", "xhigh", "max"]);
+  assert.deepEqual(efforts("anthropic/claude-sonnet-5-20260815", "anthropic_messages"), ["auto", "low", "medium", "high", "xhigh", "max"]);
+  assert.deepEqual(efforts("claude-sonnet-4-5", "anthropic_messages"), ["auto"]);
+  assert.deepEqual(efforts("claude-haiku-4-5", "anthropic_messages"), ["auto"]);
+
+  assert.deepEqual(efforts("gemini-3.6-flash", "gemini_generate_content"), ["auto", "minimal", "low", "medium", "high"]);
+  assert.deepEqual(efforts("gemini-3.1-pro-preview", "gemini_generate_content"), ["auto", "low", "medium", "high"]);
+  assert.deepEqual(efforts("gemini-2.5-pro", "gemini_generate_content"), ["auto", "low", "medium", "high"]);
+  assert.deepEqual(efforts("gemini-2.5-flash-lite", "gemini_generate_content"), ["auto", "none", "low", "medium", "high"]);
+
+  assert.deepEqual(efforts("gpt-5.6-sol", "openai_responses"), ["auto", "none", "low", "medium", "high", "xhigh", "max"]);
+  assert.deepEqual(efforts("gpt-5.6-20260901", "openai_responses"), ["auto", "none", "low", "medium", "high", "xhigh", "max"]);
+  assert.deepEqual(efforts("gpt-5.5", "openai_responses"), ["auto", "none", "low", "medium", "high", "xhigh"]);
+  assert.deepEqual(efforts("gpt-5.5-pro", "openai_responses"), ["auto", "medium", "high", "xhigh"]);
+  assert.deepEqual(efforts("gpt-5.2", "openai_responses"), ["auto", "none", "low", "medium", "high", "xhigh"]);
+  assert.deepEqual(efforts("gpt-5.3-codex", "openai_responses"), ["auto", "low", "medium", "high", "xhigh"]);
+  assert.deepEqual(efforts("gpt-5.3-codex-20260831", "openai_responses"), ["auto", "low", "medium", "high", "xhigh"]);
+  assert.deepEqual(efforts("gpt-5.1", "openai_responses"), ["auto", "none", "low", "medium", "high"]);
+  assert.deepEqual(efforts("gpt-5", "openai_responses"), ["auto", "minimal", "low", "medium", "high"]);
+  assert.deepEqual(efforts("qwen3.8-max", "openai_chat"), ["auto", "none", "low", "medium", "xhigh"]);
+  assert.deepEqual(efforts("qwen3.8-max", "openai_responses"), ["auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"]);
+  assert.deepEqual(efforts("qwen3.8-max", "anthropic_messages"), ["auto"]);
   assert.deepEqual(efforts("o4-mini", "openai_responses"), ["auto", "low", "medium", "high"]);
   assert.deepEqual(efforts("unknown-compatible-model", "openai_chat"), ["auto"]);
+  assert.match(appSource, /if \(effort === "xhigh"\) return tr\("超高", "Extra"\);/);
+  assert.doesNotMatch(source, /ultracode/i);
+});
+
+test("reasoning effort and provider-native blocks stay wired outside the main composer", () => {
+  assert.equal([...writingStudioSource.matchAll(/reasoningEffortForProfile\(writingRunProfile, reasoningEffort\)/g)].length, 2);
+  assert.match(constellationStudioSource, /reasoningEffortForProfile\(profile, reasoningEffort\)/);
+  assert.match(appSource, /previewExternalConfigWrite\(profile, target, reasoningEffort\)/);
+  assert.match(appSource, /applyExternalConfigWrite\(profile, target, preview\.confirmationToken, reasoningEffort\)/);
+  assert.equal([...bridgeSource.matchAll(/providerReasoningBlocks/g)].length >= 4, true);
+  assert.match(storageSource, /providerReasoningBlocks: Array\.isArray\(value\.providerReasoningBlocks\)/);
+  assert.match(appSource, /providerReasoningBlocks: result\.providerReasoningBlocks/);
+  assert.match(appSource, /providerReasoningBlocks: payload\.providerReasoningBlocks/);
 });
 
 test("unsupported persisted reasoning levels fall back to Auto on model switch", () => {

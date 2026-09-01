@@ -2591,6 +2591,7 @@ function App() {
           const payload = event.payload as {
             content?: string;
             toolCalls?: ToolCall[];
+            providerReasoningBlocks?: unknown[];
             requestId?: string;
             providerId?: string;
             inputTokens?: number;
@@ -2602,6 +2603,7 @@ function App() {
           const placeholder = ensureStreamingAssistant();
           const assistant: AgentMessage = message("assistant", payload.content || currentStreamContent(), {
             toolCalls: payload.toolCalls ?? [],
+            providerReasoningBlocks: payload.providerReasoningBlocks,
             requestId: payload.requestId,
             ...assistantMessageIdentity(respondingProfile),
           });
@@ -2850,6 +2852,9 @@ function App() {
         id: crypto.randomUUID(),
         attachments: item.attachments.map((attachment) => ({ ...attachment })),
         toolCalls: item.toolCalls.map((call) => ({ ...call })),
+        providerReasoningBlocks: item.providerReasoningBlocks
+          ? structuredClone(item.providerReasoningBlocks)
+          : undefined,
       })),
       inputTokens: activeThread.inputTokens,
       outputTokens: activeThread.outputTokens,
@@ -3376,6 +3381,7 @@ function App() {
           ? normalizeHatchProviderToolCalls(result.toolCalls, history)
           : result.toolCalls,
         requestId: result.requestId,
+        providerReasoningBlocks: result.providerReasoningBlocks,
         ...assistantMessageIdentity(respondingProfile),
       };
       try {
@@ -4757,6 +4763,7 @@ function App() {
         armorWritingIntensity={armorWritingIntensity}
         activeProfile={activeProfile}
         profiles={profiles}
+        reasoningEffort={effectiveReasoningEffort}
         modelCatalogRevision={mediaCatalogRevision}
         workspace={activeThread.workspace}
         connectionReady={connectionReady}
@@ -4773,6 +4780,7 @@ function App() {
         armorWritingIntensity={armorWritingIntensity}
         activeProfile={activeProfile}
         profiles={profiles}
+        reasoningEffort={effectiveReasoningEffort}
         workspace={activeThread.workspace}
         mediaCatalogRevision={mediaCatalogRevision}
         onConfigureConnection={() => setSettingsOpen(true)}
@@ -5195,6 +5203,7 @@ function App() {
         <ConnectionDialog
           profiles={profiles}
           profile={activeProfile}
+          reasoningEffort={effectiveReasoningEffort}
           keyConfigured={keyConfigured}
           diffViewSettings={diffViewSettings}
           onDiffViewSettingsChange={updateDiffViewSettings}
@@ -6544,7 +6553,7 @@ function reasoningEffortLabel(effort: ReasoningEffort) {
   if (effort === "low") return tr("低", "Low");
   if (effort === "medium") return tr("中", "Medium");
   if (effort === "high") return tr("高", "High");
-  if (effort === "xhigh") return tr("极高", "XHigh");
+  if (effort === "xhigh") return tr("超高", "Extra");
   return tr("最大", "Max");
 }
 
@@ -7738,6 +7747,7 @@ function ThemeDialog({
 function ConnectionDialog({
   profiles,
   profile,
+  reasoningEffort,
   keyConfigured,
   diffViewSettings,
   onDiffViewSettingsChange,
@@ -7754,6 +7764,7 @@ function ConnectionDialog({
 }: {
   profiles: ProviderProfile[];
   profile: ProviderProfile;
+  reasoningEffort: ReasoningEffort;
   keyConfigured: boolean;
   diffViewSettings: DiffViewSettings;
   onDiffViewSettingsChange: (settings: DiffViewSettings) => void;
@@ -8170,7 +8181,11 @@ function ConnectionDialog({
             onDiagnose={runDiagnostics}
             onReset={clearHealth}
           />
-          <ConfigWritebackPanel profile={draftProfile} keyConfigured={localKeyConfigured} />
+          <ConfigWritebackPanel
+            profile={draftProfile}
+            reasoningEffort={reasoningEffortForProfile(draftProfile, reasoningEffort)}
+            keyConfigured={localKeyConfigured}
+          />
           {error && <div className="dialog-error">{error}</div>}
         </div>
         )}
@@ -8333,7 +8348,15 @@ function formatCoinBalance(value: number, locale: AppLocale) {
   }).format(value);
 }
 
-function ConfigWritebackPanel({ profile, keyConfigured }: { profile: ProviderProfile; keyConfigured: boolean }) {
+function ConfigWritebackPanel({
+  profile,
+  reasoningEffort,
+  keyConfigured,
+}: {
+  profile: ProviderProfile;
+  reasoningEffort: ReasoningEffort;
+  keyConfigured: boolean;
+}) {
   const [target, setTarget] = useState<ExternalConfigTarget>(() => targetForProtocol(profile.protocol));
   const [preview, setPreview] = useState<ConfigWritePreview | null>(null);
   const [result, setResult] = useState<ConfigWriteResult | null>(null);
@@ -8345,14 +8368,14 @@ function ConfigWritebackPanel({ profile, keyConfigured }: { profile: ProviderPro
     setPreview(null);
     setResult(null);
     setError(null);
-  }, [profile.id, profile.protocol]);
+  }, [profile.baseUrl, profile.id, profile.model, profile.protocol, reasoningEffort]);
 
   const inspect = async () => {
     setBusy(true);
     setError(null);
     setResult(null);
     try {
-      setPreview(await previewExternalConfigWrite(profile, target));
+      setPreview(await previewExternalConfigWrite(profile, target, reasoningEffort));
     } catch (reason) {
       setError(errorText(reason));
     } finally {
@@ -8365,7 +8388,7 @@ function ConfigWritebackPanel({ profile, keyConfigured }: { profile: ProviderPro
     setBusy(true);
     setError(null);
     try {
-      setResult(await applyExternalConfigWrite(profile, target, preview.confirmationToken));
+      setResult(await applyExternalConfigWrite(profile, target, preview.confirmationToken, reasoningEffort));
       setPreview(null);
     } catch (reason) {
       setError(errorText(reason));
@@ -9320,6 +9343,7 @@ function importedConversationThread(imported: ImportedConversation, workspace?: 
     providerBrand: item.providerBrand,
     internal: item.internal,
     changeSet: item.changeSet,
+    providerReasoningBlocks: item.providerReasoningBlocks,
     attachments: [],
   } satisfies AgentMessage));
   const latestMessageAt = messages.reduce((latest, item) => Math.max(latest, item.createdAt), 0);

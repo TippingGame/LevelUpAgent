@@ -797,13 +797,14 @@ export async function agentTurn(
   customInstructions?: string,
   reasoningEffort: ReasoningEffort = "auto",
 ): Promise<AgentTurnResponse> {
-  const cleanMessages = messages.filter((message) => !message.status).map(({ role, content, toolCalls, toolCallId, internal, attachments }) => ({
+  const cleanMessages = messages.filter((message) => !message.status).map(({ role, content, toolCalls, toolCallId, internal, attachments, providerReasoningBlocks }) => ({
     role,
     content,
     toolCalls,
     toolCallId,
     internal: Boolean(internal),
     attachments,
+    providerReasoningBlocks,
   }));
   return invoke<AgentTurnResponse>("agent_turn", {
     request: { profile, messages: cleanMessages, mode, workspace, threadId, fallbackProfiles, hatch, hatchSkillLoaded, customInstructions, reasoningEffort },
@@ -826,13 +827,14 @@ export async function agentTurnStream(
   customInstructions?: string,
   reasoningEffort: ReasoningEffort = "auto",
 ): Promise<AgentTurnResponse> {
-  const cleanMessages = messages.filter((message) => !message.status).map(({ role, content, toolCalls, toolCallId, internal, attachments }) => ({
+  const cleanMessages = messages.filter((message) => !message.status).map(({ role, content, toolCalls, toolCallId, internal, attachments, providerReasoningBlocks }) => ({
     role,
     content,
     toolCalls,
     toolCallId,
     internal: Boolean(internal),
     attachments,
+    providerReasoningBlocks,
   }));
   const onEvent = new Channel<AgentStreamEvent>();
   onEvent.onmessage = (event) => {
@@ -870,16 +872,18 @@ export async function getGatewayDiagnostics(profile: ProviderProfile): Promise<G
 export async function previewExternalConfigWrite(
   profile: ProviderProfile,
   target: ExternalConfigTarget,
+  reasoningEffort: ReasoningEffort,
 ): Promise<ConfigWritePreview> {
-  return invoke<ConfigWritePreview>("preview_external_config_write", { profile, target });
+  return invoke<ConfigWritePreview>("preview_external_config_write", { profile, target, reasoningEffort });
 }
 
 export async function applyExternalConfigWrite(
   profile: ProviderProfile,
   target: ExternalConfigTarget,
   confirmationToken: string,
+  reasoningEffort: ReasoningEffort,
 ): Promise<ConfigWriteResult> {
-  return invoke<ConfigWriteResult>("apply_external_config_write", { profile, target, confirmationToken });
+  return invoke<ConfigWriteResult>("apply_external_config_write", { profile, target, confirmationToken, reasoningEffort });
 }
 
 export async function rollbackExternalConfigWrite(

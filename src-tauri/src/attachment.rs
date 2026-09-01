@@ -1218,6 +1218,7 @@ mod tests {
             content: "Inspect".to_owned(),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            provider_reasoning_blocks: Vec::new(),
             internal: false,
             attachments,
         }

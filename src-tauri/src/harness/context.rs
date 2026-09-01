@@ -66,6 +66,7 @@ impl LocalCheckpoint {
             content: self.render(),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            provider_reasoning_blocks: Vec::new(),
             internal: true,
             attachments: Vec::new(),
         }
@@ -287,6 +288,9 @@ pub fn history_fingerprint(messages: &[AgentMessage]) -> String {
             update(&mut hash, &call.name);
             update(&mut hash, &call.arguments.to_string());
         }
+        for block in &message.provider_reasoning_blocks {
+            update(&mut hash, &block.to_string());
+        }
         for attachment in &message.attachments {
             update(&mut hash, &attachment.id);
             update(&mut hash, &attachment.name);
@@ -313,6 +317,9 @@ pub fn estimate_message_tokens(message: &AgentMessage) -> u32 {
             .saturating_add(estimate_tokens(&call.id, 4))
             .saturating_add(estimate_tokens(&call.name, 4))
             .saturating_add(estimate_tokens(&call.arguments.to_string(), 4));
+    }
+    for block in &message.provider_reasoning_blocks {
+        tokens = tokens.saturating_add(estimate_tokens(&block.to_string(), 4));
     }
     if let Some(call_id) = &message.tool_call_id {
         tokens = tokens.saturating_add(estimate_tokens(call_id, 4));
@@ -360,6 +367,9 @@ fn estimate_resend_message_tokens(message: &AgentMessage, is_current_user: bool)
                 argument_tokens,
                 argument_chars.min(HISTORICAL_TOOL_ARGUMENTS_MAX_CHARS),
             ));
+    }
+    for block in &message.provider_reasoning_blocks {
+        tokens = tokens.saturating_add(estimate_tokens(&block.to_string(), 4));
     }
     if let Some(call_id) = &message.tool_call_id {
         tokens = tokens.saturating_add(estimate_tokens(call_id, 4));
@@ -909,6 +919,7 @@ mod tests {
             content: content.into(),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            provider_reasoning_blocks: Vec::new(),
             internal: false,
             attachments: Vec::new(),
         }
@@ -1135,6 +1146,7 @@ mod tests {
                 arguments: serde_json::json!({ "path": "src/main.rs" }),
             }],
             tool_call_id: None,
+            provider_reasoning_blocks: Vec::new(),
             internal: false,
             attachments: Vec::new(),
         });
@@ -1143,6 +1155,7 @@ mod tests {
             content: "file contents".to_owned(),
             tool_calls: Vec::new(),
             tool_call_id: Some(call_id.clone()),
+            provider_reasoning_blocks: Vec::new(),
             internal: false,
             attachments: Vec::new(),
         });
@@ -1226,6 +1239,7 @@ mod tests {
                     arguments: serde_json::json!({ "path": "build.log" }),
                 }],
                 tool_call_id: None,
+                provider_reasoning_blocks: Vec::new(),
                 internal: false,
                 attachments: Vec::new(),
             },
@@ -1234,6 +1248,7 @@ mod tests {
                 content: "x".repeat(1_000_000),
                 tool_calls: Vec::new(),
                 tool_call_id: Some("log-call".to_owned()),
+                provider_reasoning_blocks: Vec::new(),
                 internal: false,
                 attachments: Vec::new(),
             },

@@ -91,8 +91,8 @@ import {
   type ArmorSkillState,
   type ArmorWritingIntensity,
 } from "../lib/armorMode";
-import { isTextGenerationModel } from "../lib/modelSelection";
-import type { AgentMessage, ProviderModelInfo, ProviderProfile } from "../lib/types";
+import { isTextGenerationModel, reasoningEffortForProfile } from "../lib/modelSelection";
+import type { AgentMessage, ProviderModelInfo, ProviderProfile, ReasoningEffort } from "../lib/types";
 import {
   autoLayoutStoryNodes,
   applyWritingGoalStep,
@@ -191,6 +191,7 @@ interface WritingStudioProps {
   armorWritingIntensity: ArmorWritingIntensity;
   activeProfile: ProviderProfile;
   profiles: ProviderProfile[];
+  reasoningEffort: ReasoningEffort;
   modelCatalogRevision: number;
   workspace?: string;
   connectionReady: boolean;
@@ -223,6 +224,7 @@ export function WritingStudio({
   armorWritingIntensity,
   activeProfile,
   profiles,
+  reasoningEffort,
   modelCatalogRevision,
   workspace,
   connectionReady,
@@ -596,6 +598,7 @@ export function WritingStudio({
           skills: armorModeSkills,
           surface: "writing",
         }),
+        reasoningEffortForProfile(writingRunProfile, reasoningEffort),
       );
       if (completionEpochRef.current !== epoch || operationRef.current !== operationId) return;
       operationRef.current = undefined;
@@ -978,6 +981,7 @@ export function WritingStudio({
           skills: armorModeSkills,
           surface: "writing",
         }),
+        reasoningEffortForProfile(writingRunProfile, reasoningEffort),
       );
       if (goalEpochRef.current !== epoch || goalOperationRef.current !== operationId) return undefined;
       goalOperationRef.current = undefined;

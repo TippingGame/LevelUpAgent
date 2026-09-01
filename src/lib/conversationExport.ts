@@ -36,6 +36,7 @@ export interface ConversationExportMessage {
   status?: AgentMessage["status"];
   internal?: boolean;
   changeSet?: AgentMessage["changeSet"];
+  providerReasoningBlocks?: unknown[];
   attachments: ConversationExportAttachment[];
 }
 
@@ -68,6 +69,7 @@ export interface ImportedConversationMessage {
   providerBrand?: AgentMessage["providerBrand"];
   internal?: boolean;
   changeSet?: AgentMessage["changeSet"];
+  providerReasoningBlocks?: unknown[];
 }
 
 export function serializeConversationExport(thread: AgentThread): string {
@@ -85,6 +87,7 @@ export function serializeConversationExport(thread: AgentThread): string {
     ...(item.status ? { status: item.status } : {}),
     ...(item.internal ? { internal: true } : {}),
     ...(item.changeSet ? { changeSet: item.changeSet } : {}),
+    ...(item.providerReasoningBlocks?.length ? { providerReasoningBlocks: item.providerReasoningBlocks } : {}),
     attachments: item.attachments.map((attachment) => ({
       name: attachment.name,
       mimeType: attachment.mimeType,
@@ -165,6 +168,9 @@ function normalizeImportedMessage(value: unknown, index: number): ImportedConver
     modelName: stringValue(value.modelName ?? value.model_name),
     providerBrand: providerBrand(value.providerBrand ?? value.provider_brand),
     internal: value.internal === true ? true : undefined,
+    providerReasoningBlocks: Array.isArray(value.providerReasoningBlocks)
+      ? value.providerReasoningBlocks
+      : undefined,
     // Imported change sets can contain large, provider-specific objects and
     // are not needed to continue the conversation safely.
     changeSet: undefined,

@@ -214,6 +214,8 @@ export interface AgentMessage {
   internal?: boolean;
   changeSet?: ConversationChangeSet;
   attachments: ImageAttachment[];
+  /** Provider-native reasoning blocks required to continue signed thinking turns. */
+  providerReasoningBlocks?: unknown[];
 }
 
 export type ConversationChangeStatus = "completed" | "failed" | "cancelled" | "interrupted";
@@ -290,6 +292,7 @@ export interface AttachmentPreview {
 export interface AgentTurnResponse {
   content: string;
   toolCalls: ToolCall[];
+  providerReasoningBlocks?: unknown[];
   inputTokens?: number;
   outputTokens?: number;
   requestId?: string;

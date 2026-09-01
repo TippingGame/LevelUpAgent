@@ -114,12 +114,22 @@ export function opencodeWireProtocol(model: string): Exclude<ProviderProtocol, "
 }
 
 const AUTO_REASONING = ["auto"] as const satisfies readonly ReasoningEffort[];
-const OPENAI_REASONING = ["auto", "none", "minimal", "low", "medium", "high", "xhigh"] as const satisfies readonly ReasoningEffort[];
 const GPT_56_REASONING = ["auto", "none", "low", "medium", "high", "xhigh", "max"] as const satisfies readonly ReasoningEffort[];
+const GPT_52_PLUS_REASONING = ["auto", "none", "low", "medium", "high", "xhigh"] as const satisfies readonly ReasoningEffort[];
+const GPT_53_CODEX_REASONING = ["auto", "low", "medium", "high", "xhigh"] as const satisfies readonly ReasoningEffort[];
+const GPT_PRO_REASONING = ["auto", "medium", "high", "xhigh"] as const satisfies readonly ReasoningEffort[];
+const GPT_51_REASONING = ["auto", "none", "low", "medium", "high"] as const satisfies readonly ReasoningEffort[];
+const GPT_5_REASONING = ["auto", "minimal", "low", "medium", "high"] as const satisfies readonly ReasoningEffort[];
 const THREE_LEVEL_REASONING = ["auto", "low", "medium", "high"] as const satisfies readonly ReasoningEffort[];
 const GROK_46_REASONING = ["auto", "low", "medium", "high", "xhigh"] as const satisfies readonly ReasoningEffort[];
-const HIGH_MAX_REASONING = ["auto", "high", "max"] as const satisfies readonly ReasoningEffort[];
-const GOOGLE_REASONING = ["auto", "low", "high"] as const satisfies readonly ReasoningEffort[];
+const LOW_HIGH_MAX_REASONING = ["auto", "low", "high", "max"] as const satisfies readonly ReasoningEffort[];
+const CLAUDE_STANDARD_REASONING = ["auto", "low", "medium", "high"] as const satisfies readonly ReasoningEffort[];
+const CLAUDE_MAX_REASONING = ["auto", "low", "medium", "high", "max"] as const satisfies readonly ReasoningEffort[];
+const CLAUDE_EXTENDED_REASONING = ["auto", "low", "medium", "high", "xhigh", "max"] as const satisfies readonly ReasoningEffort[];
+const GEMINI_3_FLASH_REASONING = ["auto", "minimal", "low", "medium", "high"] as const satisfies readonly ReasoningEffort[];
+const GEMINI_25_FLASH_REASONING = ["auto", "none", "low", "medium", "high"] as const satisfies readonly ReasoningEffort[];
+const QWEN_38_CHAT_REASONING = ["auto", "none", "low", "medium", "xhigh"] as const satisfies readonly ReasoningEffort[];
+const QWEN_38_RESPONSES_REASONING = ["auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"] as const satisfies readonly ReasoningEffort[];
 
 function bareModelId(model: string) {
   const segments = model
@@ -131,6 +141,13 @@ function bareModelId(model: string) {
 
 function modelOrVariant(id: string, base: string) {
   return id === base || new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:[._-]|$)`, "i").test(id);
+}
+
+function claudeModelOrVariant(id: string, base: string) {
+  const normalized = id.replace(/[._]/g, "-");
+  const claudeIndex = normalized.indexOf("claude-");
+  const claudeId = claudeIndex >= 0 ? normalized.slice(claudeIndex) : normalized;
+  return modelOrVariant(claudeId, `claude-${base}`) || modelOrVariant(normalized, base);
 }
 
 /**
@@ -146,21 +163,44 @@ export function reasoningEffortsForProfile(
     ? normalizeOpenCodeModelId(profile.model).toLocaleLowerCase()
     : bareModelId(profile.model);
 
-  if (modelOrVariant(id, "gpt-5.6-luna") || modelOrVariant(id, "gpt-5.6-sol") || modelOrVariant(id, "gpt-5.6-terra") || id === "gpt-5.6") {
-    return GPT_56_REASONING;
-  }
+  if (modelOrVariant(id, "gpt-5.6")) return GPT_56_REASONING;
   if (modelOrVariant(id, "grok-4.6")) return GROK_46_REASONING;
   if (modelOrVariant(id, "grok-4.5")) return THREE_LEVEL_REASONING;
-  if (/^glm-5(?:[._-]|$)/i.test(id) || /^deepseek-v4(?:[._-]|$)/i.test(id)) return HIGH_MAX_REASONING;
+  if (/^deepseek-v4(?:[._-]|$)/i.test(id)) return LOW_HIGH_MAX_REASONING;
 
   // The remaining OpenCode Go models expose reasoning output, but the current
   // Go contract does not publish adjustable effort tiers for them. Keep their
   // provider default rather than pretending Anthropic/OpenAI levels transfer.
   if (profile.protocol === "opencode_go") return AUTO_REASONING;
 
-  if (/^(?:claude|opus|sonnet|haiku)(?:[._-]|$)/i.test(id)) return HIGH_MAX_REASONING;
-  if (profile.protocol === "gemini_generate_content" || /^gemini(?:[._-]|$)/i.test(id)) return GOOGLE_REASONING;
-  if (/^gpt-5(?:[._-]|$)/i.test(id)) return OPENAI_REASONING;
+  if (/^qwen-?3\.8(?:[._-]|$)/i.test(id)) {
+    if (profile.protocol === "openai_chat") return QWEN_38_CHAT_REASONING;
+    if (profile.protocol === "openai_responses") return QWEN_38_RESPONSES_REASONING;
+    return AUTO_REASONING;
+  }
+
+  if (["fable-5", "mythos-5", "sonnet-5", "opus-5", "opus-4-7", "opus-4-8"]
+    .some((family) => claudeModelOrVariant(id, family))) return CLAUDE_EXTENDED_REASONING;
+  if (["mythos-preview", "sonnet-4-6", "opus-4-6"]
+    .some((family) => claudeModelOrVariant(id, family))) return CLAUDE_MAX_REASONING;
+  if (claudeModelOrVariant(id, "opus-4-5")) return CLAUDE_STANDARD_REASONING;
+  if (/^(?:claude|opus|sonnet|haiku|fable|mythos)(?:[._-]|$)/i.test(id)) return AUTO_REASONING;
+
+  if (/^gemini-3(?:\.[0-9]+)?(?:[._-]|$)/i.test(id)) {
+    return /(?:^|[._-])pro(?:[._-]|$)/i.test(id) ? THREE_LEVEL_REASONING : GEMINI_3_FLASH_REASONING;
+  }
+  if (modelOrVariant(id, "gemini-2.5-pro")) return THREE_LEVEL_REASONING;
+  if (modelOrVariant(id, "gemini-2.5-flash")) return GEMINI_25_FLASH_REASONING;
+  if (profile.protocol === "gemini_generate_content" || /^gemini(?:[._-]|$)/i.test(id)) return AUTO_REASONING;
+
+  if (modelOrVariant(id, "gpt-5.5-pro") || modelOrVariant(id, "gpt-5.4-pro") || modelOrVariant(id, "gpt-5.2-pro")) {
+    return GPT_PRO_REASONING;
+  }
+  if (modelOrVariant(id, "gpt-5.3-codex")) return GPT_53_CODEX_REASONING;
+  if (modelOrVariant(id, "gpt-5.5") || modelOrVariant(id, "gpt-5.4")
+    || modelOrVariant(id, "gpt-5.3") || modelOrVariant(id, "gpt-5.2")) return GPT_52_PLUS_REASONING;
+  if (modelOrVariant(id, "gpt-5.1")) return GPT_51_REASONING;
+  if (/^gpt-5(?:$|-(?:chat|codex|mini|nano|pro|[0-9]{4})(?:[._-]|$))/i.test(id)) return GPT_5_REASONING;
   if (/^o(?:1|3|4)(?:[._-]|$)/i.test(id)) return THREE_LEVEL_REASONING;
   return AUTO_REASONING;
 }

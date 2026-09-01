@@ -87,6 +87,7 @@ test("finalizing a streamed assistant preserves placeholder identity", () => {
   const placeholder = assistant("assistant-1", "partial", 321);
   const completed = assistant("provider-id", "complete", 999);
   completed.requestId = "request-1";
+  completed.providerReasoningBlocks = [{ type: "thinking", signature: "sig-1" }];
   const finalized = finalizeAssistantMessage(
     [{ ...placeholder }],
     placeholder,
@@ -97,4 +98,5 @@ test("finalizing a streamed assistant preserves placeholder identity", () => {
   assert.equal(finalized[0].createdAt, 321);
   assert.equal(finalized[0].content, "complete");
   assert.equal(finalized[0].requestId, "request-1");
+  assert.deepEqual(finalized[0].providerReasoningBlocks, completed.providerReasoningBlocks);
 });

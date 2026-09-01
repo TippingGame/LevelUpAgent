@@ -177,6 +177,9 @@ function normalizeMessage(value: unknown): AgentMessage | null {
     attachments: Array.isArray(value.attachments)
       ? value.attachments.map(normalizeAttachment).filter((item): item is ImageAttachment => item !== null)
       : [],
+    providerReasoningBlocks: Array.isArray(value.providerReasoningBlocks)
+      ? value.providerReasoningBlocks
+      : undefined,
   };
 }
 
@@ -408,7 +411,7 @@ export function createThread(workspace?: string): AgentThread {
 export function message(
   role: AgentMessageRole,
   content: string,
-  options: Partial<Pick<import("./types").AgentMessage, "toolCalls" | "toolCallId" | "isError" | "requestId" | "modelName" | "providerBrand" | "status" | "durationMs" | "internal" | "changeSet" | "attachments">> = {},
+  options: Partial<Pick<import("./types").AgentMessage, "toolCalls" | "toolCallId" | "isError" | "requestId" | "modelName" | "providerBrand" | "status" | "durationMs" | "internal" | "changeSet" | "attachments" | "providerReasoningBlocks">> = {},
 ) {
   return {
     id: crypto.randomUUID(),
@@ -425,6 +428,7 @@ export function message(
     internal: options.internal,
     changeSet: options.changeSet,
     attachments: options.attachments ?? [],
+    providerReasoningBlocks: options.providerReasoningBlocks,
     createdAt: Date.now(),
   } satisfies import("./types").AgentMessage;
 }

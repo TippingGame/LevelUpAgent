@@ -15,7 +15,7 @@ use crate::models::{
     ProviderSettings, StoredMessage, StoredThread, ToolCall, WritingProjectRecord,
 };
 
-const SCHEMA_VERSION: i64 = 17;
+const SCHEMA_VERSION: i64 = 18;
 
 fn paths_equal(left: &str, right: &str) -> bool {
     #[cfg(windows)]
@@ -89,6 +89,7 @@ impl Database {
                     content TEXT NOT NULL,
                     tool_calls_json TEXT NOT NULL DEFAULT '[]',
                     tool_call_id TEXT,
+                    provider_reasoning_blocks_json TEXT NOT NULL DEFAULT '[]',
                     created_at INTEGER NOT NULL,
                      is_error INTEGER NOT NULL DEFAULT 0,
                      request_id TEXT,
@@ -345,6 +346,23 @@ impl Database {
                 )
                 .map_err(database_error)?;
         }
+        let has_provider_reasoning_blocks = connection
+            .prepare("PRAGMA table_info(messages)")
+            .and_then(|mut statement| {
+                let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+                columns.collect::<Result<Vec<_>, _>>()
+            })
+            .map_err(database_error)?
+            .iter()
+            .any(|column| column == "provider_reasoning_blocks_json");
+        if !has_provider_reasoning_blocks {
+            connection
+                .execute(
+                    "ALTER TABLE messages ADD COLUMN provider_reasoning_blocks_json TEXT NOT NULL DEFAULT '[]'",
+                    [],
+                )
+                .map_err(database_error)?;
+        }
         let has_model_name = connection
             .prepare("PRAGMA table_info(messages)")
             .and_then(|mut statement| {
@@ -494,7 +512,8 @@ impl Database {
                         )) AS model_name,
                         m.provider_brand,
                         m.change_set_json,
-                        m.status
+                        m.status,
+                        m.provider_reasoning_blocks_json
                  FROM messages AS m
                  WHERE m.thread_id = ?1 ORDER BY m.position ASC",
             )
@@ -511,12 +530,18 @@ impl Database {
                     let attachments =
                         serde_json::from_str::<Vec<ImageAttachment>>(&attachments_json)
                             .unwrap_or_default();
+                    let provider_reasoning_blocks_json: String = row.get(14)?;
+                    let provider_reasoning_blocks = serde_json::from_str::<Vec<serde_json::Value>>(
+                        &provider_reasoning_blocks_json,
+                    )
+                    .unwrap_or_default();
                     Ok(StoredMessage {
                         id: row.get(0)?,
                         role: row.get(1)?,
                         content: row.get(2)?,
                         tool_calls,
                         tool_call_id: row.get(4)?,
+                        provider_reasoning_blocks,
                         created_at: row.get(5)?,
                         is_error: row.get::<_, i64>(6)? != 0,
                         request_id: row.get(7)?,
@@ -585,8 +610,8 @@ impl Database {
             let mut statement = transaction
                 .prepare(
                     "INSERT INTO messages
-                     (id, thread_id, position, role, content, tool_calls_json, tool_call_id, created_at, is_error, request_id, internal, attachments_json, model_name, provider_brand, change_set_json, status)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                     (id, thread_id, position, role, content, tool_calls_json, tool_call_id, created_at, is_error, request_id, internal, attachments_json, model_name, provider_brand, change_set_json, status, provider_reasoning_blocks_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                 )
                 .map_err(database_error)?;
             for (position, message) in thread.messages.iter().enumerate() {
@@ -594,6 +619,10 @@ impl Database {
                     .map_err(|error| format!("Could not serialize tool calls: {error}"))?;
                 let attachments = serde_json::to_string(&message.attachments)
                     .map_err(|error| format!("Could not serialize image attachments: {error}"))?;
+                let provider_reasoning_blocks =
+                    serde_json::to_string(&message.provider_reasoning_blocks).map_err(|error| {
+                        format!("Could not serialize provider reasoning blocks: {error}")
+                    })?;
                 statement
                     .execute(params![
                         message.id,
@@ -616,6 +645,7 @@ impl Database {
                             .map(|value| serde_json::to_string(value)
                                 .unwrap_or_else(|_| "null".to_owned())),
                         message.status,
+                        provider_reasoning_blocks,
                     ])
                     .map_err(database_error)?;
             }
@@ -3205,6 +3235,11 @@ mod tests {
                     arguments: serde_json::json!({ "path": "README.md" }),
                 }],
                 tool_call_id: None,
+                provider_reasoning_blocks: vec![serde_json::json!({
+                    "type": "thinking",
+                    "thinking": "Inspect the repository first.",
+                    "signature": "signed-reasoning"
+                })],
                 created_at: 1_700_000_000_000,
                 is_error: false,
                 request_id: Some("request-1".to_owned()),
@@ -3728,6 +3763,7 @@ mod tests {
                 content: "Start".to_owned(),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                provider_reasoning_blocks: Vec::new(),
                 created_at: 1_699_999_999_000,
                 is_error: false,
                 request_id: None,
@@ -3821,6 +3857,11 @@ mod tests {
         assert!(columns.iter().any(|column| column == "request_id"));
         assert!(columns.iter().any(|column| column == "internal"));
         assert!(columns.iter().any(|column| column == "attachments_json"));
+        assert!(
+            columns
+                .iter()
+                .any(|column| column == "provider_reasoning_blocks_json")
+        );
         assert!(columns.iter().any(|column| column == "model_name"));
         assert!(columns.iter().any(|column| column == "provider_brand"));
         assert!(columns.iter().any(|column| column == "status"));

@@ -1396,7 +1396,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .send-button { color: #fff; background: #292b28; }
 .send-button:hover:not(:disabled) { color: #fff; background: #10110f; }
 .mode-switch, .protocol-switch { display: flex; align-items: center; padding: 2px; border: 1px solid var(--line); border-radius: 6px; background: #eff0ec; }
-.mode-switch button { height: 25px; padding: 0 8px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); font-size: var(--font-caption); cursor: pointer; }
+.mode-switch button { height: 25px; padding: 0 8px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); font-size: var(--font-caption); white-space: nowrap; word-break: keep-all; cursor: pointer; }
 .mode-switch button.active { background: #fff; color: var(--text); font-weight: 650; box-shadow: 0 1px 3px rgba(32,34,30,0.1); }
 .mode-switch button:disabled { cursor: default; opacity: .55; }
 .permission-picker { position: relative; flex: 0 0 auto; }
@@ -2464,8 +2464,8 @@ button.detail-row { padding: 0; border: 0; background: transparent; text-align: 
   .composer-wrap { padding: 7px 10px 10px; }
   .composer textarea { min-height: 54px; }
   .composer-toolbar { height: auto; min-height: 68px; display: flex; flex-wrap: wrap; gap: 5px; padding: 4px 7px 7px; }
-  .mode-switch { width: 100%; flex: 1 0 100%; }
-  .mode-switch button { min-width: 0; flex: 1; padding-inline: 5px; }
+  .mode-switch { width: 100%; max-width: 100%; flex: 1 0 100%; overflow-x: auto; }
+  .mode-switch button { min-width: max-content; flex: 1 0 auto; padding-inline: 5px; }
   .permission-picker { flex: 0 0 auto; }
   .armor-toggle { max-width: 112px; padding-inline: 6px; }
   .armor-level-button { max-width: 94px; padding-inline: 6px; }

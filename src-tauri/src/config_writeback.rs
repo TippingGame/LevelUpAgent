@@ -21,8 +21,9 @@ pub fn preview(
     target: ExternalConfigTarget,
     profile: &ProviderProfile,
     api_key: &str,
+    reasoning_effort: Option<&str>,
 ) -> Result<ConfigWritePreview, String> {
-    let plans = plans(home, target, profile, api_key)?;
+    let plans = plans(home, target, profile, api_key, reasoning_effort)?;
     Ok(ConfigWritePreview {
         target,
         files: plans
@@ -42,8 +43,9 @@ pub fn apply(
     target: ExternalConfigTarget,
     profile: &ProviderProfile,
     api_key: &str,
+    reasoning_effort: Option<&str>,
 ) -> Result<ConfigWriteResult, String> {
-    let plans = plans(home, target, profile, api_key)?;
+    let plans = plans(home, target, profile, api_key, reasoning_effort)?;
     apply_plans(target, plans)
 }
 
@@ -262,6 +264,7 @@ fn plans(
     target: ExternalConfigTarget,
     profile: &ProviderProfile,
     api_key: &str,
+    reasoning_effort: Option<&str>,
 ) -> Result<Vec<PlannedFile>, String> {
     if api_key.trim().is_empty() {
         return Err("API key cannot be empty".to_owned());
@@ -269,7 +272,7 @@ fn plans(
     validate_base_url(&profile.base_url)?;
     match target {
         ExternalConfigTarget::Codex => codex_plans(home, profile, api_key),
-        ExternalConfigTarget::Claude => claude_plans(home, profile, api_key),
+        ExternalConfigTarget::Claude => claude_plans(home, profile, api_key, reasoning_effort),
         ExternalConfigTarget::Gemini => gemini_plans(home, profile, api_key),
         ExternalConfigTarget::Opencode => opencode_plans(home, profile, api_key),
     }
@@ -393,6 +396,7 @@ fn claude_plans(
     home: &Path,
     profile: &ProviderProfile,
     api_key: &str,
+    reasoning_effort: Option<&str>,
 ) -> Result<Vec<PlannedFile>, String> {
     if !matches!(profile.protocol, ProviderProtocol::AnthropicMessages) {
         return Err("Claude Code requires an Anthropic Messages connection".to_owned());
@@ -417,6 +421,15 @@ fn claude_plans(
         "ANTHROPIC_MODEL".to_owned(),
         Value::String(profile.model.clone()),
     );
+    let effort = normalized_claude_code_effort(reasoning_effort);
+    if let Some(effort) = effort {
+        env.insert(
+            "CLAUDE_CODE_EFFORT_LEVEL".to_owned(),
+            Value::String(effort.to_owned()),
+        );
+    } else {
+        env.remove("CLAUDE_CODE_EFFORT_LEVEL");
+    }
     let content = serde_json::to_string_pretty(&Value::Object(root))
         .map_err(|error| format!("Could not encode Claude settings: {error}"))?
         + "\n";
@@ -429,9 +442,24 @@ fn claude_plans(
                 ("ANTHROPIC_BASE_URL", &profile.base_url),
                 ("ANTHROPIC_AUTH_TOKEN", "••••••••"),
                 ("ANTHROPIC_MODEL", &profile.model),
+                (
+                    "CLAUDE_CODE_EFFORT_LEVEL",
+                    effort.unwrap_or("default (removed)"),
+                ),
             ],
         ),
     }])
+}
+
+fn normalized_claude_code_effort(value: Option<&str>) -> Option<&'static str> {
+    match value?.trim().to_ascii_lowercase().as_str() {
+        "low" => Some("low"),
+        "medium" => Some("medium"),
+        "high" => Some("high"),
+        "xhigh" => Some("xhigh"),
+        "max" => Some("max"),
+        _ => None,
+    }
 }
 
 fn gemini_plans(
@@ -730,9 +758,15 @@ mod tests {
             ExternalConfigTarget::Claude,
             &profile(ProviderProtocol::AnthropicMessages),
             "super-secret",
+            Some("xhigh"),
         )
         .unwrap();
         assert!(!preview.files[0].diff.contains("super-secret"));
+        assert!(
+            preview.files[0]
+                .diff
+                .contains("CLAUDE_CODE_EFFORT_LEVEL = xhigh")
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -747,7 +781,8 @@ mod tests {
                 &root,
                 ExternalConfigTarget::Claude,
                 &unsafe_profile,
-                "secret"
+                "secret",
+                None,
             )
             .is_err()
         );
@@ -766,15 +801,43 @@ mod tests {
             ExternalConfigTarget::Claude,
             &profile(ProviderProtocol::AnthropicMessages),
             "secret",
+            Some("high"),
         )
         .unwrap();
         let changed = std::fs::read_to_string(&path).unwrap();
         assert!(changed.contains("ANTHROPIC_BASE_URL"));
+        assert!(changed.contains("\"CLAUDE_CODE_EFFORT_LEVEL\": \"high\""));
         rollback(&root, ExternalConfigTarget::Claude, &result.backup_id).unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "{\"custom\":true}\n"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn claude_auto_removes_a_previously_saved_effort_override() {
+        let root = std::env::temp_dir().join(format!("levelup-write-auto-{}", Uuid::new_v4()));
+        let directory = root.join(".claude");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"env":{"CLAUDE_CODE_EFFORT_LEVEL":"max","CUSTOM":"kept"}}"#,
+        )
+        .unwrap();
+
+        apply(
+            &root,
+            ExternalConfigTarget::Claude,
+            &profile(ProviderProtocol::AnthropicMessages),
+            "secret",
+            Some("auto"),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(value["env"].get("CLAUDE_CODE_EFFORT_LEVEL").is_none());
+        assert_eq!(value["env"]["CUSTOM"], "kept");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -794,6 +857,7 @@ mod tests {
             ExternalConfigTarget::Opencode,
             &profile,
             "open-secret",
+            None,
         )
         .unwrap();
         assert!(!preview.files[0].diff.contains("open-secret"));
@@ -802,6 +866,7 @@ mod tests {
             ExternalConfigTarget::Opencode,
             &profile,
             "open-secret",
+            None,
         )
         .unwrap();
         let value: Value = serde_json::from_str(

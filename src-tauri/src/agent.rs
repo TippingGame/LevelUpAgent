@@ -44,6 +44,14 @@ const THEME_GENERATION_REQUEST_TIMEOUT_SECS: u64 = 360;
 const PROVIDER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 #[cfg(test)]
 const PROVIDER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_millis(250);
+#[cfg(not(test))]
+const PROVIDER_REASONING_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+#[cfg(test)]
+const PROVIDER_REASONING_STREAM_IDLE_TIMEOUT: Duration = Duration::from_millis(750);
+#[cfg(not(test))]
+const PROVIDER_REASONING_FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(1_860);
+#[cfg(test)]
+const PROVIDER_REASONING_FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_millis(900);
 const PROVIDER_STREAM_INTERRUPTED: &str = "Provider stream ended before completion";
 
 fn turn_request_timeout(request: &AgentTurnRequest) -> Option<std::time::Duration> {
@@ -76,6 +84,17 @@ fn anthropic_auth_if_present(request: RequestBuilder, api_key: &str) -> RequestB
     }
 }
 
+fn anthropic_request_headers(request: RequestBuilder, turn: &AgentTurnRequest) -> RequestBuilder {
+    let request = request.header("anthropic-version", "2023-06-01");
+    if normalized_reasoning_effort_value(turn).is_some()
+        && anthropic_thinking_mode(&turn.profile).is_some()
+    {
+        request.header("anthropic-beta", "effort-2025-11-24")
+    } else {
+        request
+    }
+}
+
 fn gemini_auth_if_present(request: RequestBuilder, api_key: &str) -> RequestBuilder {
     if api_key.is_empty() {
         request
@@ -86,11 +105,31 @@ fn gemini_auth_if_present(request: RequestBuilder, api_key: &str) -> RequestBuil
     }
 }
 
-fn provider_stream_idle_timeout_error() -> String {
-    let timeout = if PROVIDER_STREAM_IDLE_TIMEOUT.subsec_millis() == 0 {
-        format!("{} seconds", PROVIDER_STREAM_IDLE_TIMEOUT.as_secs())
+fn provider_stream_idle_timeout(request: &AgentTurnRequest) -> Duration {
+    if request_uses_reasoning(request) {
+        PROVIDER_REASONING_STREAM_IDLE_TIMEOUT
     } else {
-        format!("{} ms", PROVIDER_STREAM_IDLE_TIMEOUT.as_millis())
+        PROVIDER_STREAM_IDLE_TIMEOUT
+    }
+}
+
+fn provider_first_response_timeout(request: &AgentTurnRequest) -> Duration {
+    if request_uses_reasoning(request) {
+        PROVIDER_REASONING_FIRST_RESPONSE_TIMEOUT
+    } else {
+        PROVIDER_STREAM_IDLE_TIMEOUT
+    }
+}
+
+pub(crate) fn request_uses_reasoning(request: &AgentTurnRequest) -> bool {
+    normalized_reasoning_effort_value(request).is_some_and(|effort| effort != "none")
+}
+
+fn provider_stream_idle_timeout_error(idle_timeout: Duration) -> String {
+    let timeout = if idle_timeout.subsec_millis() == 0 {
+        format!("{} seconds", idle_timeout.as_secs())
+    } else {
+        format!("{} ms", idle_timeout.as_millis())
     };
     format!("Provider stream timed out after {timeout} without activity")
 }
@@ -98,39 +137,55 @@ fn provider_stream_idle_timeout_error() -> String {
 async fn send_stream_request(
     request: RequestBuilder,
     cancellation: &CancellationToken,
+    idle_timeout: Duration,
 ) -> Result<Response, String> {
     let response = tokio::select! {
         _ = cancellation.cancelled() => return Err("REQUEST_CANCELLED".to_owned()),
-        response = tokio::time::timeout(PROVIDER_STREAM_IDLE_TIMEOUT, request.send()) => response,
+        response = tokio::time::timeout(idle_timeout, request.send()) => response,
     };
     response
-        .map_err(|_| provider_stream_idle_timeout_error())?
+        .map_err(|_| provider_stream_idle_timeout_error(idle_timeout))?
         .map_err(|error| format!("Connection failed: {error}"))
 }
 
 async fn stream_response_json(
     response: Response,
     cancellation: &CancellationToken,
+    idle_timeout: Duration,
 ) -> Result<Value, String> {
     let result = tokio::select! {
         _ = cancellation.cancelled() => return Err("REQUEST_CANCELLED".to_owned()),
-        result = tokio::time::timeout(PROVIDER_STREAM_IDLE_TIMEOUT, response_json(response)) => result,
+        result = tokio::time::timeout(idle_timeout, response_json(response)) => result,
     };
-    result.map_err(|_| provider_stream_idle_timeout_error())?
+    result.map_err(|_| provider_stream_idle_timeout_error(idle_timeout))?
 }
 
 async fn next_stream_item<S>(
     stream: &mut S,
     cancellation: &CancellationToken,
+    idle_timeout: Duration,
+    activity: &mut tokio::sync::watch::Receiver<u64>,
 ) -> Result<Option<S::Item>, String>
 where
     S: Stream + Unpin,
 {
-    let next = tokio::select! {
-        _ = cancellation.cancelled() => return Err("REQUEST_CANCELLED".to_owned()),
-        next = tokio::time::timeout(PROVIDER_STREAM_IDLE_TIMEOUT, stream.next()) => next,
-    };
-    next.map_err(|_| provider_stream_idle_timeout_error())
+    let idle = tokio::time::sleep(idle_timeout);
+    tokio::pin!(idle);
+    let mut activity_open = true;
+    loop {
+        tokio::select! {
+            _ = cancellation.cancelled() => return Err("REQUEST_CANCELLED".to_owned()),
+            next = stream.next() => return Ok(next),
+            changed = activity.changed(), if activity_open => {
+                if changed.is_err() {
+                    activity_open = false;
+                } else {
+                    idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
+                }
+            }
+            _ = &mut idle => return Err(provider_stream_idle_timeout_error(idle_timeout)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -684,12 +739,14 @@ async fn run_anthropic_messages(
 ) -> Result<AgentTurnResponse, String> {
     let url = endpoint(&request.profile.base_url, "/v1/messages")?;
     let body = anthropic_body(&request, false);
-    let response = anthropic_auth_if_present(turn_post(client, url, &request), api_key)
-        .header("anthropic-version", "2023-06-01")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|error| format!("Connection failed: {error}"))?;
+    let response = anthropic_request_headers(
+        anthropic_auth_if_present(turn_post(client, url, &request), api_key),
+        &request,
+    )
+    .json(&body)
+    .send()
+    .await
+    .map_err(|error| format!("Connection failed: {error}"))?;
     let request_id = header_request_id(&response);
     let value = response_json(response).await?;
     parse_anthropic_value(&value, request_id)
@@ -713,16 +770,19 @@ where
     F: FnMut(AgentStreamEvent),
 {
     let url = endpoint(&request.profile.base_url, "/v1/chat/completions")?;
+    let idle_timeout = provider_stream_idle_timeout(&request);
+    let first_response_timeout = provider_first_response_timeout(&request);
     let response = send_stream_request(
         bearer_auth_if_present(turn_post(client, url, &request), api_key)
             .json(&chat_body(&request, true)),
         &cancellation,
+        first_response_timeout,
     )
     .await?;
     let request_id = header_request_id(&response);
     if !is_event_stream(&response) {
         emit(AgentStreamEvent::non_stream_response());
-        let value = stream_response_json(response, &cancellation).await?;
+        let value = stream_response_json(response, &cancellation, idle_timeout).await?;
         let result = parse_openai_chat_value(&value, request_id)?;
         if !result.content.is_empty() {
             emit(AgentStreamEvent::content(result.content.clone()));
@@ -732,14 +792,23 @@ where
     ensure_success_status(&response)?;
     emit(AgentStreamEvent::stream_opened());
 
-    let mut stream = response.bytes_stream().eventsource();
+    let (activity_tx, mut activity_rx) = tokio::sync::watch::channel(0_u64);
+    let mut activity_sequence = 0_u64;
+    let mut stream = response
+        .bytes_stream()
+        .inspect(move |_| {
+            activity_sequence = activity_sequence.wrapping_add(1);
+            activity_tx.send_replace(activity_sequence);
+        })
+        .eventsource();
     let mut content = String::new();
     let mut tools: BTreeMap<usize, ToolAccumulator> = BTreeMap::new();
     let mut input_tokens = None;
     let mut output_tokens = None;
     let mut completed = false;
     loop {
-        let next = next_stream_item(&mut stream, &cancellation).await?;
+        let next =
+            next_stream_item(&mut stream, &cancellation, idle_timeout, &mut activity_rx).await?;
         let Some(event) = next else { break };
         let event = event.map_err(|error| format!("Invalid SSE stream: {error}"))?;
         if event.data.trim() == "[DONE]" {
@@ -779,12 +848,13 @@ where
                 .or(output_tokens);
         }
     }
-    if !completed && content.is_empty() && tools.is_empty() {
+    if !completed {
         return Err(PROVIDER_STREAM_INTERRUPTED.to_owned());
     }
     Ok(AgentTurnResponse {
         content,
         tool_calls: finish_tools(tools),
+        provider_reasoning_blocks: Vec::new(),
         input_tokens,
         output_tokens,
         request_id,
@@ -804,17 +874,20 @@ where
     F: FnMut(AgentStreamEvent),
 {
     let url = endpoint(&request.profile.base_url, "/v1/responses")?;
+    let idle_timeout = provider_stream_idle_timeout(&request);
+    let first_response_timeout = provider_first_response_timeout(&request);
     let response = send_stream_request(
         bearer_auth_if_present(turn_post(client, url, &request), api_key)
             .header("OpenAI-Beta", "responses=experimental")
             .json(&responses_body(&request, true)),
         &cancellation,
+        first_response_timeout,
     )
     .await?;
     let request_id = header_request_id(&response);
     if !is_event_stream(&response) {
         emit(AgentStreamEvent::non_stream_response());
-        let value = stream_response_json(response, &cancellation).await?;
+        let value = stream_response_json(response, &cancellation, idle_timeout).await?;
         let result = parse_openai_responses_value(&value, request_id)?;
         if !result.content.is_empty() {
             emit(AgentStreamEvent::content(result.content.clone()));
@@ -824,7 +897,15 @@ where
     ensure_success_status(&response)?;
     emit(AgentStreamEvent::stream_opened());
 
-    let mut stream = response.bytes_stream().eventsource();
+    let (activity_tx, mut activity_rx) = tokio::sync::watch::channel(0_u64);
+    let mut activity_sequence = 0_u64;
+    let mut stream = response
+        .bytes_stream()
+        .inspect(move |_| {
+            activity_sequence = activity_sequence.wrapping_add(1);
+            activity_tx.send_replace(activity_sequence);
+        })
+        .eventsource();
     let mut content = String::new();
     let mut tools: BTreeMap<usize, ToolAccumulator> = BTreeMap::new();
     let mut input_tokens = None;
@@ -832,7 +913,8 @@ where
     let mut completed_result = None;
     let mut completed = false;
     loop {
-        let next = next_stream_item(&mut stream, &cancellation).await?;
+        let next =
+            next_stream_item(&mut stream, &cancellation, idle_timeout, &mut activity_rx).await?;
         let Some(event) = next else { break };
         let event = event.map_err(|error| format!("Invalid SSE stream: {error}"))?;
         if event.data.trim() == "[DONE]" {
@@ -887,7 +969,7 @@ where
             _ => {}
         }
     }
-    if !completed && content.is_empty() && tools.is_empty() {
+    if !completed {
         return Err(PROVIDER_STREAM_INTERRUPTED.to_owned());
     }
     if let Some(completed) = completed_result {
@@ -901,6 +983,7 @@ where
             return Ok(AgentTurnResponse {
                 content,
                 tool_calls: completed.tool_calls,
+                provider_reasoning_blocks: completed.provider_reasoning_blocks,
                 input_tokens,
                 output_tokens,
                 request_id,
@@ -912,6 +995,7 @@ where
     Ok(AgentTurnResponse {
         content,
         tool_calls: finish_tools(tools),
+        provider_reasoning_blocks: Vec::new(),
         input_tokens,
         output_tokens,
         request_id,
@@ -931,17 +1015,22 @@ where
     F: FnMut(AgentStreamEvent),
 {
     let url = endpoint(&request.profile.base_url, "/v1/messages")?;
+    let idle_timeout = provider_stream_idle_timeout(&request);
+    let first_response_timeout = provider_first_response_timeout(&request);
     let response = send_stream_request(
-        anthropic_auth_if_present(turn_post(client, url, &request), api_key)
-            .header("anthropic-version", "2023-06-01")
-            .json(&anthropic_body(&request, true)),
+        anthropic_request_headers(
+            anthropic_auth_if_present(turn_post(client, url, &request), api_key),
+            &request,
+        )
+        .json(&anthropic_body(&request, true)),
         &cancellation,
+        first_response_timeout,
     )
     .await?;
     let request_id = header_request_id(&response);
     if !is_event_stream(&response) {
         emit(AgentStreamEvent::non_stream_response());
-        let value = stream_response_json(response, &cancellation).await?;
+        let value = stream_response_json(response, &cancellation, idle_timeout).await?;
         let result = parse_anthropic_value(&value, request_id)?;
         if !result.content.is_empty() {
             emit(AgentStreamEvent::content(result.content.clone()));
@@ -951,14 +1040,24 @@ where
     ensure_success_status(&response)?;
     emit(AgentStreamEvent::stream_opened());
 
-    let mut stream = response.bytes_stream().eventsource();
+    let (activity_tx, mut activity_rx) = tokio::sync::watch::channel(0_u64);
+    let mut activity_sequence = 0_u64;
+    let mut stream = response
+        .bytes_stream()
+        .inspect(move |_| {
+            activity_sequence = activity_sequence.wrapping_add(1);
+            activity_tx.send_replace(activity_sequence);
+        })
+        .eventsource();
     let mut content = String::new();
     let mut tools: BTreeMap<usize, ToolAccumulator> = BTreeMap::new();
+    let mut reasoning_blocks: BTreeMap<usize, Value> = BTreeMap::new();
     let mut input_tokens = None;
     let mut output_tokens = None;
     let mut completed = false;
     loop {
-        let next = next_stream_item(&mut stream, &cancellation).await?;
+        let next =
+            next_stream_item(&mut stream, &cancellation, idle_timeout, &mut activity_rx).await?;
         let Some(event) = next else { break };
         let event = event.map_err(|error| format!("Invalid SSE stream: {error}"))?;
         let value: Value = serde_json::from_str(&event.data)
@@ -995,6 +1094,30 @@ where
                                 tool.arguments = input.to_string();
                             }
                         }
+                        Some("thinking") => {
+                            reasoning_blocks.insert(
+                                index,
+                                json!({
+                                    "type": "thinking",
+                                    "thinking": block
+                                        .get("thinking")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default(),
+                                    "signature": block
+                                        .get("signature")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                }),
+                            );
+                        }
+                        Some("redacted_thinking") => {
+                            if let Some(data) = block.get("data").and_then(Value::as_str) {
+                                reasoning_blocks.insert(
+                                    index,
+                                    json!({ "type": "redacted_thinking", "data": data }),
+                                );
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -1013,6 +1136,22 @@ where
                         &mut tools.entry(index).or_default().arguments,
                         value.pointer("/delta/partial_json"),
                     );
+                } else if value.pointer("/delta/type").and_then(Value::as_str)
+                    == Some("thinking_delta")
+                {
+                    append_json_string_field(
+                        reasoning_blocks.get_mut(&index),
+                        "thinking",
+                        value.pointer("/delta/thinking"),
+                    );
+                } else if value.pointer("/delta/type").and_then(Value::as_str)
+                    == Some("signature_delta")
+                {
+                    append_json_string_field(
+                        reasoning_blocks.get_mut(&index),
+                        "signature",
+                        value.pointer("/delta/signature"),
+                    );
                 }
             }
             "message_delta" => {
@@ -1028,12 +1167,16 @@ where
             _ => {}
         }
     }
-    if !completed && content.is_empty() && tools.is_empty() {
+    if !completed {
         return Err(PROVIDER_STREAM_INTERRUPTED.to_owned());
     }
     Ok(AgentTurnResponse {
         content,
         tool_calls: finish_tools(tools),
+        provider_reasoning_blocks: reasoning_blocks
+            .into_values()
+            .filter_map(|block| anthropic_reasoning_block(&block))
+            .collect(),
         input_tokens,
         output_tokens,
         request_id,
@@ -1053,6 +1196,8 @@ where
     F: FnMut(AgentStreamEvent),
 {
     let model = gemini_model_name(&request.profile.model)?;
+    let idle_timeout = provider_stream_idle_timeout(&request);
+    let first_response_timeout = provider_first_response_timeout(&request);
     let url = gemini_endpoint(
         &request.profile.base_url,
         &format!("/v1beta/models/{model}:streamGenerateContent?alt=sse"),
@@ -1061,12 +1206,13 @@ where
         gemini_auth_if_present(turn_post(client, url, &request), api_key)
             .json(&gemini_body(&request)),
         &cancellation,
+        first_response_timeout,
     )
     .await?;
     let request_id = header_request_id(&response);
     if !is_event_stream(&response) {
         emit(AgentStreamEvent::non_stream_response());
-        let value = stream_response_json(response, &cancellation).await?;
+        let value = stream_response_json(response, &cancellation, idle_timeout).await?;
         let result = parse_gemini_value(&value, request_id)?;
         if !result.content.is_empty() {
             emit(AgentStreamEvent::content(result.content.clone()));
@@ -1076,15 +1222,23 @@ where
     ensure_success_status(&response)?;
     emit(AgentStreamEvent::stream_opened());
 
-    let mut stream = response.bytes_stream().eventsource();
+    let (activity_tx, mut activity_rx) = tokio::sync::watch::channel(0_u64);
+    let mut activity_sequence = 0_u64;
+    let mut stream = response
+        .bytes_stream()
+        .inspect(move |_| {
+            activity_sequence = activity_sequence.wrapping_add(1);
+            activity_tx.send_replace(activity_sequence);
+        })
+        .eventsource();
     let mut content = String::new();
     let mut tool_calls = Vec::new();
     let mut input_tokens = None;
     let mut output_tokens = None;
     let mut completed = false;
-    let mut received_candidate = false;
     loop {
-        let next = next_stream_item(&mut stream, &cancellation).await?;
+        let next =
+            next_stream_item(&mut stream, &cancellation, idle_timeout, &mut activity_rx).await?;
         let Some(event) = next else { break };
         let event = event.map_err(|error| format!("Invalid SSE stream: {error}"))?;
         if event.data.trim() == "[DONE]" {
@@ -1094,7 +1248,13 @@ where
         let value: Value = serde_json::from_str(&event.data)
             .map_err(|error| format!("Invalid stream event: {error}"))?;
         check_stream_error(&value)?;
-        received_candidate |= value.pointer("/candidates/0").is_some();
+        if value
+            .pointer("/candidates/0/finishReason")
+            .and_then(Value::as_str)
+            .is_some_and(|reason| !reason.is_empty())
+        {
+            completed = true;
+        }
         if let Some(parts) = value
             .pointer("/candidates/0/content/parts")
             .and_then(Value::as_array)
@@ -1127,12 +1287,13 @@ where
                 .or(output_tokens);
         }
     }
-    if !completed && !received_candidate {
+    if !completed {
         return Err(PROVIDER_STREAM_INTERRUPTED.to_owned());
     }
     Ok(AgentTurnResponse {
         content,
         tool_calls,
+        provider_reasoning_blocks: Vec::new(),
         input_tokens,
         output_tokens,
         request_id,
@@ -1165,7 +1326,19 @@ fn chat_body(request: &AgentTurnRequest, stream: bool) -> Value {
         body["tool_choice"] = json!("auto");
     }
     if let Some(effort) = normalized_reasoning_effort_value(request) {
-        body["reasoning_effort"] = json!(effort);
+        if is_deepseek_v4_model(&request.profile) {
+            body["reasoning_effort"] = json!(effort);
+            body["thinking"] = json!({ "type": "enabled" });
+        } else if is_qwen_3_8_model(&request.profile) && effort == "none" {
+            body["enable_thinking"] = json!(false);
+        } else {
+            body["reasoning_effort"] = json!(effort);
+        }
+        if effort != "none" {
+            let max_output_tokens =
+                reasoning_max_output_tokens_for_profile(&request.profile, effort);
+            body[chat_completion_token_limit_field(&request.profile)] = json!(max_output_tokens);
+        }
     }
     body
 }
@@ -1194,6 +1367,12 @@ fn responses_body(request: &AgentTurnRequest, stream: bool) -> Value {
     }
     if let Some(effort) = normalized_reasoning_effort_value(request) {
         body["reasoning"] = json!({ "effort": effort });
+        if effort != "none" {
+            body["max_output_tokens"] = json!(reasoning_max_output_tokens_for_profile(
+                &request.profile,
+                effort
+            ));
+        }
     }
     body
 }
@@ -1218,11 +1397,18 @@ fn anthropic_body(request: &AgentTurnRequest, stream: bool) -> Value {
         body["tools"] = Value::Array(tools);
     }
     if let Some(effort) = normalized_reasoning_effort_value(request) {
-        body["thinking"] = if effort == "none" {
-            json!({ "type": "disabled" })
-        } else {
-            json!({ "type": "enabled", "budget_tokens": reasoning_budget_tokens(effort) })
-        };
+        if is_deepseek_v4_model(&request.profile) {
+            body["thinking"] = json!({ "type": "enabled" });
+            body["output_config"] = json!({ "effort": effort });
+        } else if let Some(mode) = anthropic_thinking_mode(&request.profile) {
+            body["thinking"] = match mode {
+                AnthropicThinkingMode::Adaptive => json!({ "type": "adaptive" }),
+                AnthropicThinkingMode::LegacyBudget => {
+                    json!({ "type": "enabled", "budget_tokens": reasoning_budget_tokens(effort) })
+                }
+            };
+            body["output_config"] = json!({ "effort": effort });
+        }
     }
     body
 }
@@ -1248,9 +1434,16 @@ fn gemini_body(request: &AgentTurnRequest) -> Value {
         });
     }
     if let Some(effort) = normalized_reasoning_effort_value(request) {
-        body["generationConfig"] = json!({
-            "thinkingConfig": { "thinkingBudget": if effort == "none" { 0 } else { reasoning_budget_tokens(effort) } }
-        });
+        let thinking_config = if is_gemini_3_model(&request.profile) {
+            json!({ "thinkingLevel": effort.to_ascii_uppercase() })
+        } else if is_gemini_2_5_model(&request.profile) {
+            json!({ "thinkingBudget": gemini_2_5_thinking_budget(&request.profile, effort) })
+        } else {
+            Value::Null
+        };
+        if !thinking_config.is_null() {
+            body["generationConfig"] = json!({ "thinkingConfig": thinking_config });
+        }
     }
     body
 }
@@ -1274,20 +1467,134 @@ fn reasoning_model_id(profile: &ProviderProfile) -> String {
             .unwrap_or(profile.model.trim())
             .to_owned()
     };
-    normalized
+    let id = normalized
         .rsplit(['/', ':'])
         .next()
         .unwrap_or(&normalized)
-        .to_ascii_lowercase()
+        .to_ascii_lowercase();
+    if let Some(index) = id.find("claude") {
+        let candidate = id[index..].replace(['.', '_'], "-");
+        if opencode_model_or_variant(&candidate, "claude") {
+            return candidate;
+        }
+    }
+    if ["opus", "sonnet", "haiku", "fable", "mythos"]
+        .iter()
+        .any(|family| opencode_model_or_variant(&id, family))
+    {
+        return id.replace(['.', '_'], "-");
+    }
+    id
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnthropicThinkingMode {
+    LegacyBudget,
+    Adaptive,
+}
+
+fn model_matches_any(id: &str, families: &[&str]) -> bool {
+    families
+        .iter()
+        .any(|family| opencode_model_or_variant(id, family))
+}
+
+fn anthropic_thinking_mode(profile: &ProviderProfile) -> Option<AnthropicThinkingMode> {
+    let id = reasoning_model_id(profile);
+    if model_matches_any(&id, &["claude-opus-4-5", "opus-4-5"]) {
+        return Some(AnthropicThinkingMode::LegacyBudget);
+    }
+    if model_matches_any(
+        &id,
+        &[
+            "claude-mythos-preview",
+            "mythos-preview",
+            "claude-mythos-5",
+            "mythos-5",
+            "claude-fable-5",
+            "fable-5",
+            "claude-opus-4-6",
+            "opus-4-6",
+            "claude-sonnet-4-6",
+            "sonnet-4-6",
+            "claude-opus-4-7",
+            "opus-4-7",
+            "claude-opus-4-8",
+            "opus-4-8",
+            "claude-opus-5",
+            "opus-5",
+            "claude-sonnet-5",
+            "sonnet-5",
+        ],
+    ) {
+        return Some(AnthropicThinkingMode::Adaptive);
+    }
+    None
+}
+
+fn is_gemini_3_model(profile: &ProviderProfile) -> bool {
+    opencode_model_or_variant(&reasoning_model_id(profile), "gemini-3")
+}
+
+fn is_gemini_2_5_model(profile: &ProviderProfile) -> bool {
+    opencode_model_or_variant(&reasoning_model_id(profile), "gemini-2.5")
+}
+
+fn is_qwen_3_8_model(profile: &ProviderProfile) -> bool {
+    let id = reasoning_model_id(profile);
+    opencode_model_or_variant(&id, "qwen3.8") || opencode_model_or_variant(&id, "qwen-3.8")
+}
+
+fn is_deepseek_v4_model(profile: &ProviderProfile) -> bool {
+    opencode_model_or_variant(&reasoning_model_id(profile), "deepseek-v4")
+}
+
+fn is_original_gpt_5_model(id: &str) -> bool {
+    if id == "gpt-5" {
+        return true;
+    }
+    let Some(suffix) = id.strip_prefix("gpt-5-") else {
+        return false;
+    };
+    ["chat", "codex", "mini", "nano", "pro"]
+        .iter()
+        .any(|family| opencode_model_or_variant(suffix, family))
+        || suffix.split(['.', '_', '-']).next().is_some_and(|value| {
+            value.len() == 8 && value.chars().all(|character| character.is_ascii_digit())
+        })
+}
+
+fn gemini_2_5_thinking_budget(profile: &ProviderProfile, effort: &str) -> i64 {
+    if effort == "none" {
+        return 0;
+    }
+    let id = reasoning_model_id(profile);
+    match effort {
+        "low" => 2_048,
+        "medium" => 8_192,
+        "high" if id.contains("pro") => 32_768,
+        "high" => 24_576,
+        _ => -1,
+    }
 }
 
 fn supported_reasoning_efforts(profile: &ProviderProfile) -> &'static [&'static str] {
-    const OPENAI: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh"];
+    const GPT_52_PLUS: &[&str] = &["none", "low", "medium", "high", "xhigh"];
+    const GPT_PRO: &[&str] = &["medium", "high", "xhigh"];
+    const GPT_53_CODEX: &[&str] = &["low", "medium", "high", "xhigh"];
+    const GPT_51: &[&str] = &["none", "low", "medium", "high"];
+    const GPT_5: &[&str] = &["minimal", "low", "medium", "high"];
     const GPT_56: &[&str] = &["none", "low", "medium", "high", "xhigh", "max"];
     const THREE_LEVEL: &[&str] = &["low", "medium", "high"];
     const GROK_46: &[&str] = &["low", "medium", "high", "xhigh"];
-    const HIGH_MAX: &[&str] = &["high", "max"];
-    const GOOGLE: &[&str] = &["low", "high"];
+    const LOW_HIGH_MAX: &[&str] = &["low", "high", "max"];
+    const LOW_MEDIUM_HIGH_MAX: &[&str] = &["low", "medium", "high", "max"];
+    const LOW_MEDIUM_HIGH_XHIGH_MAX: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+    const GEMINI_WITH_OFF: &[&str] = &["none", "low", "medium", "high"];
+    const GEMINI_3_FLASH: &[&str] = &["minimal", "low", "medium", "high"];
+    const QWEN_CHAT: &[&str] = &["none", "low", "medium", "xhigh"];
+    const ALL_OPENAI_LEVELS: &[&str] =
+        &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
     let id = reasoning_model_id(profile);
     if opencode_model_or_variant(&id, "gpt-5.6") {
@@ -1299,8 +1606,11 @@ fn supported_reasoning_efforts(profile: &ProviderProfile) -> &'static [&'static 
     if opencode_model_or_variant(&id, "grok-4.5") {
         return THREE_LEVEL;
     }
-    if opencode_model_or_variant(&id, "glm-5") || opencode_model_or_variant(&id, "deepseek-v4") {
-        return HIGH_MAX;
+    if opencode_model_or_variant(&id, "deepseek-v4") {
+        return LOW_HIGH_MAX;
+    }
+    if opencode_model_or_variant(&id, "glm-5") {
+        return &[];
     }
 
     // Other OpenCode Go models currently publish reasoning output but not a
@@ -1310,19 +1620,79 @@ fn supported_reasoning_efforts(profile: &ProviderProfile) -> &'static [&'static 
         return &[];
     }
 
-    if ["claude", "opus", "sonnet", "haiku"]
-        .iter()
-        .any(|family| opencode_model_or_variant(&id, family))
-    {
-        return HIGH_MAX;
+    if is_qwen_3_8_model(profile) {
+        return match profile.protocol {
+            ProviderProtocol::OpenaiChat => QWEN_CHAT,
+            ProviderProtocol::OpenaiResponses => ALL_OPENAI_LEVELS,
+            _ => &[],
+        };
     }
-    if matches!(profile.protocol, ProviderProtocol::GeminiGenerateContent)
-        || opencode_model_or_variant(&id, "gemini")
-    {
-        return GOOGLE;
+
+    if model_matches_any(&id, &["claude-opus-4-5", "opus-4-5"]) {
+        return THREE_LEVEL;
     }
-    if opencode_model_or_variant(&id, "gpt-5") {
-        return OPENAI;
+    if model_matches_any(
+        &id,
+        &[
+            "claude-mythos-preview",
+            "mythos-preview",
+            "claude-opus-4-6",
+            "opus-4-6",
+            "claude-sonnet-4-6",
+            "sonnet-4-6",
+        ],
+    ) {
+        return LOW_MEDIUM_HIGH_MAX;
+    }
+    if model_matches_any(
+        &id,
+        &[
+            "claude-mythos-5",
+            "mythos-5",
+            "claude-fable-5",
+            "fable-5",
+            "claude-opus-4-7",
+            "opus-4-7",
+            "claude-opus-4-8",
+            "opus-4-8",
+            "claude-opus-5",
+            "opus-5",
+            "claude-sonnet-5",
+            "sonnet-5",
+        ],
+    ) {
+        return LOW_MEDIUM_HIGH_XHIGH_MAX;
+    }
+    if opencode_model_or_variant(&id, "gemini-3") {
+        return if id.split(['.', '_', '-']).any(|part| part == "pro") {
+            THREE_LEVEL
+        } else {
+            GEMINI_3_FLASH
+        };
+    }
+    if opencode_model_or_variant(&id, "gemini-2.5-pro") {
+        return THREE_LEVEL;
+    }
+    if opencode_model_or_variant(&id, "gemini-2.5-flash") {
+        return GEMINI_WITH_OFF;
+    }
+    if matches!(profile.protocol, ProviderProtocol::GeminiGenerateContent) {
+        return &[];
+    }
+    if model_matches_any(&id, &["gpt-5.5-pro", "gpt-5.4-pro", "gpt-5.2-pro"]) {
+        return GPT_PRO;
+    }
+    if opencode_model_or_variant(&id, "gpt-5.3-codex") {
+        return GPT_53_CODEX;
+    }
+    if model_matches_any(&id, &["gpt-5.5", "gpt-5.4", "gpt-5.3", "gpt-5.2"]) {
+        return GPT_52_PLUS;
+    }
+    if opencode_model_or_variant(&id, "gpt-5.1") {
+        return GPT_51;
+    }
+    if is_original_gpt_5_model(&id) {
+        return GPT_5;
     }
     if ["o1", "o3", "o4"]
         .iter()
@@ -1371,14 +1741,44 @@ fn reasoning_budget_tokens(effort: &str) -> u64 {
     }
 }
 
+fn reasoning_max_output_tokens(effort: &str) -> u64 {
+    reasoning_budget_tokens(effort)
+        .saturating_add(4_096)
+        .max(8_192)
+}
+
+fn reasoning_max_output_tokens_for_profile(profile: &ProviderProfile, effort: &str) -> u64 {
+    if matches!(
+        anthropic_thinking_mode(profile),
+        Some(AnthropicThinkingMode::Adaptive)
+    ) {
+        return match effort {
+            "medium" => 16_384,
+            "high" => 32_768,
+            "xhigh" | "max" => 65_536,
+            _ => 8_192,
+        };
+    }
+    reasoning_max_output_tokens(effort)
+}
+
+fn chat_completion_token_limit_field(profile: &ProviderProfile) -> &'static str {
+    let id = reasoning_model_id(profile);
+    if opencode_model_or_variant(&id, "gpt-5")
+        || ["o1", "o3", "o4"]
+            .iter()
+            .any(|family| opencode_model_or_variant(&id, family))
+    {
+        "max_completion_tokens"
+    } else {
+        "max_tokens"
+    }
+}
+
 fn anthropic_max_tokens(request: &AgentTurnRequest) -> u64 {
     normalized_reasoning_effort_value(request)
         .filter(|effort| *effort != "none")
-        .map(|effort| {
-            reasoning_budget_tokens(effort)
-                .saturating_add(4_096)
-                .max(8_192)
-        })
+        .map(|effort| reasoning_max_output_tokens_for_profile(&request.profile, effort))
         .unwrap_or(8_192)
 }
 
@@ -1398,6 +1798,7 @@ fn parse_openai_chat_value(
     Ok(AgentTurnResponse {
         content: extract_text(message.get("content")),
         tool_calls,
+        provider_reasoning_blocks: Vec::new(),
         input_tokens: usage
             .and_then(|item| item.get("prompt_tokens"))
             .and_then(Value::as_u64),
@@ -1445,6 +1846,7 @@ fn parse_openai_responses_value(
     Ok(AgentTurnResponse {
         content,
         tool_calls,
+        provider_reasoning_blocks: Vec::new(),
         input_tokens: usage
             .and_then(|item| item.get("input_tokens"))
             .and_then(Value::as_u64),
@@ -1457,6 +1859,39 @@ fn parse_openai_responses_value(
     })
 }
 
+fn append_json_string_field(block: Option<&mut Value>, field: &str, delta: Option<&Value>) {
+    let Some(delta) = delta.and_then(Value::as_str) else {
+        return;
+    };
+    let Some(block) = block.and_then(Value::as_object_mut) else {
+        return;
+    };
+    let current = block.get(field).and_then(Value::as_str).unwrap_or_default();
+    block.insert(field.to_owned(), Value::String(format!("{current}{delta}")));
+}
+
+fn anthropic_reasoning_block(block: &Value) -> Option<Value> {
+    match block.get("type").and_then(Value::as_str) {
+        Some("thinking") => Some(json!({
+            "type": "thinking",
+            "thinking": block.get("thinking")?.as_str()?,
+            "signature": block.get("signature")?.as_str()?
+        })),
+        Some("redacted_thinking") => Some(json!({
+            "type": "redacted_thinking",
+            "data": block.get("data")?.as_str()?
+        })),
+        _ => None,
+    }
+}
+
+fn anthropic_reasoning_blocks(blocks: &[Value]) -> Vec<Value> {
+    blocks
+        .iter()
+        .filter_map(anthropic_reasoning_block)
+        .collect()
+}
+
 fn parse_anthropic_value(
     value: &Value,
     request_id: Option<String>,
@@ -1466,9 +1901,10 @@ fn parse_anthropic_value(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let provider_reasoning_blocks = anthropic_reasoning_blocks(&blocks);
     let mut content = String::new();
     let mut tool_calls = Vec::new();
-    for block in blocks {
+    for block in &blocks {
         match block.get("type").and_then(Value::as_str) {
             Some("text") => {
                 if let Some(text) = block.get("text").and_then(Value::as_str) {
@@ -1495,6 +1931,7 @@ fn parse_anthropic_value(
     Ok(AgentTurnResponse {
         content,
         tool_calls,
+        provider_reasoning_blocks,
         input_tokens: usage
             .and_then(|item| item.get("input_tokens"))
             .and_then(Value::as_u64),
@@ -1533,6 +1970,7 @@ fn parse_gemini_value(
     Ok(AgentTurnResponse {
         content,
         tool_calls,
+        provider_reasoning_blocks: Vec::new(),
         input_tokens: usage
             .and_then(|item| item.get("promptTokenCount"))
             .and_then(Value::as_u64),
@@ -1915,6 +2353,11 @@ fn message_char_cost(message: &AgentMessage) -> usize {
                     + call.name.chars().count()
                     + call.arguments.to_string().chars().count()
             })
+            .sum::<usize>()
+        + message
+            .provider_reasoning_blocks
+            .iter()
+            .map(|block| block.to_string().chars().count())
             .sum::<usize>()
         + message
             .attachments
@@ -2352,8 +2795,11 @@ fn anthropic_messages(messages: &[AgentMessage]) -> Vec<Value> {
         }
 
         output.push(match message.role.as_str() {
-            "assistant" if !message.tool_calls.is_empty() => {
-                let mut content = Vec::new();
+            "assistant"
+                if !message.tool_calls.is_empty()
+                    || !message.provider_reasoning_blocks.is_empty() =>
+            {
+                let mut content = anthropic_reasoning_blocks(&message.provider_reasoning_blocks);
                 if !message.content.is_empty() {
                     content.push(json!({ "type": "text", "text": message.content }));
                 }
@@ -3286,6 +3732,7 @@ mod tests {
             ),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            provider_reasoning_blocks: Vec::new(),
             internal: true,
             attachments: Vec::new(),
         }];
@@ -3347,6 +3794,7 @@ mod tests {
                 content: String::new(),
                 tool_calls: vec![manifest_call.clone()],
                 tool_call_id: None,
+                provider_reasoning_blocks: Vec::new(),
                 internal: false,
                 attachments: Vec::new(),
             },
@@ -3355,6 +3803,7 @@ mod tests {
                 content: "Skill: customize-levelup-layout\nFile: SKILL.md\n\n# Theme".to_owned(),
                 tool_calls: Vec::new(),
                 tool_call_id: Some("read-manifest".to_owned()),
+                provider_reasoning_blocks: Vec::new(),
                 internal: false,
                 attachments: Vec::new(),
             },
@@ -3400,6 +3849,7 @@ mod tests {
                     arguments: json!({ "skillId": "skill-hatch" }),
                 }],
                 tool_call_id: None,
+                provider_reasoning_blocks: Vec::new(),
                 internal: false,
                 attachments: Vec::new(),
             },
@@ -3408,6 +3858,7 @@ mod tests {
                 content: "The requested Skill is not enabled".to_owned(),
                 tool_calls: Vec::new(),
                 tool_call_id: Some("read-1".to_owned()),
+                provider_reasoning_blocks: Vec::new(),
                 internal: false,
                 attachments: Vec::new(),
             },
@@ -3442,6 +3893,7 @@ mod tests {
                     },
                 ],
                 tool_call_id: None,
+                provider_reasoning_blocks: Vec::new(),
                 internal: false,
                 attachments: Vec::new(),
             },
@@ -3450,6 +3902,7 @@ mod tests {
                 content: "Skill file is unavailable".to_owned(),
                 tool_calls: Vec::new(),
                 tool_call_id: Some("read-failed".to_owned()),
+                provider_reasoning_blocks: Vec::new(),
                 internal: false,
                 attachments: Vec::new(),
             },
@@ -3459,6 +3912,7 @@ mod tests {
                     .to_owned(),
                 tool_calls: Vec::new(),
                 tool_call_id: Some("read-success".to_owned()),
+                provider_reasoning_blocks: Vec::new(),
                 internal: false,
                 attachments: Vec::new(),
             },
@@ -3476,6 +3930,7 @@ mod tests {
                     arguments: json!({ "skillId": "skill-hatch", "path": "SKILL.md" }),
                 }],
                 tool_call_id: None,
+                provider_reasoning_blocks: Vec::new(),
                 internal: false,
                 attachments: Vec::new(),
             },
@@ -3484,6 +3939,7 @@ mod tests {
                 content: "Skill: hatch-pet\nFile: SKILL.md\n\n# Hatch Pet".to_owned(),
                 tool_calls: Vec::new(),
                 tool_call_id: Some("read-manifest".to_owned()),
+                provider_reasoning_blocks: Vec::new(),
                 internal: false,
                 attachments: Vec::new(),
             },
@@ -3516,6 +3972,7 @@ mod tests {
                     arguments: json!({ "skillId": "skill-hatch" }),
                 }],
                 tool_call_id: None,
+                provider_reasoning_blocks: Vec::new(),
                 internal: false,
                 attachments: Vec::new(),
             },
@@ -3524,6 +3981,7 @@ mod tests {
                 content: "Skill: hatch-pet\nFile: SKILL.md\n\n# Hatch Pet".to_owned(),
                 tool_calls: Vec::new(),
                 tool_call_id: Some("read-1".to_owned()),
+                provider_reasoning_blocks: Vec::new(),
                 internal: false,
                 attachments: Vec::new(),
             },
@@ -3564,6 +4022,7 @@ mod tests {
             content: "[LEVELUP_HATCH_BOOTSTRAP_COMPLETE]\nready_jobs: [base]".to_owned(),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            provider_reasoning_blocks: Vec::new(),
             internal: true,
             attachments: Vec::new(),
         }];
@@ -3600,6 +4059,7 @@ mod tests {
                 ),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                provider_reasoning_blocks: Vec::new(),
                 internal: true,
                 attachments: Vec::new(),
             },
@@ -4231,6 +4691,7 @@ mod tests {
                 content: "Inspect the project".to_owned(),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                provider_reasoning_blocks: Vec::new(),
                 internal: false,
                 attachments: Vec::new(),
             }],
@@ -4256,6 +4717,7 @@ mod tests {
             content: content.into(),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            provider_reasoning_blocks: Vec::new(),
             internal: false,
             attachments: Vec::new(),
         }
@@ -4272,6 +4734,7 @@ mod tests {
                     arguments,
                 }],
                 tool_call_id: None,
+                provider_reasoning_blocks: Vec::new(),
                 internal: false,
                 attachments: Vec::new(),
             },
@@ -4280,6 +4743,7 @@ mod tests {
                 content: output,
                 tool_calls: Vec::new(),
                 tool_call_id: Some(id.to_owned()),
+                provider_reasoning_blocks: Vec::new(),
                 internal: false,
                 attachments: Vec::new(),
             },
@@ -4514,6 +4978,7 @@ mod tests {
                     },
                 ],
                 tool_call_id: None,
+                provider_reasoning_blocks: Vec::new(),
                 internal: false,
                 attachments: Vec::new(),
             },
@@ -4522,6 +4987,7 @@ mod tests {
                 content: "first result".to_owned(),
                 tool_calls: Vec::new(),
                 tool_call_id: Some("call-a".to_owned()),
+                provider_reasoning_blocks: Vec::new(),
                 internal: false,
                 attachments: Vec::new(),
             },
@@ -4530,6 +4996,7 @@ mod tests {
                 content: "second result".to_owned(),
                 tool_calls: Vec::new(),
                 tool_call_id: Some("call-b".to_owned()),
+                provider_reasoning_blocks: Vec::new(),
                 internal: false,
                 attachments: Vec::new(),
             },
@@ -4613,6 +5080,7 @@ mod tests {
                 arguments: json!({ "path": "README.md" }),
             }],
             tool_call_id: None,
+            provider_reasoning_blocks: Vec::new(),
             internal: false,
             attachments: Vec::new(),
         });
@@ -4710,7 +5178,7 @@ mod tests {
 
     #[tokio::test]
     async fn parses_anthropic_tool_use_blocks() {
-        let body = r#"{"content":[{"type":"text","text":"Searching now."},{"type":"tool_use","id":"call-anthropic","name":"search_files","input":{"query":"TODO"}}],"usage":{"input_tokens":20,"output_tokens":9}}"#;
+        let body = r#"{"content":[{"type":"thinking","thinking":"I should search.","signature":"signed-thinking"},{"type":"redacted_thinking","data":"encrypted-thinking"},{"type":"text","text":"Searching now."},{"type":"tool_use","id":"call-anthropic","name":"search_files","input":{"query":"TODO"}}],"usage":{"input_tokens":20,"output_tokens":9}}"#;
         let request = test_request(
             mock_server("/v1/messages", body),
             ProviderProtocol::AnthropicMessages,
@@ -4720,6 +5188,39 @@ mod tests {
         assert_eq!(result.tool_calls[0].name, "search_files");
         assert_eq!(result.tool_calls[0].arguments["query"], "TODO");
         assert_eq!(result.output_tokens, Some(9));
+        assert_eq!(
+            result.provider_reasoning_blocks,
+            vec![
+                json!({
+                    "type": "thinking",
+                    "thinking": "I should search.",
+                    "signature": "signed-thinking"
+                }),
+                json!({ "type": "redacted_thinking", "data": "encrypted-thinking" }),
+            ]
+        );
+
+        let replay = anthropic_messages(&[AgentMessage {
+            role: "assistant".to_owned(),
+            content: result.content,
+            tool_calls: result.tool_calls,
+            tool_call_id: None,
+            provider_reasoning_blocks: result.provider_reasoning_blocks,
+            internal: false,
+            attachments: Vec::new(),
+        }]);
+        assert_eq!(
+            replay[0].pointer("/content/0/signature"),
+            Some(&json!("signed-thinking"))
+        );
+        assert_eq!(
+            replay[0].pointer("/content/1/data"),
+            Some(&json!("encrypted-thinking"))
+        );
+        assert_eq!(
+            replay[0].pointer("/content/3/type"),
+            Some(&json!("tool_use"))
+        );
     }
 
     #[tokio::test]
@@ -4862,19 +5363,51 @@ mod tests {
         request.profile.model = "claude-opus-4-7".to_owned();
         request.reasoning_effort = Some("max".to_owned());
         let body = anthropic_body(&request, false);
+        assert_eq!(body.pointer("/thinking/type"), Some(&json!("adaptive")));
+        assert!(body.pointer("/thinking/budget_tokens").is_none());
+        assert_eq!(body.pointer("/output_config/effort"), Some(&json!("max")));
+        assert_eq!(body["max_tokens"], json!(65_536));
+
+        request.profile.model = "claude-opus-4-5".to_owned();
+        request.reasoning_effort = Some("high".to_owned());
+        let body = anthropic_body(&request, false);
         assert_eq!(body.pointer("/thinking/type"), Some(&json!("enabled")));
         assert_eq!(
             body.pointer("/thinking/budget_tokens"),
-            Some(&json!(32_768))
+            Some(&json!(16_384))
         );
-        assert_eq!(body["max_tokens"], json!(36_864));
+        assert_eq!(body.pointer("/output_config/effort"), Some(&json!("high")));
 
         request.profile.protocol = ProviderProtocol::GeminiGenerateContent;
         request.profile.model = "gemini-3.6-flash".to_owned();
         request.reasoning_effort = Some("high".to_owned());
         assert_eq!(
+            gemini_body(&request).pointer("/generationConfig/thinkingConfig/thinkingLevel"),
+            Some(&json!("HIGH"))
+        );
+        assert!(
+            gemini_body(&request)
+                .pointer("/generationConfig/thinkingConfig/thinkingBudget")
+                .is_none()
+        );
+
+        request.profile.model = "gemini-2.5-pro".to_owned();
+        request.reasoning_effort = Some("medium".to_owned());
+        let body = gemini_body(&request);
+        assert_eq!(
+            body.pointer("/generationConfig/thinkingConfig/thinkingBudget"),
+            Some(&json!(8_192))
+        );
+        assert!(
+            body.pointer("/generationConfig/thinkingConfig/thinkingLevel")
+                .is_none()
+        );
+
+        request.profile.model = "gemini-2.5-flash".to_owned();
+        request.reasoning_effort = Some("none".to_owned());
+        assert_eq!(
             gemini_body(&request).pointer("/generationConfig/thinkingConfig/thinkingBudget"),
-            Some(&json!(16_384))
+            Some(&json!(0))
         );
 
         // MiniMax M3 is a reasoning model, but OpenCode Go does not advertise
@@ -4898,6 +5431,159 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_effort_adds_protocol_compatible_output_limits() {
+        let mut request = test_request(
+            "https://levelup.example".to_owned(),
+            ProviderProtocol::OpenaiChat,
+        );
+        request.profile.model = "gpt-5.6-sol".to_owned();
+        request.reasoning_effort = Some("high".to_owned());
+        let body = chat_body(&request, false);
+        assert_eq!(body.get("max_completion_tokens"), Some(&json!(20_480)));
+        assert!(body.get("max_tokens").is_none());
+
+        request.profile.model = "claude-opus-4-7".to_owned();
+        request.reasoning_effort = Some("max".to_owned());
+        let body = chat_body(&request, false);
+        assert_eq!(body.get("max_tokens"), Some(&json!(65_536)));
+        assert!(body.get("max_completion_tokens").is_none());
+
+        request.profile.protocol = ProviderProtocol::OpenaiResponses;
+        let body = responses_body(&request, false);
+        assert_eq!(body.get("max_output_tokens"), Some(&json!(65_536)));
+
+        request.profile.model = "gpt-5.6-sol".to_owned();
+        request.reasoning_effort = Some("none".to_owned());
+        assert!(
+            responses_body(&request, false)
+                .get("max_output_tokens")
+                .is_none()
+        );
+
+        request.profile.protocol = ProviderProtocol::OpenaiChat;
+        request.profile.model = "unknown-compatible-model".to_owned();
+        request.reasoning_effort = Some("high".to_owned());
+        let body = chat_body(&request, false);
+        assert!(body.get("max_tokens").is_none());
+        assert!(body.get("max_completion_tokens").is_none());
+
+        request.profile.protocol = ProviderProtocol::OpenaiResponses;
+        let body = responses_body(&request, false);
+        assert!(body.get("reasoning").is_none());
+        assert!(body.get("max_output_tokens").is_none());
+    }
+
+    #[test]
+    fn qwen_3_8_uses_protocol_specific_thinking_controls() {
+        let mut request = test_request(
+            "https://levelup.example".to_owned(),
+            ProviderProtocol::OpenaiChat,
+        );
+        request.profile.model = "qwen3.8-max".to_owned();
+        request.reasoning_effort = Some("none".to_owned());
+        let body = chat_body(&request, false);
+        assert_eq!(body.get("enable_thinking"), Some(&json!(false)));
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("thinking_budget").is_none());
+
+        request.reasoning_effort = Some("low".to_owned());
+        let body = chat_body(&request, false);
+        assert_eq!(body.get("reasoning_effort"), Some(&json!("low")));
+        assert!(body.get("enable_thinking").is_none());
+
+        request.profile.protocol = ProviderProtocol::OpenaiResponses;
+        request.reasoning_effort = Some("max".to_owned());
+        assert_eq!(
+            responses_body(&request, false).pointer("/reasoning/effort"),
+            Some(&json!("max"))
+        );
+    }
+
+    #[tokio::test]
+    async fn anthropic_adaptive_effort_request_includes_beta_contract() {
+        let (base_url, capture) = mock_contract_server(
+            r#"{"content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}"#,
+        );
+        let mut request = test_request(base_url, ProviderProtocol::AnthropicMessages);
+        request.profile.model = "claude-opus-4-7".to_owned();
+        request.reasoning_effort = Some("xhigh".to_owned());
+        let result = run_turn(&Client::new(), request, "anthropic-key")
+            .await
+            .unwrap();
+        assert_eq!(result.content, "ok");
+
+        let captured = capture
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let headers = captured
+            .split_once("\r\n\r\n")
+            .unwrap()
+            .0
+            .to_ascii_lowercase();
+        assert!(headers.contains("anthropic-beta: effort-2025-11-24"));
+        let body = captured_json_request(captured, "/v1/messages");
+        assert_eq!(body.pointer("/thinking/type"), Some(&json!("adaptive")));
+        assert_eq!(body.pointer("/output_config/effort"), Some(&json!("xhigh")));
+    }
+
+    #[tokio::test]
+    async fn deepseek_v4_uses_each_compatibility_protocols_reasoning_contract() {
+        let cases = [
+            (
+                ProviderProtocol::OpenaiChat,
+                "low",
+                "/v1/chat/completions",
+                r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#,
+            ),
+            (
+                ProviderProtocol::AnthropicMessages,
+                "high",
+                "/v1/messages",
+                r#"{"content":[{"type":"text","text":"ok"}]}"#,
+            ),
+            (
+                ProviderProtocol::OpenaiResponses,
+                "max",
+                "/v1/responses",
+                r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}"#,
+            ),
+        ];
+
+        for (protocol, effort, path, response) in cases {
+            let (base_url, capture) = mock_contract_server(response);
+            let mut request = test_request(base_url, protocol.clone());
+            request.profile.model = "deepseek-v4-pro".to_owned();
+            request.reasoning_effort = Some(effort.to_owned());
+            let result = run_turn(&Client::new(), request, "deepseek-key")
+                .await
+                .unwrap();
+            assert_eq!(result.content, "ok");
+
+            let captured = capture
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            let body = captured_json_request(captured, path);
+            match protocol {
+                ProviderProtocol::OpenaiChat => {
+                    assert_eq!(body.get("reasoning_effort"), Some(&json!("low")));
+                    assert_eq!(body.pointer("/thinking/type"), Some(&json!("enabled")));
+                }
+                ProviderProtocol::AnthropicMessages => {
+                    assert_eq!(body.pointer("/output_config/effort"), Some(&json!("high")));
+                    assert_eq!(body.pointer("/thinking/type"), Some(&json!("enabled")));
+                    assert!(body.pointer("/thinking/budget_tokens").is_none());
+                }
+                ProviderProtocol::OpenaiResponses => {
+                    assert_eq!(body.pointer("/reasoning/effort"), Some(&json!("max")));
+                    assert!(body.get("thinking").is_none());
+                    assert!(body.get("output_config").is_none());
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
     fn reasoning_effort_capabilities_are_model_specific() {
         let mut profile = test_request(
             "https://levelup.example".to_owned(),
@@ -4911,14 +5597,72 @@ mod tests {
             ),
             ("grok-4.6", &["low", "medium", "high", "xhigh"]),
             ("grok-4.5", &["low", "medium", "high"]),
-            ("glm-5.3", &["high", "max"]),
-            ("deepseek-v4-pro", &["high", "max"]),
+            ("glm-5.3", &[]),
+            ("deepseek-v4-pro", &["low", "high", "max"]),
             ("kimi-k3", &[]),
             ("minimax-m3", &[]),
             ("qwen3.8-max", &[]),
             ("mimo-v2.5", &[]),
         ];
         for (model, expected) in cases {
+            profile.model = (*model).to_owned();
+            assert_eq!(supported_reasoning_efforts(&profile), *expected, "{model}");
+        }
+
+        profile.protocol = ProviderProtocol::AnthropicMessages;
+        let claude_cases: &[(&str, &[&str])] = &[
+            ("claude-opus-4-5", &["low", "medium", "high"]),
+            ("claude-sonnet-4-6", &["low", "medium", "high", "max"]),
+            (
+                "claude-opus-4-7",
+                &["low", "medium", "high", "xhigh", "max"],
+            ),
+            (
+                "anthropic.claude_opus_4_7_20260831",
+                &["low", "medium", "high", "xhigh", "max"],
+            ),
+            ("claude-sonnet-4-5", &[]),
+        ];
+        for (model, expected) in claude_cases {
+            profile.model = (*model).to_owned();
+            assert_eq!(supported_reasoning_efforts(&profile), *expected, "{model}");
+        }
+
+        profile.protocol = ProviderProtocol::GeminiGenerateContent;
+        let gemini_cases: &[(&str, &[&str])] = &[
+            ("gemini-3.1-pro", &["low", "medium", "high"]),
+            ("gemini-3.1-flash", &["minimal", "low", "medium", "high"]),
+            ("gemini-2.5-flash", &["none", "low", "medium", "high"]),
+            (
+                "gemini-3.2-flash-lite",
+                &["minimal", "low", "medium", "high"],
+            ),
+            ("gemini-2.5-experimental", &[]),
+        ];
+        for (model, expected) in gemini_cases {
+            profile.model = (*model).to_owned();
+            assert_eq!(supported_reasoning_efforts(&profile), *expected, "{model}");
+        }
+
+        profile.protocol = ProviderProtocol::OpenaiResponses;
+        let openai_cases: &[(&str, &[&str])] = &[
+            (
+                "gpt-5.6-sol",
+                &["none", "low", "medium", "high", "xhigh", "max"],
+            ),
+            ("gpt-5.5", &["none", "low", "medium", "high", "xhigh"]),
+            ("gpt-5.4-pro", &["medium", "high", "xhigh"]),
+            ("gpt-5.3", &["none", "low", "medium", "high", "xhigh"]),
+            (
+                "gpt-5.3-codex-20260831",
+                &["low", "medium", "high", "xhigh"],
+            ),
+            ("gpt-5.2-pro", &["medium", "high", "xhigh"]),
+            ("gpt-5.1", &["none", "low", "medium", "high"]),
+            ("gpt-5-codex", &["minimal", "low", "medium", "high"]),
+            ("gpt-5.7", &[]),
+        ];
+        for (model, expected) in openai_cases {
             profile.model = (*model).to_owned();
             assert_eq!(supported_reasoning_efforts(&profile), *expected, "{model}");
         }
@@ -4934,7 +5678,7 @@ mod tests {
                 "responses",
             ),
             (
-                "glm-5.3",
+                "deepseek-v4-pro",
                 "/v1/chat/completions",
                 r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#,
                 "chat",
@@ -5075,10 +5819,14 @@ mod tests {
     async fn streams_anthropic_content_and_tool_json() {
         let events = concat!(
             "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":25}}}\n\n",
-            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
-            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Reading file\"}}\n\n",
-            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call-anthropic\",\"name\":\"read_file\",\"input\":{}}}\n\n",
-            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"src/App.tsx\\\"}\"}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Inspect first.\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"signed-\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"stream\"}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Reading file\"}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call-anthropic\",\"name\":\"read_file\",\"input\":{}}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"src/App.tsx\\\"}\"}}\n\n",
             "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":10}}\n\n",
             "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
         );
@@ -5093,6 +5841,14 @@ mod tests {
         assert_eq!(result.tool_calls[0].arguments["path"], "src/App.tsx");
         assert_eq!(result.input_tokens, Some(25));
         assert_eq!(result.output_tokens, Some(10));
+        assert_eq!(
+            result.provider_reasoning_blocks,
+            vec![json!({
+                "type": "thinking",
+                "thinking": "Inspect first.",
+                "signature": "signed-stream"
+            })]
+        );
     }
 
     #[tokio::test]
@@ -5171,6 +5927,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reasoning_stream_uses_extended_idle_timeout() {
+        let mut request = test_request(
+            mock_timed_sse_server(
+                "/v1/chat/completions",
+                std::time::Duration::ZERO,
+                vec![(
+                    PROVIDER_STREAM_IDLE_TIMEOUT + std::time::Duration::from_millis(150),
+                    "data: [DONE]\n\n",
+                )],
+                std::time::Duration::ZERO,
+            ),
+            ProviderProtocol::OpenaiChat,
+        );
+        request.profile.model = "gpt-5.4".to_owned();
+        request.reasoning_effort = Some("high".to_owned());
+        assert_eq!(
+            provider_stream_idle_timeout(&request),
+            PROVIDER_REASONING_STREAM_IDLE_TIMEOUT
+        );
+        assert_eq!(
+            provider_first_response_timeout(&request),
+            PROVIDER_REASONING_FIRST_RESPONSE_TIMEOUT
+        );
+
+        let started = std::time::Instant::now();
+        let (result, emitted) = collect_stream(request).await;
+        assert!(started.elapsed() > PROVIDER_STREAM_IDLE_TIMEOUT);
+        assert!(result.content.is_empty());
+        assert!(emitted.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reasoning_first_response_waits_beyond_the_stream_idle_limit() {
+        let mut request = test_request(
+            mock_timed_sse_server(
+                "/v1/chat/completions",
+                PROVIDER_REASONING_STREAM_IDLE_TIMEOUT + std::time::Duration::from_millis(100),
+                vec![(std::time::Duration::ZERO, "data: [DONE]\n\n")],
+                std::time::Duration::ZERO,
+            ),
+            ProviderProtocol::OpenaiChat,
+        );
+        request.profile.model = "gpt-5.4".to_owned();
+        request.reasoning_effort = Some("high".to_owned());
+
+        let (result, emitted) = collect_stream(request).await;
+        assert!(result.content.is_empty());
+        assert!(emitted.is_empty());
+    }
+
+    #[tokio::test]
     async fn stream_eof_without_a_result_is_reconnectable() {
         let request = test_request(
             mock_timed_sse_server(
@@ -5195,15 +6002,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_activity_resets_the_idle_timeout() {
+    async fn partial_stream_eof_requires_each_protocols_terminal_event() {
+        let cases = [
+            (
+                ProviderProtocol::OpenaiChat,
+                "/v1/chat/completions",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"partial chat\"}}]}\n\n",
+            ),
+            (
+                ProviderProtocol::OpenaiResponses,
+                "/v1/responses",
+                "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"partial-call\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\"}}\n\n",
+            ),
+            (
+                ProviderProtocol::AnthropicMessages,
+                "/v1/messages",
+                concat!(
+                    "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+                    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"partial thought\"}}\n\n"
+                ),
+            ),
+            (
+                ProviderProtocol::GeminiGenerateContent,
+                "/v1beta/models/test-model:streamGenerateContent?alt=sse",
+                "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"partial Gemini\"}]}}]}\n\n",
+            ),
+        ];
+
+        for (protocol, path, events) in cases {
+            let request = test_request(mock_sse_server(path, events), protocol.clone());
+            let error = run_turn_stream(
+                &Client::new(),
+                request,
+                "test-key",
+                CancellationToken::new(),
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error, PROVIDER_STREAM_INTERRUPTED, "{protocol:?}");
+            assert!(is_reconnectable_provider_error(&error), "{protocol:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn sse_comment_activity_resets_the_idle_timeout() {
         let gap = std::time::Duration::from_millis(150);
         let request = test_request(
             mock_timed_sse_server(
                 "/v1/messages",
                 std::time::Duration::ZERO,
                 vec![
-                    (gap, "event: ping\ndata: {\"type\":\"ping\"}\n\n"),
-                    (gap, "event: ping\ndata: {\"type\":\"ping\"}\n\n"),
+                    (gap, ": ping\n\n"),
+                    (gap, ": ping\n\n"),
                     (
                         gap,
                         concat!(
@@ -5227,7 +6078,7 @@ mod tests {
     async fn streams_gemini_content_tools_and_usage() {
         let events = concat!(
             "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hello \"}]}}]}\n\n",
-            "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Gemini\"},{\"functionCall\":{\"name\":\"search_files\",\"args\":{\"query\":\"TODO\"}}}]}}],\"usageMetadata\":{\"promptTokenCount\":22,\"candidatesTokenCount\":7}}\n\n"
+            "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Gemini\"},{\"functionCall\":{\"name\":\"search_files\",\"args\":{\"query\":\"TODO\"}}}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":22,\"candidatesTokenCount\":7}}\n\n"
         );
         let request = test_request(
             mock_sse_server(
@@ -5256,6 +6107,7 @@ mod tests {
                     arguments: json!({ "path": "README.md" }),
                 }],
                 tool_call_id: None,
+                provider_reasoning_blocks: Vec::new(),
                 internal: false,
                 attachments: Vec::new(),
             },
@@ -5264,6 +6116,7 @@ mod tests {
                 content: "contents".to_owned(),
                 tool_calls: Vec::new(),
                 tool_call_id: Some("gemini-call-0".to_owned()),
+                provider_reasoning_blocks: Vec::new(),
                 internal: false,
                 attachments: Vec::new(),
             },

@@ -109,7 +109,7 @@ import {
 } from "../lib/constellation";
 import { tr } from "../lib/i18n";
 import { mediaModelSupportsExplicitImageMask } from "../lib/mediaCapabilities";
-import { isTextGenerationModel } from "../lib/modelSelection";
+import { isTextGenerationModel, reasoningEffortForProfile } from "../lib/modelSelection";
 import type {
   AgentMessage,
   ImageAttachment,
@@ -118,6 +118,7 @@ import type {
   MediaGenerationRequest,
   ProviderModelInfo,
   ProviderProfile,
+  ReasoningEffort,
 } from "../lib/types";
 import { ConstellationCanvasEditor } from "./ConstellationCanvasEditor";
 import { MediaImagePreview } from "./MediaStudio";
@@ -139,6 +140,7 @@ interface ConstellationStudioProps {
   armorWritingIntensity: ArmorWritingIntensity;
   activeProfile: ProviderProfile;
   profiles: ProviderProfile[];
+  reasoningEffort: ReasoningEffort;
   workspace?: string;
   mediaCatalogRevision: number;
   onConfigureConnection: () => void;
@@ -203,6 +205,7 @@ function ConstellationStudioInner({
   armorWritingIntensity,
   activeProfile,
   profiles,
+  reasoningEffort,
   workspace,
   mediaCatalogRevision,
   onConfigureConnection,
@@ -887,6 +890,7 @@ function ConstellationStudioInner({
             skills: armorModeSkills,
             surface: "constellation",
           }),
+          reasoningEffortForProfile(profile, reasoningEffort),
         );
         const text = (streamed || response.content).trim();
         if (!text) throw new Error(tr("写作模型没有返回正文", "The writing model returned no content"));

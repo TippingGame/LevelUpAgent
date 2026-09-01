@@ -63,6 +63,10 @@ const PROVIDER_RECONNECT_RETRIES: u32 = 5;
 const LARGE_INLINE_IMAGE_BYTES: u64 = 4 * 1024 * 1024;
 const PROVIDER_ROUND_TIMEOUT: Duration = Duration::from_secs(240);
 const LONG_PROVIDER_ROUND_TIMEOUT: Duration = Duration::from_secs(360);
+// The relay can legitimately wait up to 30 minutes for an Anthropic first
+// response. Keep a small client-side margin so it can fail over or return the
+// upstream error instead of being cancelled at the same deadline.
+const REASONING_PROVIDER_ROUND_TIMEOUT: Duration = Duration::from_secs(1_860);
 const PROVIDER_ROUND_TIMEOUT_PREFIX: &str = "Provider round timed out";
 const NON_GOAL_HARNESS_MAX_ROUNDS: usize = 64;
 const EMPTY_POST_TOOL_RESPONSE_RETRIES: usize = 2;
@@ -103,6 +107,7 @@ enum HarnessPhase {
 struct PendingConfigWrite {
     target: ExternalConfigTarget,
     profile: ProviderProfile,
+    reasoning_effort: Option<String>,
     created_at: Instant,
 }
 
@@ -1661,6 +1666,7 @@ fn isolated_pet_agent_request(
             content: prompt,
             tool_calls: Vec::new(),
             tool_call_id: None,
+            provider_reasoning_blocks: Vec::new(),
             internal: true,
             attachments: Vec::new(),
         }],
@@ -2176,6 +2182,7 @@ async fn run_bounded_autonomous_pet_agent(
                         .to_owned(),
                     tool_calls: Vec::new(),
                     tool_call_id: None,
+                    provider_reasoning_blocks: Vec::new(),
                     internal: true,
                     attachments: Vec::new(),
                 });
@@ -2204,6 +2211,7 @@ async fn run_bounded_autonomous_pet_agent(
             content: response.content,
             tool_calls: response.tool_calls,
             tool_call_id: None,
+            provider_reasoning_blocks: response.provider_reasoning_blocks,
             internal: false,
             attachments: Vec::new(),
         });
@@ -2217,6 +2225,7 @@ async fn run_bounded_autonomous_pet_agent(
                 content: result.output,
                 tool_calls: Vec::new(),
                 tool_call_id: Some(call.id),
+                provider_reasoning_blocks: Vec::new(),
                 internal: false,
                 attachments: Vec::new(),
             });
@@ -2231,6 +2240,7 @@ async fn run_bounded_autonomous_pet_agent(
                     .to_owned(),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                provider_reasoning_blocks: Vec::new(),
                 internal: true,
                 attachments: Vec::new(),
             });
@@ -3317,6 +3327,14 @@ fn provider_reconnect_delay(retry_number: u32) -> Duration {
     Duration::from_millis(BASE_DELAY_MS.saturating_mul(retry_number.min(5) as u64))
 }
 
+fn effective_provider_round_timeout(request: &AgentTurnRequest, base: Duration) -> Duration {
+    if agent::request_uses_reasoning(request) {
+        base.max(REASONING_PROVIDER_ROUND_TIMEOUT)
+    } else {
+        base
+    }
+}
+
 fn provider_round_timeout_error(timeout: Duration) -> String {
     format!(
         "{PROVIDER_ROUND_TIMEOUT_PREFIX} after {} seconds",
@@ -3620,6 +3638,7 @@ where
     R: FnMut(&ProviderProfile, u32, u32, Option<&str>),
     S: FnMut(AgentStreamEvent),
 {
+    let round_timeout = effective_provider_round_timeout(&request, round_timeout);
     let round_deadline = Instant::now() + round_timeout;
     let candidates = provider_candidates(&request);
     request.fallback_profiles.clear();
@@ -4897,11 +4916,12 @@ async fn agent_turn_stream_inner(
     attach_mcp_tools(&database, &manager, &mut request).await?;
     enforce_theme_generation_tool_catalog(&mut request);
     enforce_hatch_tool_catalog(&mut request);
-    let round_timeout = if agent::theme_generation_bootstrapped(&request.messages) {
+    let base_round_timeout = if agent::theme_generation_bootstrapped(&request.messages) {
         LONG_PROVIDER_ROUND_TIMEOUT
     } else {
         PROVIDER_ROUND_TIMEOUT
     };
+    let round_timeout = effective_provider_round_timeout(&request, base_round_timeout);
     let round_deadline = Instant::now() + round_timeout;
     let goal_thread = (request.mode == "goal")
         .then(|| request.thread_id.clone())
@@ -5493,6 +5513,7 @@ async fn harness_run_loop(
                     content: format!("[{}] {}", consumed.kind, consumed.body),
                     tool_calls: Vec::new(),
                     tool_call_id: None,
+                    provider_reasoning_blocks: Vec::new(),
                     internal: true,
                     attachments: Vec::new(),
                 });
@@ -5880,6 +5901,7 @@ async fn harness_run_loop(
                                 .to_owned(),
                             tool_calls: Vec::new(),
                             tool_call_id: None,
+                            provider_reasoning_blocks: Vec::new(),
                             internal: true,
                             attachments: Vec::new(),
                         });
@@ -5984,6 +6006,7 @@ async fn harness_run_loop(
                     content: response.content.clone(),
                     tool_calls: response.tool_calls.clone(),
                     tool_call_id: None,
+                    provider_reasoning_blocks: response.provider_reasoning_blocks.clone(),
                     internal: false,
                     attachments: Vec::new(),
                 });
@@ -6018,6 +6041,7 @@ async fn harness_run_loop(
                             .to_owned(),
                             tool_calls: Vec::new(),
                             tool_call_id: None,
+                            provider_reasoning_blocks: Vec::new(),
                             internal: true,
                             attachments: Vec::new(),
                         });
@@ -6341,6 +6365,7 @@ async fn harness_run_loop(
                             .to_owned(),
                         tool_calls: Vec::new(),
                         tool_call_id: Some(call.id),
+                        provider_reasoning_blocks: Vec::new(),
                         internal: false,
                         attachments: Vec::new(),
                     });
@@ -6915,6 +6940,7 @@ where
         ),
         tool_calls: Vec::new(),
         tool_call_id: None,
+        provider_reasoning_blocks: Vec::new(),
         internal: false,
         attachments: Vec::new(),
     }];
@@ -6958,6 +6984,7 @@ where
             content: response.content,
             tool_calls: response.tool_calls,
             tool_call_id: None,
+            provider_reasoning_blocks: response.provider_reasoning_blocks,
             internal: false,
             attachments: Vec::new(),
         });
@@ -7010,6 +7037,7 @@ where
                 content: result.output,
                 tool_calls: Vec::new(),
                 tool_call_id: Some(call.id),
+                provider_reasoning_blocks: Vec::new(),
                 internal: false,
                 attachments: Vec::new(),
             });
@@ -9725,13 +9753,20 @@ fn preview_external_config_write(
     state: tauri::State<'_, AppState>,
     profile: ProviderProfile,
     target: ExternalConfigTarget,
+    reasoning_effort: Option<String>,
 ) -> Result<ConfigWritePreview, String> {
     let home = app
         .path()
         .home_dir()
         .map_err(|error| format!("Could not locate the home directory: {error}"))?;
     let api_key = load_api_key(&profile.id)?;
-    let mut preview = config_writeback::preview(&home, target, &profile, &api_key)?;
+    let mut preview = config_writeback::preview(
+        &home,
+        target,
+        &profile,
+        &api_key,
+        reasoning_effort.as_deref(),
+    )?;
     let token = uuid::Uuid::new_v4().to_string();
     let mut pending = state
         .pending_config_writes
@@ -9746,6 +9781,7 @@ fn preview_external_config_write(
         PendingConfigWrite {
             target,
             profile: profile.clone(),
+            reasoning_effort,
             created_at: Instant::now(),
         },
     );
@@ -9759,6 +9795,7 @@ fn apply_external_config_write(
     state: tauri::State<'_, AppState>,
     profile: ProviderProfile,
     target: ExternalConfigTarget,
+    reasoning_effort: Option<String>,
     confirmation_token: String,
 ) -> Result<ConfigWriteResult, String> {
     let pending = state
@@ -9770,6 +9807,7 @@ fn apply_external_config_write(
     if pending.created_at.elapsed() >= std::time::Duration::from_secs(600)
         || pending.target != target
         || pending.profile != profile
+        || pending.reasoning_effort != reasoning_effort
     {
         return Err("Preview no longer matches this configuration write".to_owned());
     }
@@ -9778,7 +9816,13 @@ fn apply_external_config_write(
         .home_dir()
         .map_err(|error| format!("Could not locate the home directory: {error}"))?;
     let api_key = load_api_key(&profile.id)?;
-    config_writeback::apply(&home, target, &profile, &api_key)
+    config_writeback::apply(
+        &home,
+        target,
+        &profile,
+        &api_key,
+        reasoning_effort.as_deref(),
+    )
 }
 
 #[tauri::command]
@@ -10363,6 +10407,7 @@ mod tests {
         let response = AgentTurnResponse {
             content: String::new(),
             tool_calls: Vec::new(),
+            provider_reasoning_blocks: Vec::new(),
             input_tokens: Some(2),
             output_tokens: Some(1),
             request_id: None,
@@ -11327,6 +11372,7 @@ mod tests {
                 content: "[LEVELUP_THEME_GENERATION_BOOTSTRAP_COMPLETE]\n[LEVELUP_THEME_GENERATION_TARGET] .levelup/generated-themes/0123456789abcdef0123456789abcdef.levelup-theme".to_owned(),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                provider_reasoning_blocks: Vec::new(),
                 internal: true,
                 attachments: Vec::new(),
             }],
@@ -11708,6 +11754,36 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_requests_receive_a_round_timeout_beyond_the_relay_limit() {
+        let mut reasoning_profile = profile("reasoning", 10, false);
+        reasoning_profile.model = "claude-opus-4-6".to_owned();
+        reasoning_profile.protocol = models::ProviderProtocol::AnthropicMessages;
+        let request = AgentTurnRequest {
+            profile: reasoning_profile,
+            messages: Vec::new(),
+            mode: "chat".to_owned(),
+            workspace: None,
+            thread_id: None,
+            hatch: false,
+            hatch_skill_loaded: false,
+            available_tools: Vec::new(),
+            available_skills: Vec::new(),
+            goal: None,
+            fallback_profiles: Vec::new(),
+            custom_instructions: None,
+            router_metadata: None,
+            router_events: Vec::new(),
+            reasoning_effort: Some("max".to_owned()),
+        };
+
+        assert_eq!(
+            effective_provider_round_timeout(&request, PROVIDER_ROUND_TIMEOUT),
+            REASONING_PROVIDER_ROUND_TIMEOUT
+        );
+        assert!(REASONING_PROVIDER_ROUND_TIMEOUT > Duration::from_secs(1_800));
+    }
+
+    #[test]
     fn large_inline_images_only_allow_one_reconnect_attempt() {
         let timeout = "Provider stream timed out after 90 seconds without activity";
         assert!(should_reconnect_request(timeout, false, 0, true));
@@ -11869,6 +11945,7 @@ mod tests {
                 content: "test".to_owned(),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                provider_reasoning_blocks: Vec::new(),
                 internal: false,
                 attachments: Vec::new(),
             }],
@@ -11951,6 +12028,7 @@ mod tests {
                 content: "test".to_owned(),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                provider_reasoning_blocks: Vec::new(),
                 internal: false,
                 attachments: Vec::new(),
             }],
@@ -12015,6 +12093,7 @@ mod tests {
                 content: "test".to_owned(),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                provider_reasoning_blocks: Vec::new(),
                 internal: false,
                 attachments: Vec::new(),
             }],
