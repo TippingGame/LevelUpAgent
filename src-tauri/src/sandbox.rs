@@ -54,6 +54,8 @@ struct ManagedProcess {
     child: Mutex<Child>,
     stdout: Arc<OutputTail>,
     stderr: Arc<OutputTail>,
+    stdout_reader: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    stderr_reader: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 #[derive(Default)]
@@ -136,12 +138,14 @@ impl ProcessManager {
         let pid = child.id();
         let stdout = Arc::new(OutputTail::default());
         let stderr = Arc::new(OutputTail::default());
-        if let Some(stream) = child.stdout.take() {
-            spawn_reader(stream, stdout.clone());
-        }
-        if let Some(stream) = child.stderr.take() {
-            spawn_reader(stream, stderr.clone());
-        }
+        let stdout_reader = child
+            .stdout
+            .take()
+            .map(|stream| spawn_reader(stream, stdout.clone()));
+        let stderr_reader = child
+            .stderr
+            .take()
+            .map(|stream| spawn_reader(stream, stderr.clone()));
         let id = uuid::Uuid::new_v4().simple().to_string();
         let snapshot = ProcessSnapshot {
             id: id.clone(),
@@ -165,6 +169,8 @@ impl ProcessManager {
                 child: Mutex::new(child),
                 stdout,
                 stderr,
+                stdout_reader: Mutex::new(stdout_reader),
+                stderr_reader: Mutex::new(stderr_reader),
             }),
         );
         Ok(snapshot)
@@ -203,6 +209,10 @@ impl ProcessManager {
             .try_wait()
             .map_err(|error| format!("Could not inspect background process: {error}"))?
             .is_none();
+        if !running {
+            finish_reader(&process.stdout_reader).await;
+            finish_reader(&process.stderr_reader).await;
+        }
         Ok(ProcessOutput {
             id: id.to_owned(),
             stdout: crate::logging::redact_sensitive(&process.stdout.text().await),
@@ -298,7 +308,7 @@ fn shell_command(command: &str) -> Command {
     }
 }
 
-fn spawn_reader<R>(mut stream: R, output: Arc<OutputTail>)
+fn spawn_reader<R>(mut stream: R, output: Arc<OutputTail>) -> tokio::task::JoinHandle<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
@@ -311,7 +321,13 @@ where
             };
             output.append(&chunk[..read]).await;
         }
-    });
+    })
+}
+
+async fn finish_reader(reader: &Mutex<Option<tokio::task::JoinHandle<()>>>) {
+    if let Some(task) = reader.lock().await.take() {
+        let _ = tokio::time::timeout(STOP_TIMEOUT, task).await;
+    }
 }
 
 async fn terminate_child(child: &mut Child) {
