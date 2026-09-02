@@ -36,6 +36,13 @@ pub struct HarnessRecoverySummary {
     pub cancelled_queue_items: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HarnessCompletionDecision {
+    Completed(u64),
+    QueuePending,
+    AlreadyTerminal(RuntimeState),
+}
+
 pub struct Database {
     connection: Mutex<Connection>,
 }
@@ -1706,6 +1713,87 @@ impl Database {
         transaction.commit().map_err(database_error)
     }
 
+    /// Complete an operation only when no follow-up message was queued.
+    ///
+    /// The queue check and terminal state transition share one transaction so
+    /// a concurrent enqueue either becomes visible to the next harness round
+    /// or is rejected after the operation is durably completed.
+    pub fn complete_harness_operation_if_queue_empty(
+        &self,
+        operation_id: &str,
+        payload: &serde_json::Value,
+    ) -> Result<HarnessCompletionDecision, String> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let transaction = connection.transaction().map_err(database_error)?;
+        let current = transaction
+            .query_row(
+                "SELECT state, last_event_sequence FROM harness_operations WHERE id = ?1",
+                [operation_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .map_err(database_error)?;
+        let Some((current_state, sequence)) = current else {
+            return Err("Unknown harness operation".to_owned());
+        };
+        let terminal_state = match current_state.as_str() {
+            "completed" => Some(RuntimeState::Completed),
+            "failed" => Some(RuntimeState::Failed),
+            "cancelled" => Some(RuntimeState::Cancelled),
+            _ => None,
+        };
+        if let Some(state) = terminal_state {
+            transaction.commit().map_err(database_error)?;
+            return Ok(HarnessCompletionDecision::AlreadyTerminal(state));
+        }
+        let queue_pending = transaction
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM harness_queues
+                     WHERE operation_id = ?1 AND status = 'pending'
+                 )",
+                [operation_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(database_error)?
+            != 0;
+        if queue_pending {
+            transaction.commit().map_err(database_error)?;
+            return Ok(HarnessCompletionDecision::QueuePending);
+        }
+
+        let next_sequence = sequence.saturating_add(1);
+        let now = now_millis();
+        transaction
+            .execute(
+                "UPDATE harness_operations
+                 SET state = 'completed', last_event_sequence = ?1, updated_at = ?2, ended_at = ?2
+                 WHERE id = ?3",
+                rusqlite::params![next_sequence, now, operation_id],
+            )
+            .map_err(database_error)?;
+        transaction
+            .execute(
+                "INSERT INTO harness_events
+                 (id, operation_id, sequence, schema_version, kind, payload_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, 'operation_completed', ?5, ?6)",
+                rusqlite::params![
+                    uuid::Uuid::new_v4().to_string(),
+                    operation_id,
+                    next_sequence,
+                    crate::harness::types::HARNESS_SCHEMA_VERSION,
+                    payload.to_string(),
+                    now,
+                ],
+            )
+            .map_err(database_error)?;
+        transaction.commit().map_err(database_error)?;
+        Ok(HarnessCompletionDecision::Completed(next_sequence as u64))
+    }
+
     pub fn harness_operation_hatch(&self, operation_id: &str) -> Result<bool, String> {
         let connection = self
             .connection
@@ -3217,6 +3305,7 @@ fn storage_error(action: &str, error: impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
 
     fn sample_thread() -> StoredThread {
         StoredThread {
@@ -3381,6 +3470,199 @@ mod tests {
             .into_started()
             .unwrap();
         assert_ne!(restarted.operation_id, started.operation_id);
+    }
+
+    #[test]
+    fn completion_waits_for_pending_queue_items() {
+        let database = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        database.save_thread(&sample_thread()).unwrap();
+        let request = crate::harness::types::HarnessDraftRequest {
+            thread_id: "thread-1".to_owned(),
+            raw_user_input: "continue".to_owned(),
+            attachment_ids: Vec::new(),
+            mode: crate::harness::types::HarnessMode::Agent,
+            permission_level: crate::harness::types::PermissionLevel::Request,
+            requested_profile_id: Some("test".to_owned()),
+            workspace: Some("C:/workspace".to_owned()),
+            hatch: false,
+            hatch_run_dir: None,
+        };
+        let operation = database
+            .start_harness_operation(&request, "C:/workspace", "test")
+            .unwrap()
+            .into_started()
+            .unwrap();
+        let queued = database
+            .enqueue_harness_item(&HarnessQueueRequest {
+                operation_id: operation.operation_id.clone(),
+                kind: "follow_up".to_owned(),
+                body: "continue with the queued request".to_owned(),
+            })
+            .unwrap();
+
+        let completion_payload = serde_json::json!({ "round": 1 });
+        assert_eq!(
+            database
+                .complete_harness_operation_if_queue_empty(
+                    &operation.operation_id,
+                    &completion_payload,
+                )
+                .unwrap(),
+            HarnessCompletionDecision::QueuePending,
+        );
+        let connection = database.connection.lock().unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT state FROM harness_operations WHERE id = ?1",
+                    [&operation.operation_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "compiling"
+        );
+        drop(connection);
+
+        assert!(
+            database
+                .consume_harness_queue(&queued.id)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            database
+                .complete_harness_operation_if_queue_empty(
+                    &operation.operation_id,
+                    &completion_payload,
+                )
+                .unwrap(),
+            HarnessCompletionDecision::Completed(2)
+        );
+        let connection = database.connection.lock().unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT state FROM harness_operations WHERE id = ?1",
+                    [&operation.operation_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "completed"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT payload_json FROM harness_events WHERE operation_id = ?1 AND kind = 'operation_completed'",
+                    [&operation.operation_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            completion_payload.to_string()
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM harness_events WHERE operation_id = ?1 AND kind = 'operation_completed'",
+                    [&operation.operation_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        drop(connection);
+        assert_eq!(
+            database
+                .complete_harness_operation_if_queue_empty(
+                    &operation.operation_id,
+                    &completion_payload,
+                )
+                .unwrap(),
+            HarnessCompletionDecision::AlreadyTerminal(RuntimeState::Completed)
+        );
+        assert!(
+            database
+                .enqueue_harness_item(&HarnessQueueRequest {
+                    operation_id: operation.operation_id,
+                    kind: "follow_up".to_owned(),
+                    body: "must be a new operation".to_owned(),
+                })
+                .unwrap_err()
+                .contains("no longer active")
+        );
+    }
+
+    #[test]
+    fn completion_and_enqueue_are_atomic() {
+        for _ in 0..8 {
+            let database =
+                Arc::new(Database::from_connection(Connection::open_in_memory().unwrap()).unwrap());
+            database.save_thread(&sample_thread()).unwrap();
+            let request = crate::harness::types::HarnessDraftRequest {
+                thread_id: "thread-1".to_owned(),
+                raw_user_input: "continue".to_owned(),
+                attachment_ids: Vec::new(),
+                mode: crate::harness::types::HarnessMode::Agent,
+                permission_level: crate::harness::types::PermissionLevel::Request,
+                requested_profile_id: Some("test".to_owned()),
+                workspace: Some("C:/workspace".to_owned()),
+                hatch: false,
+                hatch_run_dir: None,
+            };
+            let operation = database
+                .start_harness_operation(&request, "C:/workspace", "test")
+                .unwrap()
+                .into_started()
+                .unwrap();
+            let barrier = Arc::new(Barrier::new(2));
+
+            let completion_database = Arc::clone(&database);
+            let completion_barrier = Arc::clone(&barrier);
+            let completion_operation_id = operation.operation_id.clone();
+            let completion = std::thread::spawn(move || {
+                completion_barrier.wait();
+                completion_database.complete_harness_operation_if_queue_empty(
+                    &completion_operation_id,
+                    &serde_json::json!({ "round": 1 }),
+                )
+            });
+
+            let enqueue_database = Arc::clone(&database);
+            let enqueue_barrier = Arc::clone(&barrier);
+            let enqueue_operation_id = operation.operation_id.clone();
+            let enqueue = std::thread::spawn(move || {
+                enqueue_barrier.wait();
+                enqueue_database.enqueue_harness_item(&HarnessQueueRequest {
+                    operation_id: enqueue_operation_id,
+                    kind: "follow_up".to_owned(),
+                    body: "queued at the completion boundary".to_owned(),
+                })
+            });
+
+            let completion = completion.join().unwrap().unwrap();
+            let enqueue = enqueue.join().unwrap();
+            let state = database
+                .connection
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT state FROM harness_operations WHERE id = ?1",
+                    [&operation.operation_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap();
+            match (completion, enqueue) {
+                (HarnessCompletionDecision::QueuePending, Ok(_)) => {
+                    assert_ne!(state, "completed");
+                }
+                (HarnessCompletionDecision::Completed(_), Err(error)) => {
+                    assert_eq!(state, "completed");
+                    assert!(error.contains("no longer active"));
+                }
+                (completion, enqueue) => {
+                    panic!("invalid completion/enqueue race: {completion:?}, {enqueue:?}")
+                }
+            }
+        }
     }
 
     #[test]

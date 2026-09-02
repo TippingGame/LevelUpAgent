@@ -1,4 +1,4 @@
-import { Children, Fragment, isValidElement, memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type CSSProperties, type DragEvent as ReactDragEvent, type HTMLAttributes, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from "react";
+import { Children, Fragment, isValidElement, memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type CSSProperties, type DragEvent as ReactDragEvent, type HTMLAttributes, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfmCompatible from "./lib/remarkGfmCompatible";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -30,6 +30,7 @@ import {
   Gauge,
   GitBranch,
   GitMerge,
+  Globe2,
   Hand,
   ImagePlus,
   KeyRound,
@@ -65,6 +66,7 @@ import {
   X,
 } from "lucide-react";
 import { IconButton } from "./components/IconButton";
+import { AgentBrowserPanel } from "./components/AgentBrowserPanel";
 import { AttachmentChip } from "./components/AttachmentChip";
 import { MediaAssetCard, MediaStudio } from "./components/MediaStudio";
 import { WritingStudio } from "./components/WritingStudio";
@@ -182,8 +184,14 @@ import {
   createThread,
   clearLegacyProfiles,
   clearLegacyThreads,
+  COLLAPSED_SIDEBAR_WIDTH,
   DEFAULT_COMPOSER_HEIGHT,
+  DEFAULT_INSPECTOR_WIDTH,
+  DEFAULT_SIDEBAR_WIDTH,
+  MAX_SIDEBAR_WIDTH,
   MAX_COMPOSER_HEIGHT,
+  MIN_EXPANDED_SIDEBAR_WIDTH,
+  MIN_INSPECTOR_WIDTH,
   MIN_COMPOSER_HEIGHT,
   loadActiveProfileId,
   loadArmorMode,
@@ -192,6 +200,7 @@ import {
   loadArmorWritingIntensity,
   loadActiveThreadId,
   loadComposerHeight,
+  loadInspectorWidth,
   loadHiddenProjectKeys,
   loadProfiles,
   loadActiveThemeId,
@@ -199,6 +208,7 @@ import {
   loadPermissionLevel,
   loadReasoningEffort,
   loadPinnedThreadIds,
+  loadSidebarWidth,
   loadTaskCompletionNotices,
   loadThreads,
   migrateDefaultProfile,
@@ -215,7 +225,9 @@ import {
   saveActiveProfileId,
   saveActiveThreadId,
   saveComposerHeight,
+  saveInspectorWidth,
   saveHiddenProjectKeys,
+  saveSidebarWidth,
   saveThreads,
   saveActiveThemeId,
   saveDiffViewSettings,
@@ -245,6 +257,8 @@ import {
   finalizeAssistantMessage,
   providerRetryProgressLabel,
   providerThreadId,
+  queueStateWithItem,
+  queueStateWithoutItem,
   settleProviderReconnect,
   usesDurableHarness,
 } from "./lib/threadExecution";
@@ -593,7 +607,23 @@ interface WorkspaceRunBaseline {
   snapshot: WorkspaceSnapshot;
 }
 
-type InspectorTab = "details" | "changes";
+type InspectorTab = "details" | "changes" | "browser";
+
+interface BrowserSyncSignal {
+  threadId: string;
+  sessionId?: string;
+  action: string;
+  revision: number;
+}
+
+const SIDEBAR_COLLAPSE_THRESHOLD = Math.round(
+  (COLLAPSED_SIDEBAR_WIDTH + MIN_EXPANDED_SIDEBAR_WIDTH) / 2,
+);
+
+function snappedSidebarWidth(value: number, maxWidth: number): number {
+  if (value <= SIDEBAR_COLLAPSE_THRESHOLD) return COLLAPSED_SIDEBAR_WIDTH;
+  return Math.min(maxWidth, Math.max(MIN_EXPANDED_SIDEBAR_WIDTH, Math.round(value)));
+}
 
 function terminalChangeStatus(state?: HarnessOperationState): ConversationChangeStatus | null {
   if (state === "completed" || state === "failed" || state === "cancelled" || state === "interrupted") return state;
@@ -755,10 +785,17 @@ function App() {
   const [balanceBusy, setBalanceBusy] = useState(false);
   const [balanceError, setBalanceError] = useState<string | null>(null);
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
-  const [sidebarWidth, setSidebarWidth] = useState<number | null>(null);
-  const [inspectorWidth, setInspectorWidth] = useState(320);
+  const [sidebarWidth, setSidebarWidth] = useState<number | null>(loadSidebarWidth);
+  const sidebarExpandedWidthRef = useRef(
+    sidebarWidth !== null && sidebarWidth > COLLAPSED_SIDEBAR_WIDTH
+      ? sidebarWidth
+      : DEFAULT_SIDEBAR_WIDTH,
+  );
+  const [inspectorWidth, setInspectorWidth] = useState(loadInspectorWidth);
+  const [layoutViewportWidth, setLayoutViewportWidth] = useState(() => window.innerWidth);
   const [diffViewSettings, setDiffViewSettings] = useState<DiffViewSettings>(loadDiffViewSettings);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("details");
+  const [browserSyncSignal, setBrowserSyncSignal] = useState<BrowserSyncSignal | null>(null);
   const [reviewedChangeSet, setReviewedChangeSet] = useState<ConversationChangeSet | null>(null);
   const [reviewedFile, setReviewedFile] = useState<ConversationFileChange | null>(null);
   const [reviewedDiff, setReviewedDiff] = useState<GitDiff | null>(null);
@@ -790,6 +827,7 @@ function App() {
   const runningThreadIdsRef = useRef<Set<string>>(new Set());
   const pendingApprovalsRef = useRef<Record<string, PendingApproval>>({});
   const operationIdsRef = useRef<Map<string, string>>(new Map());
+  const injectedQueueIdsRef = useRef<Set<string>>(new Set());
   const workspaceRunBaselinesRef = useRef<Map<string, Promise<WorkspaceRunBaseline | null>>>(new Map());
   const themeImportingRef = useRef<string | null>(null);
   const attachmentPasteRef = useRef(false);
@@ -904,6 +942,29 @@ function App() {
   activeThreadIdRef.current = activeThread.id;
   workspaceViewRef.current = workspaceView;
   activePetIdRef.current = activePetId;
+  const syncBrowserToolResult = useCallback((
+    threadId: string,
+    toolName: string | undefined,
+    output: string | undefined,
+    isError: boolean | undefined,
+  ) => {
+    if (!toolName?.startsWith("browser_") || isError) return;
+    const rawSessionId = toolName === "browser_start" ? output?.trim() : undefined;
+    const startedSessionId = rawSessionId && /^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(rawSessionId)
+      ? rawSessionId
+      : undefined;
+    setBrowserSyncSignal((current) => ({
+      threadId,
+      sessionId: startedSessionId ?? (current?.threadId === threadId ? current.sessionId : undefined),
+      action: toolName,
+      revision: (current?.revision ?? 0) + 1,
+    }));
+    if (toolName === "browser_start" && activeThreadIdRef.current === threadId) {
+      setRightPanelOpen(true);
+      setInspectorTab("browser");
+      setQq2007RightTab("environment");
+    }
+  }, []);
   const running = runningThreadIds.has(activeThread.id);
   const pending = pendingApprovals[activeThread.id] ?? null;
   const latestConnectionMessage = conversationView.latestConnectionMessage;
@@ -966,6 +1027,22 @@ function App() {
   useEffect(() => {
     document.documentElement.lang = locale;
   }, [locale]);
+
+  useEffect(() => {
+    let frame: number | null = null;
+    const syncViewportWidth = () => {
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        setLayoutViewportWidth(window.innerWidth);
+      });
+    };
+    window.addEventListener("resize", syncViewportWidth);
+    return () => {
+      if (frame !== null) window.cancelAnimationFrame(frame);
+      window.removeEventListener("resize", syncViewportWidth);
+    };
+  }, []);
 
   useEffect(() => {
     if (!isDesktop()) return;
@@ -2148,8 +2225,8 @@ function App() {
     setPendingApprovals(next);
   };
 
-  const setThreadQueue = (threadId: string, value: HarnessQueueItem[]) => {
-    setHarnessQueueItems((current) => ({ ...current, [threadId]: value }));
+  const removeHarnessQueueItem = (threadId: string, queueId: string) => {
+    setHarnessQueueItems((current) => queueStateWithoutItem(current, threadId, queueId));
   };
 
   const ensureWorkspaceRunBaseline = (
@@ -2261,6 +2338,17 @@ function App() {
     }
   };
 
+  const recordHarnessQueueItem = (threadId: string, queued: HarnessQueueItem) => {
+    if (injectedQueueIdsRef.current.delete(queued.id)) return;
+    // A queue_injected event may race the IPC response and this state update.
+    setHarnessQueueItems((current) => queueStateWithItem(
+      current,
+      threadId,
+      queued,
+      injectedQueueIdsRef.current,
+    ));
+  };
+
   const enqueueCurrentRunMessage = async (
     threadId: string,
     operationId: string,
@@ -2268,10 +2356,7 @@ function App() {
     body: string,
   ) => {
     const queued = await harnessEnqueue(operationId, kind, body);
-    setHarnessQueueItems((current) => ({
-      ...current,
-      [threadId]: [...(current[threadId] ?? []), queued],
-    }));
+    recordHarnessQueueItem(threadId, queued);
   };
 
   const beginHatchRun = (threadId: string) => {
@@ -2650,11 +2735,12 @@ function App() {
           commitThread(projectedThread(projected));
         } else if (event.kind === "tool_execution_completed") {
           flushStreamingDelta();
-          const payload = event.payload as { callId?: string; output?: string; isError?: boolean };
+          const payload = event.payload as { callId?: string; toolName?: string; output?: string; isError?: boolean };
           projected = [...projected, message("tool", payload.output ?? "", {
             toolCallId: payload.callId,
             isError: payload.isError,
           })];
+          syncBrowserToolResult(thread.id, payload.toolName, payload.output, payload.isError);
           commitThread(projectedThread(projected));
         } else if (event.kind === "queue_injected") {
           flushStreamingDelta();
@@ -2668,10 +2754,10 @@ function App() {
             commitThread(projectedThread(projected), false);
           }
           if (payload.queueId) {
-            setThreadQueue(
-              thread.id,
-              (harnessQueueItems[thread.id] ?? []).filter((item) => item.id !== payload.queueId),
-            );
+            const queueId = payload.queueId;
+            injectedQueueIdsRef.current.add(queueId);
+            window.setTimeout(() => injectedQueueIdsRef.current.delete(queueId), 60_000);
+            removeHarnessQueueItem(thread.id, queueId);
           }
         } else if (event.kind === "approval_required") {
           flushStreamingDelta();
@@ -3673,27 +3759,38 @@ function App() {
       }
       const command = value.match(/^\/(steer|follow-up|next-turn)\s+([\s\S]+)$/i);
       const kind = command?.[1].toLowerCase().replace("-", "_") as "steer" | "follow_up" | "next_turn" | undefined;
-      try {
-        if (kind && command) {
-          await enqueueCurrentRunMessage(thread.id, activeOperationId, kind, command[2]);
-        } else {
-          await enqueueCurrentRunMessage(thread.id, activeOperationId, "follow_up", value);
-        }
-        setDraft("");
-        return;
-      } catch (error) {
-        const reason = errorText(error);
-        const staleOperation = reason.includes("Harness operation is no longer active")
-          || reason.includes("Unknown harness operation");
-        if (!staleOperation) {
-          setNotice(`${tr("无法加入运行队列", "Could not queue the message")}: ${reason}`);
+      const queuedKind = kind && command ? kind : "follow_up";
+      const queuedBody = kind && command ? command[2] : value;
+      let queueOperationId = activeOperationId;
+      const attemptedOperationIds = new Set<string>();
+      while (!attemptedOperationIds.has(queueOperationId)) {
+        attemptedOperationIds.add(queueOperationId);
+        try {
+          await enqueueCurrentRunMessage(thread.id, queueOperationId, queuedKind, queuedBody);
+          setDraft("");
           return;
+        } catch (error) {
+          const reason = errorText(error);
+          const staleOperation = reason.includes("Harness operation is no longer active")
+            || reason.includes("Unknown harness operation");
+          if (!staleOperation) {
+            setNotice(`${tr("无法加入运行队列", "Could not queue the message")}: ${reason}`);
+            return;
+          }
+          const replacementOperationId = operationIdsRef.current.get(thread.id);
+          if (replacementOperationId && replacementOperationId !== queueOperationId) {
+            queueOperationId = replacementOperationId;
+            continue;
+          }
+          // The operation may finish between the render and the enqueue call.
+          // Clear it only if it still owns this thread, then submit a new run.
+          if (replacementOperationId === queueOperationId) {
+            operationIdsRef.current.delete(thread.id);
+            runModesRef.current.delete(thread.id);
+            setThreadRunning(thread.id, false);
+          }
+          break;
         }
-        // The operation may finish between the render and the enqueue call.
-        // Release the stale local owner and submit this input as a new run.
-        operationIdsRef.current.delete(thread.id);
-        runModesRef.current.delete(thread.id);
-        setThreadRunning(thread.id, false);
       }
     }
     if ((!value && draftAttachments.length === 0)
@@ -3821,10 +3918,7 @@ function App() {
         const submission = await harnessStart(harnessRequest);
         if (submission.disposition === "queued") {
           const queued = submission.value;
-          setHarnessQueueItems((current) => ({
-            ...current,
-            [thread.id]: [...(current[thread.id] ?? []), queued],
-          }));
+          recordHarnessQueueItem(thread.id, queued);
           setDraft("");
           draftAttachmentsRef.current = [];
           setDraftAttachments([]);
@@ -3888,7 +3982,7 @@ function App() {
       // Steer preserves the current operation. The Rust runtime only
       // interrupts the provider phase; an in-flight tool is allowed to finish.
       await harnessSteer(currentOperationId, item.id);
-      setThreadQueue(thread.id, (harnessQueueItems[thread.id] ?? []).filter((entry) => entry.id !== item.id));
+      removeHarnessQueueItem(thread.id, item.id);
     } catch (error) {
       setNotice(`${tr("无法引导当前对话", "Could not steer the active conversation")}: ${errorText(error)}`);
     }
@@ -4089,6 +4183,7 @@ function App() {
           approval.operationId,
           true,
         );
+        syncBrowserToolResult(thread.id, call.name, result.output, result.isError);
         const nextHistory = [
           ...approval.history,
           message("tool", result.output, { toolCallId: call.id, isError: result.isError }),
@@ -4518,6 +4613,7 @@ function App() {
         : tr("请先配置当前连接的 API Key", "Configure an API key for this connection")
       : tr("点击刷新，余额每 60 秒自动更新", "Click to refresh; updates automatically every 60 seconds");
   const qq2007Title = localizedThreadTitle(activeThread.title);
+  const sidebarCollapsed = sidebarWidth === COLLAPSED_SIDEBAR_WIDTH;
 
   const sidebarSlot = (
       <aside className="sidebar">
@@ -4525,8 +4621,15 @@ function App() {
           className="sidebar-resize-handle"
           role="separator"
           aria-orientation="vertical"
-          aria-label={tr("调整左侧栏宽度", "Resize navigation sidebar")}
+          aria-label={tr("调整左侧栏宽度；双击可折叠或展开", "Resize navigation sidebar; double-click to collapse or expand")}
+          aria-valuemin={COLLAPSED_SIDEBAR_WIDTH}
+          aria-valuemax={MAX_SIDEBAR_WIDTH}
+          aria-valuenow={sidebarWidth ?? DEFAULT_SIDEBAR_WIDTH}
+          tabIndex={0}
+          title={tr("拖动调整宽度，双击折叠或展开", "Drag to resize; double-click to collapse or expand")}
           onPointerDown={startSidebarResize}
+          onDoubleClick={toggleSidebarCollapsed}
+          onKeyDown={resizeSidebarWithKeyboard}
         />
         <div className="sidebar-header">
           <button className="brand" type="button" title={tr("访问 LevelUpAPI 官网", "Visit LevelUpAPI")} onClick={() => void openLevelUpWebsite()}>
@@ -4906,7 +5009,7 @@ function App() {
               <Palette size={17} />
             </IconButton>
             <IconButton
-              label={rightPanelOpen ? tr("收起详情", "Hide details") : tr("展开详情", "Show details")}
+              label={rightPanelOpen ? tr("收起侧栏", "Hide side panel") : tr("展开侧栏", "Show side panel")}
               aria-expanded={rightPanelOpen}
               onClick={() => setRightPanelOpen((value) => !value)}
             >
@@ -4998,7 +5101,7 @@ function App() {
                   </button>
                   <button type="button" onClick={() => {
                     void harnessCancelQueue(item.id).then(() => {
-                      setThreadQueue(activeThread.id, queuedItems.filter((entry) => entry.id !== item.id));
+                      removeHarnessQueueItem(activeThread.id, item.id);
                     });
                   }}>
                     <X size={14} /> {tr("移除", "Remove")}
@@ -5071,36 +5174,86 @@ function App() {
       </main>
   ) : null;
 
+  function sidebarMaxWidth() {
+    const responsiveMainMinWidth = window.matchMedia("(max-width: 1180px)").matches ? 500 : 0;
+    const inspectorMinWidth = window.matchMedia("(min-width: 1181px)").matches
+      && rightPanelOpen
+      && workspaceView === "chat"
+      ? MIN_INSPECTOR_WIDTH
+      : 0;
+    return Math.min(
+      MAX_SIDEBAR_WIDTH,
+      Math.max(
+        MIN_EXPANDED_SIDEBAR_WIDTH,
+        window.innerWidth - responsiveMainMinWidth - inspectorMinWidth,
+      ),
+    );
+  }
+
+  function commitSidebarWidth(width: number) {
+    const nextWidth = width === COLLAPSED_SIDEBAR_WIDTH
+      ? COLLAPSED_SIDEBAR_WIDTH
+      : Math.min(sidebarMaxWidth(), Math.max(MIN_EXPANDED_SIDEBAR_WIDTH, Math.round(width)));
+    if (nextWidth > COLLAPSED_SIDEBAR_WIDTH) sidebarExpandedWidthRef.current = nextWidth;
+    setSidebarWidth(nextWidth);
+    saveSidebarWidth(nextWidth);
+  }
+
+  function toggleSidebarCollapsed() {
+    const nextWidth = sidebarCollapsed
+      ? Math.min(sidebarExpandedWidthRef.current, sidebarMaxWidth())
+      : COLLAPSED_SIDEBAR_WIDTH;
+    commitSidebarWidth(nextWidth);
+  }
+
+  function resizeSidebarWithKeyboard(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const currentWidth = sidebarWidth ?? DEFAULT_SIDEBAR_WIDTH;
+    const maxWidth = sidebarMaxWidth();
+    let nextWidth = currentWidth;
+    if (event.key === "Home") nextWidth = COLLAPSED_SIDEBAR_WIDTH;
+    else if (event.key === "End") nextWidth = Math.min(sidebarExpandedWidthRef.current, maxWidth);
+    else if (event.key === "ArrowLeft") {
+      nextWidth = currentWidth <= MIN_EXPANDED_SIDEBAR_WIDTH
+        ? COLLAPSED_SIDEBAR_WIDTH
+        : Math.max(MIN_EXPANDED_SIDEBAR_WIDTH, currentWidth - 16);
+    } else {
+      nextWidth = currentWidth === COLLAPSED_SIDEBAR_WIDTH
+        ? Math.min(sidebarExpandedWidthRef.current, maxWidth)
+        : Math.min(maxWidth, currentWidth + 16);
+    }
+    commitSidebarWidth(nextWidth);
+  }
+
   function startSidebarResize(event: ReactPointerEvent<HTMLDivElement>) {
     if (window.matchMedia("(max-width: 820px)").matches || (event.pointerType !== "touch" && event.button !== 0)) return;
     event.preventDefault();
     const startX = event.clientX;
     const startWidth = event.currentTarget.parentElement?.getBoundingClientRect().width
       ?? sidebarWidth
-      ?? 244;
-    const inspectorOccupancy = window.matchMedia("(min-width: 1181px)").matches
-      && rightPanelOpen
-      && workspaceView === "chat"
-      ? inspectorWidth
-      : 0;
-    const mainMinWidth = window.matchMedia("(max-width: 1180px)").matches ? 500 : 520;
-    const maxWidth = Math.min(480, Math.max(180, window.innerWidth - mainMinWidth - inspectorOccupancy));
-    const shell = document.querySelector<HTMLElement>(".app-shell");
+      ?? DEFAULT_SIDEBAR_WIDTH;
+    const maxWidth = sidebarMaxWidth();
+    const shell = event.currentTarget.closest<HTMLElement>(".app-shell");
     let latestWidth = startWidth;
     let frame: number | null = null;
+    const renderWidth = () => {
+      shell?.style.setProperty("--sidebar-width", `${latestWidth}px`);
+      shell?.classList.toggle("sidebar-collapsed", latestWidth === COLLAPSED_SIDEBAR_WIDTH);
+    };
     const onMove = (moveEvent: PointerEvent) => {
-      latestWidth = Math.min(maxWidth, Math.max(180, startWidth + moveEvent.clientX - startX));
+      latestWidth = snappedSidebarWidth(startWidth + moveEvent.clientX - startX, maxWidth);
       if (frame !== null) return;
       frame = window.requestAnimationFrame(() => {
-        shell?.style.setProperty("--sidebar-width", `${latestWidth}px`);
+        renderWidth();
         frame = null;
       });
     };
     const onUp = () => {
       if (frame !== null) window.cancelAnimationFrame(frame);
       frame = null;
-      shell?.style.setProperty("--sidebar-width", `${latestWidth}px`);
-      setSidebarWidth(latestWidth);
+      renderWidth();
+      commitSidebarWidth(latestWidth);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
@@ -5114,17 +5267,40 @@ function App() {
     window.addEventListener("pointercancel", onUp, { once: true });
   }
 
+  function effectiveSidebarWidth(viewportWidth = window.innerWidth) {
+    if (viewportWidth <= 820) return COLLAPSED_SIDEBAR_WIDTH;
+    const preferredWidth = sidebarWidth
+      ?? document.querySelector<HTMLElement>(".sidebar")?.getBoundingClientRect().width
+      ?? DEFAULT_SIDEBAR_WIDTH;
+    return viewportWidth <= 1180
+      ? Math.min(preferredWidth, Math.max(0, viewportWidth - 500))
+      : preferredWidth;
+  }
+
+  function inspectorMaxWidth(viewportWidth = window.innerWidth) {
+    const sidebarOccupancy = effectiveSidebarWidth(viewportWidth);
+    return Math.max(MIN_INSPECTOR_WIDTH, Math.floor(viewportWidth - sidebarOccupancy));
+  }
+
+  function commitInspectorWidth(width: number) {
+    const nextWidth = Math.min(inspectorMaxWidth(), Math.max(MIN_INSPECTOR_WIDTH, Math.round(width)));
+    setInspectorWidth(nextWidth);
+    saveInspectorWidth(nextWidth);
+  }
+
   const startInspectorResize = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (window.matchMedia("(max-width: 680px)").matches || (event.pointerType !== "touch" && event.button !== 0)) return;
     event.preventDefault();
     const startX = event.clientX;
-    const startWidth = inspectorWidth;
-    const maxWidth = Math.min(560, Math.max(260, window.innerWidth - 764));
-    const shell = document.querySelector<HTMLElement>(".app-shell");
+    const startWidth = event.currentTarget.parentElement?.getBoundingClientRect().width
+      ?? inspectorWidth
+      ?? DEFAULT_INSPECTOR_WIDTH;
+    const maxWidth = inspectorMaxWidth();
+    const shell = event.currentTarget.closest<HTMLElement>(".app-shell");
     let latestWidth = startWidth;
     let frame: number | null = null;
     const onMove = (moveEvent: PointerEvent) => {
-      latestWidth = Math.min(maxWidth, Math.max(260, startWidth + startX - moveEvent.clientX));
+      latestWidth = Math.min(maxWidth, Math.max(MIN_INSPECTOR_WIDTH, startWidth + startX - moveEvent.clientX));
       if (frame !== null) return;
       frame = window.requestAnimationFrame(() => {
         shell?.style.setProperty("--inspector-width", `${latestWidth}px`);
@@ -5135,7 +5311,7 @@ function App() {
       if (frame !== null) window.cancelAnimationFrame(frame);
       frame = null;
       shell?.style.setProperty("--inspector-width", `${latestWidth}px`);
-      setInspectorWidth(latestWidth);
+      commitInspectorWidth(latestWidth);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
@@ -5149,6 +5325,19 @@ function App() {
     window.addEventListener("pointercancel", onUp, { once: true });
   };
 
+  function resizeInspectorWithKeyboard(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const currentWidth = event.currentTarget.parentElement?.getBoundingClientRect().width ?? inspectorWidth;
+    const maxWidth = inspectorMaxWidth();
+    const nextWidth = event.key === "Home"
+      ? MIN_INSPECTOR_WIDTH
+      : event.key === "End"
+        ? maxWidth
+        : currentWidth + (event.key === "ArrowLeft" ? 24 : -24);
+    commitInspectorWidth(nextWidth);
+  }
+
   const updateDiffViewSettings = (next: DiffViewSettings) => {
     const normalized: DiffViewSettings = {
       fontFamily: next.fontFamily,
@@ -5158,6 +5347,7 @@ function App() {
     saveDiffViewSettings(normalized);
   };
 
+  const inspectorResizeMaxWidth = inspectorMaxWidth(layoutViewportWidth);
   const inspectorSlot = workspaceView === "chat" && rightPanelOpen ? (
     <Inspector
       profile={activeProfile}
@@ -5172,6 +5362,11 @@ function App() {
       reviewedFile={reviewedFile}
       reviewedDiff={reviewedDiff}
       reviewedDiffBusy={reviewedDiffBusy}
+      browserSyncSignal={browserSyncSignal}
+      running={running}
+      onNotice={setNotice}
+      width={Math.min(inspectorWidth, inspectorResizeMaxWidth)}
+      maxWidth={inspectorResizeMaxWidth}
       onWorkspace={chooseWorkspace}
       onSettings={() => setSettingsOpen(true)}
       onDiff={openGitDiff}
@@ -5183,6 +5378,7 @@ function App() {
         setReviewedDiff(null);
       }}
       onResizeStart={startInspectorResize}
+      onResizeKeyDown={resizeInspectorWithKeyboard}
       onClose={() => setRightPanelOpen(false)}
     />
   ) : null;
@@ -5440,6 +5636,7 @@ function App() {
       actions={layoutActions}
       shellClassName={[
         rightPanelOpen && workspaceView === "chat" ? undefined : "details-collapsed",
+        sidebarCollapsed ? "sidebar-collapsed" : undefined,
         armorMode ? `armor-mode armor-level-${armorModeLevel}` : undefined,
       ].filter(Boolean).join(" ")}
       shellStyle={{
@@ -6841,138 +7038,145 @@ function Composer({
           disabled={disabled}
         />
         <div className="composer-toolbar">
-          <div className="mode-switch" aria-label={tr("运行模式", "Run mode")}>
-            {(["agent", "plan", "goal", "chat"] as AgentMode[]).map((value) => (
+          <div className="composer-toolbar-options">
+            <div className="mode-switch" aria-label={tr("运行模式", "Run mode")}>
+              {(["agent", "plan", "goal", "chat"] as AgentMode[]).map((value) => (
+                <button
+                  aria-pressed={mode === value}
+                  className={mode === value ? "active" : ""}
+                  disabled={disabled || running}
+                  key={value}
+                  title={modeDescription(value)}
+                  onClick={() => onModeChange(value)}
+                >
+                  {modeLabel(value)}
+                </button>
+              ))}
+            </div>
+            <div className="permission-picker" ref={permissionMenuRef}>
               <button
-                aria-pressed={mode === value}
-                className={mode === value ? "active" : ""}
+                className={`permission-button permission-${permissionLevel}`}
+                type="button"
+                aria-label={`${tr("权限等级", "Permission level")}: ${permissionLabel(permissionLevel)}`}
+                aria-expanded={permissionMenuOpen}
                 disabled={disabled || running}
-                key={value}
-                title={modeDescription(value)}
-                onClick={() => onModeChange(value)}
+                onClick={() => setPermissionMenuOpen((open) => !open)}
               >
-                {modeLabel(value)}
+                {permissionIcon(permissionLevel, 14)}
+                <span>{permissionLabel(permissionLevel)}</span>
+                <ChevronDown size={12} />
               </button>
-            ))}
-          </div>
-          <div className="permission-picker" ref={permissionMenuRef}>
+              {permissionMenuOpen && (
+                <div className="permission-menu" role="menu" aria-label={tr("选择权限等级", "Choose permission level")}>
+                  {(["request", "agent", "full"] as PermissionLevel[]).map((level) => (
+                    <button
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={permissionLevel === level}
+                      className={permissionLevel === level ? "active" : ""}
+                      key={level}
+                      onClick={() => {
+                        onPermissionChange(level);
+                        setPermissionMenuOpen(false);
+                      }}
+                    >
+                      <span className={`permission-option-icon permission-${level}`}>{permissionIcon(level, 17)}</span>
+                      <span><strong>{permissionLabel(level)}</strong><small>{permissionDescription(level)}</small></span>
+                      <span className="permission-option-check">{permissionLevel === level ? <Check size={14} /> : null}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             <button
-              className={`permission-button permission-${permissionLevel}`}
               type="button"
-              aria-label={`${tr("权限等级", "Permission level")}: ${permissionLabel(permissionLevel)}`}
-              aria-expanded={permissionMenuOpen}
-              disabled={disabled || running}
-              onClick={() => setPermissionMenuOpen((open) => !open)}
+              className={`armor-toggle${armorMode ? " active" : ""}`}
+              aria-pressed={armorMode}
+              title={armorMode
+                ? tr("一键破甲已开启：对当前会话注入高强度执行指令", "Armor Mode is enabled: high-intensity execution instructions are injected into this conversation")
+                : tr("开启一键破甲：增强行动优先、工具验证和跨模型一致性", "Enable Armor Mode: strengthen action-first execution, tool verification, and cross-model consistency")}
+              disabled={disabled}
+              onClick={() => onArmorModeChange(!armorMode)}
             >
-              {permissionIcon(permissionLevel, 14)}
-              <span>{permissionLabel(permissionLevel)}</span>
-              <ChevronDown size={12} />
+              <TerminalSquare size={14} />
+              <span>{tr("一键破甲", "Armor")}</span>
+              <i aria-hidden="true" />
             </button>
-            {permissionMenuOpen && (
-              <div className="permission-menu" role="menu" aria-label={tr("选择权限等级", "Choose permission level")}>
-                {(["request", "agent", "full"] as PermissionLevel[]).map((level) => (
+            {armorMode && (
+              <>
+                <div className="armor-level-picker active" ref={armorLevelMenuRef}>
                   <button
                     type="button"
-                    role="menuitemradio"
-                    aria-checked={permissionLevel === level}
-                    className={permissionLevel === level ? "active" : ""}
-                    key={level}
-                    onClick={() => {
-                      onPermissionChange(level);
-                      setPermissionMenuOpen(false);
-                    }}
+                    className="armor-level-button"
+                    aria-label={`${tr("破甲等级", "Armor level")}: ${tr(activeArmorProfile.labelZh, activeArmorProfile.labelEn)}`}
+                    aria-expanded={armorLevelMenuOpen}
+                    aria-haspopup="menu"
+                    title={`${tr(activeArmorProfile.descriptionZh, activeArmorProfile.descriptionEn)} · ${tr("随下一轮请求注入", "Injected on the next request")}`}
+                    disabled={disabled}
+                    onClick={() => setArmorLevelMenuOpen((open) => !open)}
                   >
-                    <span className={`permission-option-icon permission-${level}`}>{permissionIcon(level, 17)}</span>
-                    <span><strong>{permissionLabel(level)}</strong><small>{permissionDescription(level)}</small></span>
-                    <span className="permission-option-check">{permissionLevel === level ? <Check size={14} /> : null}</span>
+                    <ShieldAlert size={13} />
+                    <span>{tr(activeArmorProfile.labelZh, activeArmorProfile.labelEn)}</span>
+                    <ChevronDown size={12} />
                   </button>
-                ))}
-              </div>
+                  {armorLevelMenuOpen && (
+                    <div className="armor-level-menu" role="menu" aria-label={tr("选择破甲等级", "Choose Armor level")}>
+                      {ARMOR_MODE_LEVELS.map((level) => {
+                        const profile = ARMOR_MODE_PROFILES[level];
+                        return (
+                          <button
+                            type="button"
+                            role="menuitemradio"
+                            aria-checked={armorModeLevel === level}
+                            className={armorModeLevel === level ? "active" : ""}
+                            key={level}
+                            onClick={() => {
+                              onArmorModeLevelChange(level);
+                              setArmorLevelMenuOpen(false);
+                            }}
+                          >
+                            <span className="armor-level-option-icon"><TerminalSquare size={15} /></span>
+                            <span><strong>{tr(profile.labelZh, profile.labelEn)}</strong><small>{tr(profile.descriptionZh, profile.descriptionEn)}</small></span>
+                            <span className="armor-level-check">{armorModeLevel === level ? <Check size={14} /> : null}</span>
+                          </button>
+                        );
+                      })}
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className="armor-level-menu-manage"
+                        onClick={() => {
+                          setArmorLevelMenuOpen(false);
+                          onArmorStudioOpen();
+                        }}
+                      >
+                        <span className="armor-level-option-icon"><ShieldCheck size={15} /></span>
+                        <span><strong>{tr("打开控制台", "Open console")}</strong><small>{tr("管理 Skill、写作强度和媒体编译", "Manage Skills, writing intensity, and media compilation")}</small></span>
+                        <ChevronRight size={14} />
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </>
             )}
           </div>
-          <button
-            type="button"
-            className={`armor-toggle${armorMode ? " active" : ""}`}
-            aria-pressed={armorMode}
-            title={armorMode
-              ? tr("一键破甲已开启：对当前会话注入高强度执行指令", "Armor Mode is enabled: high-intensity execution instructions are injected into this conversation")
-              : tr("开启一键破甲：增强行动优先、工具验证和跨模型一致性", "Enable Armor Mode: strengthen action-first execution, tool verification, and cross-model consistency")}
-            disabled={disabled}
-            onClick={() => onArmorModeChange(!armorMode)}
-          >
-            <TerminalSquare size={14} />
-            <span>{tr("一键破甲", "Armor")}</span>
-            <i aria-hidden="true" />
-          </button>
-          {armorMode && (
-            <>
-              <div className="armor-level-picker active" ref={armorLevelMenuRef}>
-                <button
-                  type="button"
-                  className="armor-level-button"
-                  aria-label={`${tr("破甲等级", "Armor level")}: ${tr(activeArmorProfile.labelZh, activeArmorProfile.labelEn)}`}
-                  aria-expanded={armorLevelMenuOpen}
-                  aria-haspopup="menu"
-                  title={`${tr(activeArmorProfile.descriptionZh, activeArmorProfile.descriptionEn)} · ${tr("随下一轮请求注入", "Injected on the next request")}`}
-                  disabled={disabled}
-                  onClick={() => setArmorLevelMenuOpen((open) => !open)}
-                >
-                  <ShieldAlert size={13} />
-                  <span>{tr(activeArmorProfile.labelZh, activeArmorProfile.labelEn)}</span>
-                  <ChevronDown size={12} />
-                </button>
-                {armorLevelMenuOpen && (
-                  <div className="armor-level-menu" role="menu" aria-label={tr("选择破甲等级", "Choose Armor level")}>
-                    {ARMOR_MODE_LEVELS.map((level) => {
-                      const profile = ARMOR_MODE_PROFILES[level];
-                      return (
-                        <button
-                          type="button"
-                          role="menuitemradio"
-                          aria-checked={armorModeLevel === level}
-                          className={armorModeLevel === level ? "active" : ""}
-                          key={level}
-                          onClick={() => {
-                            onArmorModeLevelChange(level);
-                            setArmorLevelMenuOpen(false);
-                          }}
-                        >
-                          <span className="armor-level-option-icon"><TerminalSquare size={15} /></span>
-                          <span><strong>{tr(profile.labelZh, profile.labelEn)}</strong><small>{tr(profile.descriptionZh, profile.descriptionEn)}</small></span>
-                          <span className="armor-level-check">{armorModeLevel === level ? <Check size={14} /> : null}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-              <button
-                type="button"
-                className="armor-manage-button"
-                title={tr("打开一键破甲控制台", "Open Armor Mode control center")}
-                onClick={onArmorStudioOpen}
-              >
-                <ShieldCheck size={14} />
-                <span>{tr("控制台", "Console")}</span>
-              </button>
-            </>
-          )}
-          <span className="composer-spacer" />
-          {thinkingControl}
-          {modelControl}
-          {running && (
-            <IconButton label={tr("停止", "Stop")} className="send-button" onClick={onStop}>
-              <CircleStop size={18} />
+          <div className="composer-toolbar-actions">
+            {thinkingControl}
+            {modelControl}
+            {running && (
+              <IconButton label={tr("停止", "Stop")} className="send-button" onClick={onStop}>
+                <CircleStop size={18} />
+              </IconButton>
+            )}
+            <IconButton
+              label={running ? tr("加入当前运行队列", "Queue for active run") : tr("发送", "Send")}
+              className="send-button"
+              disabled={disabled || (!draft.trim() && (running || attachments.length === 0))}
+              onClick={onSend}
+            >
+              <Send size={18} />
             </IconButton>
-          )}
-          <IconButton
-            label={running ? tr("加入当前运行队列", "Queue for active run") : tr("发送", "Send")}
-            className="send-button"
-            disabled={disabled || (!draft.trim() && (running || attachments.length === 0))}
-            onClick={onSend}
-          >
-            <Send size={18} />
-          </IconButton>
+          </div>
         </div>
       </div>
     </div>
@@ -6992,6 +7196,11 @@ function Inspector({
   reviewedFile,
   reviewedDiff,
   reviewedDiffBusy,
+  browserSyncSignal,
+  running,
+  onNotice,
+  width,
+  maxWidth,
   onWorkspace,
   onSettings,
   onDiff,
@@ -7000,6 +7209,7 @@ function Inspector({
   onReviewFile,
   onBackToChanges,
   onResizeStart,
+  onResizeKeyDown,
   onClose,
 }: {
   profile: ProviderProfile;
@@ -7014,6 +7224,11 @@ function Inspector({
   reviewedFile: ConversationFileChange | null;
   reviewedDiff: GitDiff | null;
   reviewedDiffBusy: boolean;
+  browserSyncSignal: BrowserSyncSignal | null;
+  running: boolean;
+  onNotice: (message: string) => void;
+  width: number;
+  maxWidth: number;
   onWorkspace: () => void;
   onSettings: () => void;
   onDiff: (change: GitFileChange) => void;
@@ -7022,17 +7237,24 @@ function Inspector({
   onReviewFile: (file: ConversationFileChange) => void;
   onBackToChanges: () => void;
   onResizeStart: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  onResizeKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
   onClose: () => void;
 }) {
   const gitUnavailable = gitStatus?.isAvailable === false;
   return (
-    <aside className="inspector">
+    <aside className={`inspector${activeTab === "browser" ? " browser-active" : ""}`}>
       <div
         className="inspector-resize-handle"
         role="separator"
         aria-orientation="vertical"
         aria-label={tr("调整右侧栏宽度", "Resize side panel")}
+        aria-valuemin={MIN_INSPECTOR_WIDTH}
+        aria-valuemax={maxWidth}
+        aria-valuenow={width}
+        tabIndex={0}
+        title={tr("拖动调整宽度，方向键微调", "Drag to resize; use arrow keys for fine adjustments")}
         onPointerDown={onResizeStart}
+        onKeyDown={onResizeKeyDown}
       />
       <div className="inspector-tabs" data-tauri-drag-region>
         <button className={activeTab === "details" ? "active" : ""} type="button" onClick={() => onTabChange("details")}>
@@ -7042,9 +7264,21 @@ function Inspector({
           <FileCode2 size={14} />{tr("本轮变更", "Turn changes")}
           {changeSet && <small>{changeSet.files.length}</small>}
         </button>
+        <button className={activeTab === "browser" ? "active" : ""} type="button" onClick={() => onTabChange("browser")} title={tr("浏览器工作台", "Browser workbench")}>
+          <Globe2 size={14} />{tr("浏览器", "Browser")}
+        </button>
         <IconButton className="inspector-close" label={tr("关闭侧栏", "Close side panel")} onClick={onClose}><X size={14} /></IconButton>
       </div>
-      {activeTab === "changes" ? (
+      {activeTab === "browser" ? (
+        <AgentBrowserPanel
+          threadId={thread.id}
+          workspace={thread.workspace}
+          sessionHint={browserSyncSignal?.threadId === thread.id ? browserSyncSignal.sessionId : null}
+          revision={browserSyncSignal?.threadId === thread.id ? browserSyncSignal.revision : 0}
+          running={running}
+          onNotice={onNotice}
+        />
+      ) : activeTab === "changes" ? (
         <ChangeInspectorPanel
           changeSet={changeSet}
           reviewedFile={reviewedFile}

@@ -2317,7 +2317,7 @@ dependencies = [
 
 [[package]]
 name = "levelup-agent"
-version = "1.0.41"
+version = "1.0.42"
 dependencies = [
  "base64 0.22.1",
  "chardetng",

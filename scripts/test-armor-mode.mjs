@@ -148,6 +148,9 @@ test("Armor Mode UI, storage, and request wiring stay connected", () => {
   assert.match(app, /armor-level-picker/);
   assert.match(app, /\{armorMode && \(/);
   assert.match(app, /armor-level-menu/);
+  assert.match(app, /className="armor-level-menu-manage"/);
+  assert.match(app, /className="armor-level-menu-manage"[\s\S]*?onArmorStudioOpen\(\)/);
+  assert.doesNotMatch(app, /className="armor-manage-button"/);
   assert.match(app, /armor-hud/);
   assert.match(app, /customInstructions: armorModeRunInstructions\(armorMode, armorModeLevel, \{/);
   assert.match(app, /armorModeRunInstructions\(armorMode, armorModeLevel, \{/);

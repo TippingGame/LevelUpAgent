@@ -88,6 +88,31 @@ struct FrontendLogEntry {
     visibility: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserPanelStartRequest {
+    thread_id: String,
+    workspace: Option<String>,
+    url: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserPanelCommandRequest {
+    session_id: String,
+    action: String,
+    url: Option<String>,
+    x: Option<f64>,
+    y: Option<f64>,
+    delta_x: Option<f64>,
+    delta_y: Option<f64>,
+    key: Option<String>,
+    text: Option<String>,
+    width: Option<u64>,
+    height: Option<u64>,
+    mobile: Option<bool>,
+}
+
 struct AppState {
     client: Client,
     active_requests: Mutex<HashMap<String, CancellationToken>>,
@@ -1112,7 +1137,7 @@ fn attach_extended_tools(request: &mut AgentTurnRequest) -> Result<(), String> {
             },
             AgentToolDefinition {
                 name: "browser_start".to_owned(),
-                description: "Start an isolated headless Chromium session for UI testing. Each session has a temporary profile, loopback CDP connection, and optional domain allowlist.".to_owned(),
+                description: "Start an isolated Chromium session for UI testing and share its live preview with the Browser side panel. Each session has a temporary profile, loopback CDP connection, and optional domain allowlist.".to_owned(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -1124,7 +1149,7 @@ fn attach_extended_tools(request: &mut AgentTurnRequest) -> Result<(), String> {
             },
             AgentToolDefinition {
                 name: "browser_list".to_owned(),
-                description: "List active isolated browser sessions.".to_owned(),
+                description: "List active isolated browser sessions attached to the current task. Reuse a user-opened session when one is already available.".to_owned(),
                 input_schema: serde_json::json!({ "type": "object", "properties": {} }),
                 read_only: true,
             },
@@ -6059,6 +6084,30 @@ async fn harness_run_loop(
                         );
                         continue;
                     }
+                    let payload = serde_json::json!({ "round": round });
+                    let sequence = match database
+                        .complete_harness_operation_if_queue_empty(&operation_id, &payload)?
+                    {
+                        database::HarnessCompletionDecision::Completed(sequence) => sequence,
+                        database::HarnessCompletionDecision::QueuePending => {
+                            logging::write(
+                                "info",
+                                "harness",
+                                "round_completed",
+                                serde_json::json!({
+                                    "operationId": &operation_id,
+                                    "threadId": &request.thread_id,
+                                    "round": round,
+                                    "outcome": "queued_follow_up",
+                                    "latencyMs": round_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                                }),
+                            );
+                            continue;
+                        }
+                        database::HarnessCompletionDecision::AlreadyTerminal(state) => {
+                            return Ok(crate::harness::types::HarnessRunOutcome { state });
+                        }
+                    };
                     logging::write(
                         "info",
                         "harness",
@@ -6071,16 +6120,6 @@ async fn harness_run_loop(
                             "latencyMs": round_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
                         }),
                     );
-                    database.update_harness_operation_state(
-                        &operation_id,
-                        &crate::harness::types::RuntimeState::Completed,
-                    )?;
-                    let payload = serde_json::json!({ "round": round });
-                    let sequence = database.append_harness_event(
-                        &operation_id,
-                        "operation_completed",
-                        &payload,
-                    )?;
                     let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
                         &operation_id,
                         sequence,
@@ -6434,21 +6473,36 @@ async fn harness_run_loop(
                                 "latencyMs": round_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
                             }),
                         );
-                        database.update_harness_operation_state(
-                            &operation_id,
-                            &crate::harness::types::RuntimeState::Completed,
-                        )?;
                         let payload = serde_json::json!({
                             "round": round,
                             "reason": "theme_package_validated",
                             "themeId": manifest.id,
                             "themeName": manifest.name,
                         });
-                        let sequence = database.append_harness_event(
-                            &operation_id,
-                            "operation_completed",
-                            &payload,
-                        )?;
+                        let sequence = match database
+                            .complete_harness_operation_if_queue_empty(&operation_id, &payload)?
+                        {
+                            database::HarnessCompletionDecision::Completed(sequence) => sequence,
+                            database::HarnessCompletionDecision::QueuePending => {
+                                logging::write(
+                                    "info",
+                                    "harness",
+                                    "round_completed",
+                                    serde_json::json!({
+                                        "operationId": &operation_id,
+                                        "threadId": &request.thread_id,
+                                        "round": round,
+                                        "outcome": "queued_follow_up",
+                                        "reason": "theme_package_validated",
+                                        "latencyMs": round_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                                    }),
+                                );
+                                continue;
+                            }
+                            database::HarnessCompletionDecision::AlreadyTerminal(state) => {
+                                return Ok(crate::harness::types::HarnessRunOutcome { state });
+                            }
+                        };
                         let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
                             &operation_id,
                             sequence,
@@ -6488,19 +6542,34 @@ async fn harness_run_loop(
                             "latencyMs": round_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
                         }),
                     );
-                    database.update_harness_operation_state(
-                        &operation_id,
-                        &crate::harness::types::RuntimeState::Completed,
-                    )?;
                     let payload = serde_json::json!({
                         "round": round,
                         "reason": "goal_completed",
                     });
-                    let sequence = database.append_harness_event(
-                        &operation_id,
-                        "operation_completed",
-                        &payload,
-                    )?;
+                    let sequence = match database
+                        .complete_harness_operation_if_queue_empty(&operation_id, &payload)?
+                    {
+                        database::HarnessCompletionDecision::Completed(sequence) => sequence,
+                        database::HarnessCompletionDecision::QueuePending => {
+                            logging::write(
+                                "info",
+                                "harness",
+                                "round_completed",
+                                serde_json::json!({
+                                    "operationId": &operation_id,
+                                    "threadId": &request.thread_id,
+                                    "round": round,
+                                    "outcome": "queued_follow_up",
+                                    "reason": "goal_completed",
+                                    "latencyMs": round_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                                }),
+                            );
+                            continue;
+                        }
+                        database::HarnessCompletionDecision::AlreadyTerminal(state) => {
+                            return Ok(crate::harness::types::HarnessRunOutcome { state });
+                        }
+                    };
                     let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
                         &operation_id,
                         sequence,
@@ -8256,6 +8325,134 @@ fn hatch_repeated_command_error(
 }
 
 #[tauri::command]
+async fn browser_panel_sessions(
+    browser: tauri::State<'_, browser::BrowserManager>,
+) -> Result<Vec<serde_json::Value>, String> {
+    Ok(browser.list().await)
+}
+
+#[tauri::command]
+async fn browser_panel_preview(
+    browser: tauri::State<'_, browser::BrowserManager>,
+    session_id: String,
+) -> Result<browser::BrowserPreview, String> {
+    browser.preview(&session_id).await
+}
+
+#[tauri::command]
+async fn browser_panel_start(
+    app: tauri::AppHandle,
+    browser: tauri::State<'_, browser::BrowserManager>,
+    request: BrowserPanelStartRequest,
+) -> Result<browser::BrowserPreview, String> {
+    let (app_data, _) = skill_storage_paths(&app)?;
+    let url = request
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let workspace = request
+        .workspace
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(Path::new);
+    let id = browser
+        .start(
+            &app_data,
+            url,
+            Vec::new(),
+            workspace,
+            Some(&request.thread_id),
+        )
+        .await?;
+    browser.preview(&id).await
+}
+
+#[tauri::command]
+async fn browser_panel_command(
+    browser: tauri::State<'_, browser::BrowserManager>,
+    request: BrowserPanelCommandRequest,
+) -> Result<Option<browser::BrowserPreview>, String> {
+    let session_id = request.session_id;
+    match request.action.as_str() {
+        "navigate" => {
+            let url = request
+                .url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "Browser navigation requires a URL".to_owned())?;
+            browser.navigate(&session_id, url).await?;
+        }
+        "back" => {
+            browser.go_back(&session_id).await?;
+        }
+        "forward" => {
+            browser.go_forward(&session_id).await?;
+        }
+        "reload" => {
+            browser.reload(&session_id).await?;
+        }
+        "click" => {
+            browser
+                .click_point(
+                    &session_id,
+                    request
+                        .x
+                        .ok_or_else(|| "Browser click requires x".to_owned())?,
+                    request
+                        .y
+                        .ok_or_else(|| "Browser click requires y".to_owned())?,
+                )
+                .await?;
+        }
+        "scroll" => {
+            browser
+                .scroll(
+                    &session_id,
+                    request.x.unwrap_or(0.0),
+                    request.y.unwrap_or(0.0),
+                    request.delta_x.unwrap_or(0.0),
+                    request.delta_y.unwrap_or(0.0),
+                )
+                .await?;
+        }
+        "key" => {
+            let key = request
+                .key
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("Unidentified");
+            browser
+                .send_key(&session_id, key, request.text.as_deref())
+                .await?;
+        }
+        "setViewport" => {
+            browser
+                .set_viewport(
+                    &session_id,
+                    request
+                        .width
+                        .ok_or_else(|| "Browser viewport requires width".to_owned())?,
+                    request
+                        .height
+                        .ok_or_else(|| "Browser viewport requires height".to_owned())?,
+                    request.mobile.unwrap_or(false),
+                )
+                .await?;
+        }
+        "close" => {
+            browser.close(&session_id).await?;
+            return Ok(None);
+        }
+        action => return Err(format!("Unknown browser panel action: {action}")),
+    }
+    browser.preview(&session_id).await.map(Some)
+}
+
+#[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn execute_tool(
     app: tauri::AppHandle,
@@ -8852,11 +9049,21 @@ async fn execute_tool_inner(
                         allowed_domains,
                         (!request.workspace.trim().is_empty())
                             .then(|| Path::new(&request.workspace)),
+                        request.thread_id.as_deref(),
                     )
                     .await;
                 tool_execution_result(result)
             }
-            "browser_list" => json_tool_output(&browser.list().await),
+            "browser_list" => {
+                let mut sessions = browser.list().await;
+                if let Some(thread_id) = request.thread_id.as_deref() {
+                    sessions.retain(|session| {
+                        session.get("threadId").and_then(serde_json::Value::as_str)
+                            == Some(thread_id)
+                    });
+                }
+                json_tool_output(&sessions)
+            }
             "browser_navigate" => {
                 let session_id = required_tool_string(&request.arguments, "sessionId")?;
                 let url = required_tool_string(&request.arguments, "url")?;
@@ -10144,6 +10351,10 @@ pub fn run() {
             agent_turn,
             agent_turn_stream,
             cancel_agent_turn,
+            browser_panel_sessions,
+            browser_panel_preview,
+            browser_panel_start,
+            browser_panel_command,
             execute_tool,
             create_goal,
             get_goal,

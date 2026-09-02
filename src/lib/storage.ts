@@ -28,10 +28,18 @@ const ACTIVE_THEME_KEY = "levelup-agent.active-theme.v1";
 const DIFF_VIEW_SETTINGS_KEY = "levelup-agent.diff-view-settings.v1";
 const TASK_COMPLETIONS_KEY = "levelup-agent.task-completions.v1";
 const COMPOSER_HEIGHT_KEY = "levelup-agent.composer-height.v1";
+const SIDEBAR_WIDTH_KEY = "levelup-agent.sidebar-width.v1";
+const INSPECTOR_WIDTH_KEY = "levelup-agent.inspector-width.v1";
 
 export const DEFAULT_COMPOSER_HEIGHT = 64;
 export const MIN_COMPOSER_HEIGHT = 48;
 export const MAX_COMPOSER_HEIGHT = 420;
+export const DEFAULT_SIDEBAR_WIDTH = 244;
+export const COLLAPSED_SIDEBAR_WIDTH = 68;
+export const MIN_EXPANDED_SIDEBAR_WIDTH = 180;
+export const MAX_SIDEBAR_WIDTH = 480;
+export const DEFAULT_INSPECTOR_WIDTH = 320;
+export const MIN_INSPECTOR_WIDTH = 260;
 
 export const DEFAULT_DIFF_VIEW_SETTINGS: DiffViewSettings = {
   fontFamily: "system",
@@ -389,6 +397,38 @@ export function loadComposerHeight(): number {
 
 export function saveComposerHeight(height: number) {
   writeStorageValue(COMPOSER_HEIGHT_KEY, String(normalizeComposerHeight(height)));
+}
+
+function normalizeSidebarWidth(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  if (value <= COLLAPSED_SIDEBAR_WIDTH + 1) return COLLAPSED_SIDEBAR_WIDTH;
+  return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_EXPANDED_SIDEBAR_WIDTH, Math.round(value)));
+}
+
+export function loadSidebarWidth(): number | null {
+  const stored = readStorageValue(SIDEBAR_WIDTH_KEY);
+  return stored === null ? null : normalizeSidebarWidth(Number(stored));
+}
+
+export function saveSidebarWidth(width: number) {
+  const normalized = normalizeSidebarWidth(width);
+  if (normalized !== null) writeStorageValue(SIDEBAR_WIDTH_KEY, String(normalized));
+}
+
+function normalizeInspectorWidth(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_INSPECTOR_WIDTH;
+  const rounded = Math.round(value);
+  if (!Number.isSafeInteger(rounded)) return DEFAULT_INSPECTOR_WIDTH;
+  return Math.max(MIN_INSPECTOR_WIDTH, rounded);
+}
+
+export function loadInspectorWidth(): number {
+  const stored = readStorageValue(INSPECTOR_WIDTH_KEY);
+  return stored === null ? DEFAULT_INSPECTOR_WIDTH : normalizeInspectorWidth(Number(stored));
+}
+
+export function saveInspectorWidth(width: number) {
+  writeStorageValue(INSPECTOR_WIDTH_KEY, String(normalizeInspectorWidth(width)));
 }
 
 export function clearLegacyThreads() {

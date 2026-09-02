@@ -467,6 +467,43 @@ export interface ToolExecutionResponse {
   isError: boolean;
 }
 
+export interface BrowserSessionSummary {
+  id: string;
+  threadId?: string;
+  createdAt: number;
+  lastActiveAt: number;
+  url: string;
+  title: string;
+  viewportWidth: number;
+  viewportHeight: number;
+  mobile: boolean;
+  allowedDomains: string[];
+}
+
+export interface BrowserConsoleEntry {
+  level: "log" | "info" | "warn" | "error" | "debug";
+  text: string;
+  timestamp: number;
+}
+
+export interface BrowserPreview {
+  sessionId: string;
+  threadId?: string;
+  url: string;
+  title: string;
+  faviconUrl: string;
+  readyState: string;
+  viewportWidth: number;
+  viewportHeight: number;
+  mobile: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  screenshotDataUrl: string;
+  consoleEntries: BrowserConsoleEntry[];
+  consoleErrorCount: number;
+  updatedAt: number;
+}
+
 export interface HarnessDraftRequest {
   threadId: string;
   rawUserInput: string;

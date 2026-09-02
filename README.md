@@ -12,7 +12,7 @@
     <a href="https://levelup.mom/">LevelUpAPI</a>
   </p>
   <p>
-    <img alt="Version" src="https://img.shields.io/badge/version-1.0.41-ff5a4f?style=flat-square" />
+    <img alt="Version" src="https://img.shields.io/badge/version-1.0.42-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-可用预览-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -155,7 +155,7 @@ macOS 安装包使用 `pnpm build:macos`。正式更新还需要仓库所有者�
 
 ## 当前状态
 
-`1.0.41` 是当前发布里程碑。图片附件的 Base64 传输内容不再被当作普通文本计入上下文预算，避免大图挤掉后续工具结果，并降低兼容模型重复调用工具的风险。模型连接协议标签新增 GLM、Kimi 与 DeepSeek，并按 LevelUpAPI 的入口兼容能力显示；OpenCode 改为天蓝色，新平台标签采用各自品牌色。对话输入框的运行模式按钮在窄窗口下保持中文横向排版，避免文字竖排超框。Windows 安装包使用 Tauri updater 签名但仍未配置 Authenticode，SmartScreen 可能提示“未知发布者”；macOS 安装包当前未公证。提交 Issue 时请附上复现步骤、应用日志和平台信息。
+`1.0.42` 是当前发布里程碑。右侧栏新增与 Agent 共用同一隔离 Chromium 会话的浏览器工作台，可查看和操作 Agent 打开的测试页面、切换桌面/移动视口、读取控制台并同步浏览器工具结果。左侧栏现在可直接拖拽收缩为图标栏，右侧栏可扩展到左栏边界，对话输入操作在窄空间内保持右对齐和可发送。Harness 队列完成边界改为事务化处理，避免运行结束与后续消息入队竞争导致消息丢失。Windows 安装包使用 Tauri updater 签名但仍未配置 Authenticode，SmartScreen 可能提示“未知发布者”；macOS 安装包当前未公证。提交 Issue 时请附上复现步骤、应用日志和平台信息。
 
 ## 许可证
 

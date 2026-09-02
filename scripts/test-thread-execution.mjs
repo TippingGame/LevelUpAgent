@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -6,9 +7,14 @@ import {
   finalizeAssistantMessage,
   providerRetryProgressLabel,
   providerThreadId,
+  queueStateWithItem,
+  queueStateWithoutItem,
   settleProviderReconnect,
   usesDurableHarness,
 } from "../src/lib/threadExecution.ts";
+
+const appSource = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+const harnessSource = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
 
 function assistant(id, content, createdAt = 100) {
   return {
@@ -39,6 +45,39 @@ test("all desktop conversations, including hatch and pet chats, use Harness", ()
   assert.equal(usesDurableHarness({}, true), true);
   assert.equal(usesDurableHarness({ kind: "pet" }, true), true);
   assert.equal(usesDurableHarness({ kind: "standard" }, false), false);
+});
+
+test("active-run queue remains visible until the runtime injects each item", () => {
+  assert.match(appSource, /event\.kind === "queue_injected"/);
+  assert.match(appSource, /const removeHarnessQueueItem =/);
+  assert.doesNotMatch(appSource, /const setThreadQueue =/);
+  assert.match(appSource, /injectedQueueIdsRef/);
+  assert.match(appSource, /const recordHarnessQueueItem =/);
+  assert.match(appSource, /const enqueueCurrentRunMessage[\s\S]*?recordHarnessQueueItem\(threadId, queued\)/);
+  assert.match(appSource, /submission\.disposition === "queued"[\s\S]*?recordHarnessQueueItem\(thread\.id, queued\)/);
+  assert.match(appSource, /replacementOperationId !== queueOperationId[\s\S]*?continue;/);
+});
+
+test("queue state reconciles either queue injection event order without reviving items", () => {
+  const threadId = "thread-1";
+  const first = { id: "queue-1", operationId: "operation-1", kind: "follow_up", body: "first", status: "pending" };
+  const second = { id: "queue-2", operationId: "operation-1", kind: "follow_up", body: "second", status: "pending" };
+  const empty = {};
+
+  const eventFirst = queueStateWithItem(empty, threadId, first, new Set([first.id]));
+  assert.strictEqual(eventFirst, empty);
+
+  const ipcFirst = queueStateWithItem(empty, threadId, first, new Set());
+  assert.deepEqual(ipcFirst[threadId], [first]);
+  assert.deepEqual(queueStateWithoutItem(ipcFirst, threadId, first.id)[threadId], []);
+
+  const withSecond = queueStateWithItem(ipcFirst, threadId, second, new Set());
+  assert.deepEqual(queueStateWithoutItem(withSecond, threadId, first.id)[threadId], [second]);
+});
+
+test("Harness completion defers to pending queue messages", () => {
+  assert.match(harnessSource, /complete_harness_operation_if_queue_empty/);
+  assert.match(harnessSource, /outcome": "queued_follow_up"/);
 });
 
 test("provider retry progress identifies the active request and keeps ticking", () => {

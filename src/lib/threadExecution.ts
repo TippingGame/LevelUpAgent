@@ -1,6 +1,28 @@
-import type { AgentThread } from "./types";
-import type { AgentMessage } from "./types";
+import type { AgentMessage, AgentThread, HarnessQueueItem } from "./types";
 import type { AppLocale } from "./i18n";
+
+export type HarnessQueueState = Record<string, HarnessQueueItem[]>;
+
+export function queueStateWithItem(
+  current: HarnessQueueState,
+  threadId: string,
+  item: HarnessQueueItem,
+  injectedQueueIds: ReadonlySet<string>,
+): HarnessQueueState {
+  const items = current[threadId] ?? [];
+  if (injectedQueueIds.has(item.id) || items.some((queued) => queued.id === item.id)) return current;
+  return { ...current, [threadId]: [...items, item] };
+}
+
+export function queueStateWithoutItem(
+  current: HarnessQueueState,
+  threadId: string,
+  queueId: string,
+): HarnessQueueState {
+  const items = current[threadId] ?? [];
+  const remaining = items.filter((item) => item.id !== queueId);
+  return remaining.length === items.length ? current : { ...current, [threadId]: remaining };
+}
 
 export function usesDurableHarness(
   thread: Pick<AgentThread, "kind">,

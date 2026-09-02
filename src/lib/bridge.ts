@@ -7,6 +7,8 @@ import type {
   AgentThread,
   AgentTurnResponse,
   AppUpdateInfo,
+  BrowserPreview,
+  BrowserSessionSummary,
   ConfigWritePreview,
   ConfigWriteResult,
   ExternalConfigCandidate,
@@ -998,6 +1000,57 @@ export async function executeTool(
       approvalGranted,
     }),
   });
+}
+
+export type BrowserPanelAction =
+  | "navigate"
+  | "back"
+  | "forward"
+  | "reload"
+  | "click"
+  | "scroll"
+  | "key"
+  | "setViewport"
+  | "close";
+
+export interface BrowserPanelCommand {
+  sessionId: string;
+  action: BrowserPanelAction;
+  url?: string;
+  x?: number;
+  y?: number;
+  deltaX?: number;
+  deltaY?: number;
+  key?: string;
+  text?: string;
+  width?: number;
+  height?: number;
+  mobile?: boolean;
+}
+
+export async function listBrowserPanelSessions(): Promise<BrowserSessionSummary[]> {
+  if (!isDesktop()) return [];
+  return invoke<BrowserSessionSummary[]>("browser_panel_sessions");
+}
+
+export async function getBrowserPanelPreview(sessionId: string): Promise<BrowserPreview> {
+  return invoke<BrowserPreview>("browser_panel_preview", { sessionId });
+}
+
+export async function startBrowserPanelSession(
+  threadId: string,
+  workspace: string | undefined,
+  url?: string,
+): Promise<BrowserPreview> {
+  return invoke<BrowserPreview>("browser_panel_start", {
+    request: { threadId, workspace, url },
+  });
+}
+
+export async function runBrowserPanelCommand(
+  request: BrowserPanelCommand,
+): Promise<BrowserPreview | null> {
+  return invoke<BrowserPreview | null>("browser_panel_command", { request });
 }
 
 export async function executeHatchBootstrapTool(
