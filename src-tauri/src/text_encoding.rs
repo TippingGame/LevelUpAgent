@@ -839,7 +839,7 @@ fn decode_utf16_text(encoding: TextEncoding, bytes: &[u8]) -> Result<String, Tex
             encoding.label()
         )));
     }
-    let units = bytes.chunks_exact(2).map(|pair| match encoding {
+    let units = bytes.chunks(2).map(|pair| match encoding {
         TextEncoding::Utf16Le => u16::from_le_bytes([pair[0], pair[1]]),
         TextEncoding::Utf16Be => u16::from_be_bytes([pair[0], pair[1]]),
         _ => unreachable!("decode_utf16 called for a non-UTF-16 encoding"),

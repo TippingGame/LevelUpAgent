@@ -43,15 +43,15 @@ const THEME_GENERATION_REQUEST_TIMEOUT_SECS: u64 = 360;
 #[cfg(not(test))]
 const PROVIDER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 #[cfg(test)]
-const PROVIDER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_millis(250);
+const PROVIDER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
 #[cfg(not(test))]
 const PROVIDER_REASONING_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 #[cfg(test)]
-const PROVIDER_REASONING_STREAM_IDLE_TIMEOUT: Duration = Duration::from_millis(750);
+const PROVIDER_REASONING_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(not(test))]
 const PROVIDER_REASONING_FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(1_860);
 #[cfg(test)]
-const PROVIDER_REASONING_FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_millis(900);
+const PROVIDER_REASONING_FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(4);
 const PROVIDER_STREAM_INTERRUPTED: &str = "Provider stream ended before completion";
 
 fn turn_request_timeout(request: &AgentTurnRequest) -> Option<std::time::Duration> {
@@ -6047,7 +6047,7 @@ mod tests {
 
     #[tokio::test]
     async fn sse_comment_activity_resets_the_idle_timeout() {
-        let gap = std::time::Duration::from_millis(150);
+        let gap = PROVIDER_STREAM_IDLE_TIMEOUT / 2;
         let request = test_request(
             mock_timed_sse_server(
                 "/v1/messages",

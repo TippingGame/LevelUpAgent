@@ -623,10 +623,15 @@ fn ensure_no_symlink_chain(path: &Path) -> Result<(), String> {
         if let Ok(metadata) = std::fs::symlink_metadata(candidate)
             && metadata.file_type().is_symlink()
         {
-            return Err(format!(
-                "Skill path contains a symbolic link: {}",
-                candidate.display()
-            ));
+            let is_filesystem_alias = candidate
+                .parent()
+                .is_some_and(|parent| parent.parent().is_none());
+            if !is_filesystem_alias {
+                return Err(format!(
+                    "Skill path contains a symbolic link: {}",
+                    candidate.display()
+                ));
+            }
         }
         current = candidate.parent();
     }
@@ -648,7 +653,10 @@ fn ensure_mutable_skill_path(
     }) {
         return Err("Codex system Skills are read-only".to_owned());
     }
-    let roots = mutable_skill_roots(app_data, home, workspace);
+    let roots = mutable_skill_roots(app_data, home, workspace)
+        .into_iter()
+        .filter_map(|root| std::fs::canonicalize(root).ok())
+        .collect::<Vec<_>>();
     let Some(root) = roots.iter().find(|root| manifest.starts_with(root)) else {
         return Err("Only user, app, or workspace Skills may be modified".to_owned());
     };

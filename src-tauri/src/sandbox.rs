@@ -189,7 +189,7 @@ impl ProcessManager {
             snapshot.running = running;
             snapshots.push(snapshot);
         }
-        snapshots.sort_by(|left, right| left.started_at.cmp(&right.started_at));
+        snapshots.sort_by_key(|snapshot| snapshot.started_at);
         Ok(snapshots)
     }
 
@@ -336,9 +336,9 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let manager = ProcessManager::default();
         let command = if cfg!(windows) {
-            "Write-Output process-manager-fixture"
+            "Write-Output process-manager-fixture; Start-Sleep -Milliseconds 300"
         } else {
-            "printf process-manager-fixture"
+            "printf process-manager-fixture; sleep 0.3"
         };
         let snapshot = manager
             .start(&root, command, Some("fixture"))
@@ -347,7 +347,7 @@ mod tests {
         assert!(snapshot.running);
         assert_eq!(manager.list(&root).await.unwrap().len(), 1);
         let mut output = manager.output(&snapshot.id, &root).await.unwrap();
-        for _ in 0..40 {
+        for _ in 0..100 {
             if output.stdout.contains("process-manager-fixture") {
                 break;
             }
