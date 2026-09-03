@@ -70,6 +70,17 @@ mutation calls. Public web and Skill downloads filter local/private DNS answers
 before connecting, then re-check the response address. Set
 `LEVELUP_BROWSER_EXECUTABLE` when Chrome is installed in a non-standard path.
 
+In Agent and Goal modes, the host preloads `browser-qa` when the current request
+clearly targets a web implementation or when the current user turn modifies a
+browser-facing file such as HTML, CSS, JSX, TSX, Vue, or Svelte. If the model
+tries to finish without a browser inspection result after that change, Harness
+injects a bounded sequence of completion continuations so lower-effort models
+can progress through server startup, browser startup, and inspection even when
+approvals pause the run. This behavior is provider-neutral and does not raise
+the selected reasoning effort. Browser and managed-process actions retain the
+normal approval policy; Full permission is required for them to run without an
+approval pause.
+
 The model-facing client capability rules, browser conformance checks, and
 copy-ready manual acceptance prompts are defined in
 [`CLIENT_CAPABILITIES.md`](CLIENT_CAPABILITIES.md).

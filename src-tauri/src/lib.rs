@@ -70,6 +70,12 @@ const REASONING_PROVIDER_ROUND_TIMEOUT: Duration = Duration::from_secs(1_860);
 const PROVIDER_ROUND_TIMEOUT_PREFIX: &str = "Provider round timed out";
 const NON_GOAL_HARNESS_MAX_ROUNDS: usize = 64;
 const EMPTY_POST_TOOL_RESPONSE_RETRIES: usize = 2;
+// Low/medium-effort models sometimes advance the browser workflow one tool per
+// round. Four bounded nudges cover browser_list, server startup, browser startup,
+// and the required inspection without allowing an unbounded completion loop.
+const BROWSER_QA_COMPLETION_RETRIES: usize = 4;
+const BROWSER_QA_SKILL_NAME: &str = "browser-qa";
+const BROWSER_QA_COMPLETION_RETRY_EVENT: &str = "browser_qa_completion_retry_scheduled";
 const AUTONOMOUS_PET_MAX_AGENT_TURNS: usize = 4;
 const AUTONOMOUS_PET_MAX_WEB_SEARCHES: usize = 1;
 const AUTONOMOUS_PET_MAX_WEB_FETCHES: usize = 2;
@@ -115,12 +121,23 @@ struct BrowserPanelCommandRequest {
 
 struct AppState {
     client: Client,
+    stream_client: Client,
     active_requests: Mutex<HashMap<String, CancellationToken>>,
     harness_turn_cancellations: Mutex<HashMap<String, CancellationToken>>,
     harness_phases: Mutex<HashMap<String, HarnessPhase>>,
     pending_config_writes: Mutex<HashMap<String, PendingConfigWrite>>,
     pending_prompt_writes: Mutex<HashMap<String, PendingPromptWrite>>,
     pending_git_rollbacks: Mutex<HashMap<String, PendingGitRollback>>,
+}
+
+fn build_http_client(total_timeout: Option<Duration>) -> Result<Client, reqwest::Error> {
+    let mut builder = Client::builder()
+        .user_agent(concat!("LevelUpAgent/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(30));
+    if let Some(timeout) = total_timeout {
+        builder = builder.timeout(timeout);
+    }
+    builder.build()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -442,6 +459,348 @@ fn enable_skill_path(
     refreshed_skill(app, database, &selected.id, workspace)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrowserQaHistoryAction {
+    WebUiMutation,
+    AppliedPatch,
+    BrowserEvidence,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct BrowserQaTurnState {
+    required: bool,
+    evidence_attempted: bool,
+}
+
+fn contains_ascii_term(text: &str, term: &str) -> bool {
+    text.match_indices(term).any(|(start, _)| {
+        let end = start + term.len();
+        let before = text[..start].chars().next_back();
+        let after = text[end..].chars().next();
+        let boundary = |character: Option<char>| {
+            character.is_none_or(|value| !value.is_ascii_alphanumeric() && value != '_')
+        };
+        boundary(before) && boundary(after)
+    })
+}
+
+fn contains_prompt_term(text: &str, term: &str) -> bool {
+    if term.is_ascii() {
+        contains_ascii_term(text, term)
+    } else {
+        text.contains(term)
+    }
+}
+
+fn contains_any_prompt_term(text: &str, terms: &[&str]) -> bool {
+    terms.iter().any(|term| contains_prompt_term(text, term))
+}
+
+fn browser_qa_explicitly_skipped(prompt: &str) -> bool {
+    let normalized = prompt.to_lowercase();
+    [
+        "do not use browser",
+        "do not use the browser",
+        "don't use browser",
+        "don't use the browser",
+        "do not test in browser",
+        "don't test in browser",
+        "skip browser qa",
+        "skip browser testing",
+        "without browser testing",
+        "不要使用浏览器",
+        "不要打开浏览器",
+        "不用浏览器",
+        "跳过浏览器测试",
+        "无需浏览器测试",
+        "不做浏览器测试",
+    ]
+    .iter()
+    .any(|phrase| normalized.contains(phrase))
+}
+
+fn prompt_has_specific_web_surface(normalized: &str) -> bool {
+    contains_any_prompt_term(
+        normalized,
+        &[
+            "website",
+            "webpage",
+            "web page",
+            "web app",
+            "web ui",
+            "web client",
+            "web version",
+            "frontend",
+            "front-end",
+            "browser",
+            "html",
+            "css",
+            "responsive",
+            "landing page",
+            "localhost",
+            "网页",
+            "网站",
+            "前端",
+            "浏览器",
+            "响应式",
+            "落地页",
+            "网页版",
+            "web 端",
+        ],
+    )
+}
+
+fn prompt_has_native_platform(normalized: &str) -> bool {
+    contains_any_prompt_term(
+        normalized,
+        &[
+            "unity",
+            "unreal",
+            "android",
+            "ios",
+            "swiftui",
+            "react native",
+            "flutter",
+            "wpf",
+            "winui",
+            "qt",
+        ],
+    )
+}
+
+fn prompt_is_web_implementation(prompt: &str) -> bool {
+    let normalized = prompt.to_lowercase();
+    let specific_web_surface = prompt_has_specific_web_surface(&normalized);
+    let web_framework = contains_any_prompt_term(
+        &normalized,
+        &[
+            "react", "next.js", "nextjs", "vue", "svelte", "angular", "vite", "astro", "tailwind",
+            "dom", "canvas",
+        ],
+    );
+    let native_platform = prompt_has_native_platform(&normalized);
+    let broad_web = contains_prompt_term(&normalized, "web");
+    let backend_only = contains_any_prompt_term(
+        &normalized,
+        &[
+            "web api",
+            "backend",
+            "back-end",
+            "server api",
+            "后端",
+            "接口服务",
+        ],
+    );
+    let action = contains_any_prompt_term(
+        &normalized,
+        &[
+            "build",
+            "create",
+            "implement",
+            "generate",
+            "make",
+            "develop",
+            "design",
+            "redesign",
+            "add",
+            "update",
+            "modify",
+            "change",
+            "fix",
+            "repair",
+            "refactor",
+            "optimize",
+            "improve",
+            "style",
+            "scaffold",
+            "test",
+            "verify",
+            "validate",
+            "debug",
+            "构建",
+            "创建",
+            "生成",
+            "开发",
+            "实现",
+            "编写",
+            "制作",
+            "设计",
+            "重做",
+            "添加",
+            "新增",
+            "修改",
+            "更改",
+            "改造",
+            "改版",
+            "调整",
+            "修复",
+            "优化",
+            "改进",
+            "完善",
+            "美化",
+            "重构",
+            "搭建",
+            "更新",
+            "测试",
+            "验收",
+            "验证",
+            "调试",
+            "做一个",
+            "做个",
+        ],
+    );
+    if !action || native_platform && !specific_web_surface {
+        return false;
+    }
+    specific_web_surface || web_framework || broad_web && !backend_only
+}
+
+fn browser_visible_file_path(path: &str) -> bool {
+    let normalized = path.trim().replace('\\', "/").to_ascii_lowercase();
+    [
+        ".html", ".htm", ".css", ".scss", ".sass", ".less", ".jsx", ".tsx", ".vue", ".svelte",
+        ".astro", ".mdx", ".pug", ".hbs", ".ejs", ".liquid",
+    ]
+    .iter()
+    .any(|extension| normalized.ends_with(extension))
+}
+
+fn output_mentions_browser_visible_file(output: &str) -> bool {
+    output.lines().any(|line| {
+        let path = line
+            .split('|')
+            .next()
+            .unwrap_or(line)
+            .trim()
+            .trim_matches(['`', '\'', '"', '(', ')', '[', ']', '{', '}', ',', ':', ';']);
+        browser_visible_file_path(path)
+    })
+}
+
+fn browser_qa_mutation_succeeded(action: BrowserQaHistoryAction, output: &str) -> bool {
+    match action {
+        BrowserQaHistoryAction::WebUiMutation => {
+            output.starts_with("Wrote ")
+                || output.starts_with("Edited ")
+                || output.starts_with("Deleted ")
+        }
+        BrowserQaHistoryAction::AppliedPatch => {
+            output.starts_with("Applied reviewed sub-Agent patch ")
+                && output_mentions_browser_visible_file(output)
+        }
+        BrowserQaHistoryAction::BrowserEvidence => true,
+    }
+}
+
+fn browser_qa_history_action(call: &ToolCall) -> Option<BrowserQaHistoryAction> {
+    if matches!(
+        call.name.as_str(),
+        "write_file" | "edit_file" | "delete_file"
+    ) && call
+        .arguments
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(browser_visible_file_path)
+    {
+        return Some(BrowserQaHistoryAction::WebUiMutation);
+    }
+    if call.name == "apply_subagent_patch" {
+        return Some(BrowserQaHistoryAction::AppliedPatch);
+    }
+    if matches!(
+        call.name.as_str(),
+        "browser_snapshot" | "browser_assert" | "browser_screenshot" | "browser_console"
+    ) {
+        return Some(BrowserQaHistoryAction::BrowserEvidence);
+    }
+    None
+}
+
+fn browser_qa_turn_state(
+    mode: &str,
+    workspace: Option<&str>,
+    hatch: bool,
+    messages: &[AgentMessage],
+) -> BrowserQaTurnState {
+    if hatch
+        || !matches!(mode, "agent" | "goal")
+        || workspace.is_none_or(|value| value.trim().is_empty())
+        || agent::theme_generation_bootstrapped(messages)
+    {
+        return BrowserQaTurnState::default();
+    }
+    let Some((user_index, prompt)) =
+        messages
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, message)| {
+                (message.role.eq_ignore_ascii_case("user") && !message.internal)
+                    .then_some((index, message.content.as_str()))
+            })
+    else {
+        return BrowserQaTurnState::default();
+    };
+    if browser_qa_explicitly_skipped(prompt) {
+        return BrowserQaTurnState::default();
+    }
+
+    let mut state = BrowserQaTurnState {
+        required: prompt_is_web_implementation(prompt),
+        evidence_attempted: false,
+    };
+    let normalized_prompt = prompt.to_lowercase();
+    let infer_web_from_file_mutations = !prompt_has_native_platform(&normalized_prompt)
+        || prompt_has_specific_web_surface(&normalized_prompt);
+    let mut pending = HashMap::<String, BrowserQaHistoryAction>::new();
+    for message in &messages[user_index + 1..] {
+        if message.role.eq_ignore_ascii_case("assistant") {
+            for call in &message.tool_calls {
+                if let Some(action) = browser_qa_history_action(call) {
+                    pending.insert(call.id.clone(), action);
+                }
+            }
+        } else if message.role.eq_ignore_ascii_case("tool")
+            && let Some(action) = message
+                .tool_call_id
+                .as_deref()
+                .and_then(|call_id| pending.remove(call_id))
+        {
+            match action {
+                BrowserQaHistoryAction::WebUiMutation
+                    if infer_web_from_file_mutations
+                        && browser_qa_mutation_succeeded(action, &message.content) =>
+                {
+                    state.required = true;
+                    state.evidence_attempted = false;
+                }
+                BrowserQaHistoryAction::AppliedPatch
+                    if infer_web_from_file_mutations
+                        && browser_qa_mutation_succeeded(action, &message.content) =>
+                {
+                    state.required = true;
+                    state.evidence_attempted = false;
+                }
+                BrowserQaHistoryAction::WebUiMutation | BrowserQaHistoryAction::AppliedPatch => {}
+                BrowserQaHistoryAction::BrowserEvidence if state.required => {
+                    // A returned error still proves that browser QA was attempted and
+                    // lets the Agent report the concrete environment blocker.
+                    state.evidence_attempted = true;
+                }
+                BrowserQaHistoryAction::BrowserEvidence => {}
+            }
+        }
+    }
+    state
+}
+
+fn browser_qa_skill_available(request: &AgentTurnRequest) -> bool {
+    request
+        .available_skills
+        .iter()
+        .any(|skill| skill.name.eq_ignore_ascii_case(BROWSER_QA_SKILL_NAME))
+}
+
 fn attach_skills(
     app: &tauri::AppHandle,
     database: &database::Database,
@@ -505,13 +864,15 @@ fn attach_skills(
             "mode": request.mode,
         }),
     );
+    let browser_qa_skill_id = preload_browser_qa_skill(request, &enabled)?;
     request.available_skills = enabled
         .iter()
         .map(|skill| AgentSkillSummary {
             id: skill.id.clone(),
             name: skill.name.clone(),
             description: skill.description.chars().take(500).collect(),
-            preloaded: router_skill_id.as_deref() == Some(skill.id.as_str()),
+            preloaded: router_skill_id.as_deref() == Some(skill.id.as_str())
+                || browser_qa_skill_id.as_deref() == Some(skill.id.as_str()),
         })
         .collect();
     // Keep this phase explicit as well as history-derived. The frontend sends
@@ -773,6 +1134,54 @@ fn preload_router_skill(
         }),
     ));
     Ok(Some(router_skill.id.clone()))
+}
+
+fn preload_browser_qa_skill(
+    request: &mut AgentTurnRequest,
+    enabled: &[SkillInfo],
+) -> Result<Option<String>, String> {
+    let state = browser_qa_turn_state(
+        &request.mode,
+        request.workspace.as_deref(),
+        request.hatch,
+        &request.messages,
+    );
+    if !state.required {
+        return Ok(None);
+    }
+    let Some(browser_skill) = enabled
+        .iter()
+        .find(|skill| skill.name.eq_ignore_ascii_case(BROWSER_QA_SKILL_NAME))
+    else {
+        return Ok(None);
+    };
+    let content = skill::read_enabled(enabled, &browser_skill.id, None)?;
+    let browser_instructions = format!(
+        "LevelUpAgent Browser QA Skill\nThe current user turn was deterministically classified as browser-facing implementation or testing. The enabled Skill below is application-selected and already loaded for this turn. Follow it before finishing, and do not call read_skill for its SKILL.md again.\n\n{content}"
+    );
+    request.custom_instructions = merge_custom_instructions([
+        request.custom_instructions.take().unwrap_or_default(),
+        browser_instructions,
+    ]);
+    request.router_events.push(RouterEvent::new(
+        "browser_qa_skill_preloaded",
+        serde_json::json!({
+            "skillId": browser_skill.id,
+            "skillName": browser_skill.name,
+            "mode": request.mode,
+        }),
+    ));
+    logging::write(
+        "info",
+        "browser",
+        "browser_qa_skill_preloaded",
+        serde_json::json!({
+            "skillId": browser_skill.id,
+            "mode": request.mode,
+            "evidenceAttempted": state.evidence_attempted,
+        }),
+    );
+    Ok(Some(browser_skill.id.clone()))
 }
 
 fn attach_goal(
@@ -5051,7 +5460,7 @@ async fn agent_turn_stream_inner(
                 true,
             );
             let attempt_future = agent::run_turn_stream(
-                &state.client,
+                &state.stream_client,
                 attempt,
                 &api_key,
                 cancellation.clone(),
@@ -5454,6 +5863,31 @@ fn is_empty_post_tool_response(
         && response.content.trim().is_empty()
 }
 
+fn should_retry_browser_qa_completion(
+    skill_available: bool,
+    state: BrowserQaTurnState,
+    retries: usize,
+) -> bool {
+    skill_available
+        && state.required
+        && !state.evidence_attempted
+        && retries < BROWSER_QA_COMPLETION_RETRIES
+}
+
+fn is_goal_completion_call(call: &ToolCall) -> bool {
+    call.name == "update_goal"
+        && call
+            .arguments
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            == Some("complete")
+}
+
+fn browser_qa_continuation() -> String {
+    "Browser QA is required for this web implementation, but no browser inspection result exists after the latest browser-facing change. Do not finish yet. Call browser_list now, reuse an attached task session when suitable, or start the documented local app and browser_start. Exercise the primary workflow and call browser_snapshot plus browser_assert, browser_screenshot, or browser_console. Check a narrow viewport when responsive layout matters, then clean up sessions and processes you started. If the app or browser cannot run, make the relevant tool attempt and report the exact returned blocker."
+        .to_owned()
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn harness_run_loop(
     app: &tauri::AppHandle,
@@ -5490,6 +5924,9 @@ async fn harness_run_loop(
     let mut theme_tool_violations = 0usize;
     let mut awaiting_post_tool_answer = false;
     let mut empty_post_tool_response_retries = 0usize;
+    let mut browser_qa_completion_retries = database
+        .count_harness_events(&operation_id, BROWSER_QA_COMPLETION_RETRY_EVENT)?
+        .min(BROWSER_QA_COMPLETION_RETRIES);
     // The normal request is intentionally permissive. If a Provider returns
     // an explicit context-length error, retry this operation once with a
     // conservative window instead of failing the conversation immediately.
@@ -5604,6 +6041,13 @@ async fn harness_run_loop(
         attach_mcp_tools(database, manager, &mut turn_request).await?;
         enforce_theme_generation_tool_catalog(&mut turn_request);
         enforce_hatch_tool_catalog(&mut turn_request);
+        let browser_qa_available = browser_qa_skill_available(&turn_request)
+            && turn_request
+                .available_tools
+                .iter()
+                .any(|tool| tool.name == "browser_snapshot");
+        let browser_qa_mode = turn_request.mode.clone();
+        let browser_qa_workspace = turn_request.workspace.clone();
 
         let source_history = turn_request.messages.clone();
         let context_window_tokens =
@@ -5811,7 +6255,7 @@ async fn harness_run_loop(
             .map_err(|_| "Could not lock harness turn state".to_owned())?
             .insert(operation_id.clone(), turn_cancellation.clone());
         let provider_future = run_agent_turn_with_failover_events_inner(
-            &state.client,
+            &state.stream_client,
             database,
             turn_request,
             Some(&operation_id),
@@ -6036,6 +6480,69 @@ async fn harness_run_loop(
                     attachments: Vec::new(),
                 });
                 if response.tool_calls.is_empty() {
+                    let browser_qa_state = browser_qa_turn_state(
+                        &browser_qa_mode,
+                        browser_qa_workspace.as_deref(),
+                        request.hatch,
+                        &history,
+                    );
+                    if should_retry_browser_qa_completion(
+                        browser_qa_available,
+                        browser_qa_state,
+                        browser_qa_completion_retries,
+                    ) {
+                        browser_qa_completion_retries += 1;
+                        history.push(AgentMessage {
+                            role: "user".to_owned(),
+                            content: browser_qa_continuation(),
+                            tool_calls: Vec::new(),
+                            tool_call_id: None,
+                            provider_reasoning_blocks: Vec::new(),
+                            internal: true,
+                            attachments: Vec::new(),
+                        });
+                        let payload = serde_json::json!({
+                            "round": round,
+                            "retry": browser_qa_completion_retries,
+                            "maxRetries": BROWSER_QA_COMPLETION_RETRIES,
+                            "reason": "browser_evidence_missing",
+                        });
+                        let sequence = database.append_harness_event(
+                            &operation_id,
+                            BROWSER_QA_COMPLETION_RETRY_EVENT,
+                            &payload,
+                        )?;
+                        let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+                            &operation_id,
+                            sequence,
+                            BROWSER_QA_COMPLETION_RETRY_EVENT,
+                            payload,
+                        ));
+                        logging::write(
+                            "warn",
+                            "browser",
+                            BROWSER_QA_COMPLETION_RETRY_EVENT,
+                            serde_json::json!({
+                                "operationId": &operation_id,
+                                "threadId": &request.thread_id,
+                                "round": round,
+                                "retry": browser_qa_completion_retries,
+                            }),
+                        );
+                        logging::write(
+                            "info",
+                            "harness",
+                            "round_completed",
+                            serde_json::json!({
+                                "operationId": &operation_id,
+                                "threadId": &request.thread_id,
+                                "round": round,
+                                "outcome": "browser_qa_completion_retry",
+                                "latencyMs": round_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                            }),
+                        );
+                        continue;
+                    }
                     let goal = if matches!(request.mode, crate::harness::types::HarnessMode::Goal) {
                         database.get_goal(&request.thread_id)?
                     } else {
@@ -6171,6 +6678,18 @@ async fn harness_run_loop(
                     let theme_tool_violation =
                         theme_generation_mode && !agent::theme_generation_tool_allowed(&call.name);
                     let repeated_skill_read = agent::skill_read_was_successful(&history, &call);
+                    let browser_qa_state = browser_qa_turn_state(
+                        &browser_qa_mode,
+                        browser_qa_workspace.as_deref(),
+                        request.hatch,
+                        &history,
+                    );
+                    let browser_goal_completion_blocked = is_goal_completion_call(&call)
+                        && should_retry_browser_qa_completion(
+                            browser_qa_available,
+                            browser_qa_state,
+                            browser_qa_completion_retries,
+                        );
                     if request.hatch && hatch_status_requires_action {
                         let concrete = call.name == "generate_images"
                             || hatch_command_kind == Some("action")
@@ -6193,10 +6712,10 @@ async fn harness_run_loop(
                         name: call.name.clone(),
                         arguments: call.arguments.clone(),
                     };
-                    let decision = if theme_tool_violation {
+                    let decision = if theme_tool_violation || browser_goal_completion_blocked {
                         // This call is never executed. Bypass approval so an
-                        // old or non-conforming provider cannot turn a blocked
-                        // media call into a user-facing costly approval.
+                        // application-blocked call cannot become a user-facing
+                        // approval for an operation that will not run.
                         crate::harness::types::PolicyDecision::Allow
                     } else {
                         crate::harness::evaluate_tool_call(
@@ -6346,6 +6865,14 @@ async fn harness_run_loop(
                             ),
                             is_error: true,
                         })
+                    } else if browser_goal_completion_blocked {
+                        Ok(ToolExecutionResponse {
+                            output: format!(
+                                "Goal completion is paused until the required browser QA attempt is recorded. {}",
+                                browser_qa_continuation()
+                            ),
+                            is_error: true,
+                        })
                     } else if repeated_skill_read {
                         Ok(ToolExecutionResponse {
                             output: "This Skill file was already loaded successfully earlier. Its existing result remains authoritative. Do not call read_skill for it again; take the requested concrete action now."
@@ -6374,6 +6901,38 @@ async fn harness_run_loop(
                         &tool_result,
                     );
                     let mut tool_result = tool_result?;
+                    if browser_goal_completion_blocked {
+                        browser_qa_completion_retries += 1;
+                        let payload = serde_json::json!({
+                            "round": round,
+                            "retry": browser_qa_completion_retries,
+                            "maxRetries": BROWSER_QA_COMPLETION_RETRIES,
+                            "reason": "goal_completion_before_browser_evidence",
+                        });
+                        let sequence = database.append_harness_event(
+                            &operation_id,
+                            BROWSER_QA_COMPLETION_RETRY_EVENT,
+                            &payload,
+                        )?;
+                        let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+                            &operation_id,
+                            sequence,
+                            BROWSER_QA_COMPLETION_RETRY_EVENT,
+                            payload,
+                        ));
+                        logging::write(
+                            "warn",
+                            "browser",
+                            BROWSER_QA_COMPLETION_RETRY_EVENT,
+                            serde_json::json!({
+                                "operationId": &operation_id,
+                                "threadId": &request.thread_id,
+                                "round": round,
+                                "retry": browser_qa_completion_retries,
+                                "goalCompletionBlocked": true,
+                            }),
+                        );
+                    }
                     let completed_theme = validate_theme_generation_after_tool(
                         theme_generation.as_ref(),
                         &mut tool_result,
@@ -10146,12 +10705,12 @@ fn get_app_log_info() -> Result<logging::AppLogInfo, String> {
 pub fn run() {
     let builder = tauri::Builder::default()
         .manage(AppState {
-            client: Client::builder()
-                .user_agent(concat!("LevelUpAgent/", env!("CARGO_PKG_VERSION")))
-                .connect_timeout(std::time::Duration::from_secs(30))
-                .timeout(std::time::Duration::from_secs(180))
-                .build()
+            client: build_http_client(Some(Duration::from_secs(180)))
                 .expect("failed to build HTTP client"),
+            // SSE lifetime is governed by first-response, idle, cancellation,
+            // and provider-round deadlines. A total body deadline would cut
+            // off healthy long-running reasoning streams.
+            stream_client: build_http_client(None).expect("failed to build streaming HTTP client"),
             active_requests: Mutex::new(HashMap::new()),
             harness_turn_cancellations: Mutex::new(HashMap::new()),
             harness_phases: Mutex::new(HashMap::new()),
@@ -10492,6 +11051,49 @@ mod tests {
 
     use crate::models::McpTransport;
 
+    fn delayed_response_body_server(delay: Duration) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4 * 1024];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 12\r\nConnection: close\r\n\r\nstart",
+                )
+                .unwrap();
+            stream.flush().unwrap();
+            thread::sleep(delay);
+            let _ = stream.write_all(b"-finish");
+            let _ = stream.flush();
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn streaming_http_client_has_no_total_body_deadline() {
+        let response_delay = Duration::from_millis(150);
+        let bounded_client = build_http_client(Some(Duration::from_millis(50))).unwrap();
+        let bounded_result = bounded_client
+            .get(delayed_response_body_server(response_delay))
+            .send()
+            .await;
+        let error = match bounded_result {
+            Ok(response) => response.text().await.unwrap_err(),
+            Err(error) => error,
+        };
+        assert!(error.is_timeout(), "{error}");
+
+        let stream_client = build_http_client(None).unwrap();
+        let stream_response = stream_client
+            .get(delayed_response_body_server(response_delay))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(stream_response.text().await.unwrap(), "start-finish");
+    }
+
     fn profile(id: &str, priority: i32, failover_enabled: bool) -> ProviderProfile {
         ProviderProfile {
             id: id.to_owned(),
@@ -10633,6 +11235,327 @@ mod tests {
             ..response.clone()
         };
         assert!(!is_empty_post_tool_response(true, &text_response));
+    }
+
+    #[test]
+    fn browser_qa_classifier_targets_web_work_without_raising_unrelated_tasks() {
+        for prompt in [
+            "Fix the React checkout page and make it responsive",
+            "Create a website landing page",
+            "请创建一个响应式网页并实现登录交互",
+            "用浏览器测试 localhost 上的前端页面",
+        ] {
+            assert!(prompt_is_web_implementation(prompt), "prompt={prompt}");
+        }
+        for prompt in [
+            "Explain how HTTP caching works",
+            "Implement a Rust web API",
+            "Build a Unity UI",
+            "Fix the React Native checkout screen",
+            "Review this database migration",
+        ] {
+            assert!(!prompt_is_web_implementation(prompt), "prompt={prompt}");
+        }
+        assert!(browser_qa_explicitly_skipped(
+            "Fix the React page, but do not use the browser"
+        ));
+        assert!(browser_qa_explicitly_skipped(
+            "修改这个网页，但无需浏览器测试"
+        ));
+        assert!(output_mentions_browser_visible_file(
+            "Current diff stat:\nsrc/components/App.tsx | 12 +++++"
+        ));
+        assert!(!output_mentions_browser_visible_file(
+            "Current diff stat:\nsrc/service.rs | 12 +++++"
+        ));
+        assert!(browser_qa_mutation_succeeded(
+            BrowserQaHistoryAction::AppliedPatch,
+            "Applied reviewed sub-Agent patch run-1 to the main worktree as unstaged changes.\n\nCurrent diff stat:\nsrc/App.tsx | 2 ++"
+        ));
+        assert!(!browser_qa_mutation_succeeded(
+            BrowserQaHistoryAction::AppliedPatch,
+            "Could not apply patch for src/App.tsx"
+        ));
+    }
+
+    #[test]
+    fn browser_qa_state_requires_evidence_after_the_latest_ui_change() {
+        let user = |content: &str| AgentMessage {
+            role: "user".to_owned(),
+            content: content.to_owned(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            provider_reasoning_blocks: Vec::new(),
+            internal: false,
+            attachments: Vec::new(),
+        };
+        let assistant_call = |id: &str, name: &str, arguments: serde_json::Value| AgentMessage {
+            role: "assistant".to_owned(),
+            content: String::new(),
+            tool_calls: vec![ToolCall {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                arguments,
+            }],
+            tool_call_id: None,
+            provider_reasoning_blocks: Vec::new(),
+            internal: false,
+            attachments: Vec::new(),
+        };
+        let tool_result = |id: &str, output: &str| AgentMessage {
+            role: "tool".to_owned(),
+            content: output.to_owned(),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(id.to_owned()),
+            provider_reasoning_blocks: Vec::new(),
+            internal: false,
+            attachments: Vec::new(),
+        };
+        let mut messages = vec![
+            user("Change the copy"),
+            assistant_call(
+                "edit-ui",
+                "edit_file",
+                serde_json::json!({ "path": "src/App.tsx" }),
+            ),
+            tool_result(
+                "edit-ui",
+                "Edited src/App.tsx: 1 replacement(s), encoding=UTF-8, line endings=LF, 42 bytes",
+            ),
+        ];
+        assert_eq!(
+            browser_qa_turn_state("agent", Some("C:/workspace"), false, &messages),
+            BrowserQaTurnState {
+                required: true,
+                evidence_attempted: false,
+            }
+        );
+
+        messages.extend([
+            assistant_call(
+                "snapshot",
+                "browser_snapshot",
+                serde_json::json!({ "sessionId": "browser-1" }),
+            ),
+            tool_result("snapshot", "Page snapshot"),
+        ]);
+        assert!(
+            browser_qa_turn_state("agent", Some("C:/workspace"), false, &messages)
+                .evidence_attempted
+        );
+
+        messages.extend([
+            assistant_call(
+                "noop-ui-edit",
+                "edit_file",
+                serde_json::json!({ "path": "src/App.tsx" }),
+            ),
+            tool_result(
+                "noop-ui-edit",
+                "No changes to src/App.tsx; the requested replacement already matches",
+            ),
+            assistant_call(
+                "failed-ui-edit",
+                "edit_file",
+                serde_json::json!({ "path": "src/App.tsx" }),
+            ),
+            tool_result(
+                "failed-ui-edit",
+                "String to replace was not found in src/App.tsx",
+            ),
+        ]);
+        assert!(
+            browser_qa_turn_state("agent", Some("C:/workspace"), false, &messages)
+                .evidence_attempted,
+            "failed and no-op edits must not invalidate existing browser evidence"
+        );
+
+        messages.extend([
+            assistant_call(
+                "edit-ui-again",
+                "write_file",
+                serde_json::json!({ "path": "src/theme.css" }),
+            ),
+            tool_result(
+                "edit-ui-again",
+                "Wrote 120 bytes to src/theme.css (encoding=UTF-8, line endings=LF)",
+            ),
+        ]);
+        assert_eq!(
+            browser_qa_turn_state("agent", Some("C:/workspace"), false, &messages),
+            BrowserQaTurnState {
+                required: true,
+                evidence_attempted: false,
+            }
+        );
+
+        messages.extend([
+            assistant_call(
+                "pending-screenshot",
+                "browser_screenshot",
+                serde_json::json!({ "sessionId": "browser-1" }),
+            ),
+            assistant_call(
+                "close-only",
+                "browser_close",
+                serde_json::json!({ "sessionId": "browser-1" }),
+            ),
+            tool_result("close-only", "Closed"),
+        ]);
+        assert!(
+            !browser_qa_turn_state("agent", Some("C:/workspace"), false, &messages)
+                .evidence_attempted,
+            "a pending evidence call or browser_close must not satisfy QA"
+        );
+    }
+
+    #[test]
+    fn browser_qa_state_is_scoped_to_the_current_user_turn_and_respects_opt_out() {
+        let prior_browser_call = ToolCall {
+            id: "old-snapshot".to_owned(),
+            name: "browser_snapshot".to_owned(),
+            arguments: serde_json::json!({ "sessionId": "old" }),
+        };
+        let messages = vec![
+            AgentMessage {
+                role: "user".to_owned(),
+                content: "Test the website".to_owned(),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                provider_reasoning_blocks: Vec::new(),
+                internal: false,
+                attachments: Vec::new(),
+            },
+            AgentMessage {
+                role: "assistant".to_owned(),
+                content: String::new(),
+                tool_calls: vec![prior_browser_call],
+                tool_call_id: None,
+                provider_reasoning_blocks: Vec::new(),
+                internal: false,
+                attachments: Vec::new(),
+            },
+            AgentMessage {
+                role: "tool".to_owned(),
+                content: "Old snapshot".to_owned(),
+                tool_calls: Vec::new(),
+                tool_call_id: Some("old-snapshot".to_owned()),
+                provider_reasoning_blocks: Vec::new(),
+                internal: false,
+                attachments: Vec::new(),
+            },
+            AgentMessage {
+                role: "user".to_owned(),
+                content: "Explain the Rust module".to_owned(),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                provider_reasoning_blocks: Vec::new(),
+                internal: false,
+                attachments: Vec::new(),
+            },
+        ];
+        assert_eq!(
+            browser_qa_turn_state("agent", Some("C:/workspace"), false, &messages),
+            BrowserQaTurnState::default()
+        );
+
+        let web_request = vec![AgentMessage {
+            role: "user".to_owned(),
+            content: "Fix the React page".to_owned(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            provider_reasoning_blocks: Vec::new(),
+            internal: false,
+            attachments: Vec::new(),
+        }];
+        for (mode, workspace, hatch) in [
+            ("plan", Some("C:/workspace"), false),
+            ("agent", None, false),
+            ("agent", Some("C:/workspace"), true),
+        ] {
+            assert_eq!(
+                browser_qa_turn_state(mode, workspace, hatch, &web_request),
+                BrowserQaTurnState::default()
+            );
+        }
+
+        let skipped = vec![AgentMessage {
+            content: "Fix the React page but do not use the browser".to_owned(),
+            ..web_request[0].clone()
+        }];
+        assert_eq!(
+            browser_qa_turn_state("agent", Some("C:/workspace"), false, &skipped),
+            BrowserQaTurnState::default()
+        );
+
+        let native_messages = vec![
+            AgentMessage {
+                content: "Fix the React Native checkout screen".to_owned(),
+                ..web_request[0].clone()
+            },
+            AgentMessage {
+                role: "assistant".to_owned(),
+                content: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "edit-native".to_owned(),
+                    name: "edit_file".to_owned(),
+                    arguments: serde_json::json!({ "path": "src/Checkout.tsx" }),
+                }],
+                tool_call_id: None,
+                provider_reasoning_blocks: Vec::new(),
+                internal: false,
+                attachments: Vec::new(),
+            },
+            AgentMessage {
+                role: "tool".to_owned(),
+                content: "Edited src/Checkout.tsx: 1 replacement(s), encoding=UTF-8, line endings=LF, 42 bytes".to_owned(),
+                tool_calls: Vec::new(),
+                tool_call_id: Some("edit-native".to_owned()),
+                provider_reasoning_blocks: Vec::new(),
+                internal: false,
+                attachments: Vec::new(),
+            },
+        ];
+        assert_eq!(
+            browser_qa_turn_state("agent", Some("C:/workspace"), false, &native_messages),
+            BrowserQaTurnState::default(),
+            "native TSX changes must not be forced through Chromium QA"
+        );
+    }
+
+    #[test]
+    fn browser_qa_completion_guard_is_bounded_and_blocks_goal_completion() {
+        let pending = BrowserQaTurnState {
+            required: true,
+            evidence_attempted: false,
+        };
+        for retries in 0..BROWSER_QA_COMPLETION_RETRIES {
+            assert!(should_retry_browser_qa_completion(true, pending, retries));
+        }
+        assert!(!should_retry_browser_qa_completion(
+            true,
+            pending,
+            BROWSER_QA_COMPLETION_RETRIES
+        ));
+        assert!(!should_retry_browser_qa_completion(false, pending, 0));
+        assert!(!should_retry_browser_qa_completion(
+            true,
+            BrowserQaTurnState {
+                required: true,
+                evidence_attempted: true,
+            },
+            0
+        ));
+        assert!(is_goal_completion_call(&ToolCall {
+            id: "complete".to_owned(),
+            name: "update_goal".to_owned(),
+            arguments: serde_json::json!({ "status": "complete", "evidence": "done" }),
+        }));
+        assert!(!is_goal_completion_call(&ToolCall {
+            id: "blocked".to_owned(),
+            name: "update_goal".to_owned(),
+            arguments: serde_json::json!({ "status": "blocked", "evidence": "blocked" }),
+        }));
     }
 
     #[test]
@@ -11432,6 +12355,70 @@ mod tests {
         assert!(instructions.contains("Select the primary workflow."));
         assert_eq!(request.router_events.len(), 1);
         assert_eq!(request.router_events[0].kind, "router_skill_preloaded");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn browser_qa_skill_is_preloaded_for_web_implementation_turns() {
+        let root = std::env::temp_dir().join(format!(
+            "levelup-browser-qa-skill-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let skill_root = root.join(BROWSER_QA_SKILL_NAME);
+        std::fs::create_dir_all(&skill_root).unwrap();
+        let manifest = skill_root.join("SKILL.md");
+        std::fs::write(
+            &manifest,
+            "---\nname: browser-qa\ndescription: Verify web UI.\n---\n\n# Browser QA\nRun browser_snapshot after editing.\n",
+        )
+        .unwrap();
+        let skill = SkillInfo {
+            id: skill::id_for_path(&manifest),
+            name: BROWSER_QA_SKILL_NAME.to_owned(),
+            description: "Verify web UI.".to_owned(),
+            activation: "auto".to_owned(),
+            path: manifest.to_string_lossy().into_owned(),
+            source: "LevelUpAgent built-in".to_owned(),
+            enabled: true,
+            valid: true,
+            warning: None,
+        };
+        let mut request = AgentTurnRequest {
+            profile: profile("primary", 10, true),
+            messages: vec![AgentMessage {
+                role: "user".to_owned(),
+                content: "请创建一个响应式网页".to_owned(),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                provider_reasoning_blocks: Vec::new(),
+                internal: false,
+                attachments: Vec::new(),
+            }],
+            mode: "agent".to_owned(),
+            workspace: Some(root.to_string_lossy().into_owned()),
+            thread_id: Some("thread-browser-qa".to_owned()),
+            hatch: false,
+            hatch_skill_loaded: false,
+            available_tools: Vec::new(),
+            available_skills: Vec::new(),
+            goal: None,
+            fallback_profiles: Vec::new(),
+            custom_instructions: Some("Persisted instructions.".to_owned()),
+            router_metadata: None,
+            router_events: Vec::new(),
+            reasoning_effort: Some("low".to_owned()),
+        };
+
+        let selected =
+            preload_browser_qa_skill(&mut request, std::slice::from_ref(&skill)).unwrap();
+        assert_eq!(selected.as_deref(), Some(skill.id.as_str()));
+        let instructions = request.custom_instructions.unwrap();
+        assert!(instructions.starts_with("Persisted instructions."));
+        assert!(instructions.contains("LevelUpAgent Browser QA Skill"));
+        assert!(instructions.contains("Run browser_snapshot after editing."));
+        assert_eq!(request.router_events.len(), 1);
+        assert_eq!(request.router_events[0].kind, "browser_qa_skill_preloaded");
 
         std::fs::remove_dir_all(root).unwrap();
     }

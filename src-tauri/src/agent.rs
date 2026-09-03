@@ -59,13 +59,19 @@ fn turn_request_timeout(request: &AgentTurnRequest) -> Option<std::time::Duratio
         .then(|| std::time::Duration::from_secs(THEME_GENERATION_REQUEST_TIMEOUT_SECS))
 }
 
-fn turn_post(client: &Client, url: Url, request: &AgentTurnRequest) -> RequestBuilder {
+fn non_stream_turn_post(client: &Client, url: Url, request: &AgentTurnRequest) -> RequestBuilder {
     let builder = client.post(url);
     if let Some(timeout) = turn_request_timeout(request) {
         builder.timeout(timeout)
     } else {
         builder
     }
+}
+
+// Stream lifetime is bounded by first-response, idle, cancellation, and
+// provider-round deadlines, rather than one absolute response-body deadline.
+fn stream_turn_post(client: &Client, url: Url) -> RequestBuilder {
+    client.post(url)
 }
 
 fn bearer_auth_if_present(request: RequestBuilder, api_key: &str) -> RequestBuilder {
@@ -685,7 +691,7 @@ async fn run_gemini_generate_content(
         &request.profile.base_url,
         &format!("/v1beta/models/{model}:generateContent"),
     )?;
-    let response = gemini_auth_if_present(turn_post(client, url, &request), api_key)
+    let response = gemini_auth_if_present(non_stream_turn_post(client, url, &request), api_key)
         .json(&gemini_body(&request))
         .send()
         .await
@@ -703,7 +709,7 @@ async fn run_openai_chat(
     let url = endpoint(&request.profile.base_url, "/v1/chat/completions")?;
     let body = chat_body(&request, false);
 
-    let response = bearer_auth_if_present(turn_post(client, url, &request), api_key)
+    let response = bearer_auth_if_present(non_stream_turn_post(client, url, &request), api_key)
         .json(&body)
         .send()
         .await
@@ -721,7 +727,7 @@ async fn run_openai_responses(
     let url = endpoint(&request.profile.base_url, "/v1/responses")?;
     let body = responses_body(&request, false);
 
-    let response = bearer_auth_if_present(turn_post(client, url, &request), api_key)
+    let response = bearer_auth_if_present(non_stream_turn_post(client, url, &request), api_key)
         .header("OpenAI-Beta", "responses=experimental")
         .json(&body)
         .send()
@@ -740,7 +746,7 @@ async fn run_anthropic_messages(
     let url = endpoint(&request.profile.base_url, "/v1/messages")?;
     let body = anthropic_body(&request, false);
     let response = anthropic_request_headers(
-        anthropic_auth_if_present(turn_post(client, url, &request), api_key),
+        anthropic_auth_if_present(non_stream_turn_post(client, url, &request), api_key),
         &request,
     )
     .json(&body)
@@ -773,7 +779,7 @@ where
     let idle_timeout = provider_stream_idle_timeout(&request);
     let first_response_timeout = provider_first_response_timeout(&request);
     let response = send_stream_request(
-        bearer_auth_if_present(turn_post(client, url, &request), api_key)
+        bearer_auth_if_present(stream_turn_post(client, url), api_key)
             .json(&chat_body(&request, true)),
         &cancellation,
         first_response_timeout,
@@ -877,7 +883,7 @@ where
     let idle_timeout = provider_stream_idle_timeout(&request);
     let first_response_timeout = provider_first_response_timeout(&request);
     let response = send_stream_request(
-        bearer_auth_if_present(turn_post(client, url, &request), api_key)
+        bearer_auth_if_present(stream_turn_post(client, url), api_key)
             .header("OpenAI-Beta", "responses=experimental")
             .json(&responses_body(&request, true)),
         &cancellation,
@@ -1019,7 +1025,7 @@ where
     let first_response_timeout = provider_first_response_timeout(&request);
     let response = send_stream_request(
         anthropic_request_headers(
-            anthropic_auth_if_present(turn_post(client, url, &request), api_key),
+            anthropic_auth_if_present(stream_turn_post(client, url), api_key),
             &request,
         )
         .json(&anthropic_body(&request, true)),
@@ -1203,8 +1209,7 @@ where
         &format!("/v1beta/models/{model}:streamGenerateContent?alt=sse"),
     )?;
     let response = send_stream_request(
-        gemini_auth_if_present(turn_post(client, url, &request), api_key)
-            .json(&gemini_body(&request)),
+        gemini_auth_if_present(stream_turn_post(client, url), api_key).json(&gemini_body(&request)),
         &cancellation,
         first_response_timeout,
     )
@@ -2619,6 +2624,13 @@ fn system_prompt_with_omission(request: &AgentTurnRequest, omission: &ContextOmi
             }
         }
     }
+    if request
+        .available_skills
+        .iter()
+        .any(|skill| skill.preloaded && skill.name.eq_ignore_ascii_case("browser-qa"))
+    {
+        prompt.push_str("\n\nBrowser QA completion gate (application-owned)\nThis turn builds, changes, or tests browser-facing UI. Before the final answer, use the actual LevelUpAgent browser tools after the latest UI change; build commands and unit tests alone do not satisfy this gate. Start or reuse the local page, inspect the primary workflow with browser_snapshot plus browser_assert, browser_screenshot, or browser_console, and check a narrow viewport when responsive layout matters. Clean up sessions and managed processes that you started. If the app or browser cannot run, still attempt the relevant browser/session operation and report its exact returned error. Never claim browser or visual verification without a returned browser tool result.");
+    }
     if let Some(goal) = &request.goal {
         let status = match goal.status {
             crate::models::GoalStatus::Active => "active",
@@ -3706,6 +3718,45 @@ mod tests {
     }
 
     #[test]
+    fn browser_qa_completion_gate_is_provider_and_reasoning_independent() {
+        for protocol in [
+            ProviderProtocol::OpenaiResponses,
+            ProviderProtocol::OpenaiChat,
+            ProviderProtocol::AnthropicMessages,
+            ProviderProtocol::GeminiGenerateContent,
+            ProviderProtocol::OpencodeGo,
+        ] {
+            for effort in ["low", "medium", "high"] {
+                let mut request =
+                    test_request("https://levelup.example".to_owned(), protocol.clone());
+                request.reasoning_effort = Some(effort.to_owned());
+                request
+                    .available_skills
+                    .push(crate::models::AgentSkillSummary {
+                        id: "skill-browser-qa".to_owned(),
+                        name: "browser-qa".to_owned(),
+                        description: "Verify browser-facing changes.".to_owned(),
+                        preloaded: true,
+                    });
+
+                let prompt = system_prompt(&request);
+                assert!(
+                    prompt.contains("Browser QA completion gate"),
+                    "protocol={protocol:?}, effort={effort}"
+                );
+                assert!(
+                    prompt.contains("build commands and unit tests alone do not satisfy this gate"),
+                    "protocol={protocol:?}, effort={effort}"
+                );
+                assert!(
+                    prompt.contains("browser_snapshot"),
+                    "protocol={protocol:?}, effort={effort}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn theme_generation_bootstrap_closes_the_skill_catalog() {
         let mut request = test_request(
             "https://levelup.example".to_owned(),
@@ -3742,6 +3793,17 @@ mod tests {
             turn_request_timeout(&request),
             Some(std::time::Duration::from_secs(360))
         );
+        let client = Client::new();
+        let url = Url::parse("https://levelup.example/v1/responses").unwrap();
+        let non_stream_request = non_stream_turn_post(&client, url.clone(), &request)
+            .build()
+            .unwrap();
+        assert_eq!(
+            non_stream_request.timeout().copied(),
+            Some(std::time::Duration::from_secs(360))
+        );
+        let stream_request = stream_turn_post(&client, url).build().unwrap();
+        assert_eq!(stream_request.timeout(), None);
         assert_eq!(
             theme_generation_target(&request.messages).as_deref(),
             Some(".levelup/generated-themes/0123456789abcdef0123456789abcdef.levelup-theme")

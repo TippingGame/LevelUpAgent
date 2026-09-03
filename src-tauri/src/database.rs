@@ -1935,6 +1935,21 @@ impl Database {
         Ok(next as u64)
     }
 
+    pub fn count_harness_events(&self, operation_id: &str, kind: &str) -> Result<usize, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM harness_events WHERE operation_id = ?1 AND kind = ?2",
+                params![operation_id, kind],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(database_error)?;
+        usize::try_from(count).map_err(|_| "Harness event count is invalid".to_owned())
+    }
+
     pub fn start_harness_tool_execution(
         &self,
         operation_id: &str,
