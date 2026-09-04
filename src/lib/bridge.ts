@@ -91,7 +91,7 @@ const browserPetDashboard: PetDashboard = {
   pets: [{
     id: "yui",
     displayName: "Yui",
-    description: "A tiny Codex digital pet inspired by Yui from Sword Art Online.",
+    description: "A tiny LevelUpAgent digital pet inspired by Yui from Sword Art Online.",
     spritesheetPath: "/pets/yui/spritesheet.webp",
     personality: "Warm, observant, and curious; values companionship, careful understanding, and helping people feel less alone while forming an identity of her own.",
     removable: false,
