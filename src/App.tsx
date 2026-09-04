@@ -15,11 +15,13 @@ import {
   CircleAlert,
   CircleStop,
   Code2,
+  Columns2,
   Command,
   Copy,
   Cpu,
   Download,
   FileCode2,
+  FileDiff,
   FileInput,
   ExternalLink,
   Flag,
@@ -63,6 +65,7 @@ import {
   Trash2,
   Upload,
   Video,
+  WrapText,
   X,
 } from "lucide-react";
 import { IconButton } from "./components/IconButton";
@@ -245,7 +248,13 @@ import {
 import { getAppLocale, setAppLocale, tr, type AppLocale } from "./lib/i18n";
 import { executeCallsWithParallelMedia } from "./lib/mediaConcurrency";
 import { isConversationNearBottom, shouldFollowConversationUpdate } from "./lib/conversationScroll";
-import { compareWorkspaceSnapshots } from "./lib/workspaceChanges";
+import {
+  buildDiffDisplayRows,
+  buildSplitDiffDisplayRows,
+  compareWorkspaceSnapshots,
+  type SplitDiffCell,
+  type SplitDiffDisplayRow,
+} from "./lib/workspaceChanges";
 import {
   CLIENT_ACTION_EVENT,
   dispatchClientAction,
@@ -800,6 +809,7 @@ function App() {
   const [reviewedFile, setReviewedFile] = useState<ConversationFileChange | null>(null);
   const [reviewedDiff, setReviewedDiff] = useState<GitDiff | null>(null);
   const [reviewedDiffBusy, setReviewedDiffBusy] = useState(false);
+  const reviewedDiffRequestRef = useRef(0);
   const [notice, setNotice] = useState<string | null>(null);
   const [availableAppUpdate, setAvailableAppUpdate] = useState<AppUpdateInfo | null>(null);
   const [updateInstalling, setUpdateInstalling] = useState(false);
@@ -2043,9 +2053,11 @@ function App() {
     setThreadMenuOpen(false);
     setRenamingThread(false);
     setRenameDraft("");
+    reviewedDiffRequestRef.current += 1;
     setReviewedChangeSet(null);
     setReviewedFile(null);
     setReviewedDiff(null);
+    setReviewedDiffBusy(false);
   }, [activeThread.id]);
 
   useEffect(() => {
@@ -2285,26 +2297,21 @@ function App() {
     const messages = [...current.messages];
     messages[targetIndex] = { ...messages[targetIndex], changeSet };
     commitThread({ ...current, messages, updatedAt: Date.now() });
-    if (activeThreadIdRef.current === threadId) {
-      setReviewedChangeSet(changeSet);
-      setReviewedFile(null);
-      setReviewedDiff(null);
-      if (files.length > 0) {
-        setInspectorTab("changes");
-        setRightPanelOpen(true);
-      }
-      // Git status is refreshed separately for the repository inspector.  A
-      // plain workspace's turn changes stay independent of that optional view.
-    }
   };
 
-  const reviewChangeSet = useCallback((changeSet: ConversationChangeSet) => {
+  const selectChangeSet = useCallback((changeSet: ConversationChangeSet) => {
+    reviewedDiffRequestRef.current += 1;
     setReviewedChangeSet(changeSet);
     setReviewedFile(null);
     setReviewedDiff(null);
+    setReviewedDiffBusy(false);
+  }, []);
+
+  const reviewChangeSet = useCallback((changeSet: ConversationChangeSet) => {
+    selectChangeSet(changeSet);
     setInspectorTab("changes");
     setRightPanelOpen(true);
-  }, []);
+  }, [selectChangeSet]);
 
   const editConversationMessage = useCallback((content: string) => {
     setDraft(content);
@@ -2317,11 +2324,19 @@ function App() {
   }, []);
 
   const reviewChangedFile = async (changeSet: ConversationChangeSet, file: ConversationFileChange) => {
+    if (reviewedFile?.path === file.path) {
+      reviewedDiffRequestRef.current += 1;
+      setReviewedFile(null);
+      setReviewedDiff(null);
+      setReviewedDiffBusy(false);
+      return;
+    }
+    const requestId = reviewedDiffRequestRef.current + 1;
+    reviewedDiffRequestRef.current = requestId;
     setReviewedChangeSet(changeSet);
     setReviewedFile(file);
     setReviewedDiff(null);
-    setInspectorTab("changes");
-    setRightPanelOpen(true);
+    setReviewedDiffBusy(false);
     if (!file.diffAvailable) return;
     if (file.turnDiff) {
       setReviewedDiff({ path: file.path, content: file.turnDiff, truncated: Boolean(file.turnDiffTruncated) });
@@ -2330,11 +2345,29 @@ function App() {
     setReviewedDiffBusy(true);
     try {
       const staged = file.worktreeStatus === " " && file.indexStatus !== " ";
-      setReviewedDiff(await getGitDiff(changeSet.workspace, file.path, staged));
+      const nextDiff = await getGitDiff(changeSet.workspace, file.path, staged);
+      if (reviewedDiffRequestRef.current === requestId) setReviewedDiff(nextDiff);
     } catch (error) {
-      setNotice(`${tr("无法读取变更", "Could not read changes")}: ${errorText(error)}`);
+      if (reviewedDiffRequestRef.current === requestId) {
+        setNotice(`${tr("无法读取变更", "Could not read changes")}: ${errorText(error)}`);
+      }
     } finally {
-      setReviewedDiffBusy(false);
+      if (reviewedDiffRequestRef.current === requestId) setReviewedDiffBusy(false);
+    }
+  };
+
+  const openChangedFileDirectory = async (
+    changeSet: ConversationChangeSet,
+    file: ConversationFileChange,
+  ) => {
+    if (!isDesktop()) {
+      setNotice(tr("浏览器预览无法打开本地文件夹", "Browser preview cannot open local folders"));
+      return;
+    }
+    try {
+      await openLocalDirectory(workspaceFileDirectory(changeSet.workspace, file.path));
+    } catch (error) {
+      setNotice(`${tr("打开文件夹失败", "Could not open folder")}: ${errorText(error)}`);
     }
   };
 
@@ -5051,6 +5084,7 @@ function App() {
                   running={running}
                   pet={activePetProfile}
                   endRef={endRef}
+                  onSelectChanges={selectChangeSet}
                   onReviewChanges={reviewChangeSet}
                   onEdit={editConversationMessage}
                 />
@@ -5373,10 +5407,7 @@ function App() {
       onGoalAction={controlGoal}
       onTabChange={setInspectorTab}
       onReviewFile={(file) => visibleChangeSet && void reviewChangedFile(visibleChangeSet, file)}
-      onBackToChanges={() => {
-        setReviewedFile(null);
-        setReviewedDiff(null);
-      }}
+      onOpenFileDirectory={(file) => visibleChangeSet && void openChangedFileDirectory(visibleChangeSet, file)}
       onResizeStart={startInspectorResize}
       onResizeKeyDown={resizeInspectorWithKeyboard}
       onClose={() => setRightPanelOpen(false)}
@@ -6215,6 +6246,7 @@ function AssistantMessageGroup({
   collapsible = false,
   defaultOpen = false,
   pet,
+  onSelectChanges,
   onReviewChanges,
 }: {
   items: AgentMessage[];
@@ -6224,6 +6256,7 @@ function AssistantMessageGroup({
   collapsible?: boolean;
   defaultOpen?: boolean;
   pet?: PetProfile;
+  onSelectChanges: (changeSet: ConversationChangeSet) => void;
   onReviewChanges: (changeSet: ConversationChangeSet) => void;
 }) {
   const [open, setOpen] = useState(defaultOpen || !collapsible);
@@ -6254,6 +6287,9 @@ function AssistantMessageGroup({
       toolActivityItems.push(item);
     }
   }
+  useEffect(() => {
+    if (open && changeSet) onSelectChanges(changeSet);
+  }, [changeSet, onSelectChanges, open]);
   const identityModelName = identity?.modelName?.trim();
   const providerBrand = identity?.providerBrand ?? (identityModelName
     ? modelProviderBrandFromName(identityModelName)
@@ -6317,7 +6353,9 @@ function AssistantMessageGroup({
       {durationMs != null && (
         <div className="message-duration"><Timer size={13} />{tr("处理总时长", "Total processing time")} {formatDuration(durationMs)}</div>
       )}
-      {changeSet && <ChangeSetSummary changeSet={changeSet} onReview={() => onReviewChanges(changeSet)} />}
+      {changeSet && changeSet.files.length > 0 && (
+        <ChangeSetSummary changeSet={changeSet} onReview={() => onReviewChanges(changeSet)} />
+      )}
     </>
   );
   const completionState = assistantCompletionState(items);
@@ -6667,6 +6705,7 @@ const MemoizedAssistantMessageGroup = memo(AssistantMessageGroup, (previous, nex
   && previous.collapsible === next.collapsible
   && previous.defaultOpen === next.defaultOpen
   && previous.pet === next.pet
+  && previous.onSelectChanges === next.onSelectChanges
   && previous.onReviewChanges === next.onReviewChanges
   && previous.items === next.items
 ));
@@ -6679,6 +6718,7 @@ const ConversationMessageList = memo(({
   running,
   pet,
   endRef,
+  onSelectChanges,
   onReviewChanges,
   onEdit,
 }: {
@@ -6689,6 +6729,7 @@ const ConversationMessageList = memo(({
   running: boolean;
   pet?: PetProfile;
   endRef: RefObject<HTMLDivElement | null>;
+  onSelectChanges: (changeSet: ConversationChangeSet) => void;
   onReviewChanges: (changeSet: ConversationChangeSet) => void;
   onEdit: (content: string) => void;
 }) => {
@@ -6734,6 +6775,7 @@ const ConversationMessageList = memo(({
           collapsible={!streamingMessageId || !block.items.some((item) => item.id === streamingMessageId)}
           defaultOpen={!running && blockIndex === latestAssistantBlockIndex}
           pet={pet}
+          onSelectChanges={onSelectChanges}
           onReviewChanges={onReviewChanges}
         />
       ))}
@@ -7207,7 +7249,7 @@ function Inspector({
   onGoalAction,
   onTabChange,
   onReviewFile,
-  onBackToChanges,
+  onOpenFileDirectory,
   onResizeStart,
   onResizeKeyDown,
   onClose,
@@ -7235,7 +7277,7 @@ function Inspector({
   onGoalAction: (action: "pause" | "resume" | "cancel") => void;
   onTabChange: (tab: InspectorTab) => void;
   onReviewFile: (file: ConversationFileChange) => void;
-  onBackToChanges: () => void;
+  onOpenFileDirectory: (file: ConversationFileChange) => void;
   onResizeStart: (event: ReactPointerEvent<HTMLDivElement>) => void;
   onResizeKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
   onClose: () => void;
@@ -7285,7 +7327,8 @@ function Inspector({
           diff={reviewedDiff}
           busy={reviewedDiffBusy}
           onReviewFile={onReviewFile}
-          onBack={onBackToChanges}
+          onOpenFileDirectory={onOpenFileDirectory}
+          onNotice={onNotice}
         />
       ) : (<>
       <section>
@@ -7381,15 +7424,49 @@ function ChangeInspectorPanel({
   diff,
   busy,
   onReviewFile,
-  onBack,
+  onOpenFileDirectory,
+  onNotice,
 }: {
   changeSet: ConversationChangeSet | null;
   reviewedFile: ConversationFileChange | null;
   diff: GitDiff | null;
   busy: boolean;
   onReviewFile: (file: ConversationFileChange) => void;
-  onBack: () => void;
+  onOpenFileDirectory: (file: ConversationFileChange) => void;
+  onNotice: (message: string) => void;
 }) {
+  const [wrapLines, setWrapLines] = useState(false);
+  const [splitView, setSplitView] = useState(false);
+  const [showFullFile, setShowFullFile] = useState(false);
+  const [copiedPath, setCopiedPath] = useState<string | null>(null);
+  const copyResetTimerRef = useRef<number | null>(null);
+  const fullFileUnavailable = Boolean(reviewedFile && (
+    !reviewedFile.turnDiff
+    || reviewedFile.turnDiffTruncated
+    || diff?.truncated
+  ));
+  const effectiveFullFile = showFullFile && !fullFileUnavailable;
+  useEffect(() => () => {
+    if (copyResetTimerRef.current !== null) window.clearTimeout(copyResetTimerRef.current);
+  }, []);
+  useEffect(() => {
+    if (fullFileUnavailable) setShowFullFile(false);
+  }, [fullFileUnavailable]);
+
+  const copyFilePath = async (path: string) => {
+    try {
+      await copyText(path);
+      setCopiedPath(path);
+      if (copyResetTimerRef.current !== null) window.clearTimeout(copyResetTimerRef.current);
+      copyResetTimerRef.current = window.setTimeout(() => {
+        setCopiedPath((current) => current === path ? null : current);
+        copyResetTimerRef.current = null;
+      }, 1_500);
+    } catch (error) {
+      onNotice(`${tr("复制路径失败", "Could not copy path")}: ${errorText(error)}`);
+    }
+  };
+
   if (!changeSet) {
     return (
       <div className="change-review-empty">
@@ -7399,37 +7476,46 @@ function ChangeInspectorPanel({
       </div>
     );
   }
-  if (reviewedFile) {
-    const lines = diff?.content.split("\n").slice(0, 4000) ?? [];
-    return (
-      <div className="change-review-detail">
-        <button className="change-review-back" type="button" onClick={onBack}><ChevronRight size={14} />{tr("返回文件列表", "Back to files")}</button>
-        <div className="change-review-file-heading">
-          <span className={`file-change-kind ${reviewedFile.kind}`}>{fileChangeKindLabel(reviewedFile.kind)}</span>
-          <strong title={reviewedFile.path}>{reviewedFile.path}</strong>
-        </div>
-        {busy ? (
-          <div className="change-review-loading"><LoaderCircle size={17} />{tr("正在读取 diff", "Loading diff")}</div>
-        ) : lines.length > 0 ? (
-          <div className="side-diff-content">
-            {lines.map((line, index) => <DiffLine line={line} index={index} key={`${index}:${line}`} />)}
-            {diff?.truncated && <div className="side-diff-truncated">{tr("大型 diff 已截断", "Large diff truncated")}</div>}
-          </div>
-        ) : (
-          <div className="change-review-empty compact">
-            <Check size={20} />
-            <strong>{tr("当前没有可显示的 diff", "No current diff to display")}</strong>
-            <span>{tr("该文件可能已恢复为任务开始前的状态。", "The file may have returned to its pre-task state.")}</span>
-          </div>
-        )}
-      </div>
-    );
-  }
   return (
     <div className="change-review-list">
       <div className="change-review-summary">
-        <strong>{changeSet.files.length} {tr("个文件", "files")}</strong>
-        <span>{changeSetStatusLabel(changeSet.status)} · {formatTime(changeSet.completedAt)}</span>
+        <div className="change-review-summary-copy">
+          <strong>{changeSet.files.length} {tr("个文件", "files")}</strong>
+          <span>{changeSetStatusLabel(changeSet.status)} · {formatTime(changeSet.completedAt)}</span>
+        </div>
+        <div className="change-review-view-actions">
+          <IconButton
+            className={wrapLines ? "active" : ""}
+            label={wrapLines ? tr("关闭自动换行", "Disable line wrapping") : tr("启用自动换行", "Enable line wrapping")}
+            aria-pressed={wrapLines}
+            onClick={() => setWrapLines((current) => !current)}
+          >
+            <WrapText size={15} />
+          </IconButton>
+          <IconButton
+            className={splitView ? "active" : ""}
+            label={splitView
+              ? tr("切换为单栏对比", "Show unified comparison")
+              : tr("切换为左右对比", "Show side-by-side comparison")}
+            aria-pressed={splitView}
+            onClick={() => setSplitView((current) => !current)}
+          >
+            <Columns2 size={15} />
+          </IconButton>
+          <IconButton
+            className={showFullFile ? "active" : ""}
+            label={fullFileUnavailable
+              ? tr("内容已截断，无法显示完整文件对比", "Full-file comparison unavailable for truncated content")
+              : showFullFile
+                ? tr("折叠未修改行", "Collapse unchanged lines")
+                : tr("显示完整文件对比", "Show full-file comparison")}
+            aria-pressed={showFullFile}
+            disabled={fullFileUnavailable}
+            onClick={() => setShowFullFile((current) => !current)}
+          >
+            <FileDiff size={15} />
+          </IconButton>
+        </div>
         {changeSet.snapshotTruncated && <span className="change-review-warning"><CircleAlert size={13} />{tr("目录较大，本轮结果仅覆盖已扫描范围", "Large folder; this turn covers the scanned range only")}</span>}
       </div>
       {changeSet.files.length === 0 ? (
@@ -7438,14 +7524,161 @@ function ChangeInspectorPanel({
           <strong>{tr("本轮未修改文件", "No files changed this turn")}</strong>
           <span>{tr("对话已完成，工作区内容没有发生变化。", "The task completed without changing workspace files.")}</span>
         </div>
-      ) : changeSet.files.map((file) => (
-        <button className="change-review-row" type="button" key={`${file.kind}:${file.path}`} onClick={() => onReviewFile(file)}>
-          <span className={`file-change-kind ${file.kind}`}>{fileChangeKindLabel(file.kind)}</span>
-          <span title={file.path}>{file.path}</span>
-          <small>{file.additions != null || file.deletions != null ? `+${file.additions ?? 0} -${file.deletions ?? 0}` : ""}</small>
-          <ChevronRight size={14} />
-        </button>
-      ))}
+      ) : (
+        <div className="change-review-files">
+          {changeSet.files.map((file) => {
+            const expanded = reviewedFile?.path === file.path;
+            const unifiedRows = expanded && diff && !splitView
+              ? buildDiffDisplayRows(diff.content, effectiveFullFile)
+              : [];
+            const splitRows = expanded && diff && splitView
+              ? buildSplitDiffDisplayRows(diff.content, effectiveFullFile)
+              : [];
+            const lineNumbers = expanded && diff ? diffLineNumbers(diff.content) : [];
+            const hasRows = splitView ? splitRows.length > 0 : unifiedRows.length > 0;
+            return (
+              <div className={`change-review-file${expanded ? " expanded" : ""}`} key={`${file.kind}:${file.path}`}>
+                <div className="change-review-row">
+                  <button
+                    className="change-review-file-trigger"
+                    type="button"
+                    aria-expanded={expanded}
+                    onClick={() => onReviewFile(file)}
+                  >
+                    <span className={`file-change-kind ${file.kind}`}>{fileChangeKindLabel(file.kind)}</span>
+                    <span className="change-review-path" title={file.path}>{file.path}</span>
+                    <small className="change-review-counts">
+                      {(file.additions != null || file.deletions != null) && (
+                        <><span className="positive">+{file.additions ?? 0}</span><span className="negative">-{file.deletions ?? 0}</span></>
+                      )}
+                    </small>
+                  </button>
+                  <div className="change-review-file-actions">
+                    <IconButton
+                      className={copiedPath === file.path ? "copied" : ""}
+                      label={copiedPath === file.path ? tr("路径已复制", "Path copied") : tr("复制路径", "Copy path")}
+                      onClick={() => void copyFilePath(file.path)}
+                    >
+                      {copiedPath === file.path ? <Check size={14} /> : <Copy size={14} />}
+                    </IconButton>
+                    <IconButton
+                      label={tr("打开所在目录", "Open containing folder")}
+                      onClick={() => onOpenFileDirectory(file)}
+                    >
+                      <FolderOpen size={14} />
+                    </IconButton>
+                  </div>
+                  <ChevronDown className={`change-review-expand${expanded ? " active" : ""}`} size={14} aria-hidden="true" />
+                </div>
+                {expanded && (
+                  <div className="change-review-inline-diff">
+                    {busy ? (
+                      <div className="change-review-loading"><LoaderCircle size={17} />{tr("正在读取 diff", "Loading diff")}</div>
+                    ) : hasRows ? (
+                      splitView ? (
+                        <SplitDiffView rows={splitRows} wrapLines={wrapLines} truncated={Boolean(diff?.truncated)} />
+                      ) : (
+                        <div className={`side-diff-content${wrapLines ? " wrap-lines" : ""}`}>
+                          {unifiedRows.map((row, index) => row.kind === "collapsed" ? (
+                            <div className="diff-collapsed" key={`collapsed:${index}`}>
+                              {row.count} {row.count === 1 ? tr("行未修改", "unchanged line") : tr("行未修改", "unchanged lines")}
+                            </div>
+                          ) : (
+                            <DiffLine line={row.content} lineNumber={lineNumbers[row.sourceIndex]} key={`${row.sourceIndex}:${row.content}`} />
+                          ))}
+                          {diff?.truncated && <DiffTruncatedNotice />}
+                        </div>
+                      )
+                    ) : (
+                      <div className="change-review-empty compact">
+                        <Check size={20} />
+                        <strong>{tr("当前没有可显示的 diff", "No current diff to display")}</strong>
+                        <span>{tr("该文件可能已恢复为任务开始前的状态。", "The file may have returned to its pre-task state.")}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DiffTruncatedNotice() {
+  return (
+    <div className="side-diff-truncated">
+      {tr("大型 diff 已截断，无法显示完整文件对比", "Large diff truncated; full-file comparison is unavailable")}
+    </div>
+  );
+}
+
+function SplitDiffCellView({
+  cell,
+  side,
+}: {
+  cell: SplitDiffCell | null;
+  side: "left" | "right";
+}) {
+  const marker = cell?.kind === "addition" ? "+" : cell?.kind === "deletion" ? "-" : "";
+  return (
+    <div
+      className={`split-diff-cell ${side} ${cell?.kind ?? "empty"}`}
+      role="cell"
+      aria-label={cell ? undefined : tr("无对应行", "No corresponding line")}
+    >
+      <span className="split-diff-line-number">{cell?.lineNumber ?? ""}</span>
+      <span className="split-diff-marker" aria-hidden="true">{marker}</span>
+      <code>{cell?.content || " "}</code>
+    </div>
+  );
+}
+
+function SplitDiffView({
+  rows,
+  wrapLines,
+  truncated,
+}: {
+  rows: SplitDiffDisplayRow[];
+  wrapLines: boolean;
+  truncated: boolean;
+}) {
+  return (
+    <div className={`side-diff-content split-diff-content${wrapLines ? " wrap-lines" : ""}`}>
+      <div className="split-diff-table" role="table" aria-label={tr("左右文件对比", "Side-by-side file comparison")}>
+        <div className="split-diff-header" role="row">
+          <span role="columnheader">{tr("源文件", "Source")}</span>
+          <span role="columnheader">{tr("修改后", "Modified")}</span>
+        </div>
+        {rows.map((row, index) => {
+          if (row.kind === "collapsed") {
+            return (
+              <div className="diff-collapsed split-diff-collapsed" role="row" key={`collapsed:${index}`}>
+                <span role="cell" aria-colspan={2}>
+                  {row.count} {row.count === 1 ? tr("行未修改", "unchanged line") : tr("行未修改", "unchanged lines")}
+                </span>
+              </div>
+            );
+          }
+          if (row.kind === "notice") {
+            return (
+              <div className="split-diff-notice" role="row" key={`notice:${index}`}>
+                <span role="cell">{row.left ?? ""}</span>
+                <span role="cell">{row.right ?? ""}</span>
+              </div>
+            );
+          }
+          return (
+            <div className="split-diff-row" role="row" key={`line:${index}`}>
+              <SplitDiffCellView cell={row.left} side="left" />
+              <SplitDiffCellView cell={row.right} side="right" />
+            </div>
+          );
+        })}
+      </div>
+      {truncated && <DiffTruncatedNotice />}
     </div>
   );
 }
@@ -7464,18 +7697,73 @@ function changeSetStatusLabel(status: ConversationChangeStatus) {
   return tr("任务已中断", "Task interrupted");
 }
 
-function DiffLine({ line, index }: { line: string; index: number }) {
-  const kind = line.startsWith("+") && !line.startsWith("+++")
+function diffLineNumbers(content: string) {
+  let oldLine = 0;
+  let newLine = 0;
+  let insideHunk = false;
+  return content.split("\n").map((line) => {
+    const hunk = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
+    if (hunk) {
+      const oldStart = Number(hunk[1]);
+      const oldCount = hunk[2] == null ? 1 : Number(hunk[2]);
+      const newStart = Number(hunk[3]);
+      const newCount = hunk[4] == null ? 1 : Number(hunk[4]);
+      oldLine = oldCount === 0 ? oldStart + 1 : oldStart;
+      newLine = newCount === 0 ? newStart + 1 : newStart;
+      insideHunk = true;
+      return null;
+    }
+    if (line === "@@ new file @@") {
+      oldLine = 0;
+      newLine = 1;
+      insideHunk = true;
+      return null;
+    }
+    if (!insideHunk) return null;
+    if (line.startsWith("+")) {
+      const current = newLine;
+      newLine += 1;
+      return current;
+    }
+    if (line.startsWith("-")) {
+      const current = oldLine;
+      oldLine += 1;
+      return current;
+    }
+    if (line.startsWith(" ")) {
+      const current = newLine;
+      oldLine += 1;
+      newLine += 1;
+      return current;
+    }
+    return null;
+  });
+}
+
+function DiffLine({ line, lineNumber }: { line: string; lineNumber: number | null | undefined }) {
+  const metadata = lineNumber == null && (line.startsWith("--- ")
+    || line.startsWith("+++ ")
+    || line.startsWith("diff --git ")
+    || line.startsWith("index ")
+    || /^(?:new|deleted) file mode |^(?:similarity|dissimilarity) index |^rename (?:from|to) /.test(line));
+  const kind = metadata
+    ? "meta"
+    : line.startsWith("+")
     ? "addition"
-    : line.startsWith("-") && !line.startsWith("---")
+    : line.startsWith("-")
       ? "deletion"
       : line.startsWith("@@")
         ? "hunk"
         : "context";
+  const content = kind === "addition" || kind === "deletion" || (kind === "context" && line.startsWith(" "))
+    ? line.slice(1)
+    : line;
+  const marker = kind === "addition" ? "+" : kind === "deletion" ? "-" : "";
   return (
     <div className={`diff-line ${kind}`}>
-      <span>{index + 1}</span>
-      <code>{line || " "}</code>
+      <span className="diff-line-number">{lineNumber ?? ""}</span>
+      <span className="diff-change-marker">{marker}</span>
+      <code>{content || " "}</code>
     </div>
   );
 }
@@ -9540,6 +9828,18 @@ function toolFullSummary(call: ToolCall) {
 function shortPath(path: string) {
   const parts = path.replace(/\\/g, "/").split("/").filter(Boolean);
   return parts[parts.length - 1] ?? path;
+}
+
+function workspaceFileDirectory(workspace: string, relativePath: string) {
+  const parts = relativePath
+    .replace(/\\/g, "/")
+    .split("/")
+    .filter((part) => part && part !== ".");
+  if (parts.some((part) => part === "..")) return workspace;
+  parts.pop();
+  if (parts.length === 0) return workspace;
+  const separator = workspace.includes("\\") ? "\\" : "/";
+  return `${workspace.replace(/[\\/]+$/, "")}${separator}${parts.join(separator)}`;
 }
 
 interface ThreadProjectGroup {
