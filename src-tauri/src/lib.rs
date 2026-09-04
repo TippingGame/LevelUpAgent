@@ -5030,13 +5030,16 @@ fn import_image_attachments(
     let storage = attachment_storage(&app)?;
     let mut imported = Vec::new();
     for path in source_paths {
+        let display_name = attachment_error_name(&path);
         match attachment::import(&storage, std::path::Path::new(&path)) {
             Ok(item) => imported.push(item),
             Err(error) => {
                 for item in &imported {
                     let _ = attachment::delete(&storage, &item.id);
                 }
-                return Err(error);
+                return Err(format!(
+                    "Could not import attachment '{display_name}': {error}"
+                ));
             }
         }
     }
@@ -5054,13 +5057,16 @@ fn import_media_references(
     let storage = attachment_storage(&app)?;
     let mut imported = Vec::new();
     for path in source_paths {
+        let display_name = attachment_error_name(&path);
         match attachment::import_media_reference(&storage, std::path::Path::new(&path)) {
             Ok(item) => imported.push(item),
             Err(error) => {
                 for item in &imported {
                     let _ = attachment::delete(&storage, &item.id);
                 }
-                return Err(error);
+                return Err(format!(
+                    "Could not import media reference '{display_name}': {error}"
+                ));
             }
         }
     }
@@ -5085,13 +5091,16 @@ fn import_clipboard_images(
     let storage = attachment_storage(&app)?;
     let mut imported = Vec::new();
     for image in images {
+        let display_name = attachment_error_name(&image.name);
         match attachment::import_base64_image(&storage, &image.name, &image.data_base64) {
             Ok(item) => imported.push(item),
             Err(error) => {
                 for item in &imported {
                     let _ = attachment::delete(&storage, &item.id);
                 }
-                return Err(error);
+                return Err(format!(
+                    "Could not import pasted image '{display_name}': {error}"
+                ));
             }
         }
     }
@@ -5109,17 +5118,36 @@ fn import_clipboard_attachments(
     let storage = attachment_storage(&app)?;
     let mut imported = Vec::new();
     for payload in attachments {
+        let display_name = attachment_error_name(&payload.name);
         match attachment::import_base64_attachment(&storage, &payload.name, &payload.data_base64) {
             Ok(item) => imported.push(item),
             Err(error) => {
                 for item in &imported {
                     let _ = attachment::delete(&storage, &item.id);
                 }
-                return Err(error);
+                return Err(format!(
+                    "Could not import pasted attachment '{display_name}': {error}"
+                ));
             }
         }
     }
     Ok(imported)
+}
+
+fn attachment_error_name(value: &str) -> String {
+    let name = std::path::Path::new(value)
+        .file_name()
+        .and_then(|part| part.to_str())
+        .unwrap_or("attachment")
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(120)
+        .collect::<String>();
+    if name.trim().is_empty() {
+        "attachment".to_owned()
+    } else {
+        name
+    }
 }
 
 #[tauri::command]

@@ -15,7 +15,7 @@
 | Agent 执行与长期 Goal | 已完成 | 工具审批、持久 Goal、两阶段完成/阻塞审计；长历史按上下文上限压缩且保持工具调用配对 |
 | CodexPlusPlus 会话增强 | 原生替代 | LevelUpAgent 自己持有会话，不依赖 CDP 注入第三方 UI |
 | 图片输入 | 已完成 | 托管存储、四协议编码、格式/大小/数量边界 |
-| 文本/代码上下文附件 | 已完成 | 托管 UTF-8 文件、扩展/大小边界、四协议 user context |
+| 文本/代码上下文附件 | 已完成 | 托管文件、内容与编码探测、二进制/大小边界、四协议 user context |
 | PDF/Office 文档提取 | 已完成 | 本地解析 PDF、DOCX、XLSX、PPTX；OOXML 防展开炸弹；确定性摘录 |
 | Prompt/Instructions 控制面 | 已完成 | 内部注入及 Codex/Claude/Gemini/OpenCode 安全同步 |
 | 子 Agent / 隔离工作树 | 已完成 | 受限子模型循环、detached worktree、完整补丁、二次批准与冲突拒绝 |

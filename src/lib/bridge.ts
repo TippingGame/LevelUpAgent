@@ -333,10 +333,6 @@ export async function selectAttachments(): Promise<ImageAttachment[]> {
   const selected = await open({
     multiple: true,
     directory: false,
-    filters: [{
-      name: "Images, PDF, Office, text, and code",
-      extensions: ["png", "jpg", "jpeg", "webp", "gif", "pdf", "docx", "xlsx", "pptx", "txt", "log", "md", "markdown", "json", "jsonc", "toml", "yaml", "yml", "xml", "csv", "tsv", "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "go", "java", "kt", "kts", "swift", "c", "cc", "cpp", "h", "hpp", "cs", "rb", "php", "sh", "ps1", "sql", "html", "css", "scss", "vue", "svelte"],
-    }],
   });
   const paths = typeof selected === "string" ? [selected] : Array.isArray(selected) ? selected : [];
   return importAttachments(paths);

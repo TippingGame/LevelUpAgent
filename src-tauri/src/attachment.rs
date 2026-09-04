@@ -310,9 +310,10 @@ pub fn preview(
         ),
         AttachmentKind::Video => (None, None),
         AttachmentKind::Text => {
-            let text = std::str::from_utf8(&bytes)
-                .map_err(|_| "The selected text attachment is not valid UTF-8".to_owned())?;
-            (None, Some(preview_excerpt(text)))
+            let decoded = decode_attachment_text(&bytes).map_err(|error| {
+                format!("Could not safely decode the selected text attachment: {error}")
+            })?;
+            (None, Some(preview_excerpt(&decoded.content)))
         }
         AttachmentKind::Document => {
             let document_type = document_type_from_mime(&mime_type)
@@ -418,12 +419,15 @@ pub fn resolve(storage: &Path, messages: &mut [AgentMessage]) -> Result<(), Stri
                             "Text attachments in one request may total at most 4 MiB".to_owned()
                         );
                     }
-                    let text = std::str::from_utf8(&bytes).map_err(|_| {
-                        format!("Attachment '{}' is not valid UTF-8", attachment.name)
+                    let decoded = decode_attachment_text(&bytes).map_err(|error| {
+                        format!(
+                            "Could not safely decode attachment '{}': {error}",
+                            attachment.name
+                        )
                     })?;
                     attachment.text_content = Some(context_excerpt(
-                        text,
-                        "UTF-8 text",
+                        &decoded.content,
+                        &format!("{} text", decoded.encoding.label()),
                         bytes.len() as u64,
                         &mut context_chars_remaining,
                     ));
@@ -481,18 +485,39 @@ fn classify_attachment(name: &str, bytes: &[u8]) -> Result<(AttachmentKind, Stri
     if let Some(mime_type) = detect_video_mime(bytes) {
         return Ok((AttachmentKind::Video, mime_type.to_owned()));
     }
-    if let Some(document_type) = detect_document_type(bytes)? {
-        return Ok((
-            AttachmentKind::Document,
-            document_type.mime_type().to_owned(),
-        ));
-    }
+    let declared_document_type = document_type_from_name(name);
+    let document_error = match detect_document_type(bytes) {
+        Ok(Some(document_type)) => {
+            return Ok((
+                AttachmentKind::Document,
+                document_type.mime_type().to_owned(),
+            ));
+        }
+        Ok(None) => {
+            if let Some(document_type) = declared_document_type {
+                return Err(format!(
+                    "Attachment '{name}' has a {} extension but is not a valid {} document",
+                    document_type.label(),
+                    document_type.label()
+                ));
+            }
+            None
+        }
+        Err(error) if declared_document_type.is_some() => return Err(error),
+        Err(error) => Some(error),
+    };
     if bytes.len() as u64 > MAX_TEXT_BYTES {
-        return Err("Text and code attachments may be at most 1 MiB".to_owned());
+        return Err(document_error
+            .unwrap_or_else(|| "Text and code attachments may be at most 1 MiB".to_owned()));
     }
-    let mime_type = detect_text_mime(name, bytes).ok_or_else(|| {
-        "Only PNG/JPEG/WebP/GIF images, MP4 videos, PDF/DOCX/XLSX/PPTX documents, and supported UTF-8 text or code files are allowed".to_owned()
+    decode_attachment_text(bytes).map_err(|error| {
+        document_error.unwrap_or_else(|| {
+            format!(
+                "The file is not a supported image or document and could not be safely decoded as text: {error}"
+            )
+        })
     })?;
+    let mime_type = text_mime_from_name(name);
     Ok((AttachmentKind::Text, mime_type.to_owned()))
 }
 
@@ -518,7 +543,159 @@ fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
 }
 
 fn detect_video_mime(bytes: &[u8]) -> Option<&'static str> {
-    (bytes.len() >= 12 && &bytes[4..8] == b"ftyp").then_some("video/mp4")
+    if bytes.len() < 16 || &bytes[4..8] != b"ftyp" {
+        return None;
+    }
+    let box_size = u32::from_be_bytes(bytes[..4].try_into().ok()?);
+    let valid_box_size = match box_size {
+        0 => true,
+        1 if bytes.len() >= 24 => {
+            let extended_size = u64::from_be_bytes(bytes[8..16].try_into().ok()?);
+            (24..=bytes.len() as u64).contains(&extended_size)
+        }
+        1 => false,
+        size => (16..=bytes.len() as u64).contains(&(size as u64)),
+    };
+    valid_box_size.then_some("video/mp4")
+}
+
+fn decode_attachment_text(bytes: &[u8]) -> Result<crate::text_encoding::DecodedText, String> {
+    if let Some(format) = unsupported_binary_format(bytes) {
+        return Err(format!(
+            "Detected {format} content, which cannot be attached as text"
+        ));
+    }
+
+    let sanitized = strip_complete_ansi_sequences(bytes);
+    let candidate = sanitized.as_deref().unwrap_or(bytes);
+    let decoded = crate::text_encoding::decode(candidate).map_err(|error| error.to_string())?;
+    if sanitized.is_some() && decoded.content.is_empty() {
+        return Err("The file contains only terminal control sequences".to_owned());
+    }
+    if !legacy_attachment_text_is_plausible(candidate, &decoded) {
+        return Err(
+            "Legacy encoding detection is too ambiguous to treat these bytes as text".to_owned(),
+        );
+    }
+    Ok(decoded)
+}
+
+fn unsupported_binary_format(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.len() >= 3
+        && bytes[0] == b'P'
+        && matches!(bytes[1], b'4' | b'5' | b'6')
+        && bytes[2].is_ascii_whitespace()
+    {
+        Some("a binary Netpbm image")
+    } else if bytes.starts_with(b"bplist00") {
+        Some("an Apple binary property list")
+    } else if bytes.starts_with(b"!<arch>\n") {
+        Some("a Unix archive")
+    } else {
+        None
+    }
+}
+
+fn legacy_attachment_text_is_plausible(
+    bytes: &[u8],
+    decoded: &crate::text_encoding::DecodedText,
+) -> bool {
+    if matches!(
+        decoded.encoding,
+        crate::text_encoding::TextEncoding::Utf8
+            | crate::text_encoding::TextEncoding::Utf16Le
+            | crate::text_encoding::TextEncoding::Utf16Be
+    ) {
+        return true;
+    }
+
+    let mut previous = None;
+    let mut run = 0_usize;
+    for byte in bytes {
+        if Some(*byte) == previous {
+            run += 1;
+        } else {
+            previous = Some(*byte);
+            run = 1;
+        }
+        if *byte >= 0x80 && run >= 8 {
+            return false;
+        }
+    }
+
+    let ascii_text_signals = bytes
+        .iter()
+        .filter(|byte| byte.is_ascii_alphanumeric() || byte.is_ascii_whitespace())
+        .count();
+    if ascii_text_signals >= 2 {
+        return true;
+    }
+
+    let alphabetic = decoded
+        .content
+        .chars()
+        .filter(|character| character.is_alphabetic())
+        .count();
+    let distinct_non_ascii = decoded
+        .content
+        .chars()
+        .filter(|character| !character.is_ascii())
+        .collect::<HashSet<_>>()
+        .len();
+    alphabetic >= 2 && distinct_non_ascii >= 2
+}
+
+fn strip_complete_ansi_sequences(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0_usize;
+    let mut changed = false;
+    while index < bytes.len() {
+        if bytes[index] == 0x1b
+            && let Some(end) = ansi_sequence_end(bytes, index)
+        {
+            index = end;
+            changed = true;
+            continue;
+        }
+        output.push(bytes[index]);
+        index += 1;
+    }
+    changed.then_some(output)
+}
+
+fn ansi_sequence_end(bytes: &[u8], start: usize) -> Option<usize> {
+    match *bytes.get(start + 1)? {
+        b'[' => {
+            let limit = bytes.len().min(start.saturating_add(66));
+            for (index, byte) in bytes.iter().enumerate().take(limit).skip(start + 2) {
+                if (0x40..=0x7e).contains(byte) {
+                    return Some(index + 1);
+                }
+                if !(0x20..=0x3f).contains(byte) {
+                    return None;
+                }
+            }
+            None
+        }
+        b']' => {
+            let limit = bytes.len().min(start.saturating_add(4_098));
+            let mut index = start + 2;
+            while index < limit {
+                if bytes[index] == 0x07 {
+                    return Some(index + 1);
+                }
+                if bytes[index] == 0x1b && bytes.get(index + 1) == Some(&b'\\') {
+                    return Some(index + 2);
+                }
+                if bytes[index].is_ascii_control() && bytes[index] != b'\t' {
+                    return None;
+                }
+                index += 1;
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 fn detect_document_type(bytes: &[u8]) -> Result<Option<DocumentType>, String> {
@@ -595,25 +772,42 @@ fn document_type_from_mime(mime_type: &str) -> Option<DocumentType> {
     }
 }
 
-fn detect_text_mime(name: &str, bytes: &[u8]) -> Option<&'static str> {
-    std::str::from_utf8(bytes).ok()?;
-    let extension = Path::new(name)
+fn document_type_from_name(name: &str) -> Option<DocumentType> {
+    match Path::new(name)
         .extension()
         .and_then(|value| value.to_str())?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "pdf" => Some(DocumentType::Pdf),
+        "docx" => Some(DocumentType::Docx),
+        "xlsx" => Some(DocumentType::Xlsx),
+        "pptx" => Some(DocumentType::Pptx),
+        _ => None,
+    }
+}
+
+fn text_mime_from_name(name: &str) -> &'static str {
+    let extension = Path::new(name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
         .to_ascii_lowercase();
     match extension.as_str() {
-        "txt" | "log" => Some("text/plain"),
-        "md" | "markdown" => Some("text/markdown"),
-        "json" | "jsonc" => Some("application/json"),
-        "toml" => Some("application/toml"),
-        "yaml" | "yml" => Some("application/yaml"),
-        "xml" => Some("application/xml"),
-        "csv" => Some("text/csv"),
-        "tsv" => Some("text/tab-separated-values"),
-        "rs" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "py" | "go" | "java" | "kt"
-        | "kts" | "swift" | "c" | "cc" | "cpp" | "h" | "hpp" | "cs" | "rb" | "php" | "sh"
-        | "ps1" | "sql" | "html" | "css" | "scss" | "vue" | "svelte" => Some("text/plain"),
-        _ => None,
+        "md" | "markdown" => "text/markdown",
+        "json" | "jsonc" => "application/json",
+        "toml" => "application/toml",
+        "yaml" | "yml" => "application/yaml",
+        "xml" => "application/xml",
+        "csv" => "text/csv",
+        "tsv" => "text/tab-separated-values",
+        "html" | "htm" => "text/html",
+        "css" => "text/css",
+        "js" | "mjs" | "cjs" => "text/javascript",
+        "rs" | "ts" | "tsx" | "jsx" | "py" | "go" | "java" | "kt" | "kts" | "swift" | "c"
+        | "cc" | "cpp" | "h" | "hpp" | "cs" | "rb" | "php" | "sh" | "ps1" | "sql" | "scss"
+        | "vue" | "svelte" => "text/plain",
+        _ => "text/plain",
     }
 }
 
@@ -1285,7 +1479,7 @@ mod tests {
     fn imports_mp4_only_through_media_reference_path() {
         let root = root("video-reference");
         let source = root.join("reference.mp4");
-        std::fs::write(&source, b"\0\0\0\x18ftypisom\0\0\0\0isom").unwrap();
+        std::fs::write(&source, b"\0\0\0\x14ftypisom\0\0\0\0isom").unwrap();
         let storage = root.join("managed");
         assert!(import(&storage, &source).is_err());
         let attachment = import_media_reference(&storage, &source).unwrap();
@@ -1333,8 +1527,24 @@ mod tests {
     fn rejects_unsupported_and_forged_attachments() {
         let root = root("attachment-reject");
         let source = root.join("not-supported.bin");
-        std::fs::write(&source, b"not an image").unwrap();
+        std::fs::write(&source, [0_u8, 159, 32, 0, 1, 2, 3, 4]).unwrap();
         assert!(import(&root.join("managed"), &source).is_err());
+
+        let forged_pdf = root.join("forged.pdf");
+        std::fs::write(&forged_pdf, b"ordinary text, not a PDF\n").unwrap();
+        assert!(
+            import(&root.join("managed"), &forged_pdf)
+                .unwrap_err()
+                .contains("PDF")
+        );
+        let forged_docx = root.join("forged.docx");
+        std::fs::write(&forged_docx, b"PK but not an Office package\n").unwrap();
+        assert!(
+            import(&root.join("managed"), &forged_docx)
+                .unwrap_err()
+                .contains("Office")
+        );
+
         let mut messages = vec![user_message(vec![ImageAttachment {
             id: "../escape".to_owned(),
             name: "bad".to_owned(),
@@ -1364,6 +1574,95 @@ mod tests {
         assert!(context.contains("fn main"));
         assert!(context.contains("extracted_chars="));
         assert!(messages[0].attachments[0].data_base64.is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn accepts_text_by_content_without_an_extension_allowlist() {
+        let root = root("content-detected-text-attachment");
+        let storage = root.join("managed");
+        let samples = [
+            ("Dockerfile", "FROM rust:latest\n"),
+            (".env", "APP_MODE=development\n"),
+            ("settings.ini", "[server]\nport=8080\n"),
+            ("schema.proto", "syntax = \"proto3\";\n"),
+            ("evidence.unknown", "content,not,the extension\n"),
+            ("readable.bin", "plain text with a binary-looking suffix\n"),
+            ("zip-prefix.log", "PK is also ordinary text\n"),
+            ("pdf-prefix.log", "%PDF-not-a-document, just text\n"),
+            ("video-prefix.log", "abcdftyp is also ordinary text\n"),
+        ];
+        let mut attachments = Vec::new();
+        for (name, content) in samples {
+            let source = root.join(name);
+            std::fs::write(&source, content).unwrap();
+            let attachment = import(&storage, &source).unwrap();
+            assert_eq!(attachment.kind, AttachmentKind::Text, "name={name}");
+            attachments.push(attachment);
+        }
+
+        let mut messages = vec![user_message(attachments)];
+        resolve(&storage, &mut messages).unwrap();
+        let contexts = messages[0]
+            .attachments
+            .iter()
+            .map(|item| item.text_content.as_deref().unwrap())
+            .collect::<Vec<_>>();
+        assert!(contexts.iter().any(|content| content.contains("FROM rust")));
+        assert!(contexts.iter().any(|content| content.contains("APP_MODE")));
+        assert!(
+            contexts
+                .iter()
+                .all(|content| content.contains("UTF-8 text"))
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn accepts_reliably_detected_legacy_text_and_rejects_disguised_binary() {
+        let root = root("encoded-text-attachment");
+        let storage = root.join("managed");
+        let source = root.join("legacy-config.cfg");
+        let original = "这是一个较长的中文配置文件，用于自动检测编码。\r\n标题=中文内容\r\n";
+        let (encoded, _, had_errors) = encoding_rs::GBK.encode(original);
+        assert!(!had_errors);
+        std::fs::write(&source, encoded.as_ref()).unwrap();
+
+        let attachment = import(&storage, &source).unwrap();
+        let legacy_preview = preview(&storage, &attachment.id, &attachment.name).unwrap();
+        assert!(
+            legacy_preview
+                .text
+                .as_deref()
+                .unwrap()
+                .contains("中文配置文件")
+        );
+        let mut messages = vec![user_message(vec![attachment])];
+        resolve(&storage, &mut messages).unwrap();
+        let context = messages[0].attachments[0].text_content.as_deref().unwrap();
+        assert!(context.contains("GBK text"));
+        assert!(context.contains("标题=中文内容"));
+
+        let colored_log = root.join("colored.log");
+        std::fs::write(&colored_log, b"\x1b[31mERROR\x1b[0m: failed\n").unwrap();
+        let colored = import(&storage, &colored_log).unwrap();
+        let colored_preview = preview(&storage, &colored.id, &colored.name).unwrap();
+        assert_eq!(colored_preview.text.as_deref(), Some("ERROR: failed\n"));
+        let mut messages = vec![user_message(vec![colored])];
+        resolve(&storage, &mut messages).unwrap();
+        let context = messages[0].attachments[0].text_content.as_deref().unwrap();
+        assert!(context.contains("ERROR: failed"));
+        assert!(!context.contains('\x1b'));
+
+        let disguised = root.join("disguised.txt");
+        std::fs::write(&disguised, [b't', b'e', b'x', b't', 0, 1, 2, 3]).unwrap();
+        assert!(import(&storage, &disguised).is_err());
+        let repeated_high_bytes = root.join("repeated-high-bytes.bin");
+        std::fs::write(&repeated_high_bytes, [0x80; 16]).unwrap();
+        assert!(import(&storage, &repeated_high_bytes).is_err());
+        let binary_ppm = root.join("binary.ppm");
+        std::fs::write(&binary_ppm, b"P6\n1 1\n255\nABC").unwrap();
+        assert!(import(&storage, &binary_ppm).is_err());
         let _ = std::fs::remove_dir_all(root);
     }
 

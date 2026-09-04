@@ -4948,7 +4948,7 @@ function App() {
           <div className="file-drop-overlay" role="status" aria-live="polite">
             <span><FileInput size={28} /></span>
             <strong>{tr("松手即可添加", "Drop to add")}</strong>
-            <small>{tr("支持图片、PDF、Office、文本和代码文件", "Images, PDF, Office, text, and code files are supported")}</small>
+            <small>{tr("支持图片、PDF、Office 和可识别文本", "Images, PDF, Office, and recognizable text are supported")}</small>
           </div>
         )}
         <header className="topbar" data-tauri-drag-region>
