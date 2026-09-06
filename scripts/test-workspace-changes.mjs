@@ -7,6 +7,7 @@ import {
   buildSplitDiffDisplayRows,
   buildTurnDiff,
   compareWorkspaceSnapshots,
+  mergeConversationChangeSets,
   MAX_CHANGE_SET_DIFF_CHARS,
   MAX_TURN_DIFF_CHARS,
   MAX_TURN_DIFF_LINES,
@@ -60,13 +61,85 @@ test("unavailable snapshots fail closed instead of inventing changes", () => {
   assert.deepEqual(compareWorkspaceSnapshots(unavailable, available), []);
 });
 
-test("conversation expansion selects its changes without stealing the inspector tab", () => {
+test("conversation change summaries merge turns and keep the newest entry per path", () => {
+  const summary = mergeConversationChangeSets([
+    {
+      operationId: "first",
+      workspace: "C:/workspace",
+      status: "completed",
+      startedAt: 10,
+      completedAt: 20,
+      files: [
+        {
+          path: "shared.txt",
+          kind: "modified",
+          indexStatus: " ",
+          worktreeStatus: " ",
+          additions: 1,
+          deletions: 1,
+          diffAvailable: true,
+          turnDiff: "-old\n+first",
+        },
+        {
+          path: "first.txt",
+          kind: "added",
+          indexStatus: " ",
+          worktreeStatus: " ",
+          additions: 2,
+          deletions: 0,
+          diffAvailable: true,
+          turnDiff: "+first",
+        },
+      ],
+    },
+    {
+      operationId: "second",
+      workspace: "C:/workspace",
+      status: "failed",
+      startedAt: 30,
+      completedAt: 40,
+      snapshotTruncated: true,
+      files: [
+        {
+          path: "shared.txt",
+          kind: "modified",
+          indexStatus: " ",
+          worktreeStatus: " ",
+          additions: 2,
+          deletions: 1,
+          diffAvailable: true,
+          turnDiff: "-first\n+second",
+        },
+        {
+          path: "second.txt",
+          kind: "deleted",
+          indexStatus: " ",
+          worktreeStatus: " ",
+          additions: 0,
+          deletions: 2,
+          diffAvailable: true,
+          turnDiff: "-second",
+        },
+      ],
+    },
+  ]);
+
+  assert.deepEqual(summary.files.map((change) => change.path), [
+    "first.txt",
+    "second.txt",
+    "shared.txt",
+  ]);
+  assert.equal(summary.operationId, "second");
+  assert.equal(summary.status, "failed");
+  assert.equal(summary.startedAt, 10);
+  assert.equal(summary.completedAt, 40);
+  assert.equal(summary.snapshotTruncated, true);
+  assert.equal(summary.files.find((change) => change.path === "shared.txt").turnDiff, "-first\n+second");
+});
+
+test("conversation-wide change summary is the default while explicit review stays opt-in", () => {
   const finalize = sourceSection(
     "const finalizeWorkspaceRunChanges = async",
-    "const selectChangeSet = useCallback",
-  );
-  const select = sourceSection(
-    "const selectChangeSet = useCallback",
     "const reviewChangeSet = useCallback",
   );
   const review = sourceSection(
@@ -75,11 +148,11 @@ test("conversation expansion selects its changes without stealing the inspector 
   );
 
   assert.doesNotMatch(finalize, /setInspectorTab|setRightPanelOpen/);
-  assert.match(select, /setReviewedChangeSet\(changeSet\)/);
-  assert.doesNotMatch(select, /setInspectorTab|setRightPanelOpen/);
+  assert.match(appSource, /changeSet: mergeConversationChangeSets\(changeSets\)/);
+  assert.match(appSource, /const visibleChangeSet = reviewedChangeSet \?\? conversationView\.changeSet/);
+  assert.doesNotMatch(appSource, /onSelectChanges/);
   assert.match(review, /setInspectorTab\("changes"\)/);
   assert.match(review, /setRightPanelOpen\(true\)/);
-  assert.match(appSource, /if \(open && changeSet\) onSelectChanges\(changeSet\)/);
   assert.match(appSource, /changeSet && changeSet\.files\.length > 0/);
 });
 
@@ -90,10 +163,13 @@ test("turn-change inspector keeps inline diff controls off by default", () => {
   );
 
   assert.match(inspector, /const \[wrapLines, setWrapLines\] = useState\(false\)/);
+  assert.match(inspector, /const \[richPreview, setRichPreview\] = useState\(false\)/);
   assert.match(inspector, /const \[splitView, setSplitView\] = useState\(false\)/);
   assert.match(inspector, /const \[showFullFile, setShowFullFile\] = useState\(false\)/);
   assert.match(inspector, /buildSplitDiffDisplayRows\(diff\.content, effectiveFullFile\)/);
   assert.match(inspector, /onClick=\{\(\) => setSplitView\(\(current\) => !current\)\}/);
+  assert.match(inspector, /tr\("启用富文本预览", "Enable rich text preview"\)/);
+  assert.match(inspector, /<RichDiffPreview/);
   assert.match(inspector, /onClick=\{\(\) => setShowFullFile\(\(current\) => !current\)\}/);
   assert.match(inspector, /className="change-review-inline-diff"/);
   assert.match(inspector, /tr\("复制路径", "Copy path"\)/);

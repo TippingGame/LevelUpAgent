@@ -6345,6 +6345,16 @@ async fn harness_run_loop(
             _ = cancellation.cancelled() => Err("REQUEST_CANCELLED".to_owned()),
             _ = turn_cancellation.cancelled() => Err("REQUEST_STEER".to_owned()),
         };
+        let response = match response {
+            Err(error)
+                if error.contains("REQUEST_CANCELLED")
+                    && turn_cancellation.is_cancelled()
+                    && !cancellation.is_cancelled() =>
+            {
+                Err("REQUEST_STEER".to_owned())
+            }
+            other => other,
+        };
         if let Ok(mut turns) = state.harness_turn_cancellations.lock() {
             turns.remove(&operation_id);
         }

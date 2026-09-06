@@ -29,6 +29,7 @@ import {
   FolderMinus,
   FolderOpen,
   FolderPlus,
+  FileText,
   Gauge,
   GitBranch,
   GitMerge,
@@ -252,6 +253,7 @@ import {
   buildDiffDisplayRows,
   buildSplitDiffDisplayRows,
   compareWorkspaceSnapshots,
+  mergeConversationChangeSets,
   type SplitDiffCell,
   type SplitDiffDisplayRow,
 } from "./lib/workspaceChanges";
@@ -925,7 +927,7 @@ function App() {
     let latestUserCreatedAt = 0;
     let messageCount = 0;
     let latestConnectionMessage: AgentMessage | undefined;
-    let latestChangeSet: ConversationChangeSet | undefined;
+    const changeSets: ConversationChangeSet[] = [];
     for (const item of activeThread.messages) {
       if (!item.internal) messageCount += 1;
       if (item.role === "user") {
@@ -933,12 +935,18 @@ function App() {
         latestConnectionMessage = undefined;
       }
       if (item.status && item.createdAt >= latestUserCreatedAt) latestConnectionMessage = item;
-      if (item.changeSet) latestChangeSet = item.changeSet;
+      if (item.changeSet) changeSets.push(item.changeSet);
       if (item.internal && !item.status) continue;
       messages.push(item);
       if (item.role === "user") latestUserMessageId = item.id;
     }
-    return { messages, latestUserMessageId, messageCount, latestConnectionMessage, latestChangeSet };
+    return {
+      messages,
+      latestUserMessageId,
+      messageCount,
+      latestConnectionMessage,
+      changeSet: mergeConversationChangeSets(changeSets),
+    };
   }, [activeThread.messages]);
   const visibleConversationMessages = conversationView.messages;
   const latestVisibleUserMessageId = conversationView.latestUserMessageId;
@@ -983,8 +991,7 @@ function App() {
     ? latestConnectionMessage.id
     : undefined;
   const queuedItems = harnessQueueItems[activeThread.id] ?? [];
-  const latestChangeSet = conversationView.latestChangeSet ?? null;
-  const visibleChangeSet = reviewedChangeSet ?? latestChangeSet;
+  const visibleChangeSet = reviewedChangeSet ?? conversationView.changeSet;
   const persistentThreads = threads;
   const projectGroups = useMemo(
     () => groupThreadsByWorkspace(persistentThreads, pinnedThreadIds, defaultWorkspace),
@@ -2241,6 +2248,17 @@ function App() {
     setHarnessQueueItems((current) => queueStateWithoutItem(current, threadId, queueId));
   };
 
+  const markHarnessQueueItemSteered = (threadId: string, queueId: string) => {
+    setHarnessQueueItems((current) => {
+      const items = current[threadId];
+      if (!items?.some((item) => item.id === queueId && item.kind !== "steer")) return current;
+      return {
+        ...current,
+        [threadId]: items.map((item) => item.id === queueId ? { ...item, kind: "steer" } : item),
+      };
+    });
+  };
+
   const ensureWorkspaceRunBaseline = (
     operationId: string,
     threadId: string,
@@ -2299,19 +2317,15 @@ function App() {
     commitThread({ ...current, messages, updatedAt: Date.now() });
   };
 
-  const selectChangeSet = useCallback((changeSet: ConversationChangeSet) => {
+  const reviewChangeSet = useCallback((changeSet: ConversationChangeSet) => {
     reviewedDiffRequestRef.current += 1;
     setReviewedChangeSet(changeSet);
     setReviewedFile(null);
     setReviewedDiff(null);
     setReviewedDiffBusy(false);
-  }, []);
-
-  const reviewChangeSet = useCallback((changeSet: ConversationChangeSet) => {
-    selectChangeSet(changeSet);
     setInspectorTab("changes");
     setRightPanelOpen(true);
-  }, [selectChangeSet]);
+  }, []);
 
   const editConversationMessage = useCallback((content: string) => {
     setDraft(content);
@@ -4015,7 +4029,7 @@ function App() {
       // Steer preserves the current operation. The Rust runtime only
       // interrupts the provider phase; an in-flight tool is allowed to finish.
       await harnessSteer(currentOperationId, item.id);
-      removeHarnessQueueItem(thread.id, item.id);
+      markHarnessQueueItemSteered(thread.id, item.id);
     } catch (error) {
       setNotice(`${tr("无法引导当前对话", "Could not steer the active conversation")}: ${errorText(error)}`);
     }
@@ -5084,7 +5098,6 @@ function App() {
                   running={running}
                   pet={activePetProfile}
                   endRef={endRef}
-                  onSelectChanges={selectChangeSet}
                   onReviewChanges={reviewChangeSet}
                   onEdit={editConversationMessage}
                 />
@@ -6246,7 +6259,6 @@ function AssistantMessageGroup({
   collapsible = false,
   defaultOpen = false,
   pet,
-  onSelectChanges,
   onReviewChanges,
 }: {
   items: AgentMessage[];
@@ -6256,7 +6268,6 @@ function AssistantMessageGroup({
   collapsible?: boolean;
   defaultOpen?: boolean;
   pet?: PetProfile;
-  onSelectChanges: (changeSet: ConversationChangeSet) => void;
   onReviewChanges: (changeSet: ConversationChangeSet) => void;
 }) {
   const [open, setOpen] = useState(defaultOpen || !collapsible);
@@ -6287,9 +6298,6 @@ function AssistantMessageGroup({
       toolActivityItems.push(item);
     }
   }
-  useEffect(() => {
-    if (open && changeSet) onSelectChanges(changeSet);
-  }, [changeSet, onSelectChanges, open]);
   const identityModelName = identity?.modelName?.trim();
   const providerBrand = identity?.providerBrand ?? (identityModelName
     ? modelProviderBrandFromName(identityModelName)
@@ -6705,7 +6713,6 @@ const MemoizedAssistantMessageGroup = memo(AssistantMessageGroup, (previous, nex
   && previous.collapsible === next.collapsible
   && previous.defaultOpen === next.defaultOpen
   && previous.pet === next.pet
-  && previous.onSelectChanges === next.onSelectChanges
   && previous.onReviewChanges === next.onReviewChanges
   && previous.items === next.items
 ));
@@ -6718,7 +6725,6 @@ const ConversationMessageList = memo(({
   running,
   pet,
   endRef,
-  onSelectChanges,
   onReviewChanges,
   onEdit,
 }: {
@@ -6729,7 +6735,6 @@ const ConversationMessageList = memo(({
   running: boolean;
   pet?: PetProfile;
   endRef: RefObject<HTMLDivElement | null>;
-  onSelectChanges: (changeSet: ConversationChangeSet) => void;
   onReviewChanges: (changeSet: ConversationChangeSet) => void;
   onEdit: (content: string) => void;
 }) => {
@@ -6775,7 +6780,6 @@ const ConversationMessageList = memo(({
           collapsible={!streamingMessageId || !block.items.some((item) => item.id === streamingMessageId)}
           defaultOpen={!running && blockIndex === latestAssistantBlockIndex}
           pet={pet}
-          onSelectChanges={onSelectChanges}
           onReviewChanges={onReviewChanges}
         />
       ))}
@@ -7436,6 +7440,7 @@ function ChangeInspectorPanel({
   onNotice: (message: string) => void;
 }) {
   const [wrapLines, setWrapLines] = useState(false);
+  const [richPreview, setRichPreview] = useState(false);
   const [splitView, setSplitView] = useState(false);
   const [showFullFile, setShowFullFile] = useState(false);
   const [copiedPath, setCopiedPath] = useState<string | null>(null);
@@ -7491,6 +7496,14 @@ function ChangeInspectorPanel({
             onClick={() => setWrapLines((current) => !current)}
           >
             <WrapText size={15} />
+          </IconButton>
+          <IconButton
+            className={richPreview ? "active" : ""}
+            label={richPreview ? tr("关闭富文本预览", "Disable rich text preview") : tr("启用富文本预览", "Enable rich text preview")}
+            aria-pressed={richPreview}
+            onClick={() => setRichPreview((current) => !current)}
+          >
+            <FileText size={15} />
           </IconButton>
           <IconButton
             className={splitView ? "active" : ""}
@@ -7575,7 +7588,15 @@ function ChangeInspectorPanel({
                     {busy ? (
                       <div className="change-review-loading"><LoaderCircle size={17} />{tr("正在读取 diff", "Loading diff")}</div>
                     ) : hasRows ? (
-                      splitView ? (
+                      richPreview ? (
+                        <RichDiffPreview
+                          path={file.path}
+                          kind={file.kind}
+                          content={diff?.content ?? ""}
+                          complete={Boolean((file.turnDiff && !file.turnDiffTruncated) || effectiveFullFile)}
+                          truncated={Boolean(diff?.truncated)}
+                        />
+                      ) : splitView ? (
                         <SplitDiffView rows={splitRows} wrapLines={wrapLines} truncated={Boolean(diff?.truncated)} />
                       ) : (
                         <div className={`side-diff-content${wrapLines ? " wrap-lines" : ""}`}>
@@ -7601,6 +7622,70 @@ function ChangeInspectorPanel({
               </div>
             );
           })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function extractRichDiffContent(content: string, kind: ConversationFileChange["kind"]) {
+  if (kind === "deleted") return null;
+  const previewLines: string[] = [];
+  let insideHunk = false;
+  for (const line of content.split("\n")) {
+    if (line.startsWith("@@") || line === "@@ new file @@") {
+      insideHunk = true;
+      continue;
+    }
+    if (!insideHunk) continue;
+    if (line.startsWith("+")) previewLines.push(line.slice(1));
+    else if (line.startsWith(" ")) previewLines.push(line.slice(1));
+  }
+  return previewLines.join("\n");
+}
+
+function isMarkdownPreviewPath(path: string) {
+  return /\.(?:md|markdown|mdown|mkdn|mdx)$/i.test(path);
+}
+
+function RichDiffPreview({
+  path,
+  kind,
+  content,
+  complete,
+  truncated,
+}: {
+  path: string;
+  kind: ConversationFileChange["kind"];
+  content: string;
+  complete: boolean;
+  truncated: boolean;
+}) {
+  const preview = extractRichDiffContent(content, kind);
+  if (preview == null) {
+    return (
+      <div className="change-rich-preview change-rich-preview-empty">
+        <FileText size={20} />
+        <strong>{tr("已删除文件没有可预览的当前内容", "Deleted files have no current content to preview")}</strong>
+      </div>
+    );
+  }
+
+  const markdown = isMarkdownPreviewPath(path);
+  return (
+    <div className="change-rich-preview">
+      {markdown ? (
+        <div className="markdown-body">
+          <MarkdownContent content={preview || "\u200b"} />
+        </div>
+      ) : (
+        <pre className="change-rich-preview-code"><code>{preview || " "}</code></pre>
+      )}
+      {(truncated || !complete) && (
+        <div className="change-rich-preview-note">
+          {truncated
+            ? tr("diff 内容已截断，预览仅覆盖当前可用片段。", "The diff is truncated; preview only covers the available content.")
+            : tr("当前仅显示变更片段，未修改行已省略。", "Only changed sections are shown; unchanged lines are omitted.")}
         </div>
       )}
     </div>

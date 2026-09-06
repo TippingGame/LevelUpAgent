@@ -1,4 +1,4 @@
-import type { ConversationFileChange, WorkspaceSnapshot } from "./types";
+import type { ConversationChangeSet, ConversationFileChange, WorkspaceSnapshot } from "./types";
 
 export const MAX_TURN_DIFF_LINES = 4_000;
 export const MAX_TURN_DIFF_CHARS = 512 * 1024;
@@ -630,6 +630,37 @@ export function buildTurnDiff(before: string | null, after: string | null, path:
     deletions: diff.deletions,
     truncated: diff.fullTruncated,
   };
+}
+
+/**
+ * Merge all turn-level change sets from a thread into the current conversation
+ * summary. The newest file entry for a path wins so the result tracks the
+ * current session state instead of duplicating older turns.
+ */
+export function mergeConversationChangeSets(changeSets: ConversationChangeSet[]): ConversationChangeSet | null {
+  if (changeSets.length === 0) return null;
+  const latest = changeSets[changeSets.length - 1];
+  const filesByPath = new Map<string, ConversationFileChange>();
+  let startedAt = latest.startedAt;
+  let completedAt = latest.completedAt;
+  let snapshotTruncated = Boolean(latest.snapshotTruncated);
+  for (const changeSet of changeSets) {
+    if (changeSet.startedAt < startedAt) startedAt = changeSet.startedAt;
+    if (changeSet.completedAt > completedAt) completedAt = changeSet.completedAt;
+    snapshotTruncated = snapshotTruncated || Boolean(changeSet.snapshotTruncated);
+    for (const file of changeSet.files) {
+      filesByPath.set(file.path, { ...file });
+    }
+  }
+  const summary: ConversationChangeSet = {
+    operationId: latest.operationId,
+    workspace: latest.workspace,
+    status: latest.status,
+    startedAt,
+    completedAt,
+    files: [...filesByPath.values()].sort((left, right) => left.path.localeCompare(right.path)),
+  };
+  return snapshotTruncated ? { ...summary, snapshotTruncated: true } : summary;
 }
 
 export function compareWorkspaceSnapshots(

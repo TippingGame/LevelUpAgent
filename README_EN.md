@@ -12,7 +12,7 @@
     <a href="https://levelup.mom/">LevelUpAPI</a>
   </p>
   <p>
-    <img alt="Version" src="https://img.shields.io/badge/version-1.0.43-ff5a4f?style=flat-square" />
+    <img alt="Version" src="https://img.shields.io/badge/version-1.0.44-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-preview-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -45,7 +45,7 @@ Read the [Creative Studio capability audit](docs/CREATIVE_STUDIO_AUDIT.md) for t
 
 ### Install
 
-Download the package for your platform from GitHub **Releases**. The current `1.0.43` Windows x64 installers are built by GitHub Actions and signed with the Tauri updater key; they are not Authenticode-signed, so SmartScreen may show an unknown-publisher warning.
+Download the package for your platform from GitHub **Releases**. The current `1.0.44` Windows x64 installers are built by GitHub Actions and signed with the Tauri updater key; they are not Authenticode-signed, so SmartScreen may show an unknown-publisher warning.
 
 | Platform | Package | Status |
 | --- | --- | --- |
@@ -155,7 +155,7 @@ Use `pnpm build:macos` for macOS packages. Signed public updates additionally re
 
 ## Current status
 
-`1.0.43` is the current release milestone. Turn changes now open as inline diffs when a file name is clicked, with copy-path, open-folder, line-wrap, full-file, and side-by-side controls. Side-by-side mode places the source and modified file next to each other and can remain enabled together with full-file comparison. Expanding a task record prepares its turn changes without stealing the currently selected inspector tab, and tasks with no changed files omit the turn-changes entry. Windows installers use Tauri updater signatures but are not Authenticode-signed, so SmartScreen may show an unknown-publisher warning. When filing an issue, include reproduction steps, application logs, and platform details.
+`1.0.44` is the current release milestone. Turn changes now open as inline diffs when a file name is clicked, with copy-path, open-folder, line-wrap, full-file, and side-by-side controls. Side-by-side mode places the source and modified file next to each other and can remain enabled together with full-file comparison. Expanding a task record prepares its turn changes without stealing the currently selected inspector tab, and tasks with no changed files omit the turn-changes entry. Windows installers use Tauri updater signatures but are not Authenticode-signed, so SmartScreen may show an unknown-publisher warning. When filing an issue, include reproduction steps, application logs, and platform details.
 
 ## License
 

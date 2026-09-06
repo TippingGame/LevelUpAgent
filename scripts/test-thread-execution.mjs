@@ -50,6 +50,9 @@ test("all desktop conversations, including hatch and pet chats, use Harness", ()
 test("active-run queue remains visible until the runtime injects each item", () => {
   assert.match(appSource, /event\.kind === "queue_injected"/);
   assert.match(appSource, /const removeHarnessQueueItem =/);
+  assert.match(appSource, /const markHarnessQueueItemSteered =/);
+  assert.match(appSource, /await harnessSteer\(currentOperationId, item\.id\);\s+markHarnessQueueItemSteered\(thread\.id, item\.id\);/);
+  assert.doesNotMatch(appSource, /await harnessSteer\(currentOperationId, item\.id\);\s+removeHarnessQueueItem\(thread\.id, item\.id\);/);
   assert.doesNotMatch(appSource, /const setThreadQueue =/);
   assert.match(appSource, /injectedQueueIdsRef/);
   assert.match(appSource, /const recordHarnessQueueItem =/);
@@ -78,6 +81,11 @@ test("queue state reconciles either queue injection event order without reviving
 test("Harness completion defers to pending queue messages", () => {
   assert.match(harnessSource, /complete_harness_operation_if_queue_empty/);
   assert.match(harnessSource, /outcome": "queued_follow_up"/);
+});
+
+test("steering a provider turn is reclassified instead of looking like a cancel", () => {
+  assert.match(harnessSource, /turn_cancellation\.is_cancelled\(\)[\s\S]*?REQUEST_STEER/);
+  assert.match(harnessSource, /!cancellation\.is_cancelled\(\)/);
 });
 
 test("provider retry progress identifies the active request and keeps ticking", () => {
