@@ -7315,7 +7315,8 @@ function Inspector({
         </button>
         <IconButton className="inspector-close" label={tr("关闭侧栏", "Close side panel")} onClick={onClose}><X size={14} /></IconButton>
       </div>
-      {activeTab === "browser" ? (
+      <div className="inspector-body">
+        {activeTab === "browser" ? (
         <AgentBrowserPanel
           threadId={thread.id}
           workspace={thread.workspace}
@@ -7334,8 +7335,8 @@ function Inspector({
           onOpenFileDirectory={onOpenFileDirectory}
           onNotice={onNotice}
         />
-      ) : (<>
-      <section>
+        ) : (<div className="inspector-scroll-area"><>
+          <section>
         <div className="section-heading"><Folder size={15} /><span>{tr("项目", "Project")}</span></div>
         <button className="detail-row clickable" onClick={onWorkspace}>
           <span>{thread.workspace ? shortPath(thread.workspace) : tr("未选择", "Not selected")}</span>
@@ -7355,9 +7356,9 @@ function Inspector({
             ? tr("本轮变更可用", "Turn review available")
             : "Git"}</small>
         </div>
-      </section>
-      {gitStatus?.isRepository && (
-        <section>
+          </section>
+          {gitStatus?.isRepository && (
+            <section>
           <div className="section-heading"><FileCode2 size={15} /><span>{tr("变更", "Changes")}</span><small>{gitStatus.changes.length}</small></div>
           <div className="change-list">
             {gitStatus.changes.slice(0, 10).map((change) => (
@@ -7369,9 +7370,9 @@ function Inspector({
             {gitStatus.changes.length === 0 && <div className="clean-state"><Check size={13} />{tr("无本地变更", "No local changes")}</div>}
             {gitStatus.changes.length > 10 && <div className="more-changes">{tr("还有", "Plus")} {gitStatus.changes.length - 10} {tr("项", "more")}</div>}
           </div>
-        </section>
-      )}
-      <section>
+            </section>
+          )}
+          <section>
         <div className="section-heading"><Cpu size={15} /><span>{tr("模型", "Model")}</span></div>
         <button className="detail-row clickable" onClick={onSettings}>
           <span>{profile.model}</span><ChevronDown size={14} />
@@ -7381,16 +7382,16 @@ function Inspector({
         <button className="detail-row clickable levelup-detail-link" type="button" title={LEVELUP_WEBSITE} onClick={() => void openLevelUpWebsite()}>
           <span>LevelUpAPI</span><small>levelup.mom</small><ExternalLink size={12} />
         </button>
-      </section>
-      <section>
+          </section>
+          <section>
         <div className="section-heading"><Gauge size={15} /><span>{tr("本次任务", "This task")}</span></div>
         <div className="metric-grid">
           <div><strong>{formatTokens(thread.inputTokens)}</strong><span>{tr("输入", "Input")}</span></div>
           <div><strong>{formatTokens(thread.outputTokens)}</strong><span>{tr("输出", "Output")}</span></div>
         </div>
-      </section>
-      {(goal || mode === "goal") && (
-        <section>
+          </section>
+          {(goal || mode === "goal") && (
+            <section>
           <div className="section-heading"><Flag size={15} /><span>Goal</span><small>{goal ? goalStatusLabel(goal.status) : tr("未创建", "Not created")}</small></div>
           {goal ? (
             <>
@@ -7408,16 +7409,17 @@ function Inspector({
           ) : (
             <div className="goal-empty">{tr("发送首条目标消息后创建并持续执行。", "Created after the first Goal message and runs continuously.")}</div>
           )}
-        </section>
-      )}
-      <section>
+            </section>
+          )}
+          <section>
         <div className="section-heading"><ShieldCheck size={15} /><span>{tr("权限", "Permissions")}</span></div>
         <div className="permission-line"><Check size={13} /><span>{tr("读取与搜索", "Read and search")}</span><small>{tr("自动", "Automatic")}</small></div>
         <div className="permission-line"><KeyRound size={13} /><span>{tr("写入与命令", "Writes and commands")}</span><small>{permissionBehaviorLabel(permissionLevel, mode)}</small></div>
         <div className="permission-line"><ShieldCheck size={13} /><span>{tr("权限等级", "Permission level")}</span><small>{permissionLabel(permissionLevel)}</small></div>
         <div className="permission-line"><Command size={13} /><span>{tr("当前模式", "Current mode")}</span><small>{modeLabel(mode)}</small></div>
-      </section>
-      </>)}
+          </section>
+        </></div>)}
+      </div>
     </aside>
   );
 }
@@ -7661,20 +7663,30 @@ function RichDiffPreview({
   complete: boolean;
   truncated: boolean;
 }) {
+  const diffRows = useMemo(() => buildDiffDisplayRows(content, false, 1), [content]);
+  const lineNumbers = useMemo(() => diffLineNumbers(content), [content]);
   const preview = extractRichDiffContent(content, kind);
-  if (preview == null) {
-    return (
-      <div className="change-rich-preview change-rich-preview-empty">
-        <FileText size={20} />
-        <strong>{tr("已删除文件没有可预览的当前内容", "Deleted files have no current content to preview")}</strong>
-      </div>
-    );
-  }
 
   const markdown = isMarkdownPreviewPath(path);
   return (
     <div className="change-rich-preview">
-      {markdown ? (
+      <div className="side-diff-content change-rich-preview-diff">
+        {diffRows.map((row, index) => row.kind === "collapsed" ? (
+          <div className="diff-collapsed" key={`collapsed:${index}`}>
+            {row.count} {row.count === 1 ? tr("行未修改", "unchanged line") : tr("行未修改", "unchanged lines")}
+          </div>
+        ) : (
+          <DiffLine line={row.content} lineNumber={lineNumbers[row.sourceIndex]} key={`${row.sourceIndex}:${row.content}`} />
+        ))}
+        {truncated && <DiffTruncatedNotice />}
+      </div>
+      {preview == null ? (
+        <div className="change-rich-preview-empty compact">
+          <FileText size={20} />
+          <strong>{tr("已删除文件没有可预览的当前内容", "Deleted files have no current content to preview")}</strong>
+          <span>{tr("下面仍保留本次删除的 diff 片段。", "The diff excerpt below still shows the deleted content.")}</span>
+        </div>
+      ) : markdown ? (
         <div className="markdown-body">
           <MarkdownContent content={preview || "\u200b"} />
         </div>
