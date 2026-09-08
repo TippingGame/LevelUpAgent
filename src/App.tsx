@@ -6447,6 +6447,11 @@ function ChangeSetSummary({
     result[file.kind] += 1;
     return result;
   }, { added: 0, modified: 0, deleted: 0, renamed: 0 });
+  const lineCounts = changeSet.files.reduce((result, file) => {
+    result.additions += file.additions ?? 0;
+    result.deletions += file.deletions ?? 0;
+    return result;
+  }, { additions: 0, deletions: 0 });
   const canToggle = changeSet.files.length > 3;
   const visibleFiles = filesExpanded
     ? changeSet.files
@@ -6472,7 +6477,7 @@ function ChangeSetSummary({
                 counts.modified ? tr(`修改 ${counts.modified}`, `${counts.modified} modified`) : "",
                 counts.deleted ? tr(`删除 ${counts.deleted}`, `${counts.deleted} deleted`) : "",
                 counts.renamed ? tr(`重命名 ${counts.renamed}`, `${counts.renamed} renamed`) : "",
-              ].filter(Boolean).join(" · ")}</small>
+              ].filter(Boolean).join(" · ")}{(lineCounts.additions || lineCounts.deletions) ? ` · ${tr(`+${lineCounts.additions} -${lineCounts.deletions}`, `+${lineCounts.additions} -${lineCounts.deletions}`)}` : ""}</small>
           {changeSet.snapshotTruncated && (
             <small className="change-set-summary-warning">
               {tr("目录较大，仅显示已扫描范围", "Large folder; showing the scanned range only")}
@@ -7513,7 +7518,7 @@ function ChangeInspectorPanel({
   onOpenFileDirectory: (file: ConversationFileChange) => void;
   onNotice: (message: string) => void;
 }) {
-  const [wrapLines, setWrapLines] = useState(false);
+  const [wrapLines, setWrapLines] = useState(true);
   const [richPreview, setRichPreview] = useState(false);
   const [splitView, setSplitView] = useState(false);
   const [showFullFile, setShowFullFile] = useState(false);
@@ -7615,6 +7620,7 @@ function ChangeInspectorPanel({
         <div className="change-review-files">
           {changeSet.files.map((file) => {
             const expanded = reviewedFile?.path === file.path;
+            const fullPath = workspaceFilePath(changeSet.workspace, file.path);
             const unifiedRows = expanded && diff && !splitView
               ? buildDiffDisplayRows(diff.content, effectiveFullFile)
               : [];
@@ -7642,11 +7648,11 @@ function ChangeInspectorPanel({
                   </button>
                   <div className="change-review-file-actions">
                     <IconButton
-                      className={copiedPath === file.path ? "copied" : ""}
-                      label={copiedPath === file.path ? tr("路径已复制", "Path copied") : tr("复制路径", "Copy path")}
-                      onClick={() => void copyFilePath(file.path)}
+                      className={copiedPath === fullPath ? "copied" : ""}
+                      label={copiedPath === fullPath ? tr("路径已复制", "Path copied") : tr("复制路径", "Copy path")}
+                      onClick={() => void copyFilePath(fullPath)}
                     >
-                      {copiedPath === file.path ? <Check size={14} /> : <Copy size={14} />}
+                      {copiedPath === fullPath ? <Check size={14} /> : <Copy size={14} />}
                     </IconButton>
                     <IconButton
                       label={tr("打开所在目录", "Open containing folder")}
@@ -7667,8 +7673,6 @@ function ChangeInspectorPanel({
                           path={file.path}
                           kind={file.kind}
                           content={diff?.content ?? ""}
-                          complete={Boolean((file.turnDiff && !file.turnDiffTruncated) || effectiveFullFile)}
-                          truncated={Boolean(diff?.truncated)}
                         />
                       ) : splitView ? (
                         <SplitDiffView rows={splitRows} wrapLines={wrapLines} truncated={Boolean(diff?.truncated)} />
@@ -7726,37 +7730,21 @@ function RichDiffPreview({
   path,
   kind,
   content,
-  complete,
-  truncated,
 }: {
   path: string;
   kind: ConversationFileChange["kind"];
   content: string;
-  complete: boolean;
-  truncated: boolean;
 }) {
-  const diffRows = useMemo(() => buildDiffDisplayRows(content, false, 1), [content]);
-  const lineNumbers = useMemo(() => diffLineNumbers(content), [content]);
   const preview = extractRichDiffContent(content, kind);
 
   const markdown = isMarkdownPreviewPath(path);
   return (
     <div className="change-rich-preview">
-      <div className="side-diff-content change-rich-preview-diff">
-        {diffRows.map((row, index) => row.kind === "collapsed" ? (
-          <div className="diff-collapsed" key={`collapsed:${index}`}>
-            {row.count} {row.count === 1 ? tr("行未修改", "unchanged line") : tr("行未修改", "unchanged lines")}
-          </div>
-        ) : (
-          <DiffLine line={row.content} lineNumber={lineNumbers[row.sourceIndex]} key={`${row.sourceIndex}:${row.content}`} />
-        ))}
-        {truncated && <DiffTruncatedNotice />}
-      </div>
       {preview == null ? (
         <div className="change-rich-preview-empty compact">
           <FileText size={20} />
           <strong>{tr("已删除文件没有可预览的当前内容", "Deleted files have no current content to preview")}</strong>
-          <span>{tr("下面仍保留本次删除的 diff 片段。", "The diff excerpt below still shows the deleted content.")}</span>
+          <span>{tr("当前仅显示可读内容预览。", "Only the readable content preview is shown.")}</span>
         </div>
       ) : markdown ? (
         <div className="markdown-body">
@@ -7764,13 +7752,6 @@ function RichDiffPreview({
         </div>
       ) : (
         <pre className="change-rich-preview-code"><code>{preview || " "}</code></pre>
-      )}
-      {(truncated || !complete) && (
-        <div className="change-rich-preview-note">
-          {truncated
-            ? tr("diff 内容已截断，预览仅覆盖当前可用片段。", "The diff is truncated; preview only covers the available content.")
-            : tr("当前仅显示变更片段，未修改行已省略。", "Only changed sections are shown; unchanged lines are omitted.")}
-        </div>
       )}
     </div>
   );
@@ -10007,6 +9988,17 @@ function workspaceFileDirectory(workspace: string, relativePath: string) {
   if (parts.some((part) => part === "..")) return workspace;
   parts.pop();
   if (parts.length === 0) return workspace;
+  const separator = workspace.includes("\\") ? "\\" : "/";
+  return `${workspace.replace(/[\\/]+$/, "")}${separator}${parts.join(separator)}`;
+}
+
+function workspaceFilePath(workspace: string, relativePath: string) {
+  const parts = relativePath
+    .replace(/\\/g, "/")
+    .split("/")
+    .filter((part) => part && part !== ".");
+  if (/^(?:[A-Za-z]:[\\/]|\\\\|\/)/.test(relativePath)) return relativePath;
+  if (parts.some((part) => part === "..")) return relativePath;
   const separator = workspace.includes("\\") ? "\\" : "/";
   return `${workspace.replace(/[\\/]+$/, "")}${separator}${parts.join(separator)}`;
 }

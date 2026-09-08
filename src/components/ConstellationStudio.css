@@ -281,6 +281,10 @@
 .constellation-canvas-toolbar {
   display: flex;
   align-items: center;
+  flex-wrap: nowrap;
+  max-width: calc(100% - 24px);
+  overflow-x: auto;
+  scrollbar-width: none;
   gap: 3px;
   margin: 12px !important;
   padding: 4px;
@@ -289,7 +293,9 @@
   background: rgba(255, 255, 255, .96);
   box-shadow: 0 10px 26px rgba(15, 23, 42, .09);
 }
+.constellation-canvas-toolbar::-webkit-scrollbar { display: none; }
 .constellation-canvas-toolbar > button {
+  flex: 0 0 29px;
   width: 29px;
   height: 29px;
   display: grid;
@@ -712,6 +718,7 @@
   .constellation-topbar { grid-template-columns: minmax(148px, .78fr) minmax(0, .92fr) auto minmax(250px, 1fr); gap: 10px; padding: 0 12px; }
   .constellation-workbench.left-open.right-open { grid-template-columns: 206px minmax(0, 1fr) 0; }
   .constellation-workbench.right-open:not(.left-open) { grid-template-columns: 0 minmax(0, 1fr) 0; }
+  .constellation-canvas-toolbar { max-width: calc(100% - 20px); }
   .constellation-blueprint-panel { position: absolute; top: 0; right: 0; bottom: 0; width: 258px; transform: translateX(100%); opacity: 0; transition: transform .2s ease, opacity .15s ease; }
   .right-open > .constellation-blueprint-panel { transform: translateX(0); opacity: 1; }
   .right-open .constellation-open-blueprints { display: none; }
@@ -736,9 +743,6 @@
 @container (max-width: 460px) {
   .constellation-topbar-actions button.primary,
   .constellation-topbar-actions button.danger { width: 36px; padding: 0; font-size: 0; }
-  .constellation-canvas-toolbar { max-width: calc(100% - 24px); overflow-x: auto; scrollbar-width: none; }
-  .constellation-canvas-toolbar::-webkit-scrollbar { display: none; }
-  .constellation-canvas-toolbar > button { flex: 0 0 29px; }
   .constellation-canvas-toolbar > button:first-child { flex-basis: auto; }
   .constellation-canvas-toolbar > span { flex: 0 0 1px; }
   .constellation-open-blueprints { top: 56px; }

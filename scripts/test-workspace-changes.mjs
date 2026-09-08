@@ -162,7 +162,7 @@ test("turn-change inspector keeps inline diff controls off by default", () => {
     "function fileChangeKindLabel(",
   );
 
-  assert.match(inspector, /const \[wrapLines, setWrapLines\] = useState\(false\)/);
+  assert.match(inspector, /const \[wrapLines, setWrapLines\] = useState\(true\)/);
   assert.match(inspector, /const \[richPreview, setRichPreview\] = useState\(false\)/);
   assert.match(inspector, /const \[splitView, setSplitView\] = useState\(false\)/);
   assert.match(inspector, /const \[showFullFile, setShowFullFile\] = useState\(false\)/);
@@ -172,8 +172,22 @@ test("turn-change inspector keeps inline diff controls off by default", () => {
   assert.match(inspector, /<RichDiffPreview/);
   assert.match(inspector, /onClick=\{\(\) => setShowFullFile\(\(current\) => !current\)\}/);
   assert.match(inspector, /className="change-review-inline-diff"/);
+  assert.match(inspector, /workspaceFilePath\(changeSet\.workspace, file\.path\)/);
   assert.match(inspector, /tr\("复制路径", "Copy path"\)/);
   assert.match(inspector, /tr\("打开所在目录", "Open containing folder"\)/);
+});
+
+test("rich text preview renders only the extracted content without the diff excerpt", () => {
+  const preview = sourceSection(
+    "function RichDiffPreview({",
+    "function DiffTruncatedNotice()",
+  );
+
+  assert.doesNotMatch(preview, /change-rich-preview-diff/);
+  assert.doesNotMatch(preview, /change-rich-preview-note/);
+  assert.doesNotMatch(preview, /buildDiffDisplayRows/);
+  assert.match(preview, /MarkdownContent content=\{preview \|\| "\\u200b"\}/);
+  assert.match(preview, /<pre className="change-rich-preview-code"><code>\{preview \|\| " "\}<\/code><\/pre>/);
 });
 
 test("turn diffs include unchanged context across the full file", () => {

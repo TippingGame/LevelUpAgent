@@ -203,6 +203,16 @@ test("constellation topbar keeps the action group on the first row before the mo
   assert.match(compactTopbar, /\.constellation-mode-switch \{ display: none; \}/);
 });
 
+test("constellation canvas toolbar stays on one row and scrolls instead of wrapping", () => {
+  const toolbarBlock = studioCss.match(/\.constellation-canvas-toolbar \{[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.match(toolbarBlock, /flex-wrap:\s*nowrap;/);
+  assert.match(toolbarBlock, /overflow-x:\s*auto;/);
+  assert.match(toolbarBlock, /scrollbar-width:\s*none;/);
+  assert.match(studioCss, /\.constellation-canvas-toolbar > button \{[\s\S]*?flex:\s*0 0 29px;/);
+  const compactCanvas = studioCss.match(/@container \(max-width: 460px\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.doesNotMatch(compactCanvas, /\.constellation-canvas-toolbar \{[\s\S]*?overflow-x:\s*auto;/);
+});
+
 test("image editing exposes an explicit history source and reusable output preview", () => {
   assert.match(studioSource, /listMediaAssets\("image", 100, 0\)/);
   assert.match(studioSource, /ConstellationImageSourcePicker/);
