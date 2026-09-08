@@ -9957,8 +9957,11 @@ fn read_skill_content(
         .map_err(|error| format!("Skill manifest is unavailable: {error}"))?;
     let metadata = std::fs::metadata(&path)
         .map_err(|error| format!("Could not inspect Skill manifest: {error}"))?;
-    if metadata.len() > 256 * 1024 {
-        return Err("SKILL.md is larger than 256 KiB".to_owned());
+    if metadata.len() > crate::skill::MAX_SKILL_FILE_BYTES {
+        return Err(format!(
+            "SKILL.md is larger than {} MiB",
+            crate::skill::MAX_SKILL_FILE_BYTES / 1024 / 1024
+        ));
     }
     std::fs::read_to_string(path)
         .map_err(|error| format!("Could not read UTF-8 Skill manifest: {error}"))

@@ -11,7 +11,7 @@ use crate::models::{SkillInfo, SkillLocation};
 use crate::network;
 
 const MAX_SKILLS: usize = 300;
-const MAX_SKILL_FILE_BYTES: u64 = 256 * 1024;
+pub(crate) const MAX_SKILL_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_NAME_CHARS: usize = 80;
 const MAX_DESCRIPTION_CHARS: usize = 2_000;
 const MAX_OUTPUT_CHARS: usize = 120_000;

@@ -195,6 +195,14 @@ test("compact side panels do not cover the fitted graph or remain keyboard-focus
   assert.match(studioSource, /inert=\{!rightPanelOpen\}/);
 });
 
+test("constellation topbar keeps the action group on the first row before the mobile collapse", () => {
+  const mediumTopbar = studioCss.match(/@container \(max-width: 1080px\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.match(mediumTopbar, /\.constellation-topbar \{ grid-template-columns: minmax\(148px, \.78fr\) minmax\(0, \.92fr\) auto minmax\(250px, 1fr\);/);
+  assert.doesNotMatch(mediumTopbar, /\.constellation-mode-switch \{ display: none; \}/);
+  const compactTopbar = studioCss.match(/@container \(max-width: 760px\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.match(compactTopbar, /\.constellation-mode-switch \{ display: none; \}/);
+});
+
 test("image editing exposes an explicit history source and reusable output preview", () => {
   assert.match(studioSource, /listMediaAssets\("image", 100, 0\)/);
   assert.match(studioSource, /ConstellationImageSourcePicker/);
@@ -209,10 +217,10 @@ test("image editing exposes an explicit history source and reusable output previ
 
 test("creative-space image editing submits a distinct source and PNG mask", () => {
   assert.match(mediaSource, /STUDIO_IMAGE_MODES/);
-  assert.match(mediaSource, /selectSingleImageReference/);
+  assert.match(mediaSource, /selectImageReferences/);
   assert.match(mediaSource, /ConstellationCanvasEditor/);
-  assert.match(mediaSource, /maskAttachmentId: kind === "image" && imageMode !== "generate"/);
-  assert.match(mediaSource, /imageEditSource \? \[imageEditSource\.id\] : \[\]/);
+  assert.match(mediaSource, /maskAttachmentId: kind === "image" && imageMode !== "generate" \? task\.entry\?\.mask\?\.id : undefined/);
+  assert.match(mediaSource, /task\.entry \? \[task\.entry\.source\.id\] : \[\]/);
   assert.match(mediaSource, /size !== "auto" \? size : undefined/);
   assert.match(mediaSource, /onEdit=.*editImageAsset/);
   assert.match(mediaSource, /media-image-lightbox-edit/);

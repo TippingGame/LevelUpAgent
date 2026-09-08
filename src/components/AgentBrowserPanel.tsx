@@ -95,7 +95,7 @@ function displayUrl(url: string) {
   return url === "about:blank" ? "" : url;
 }
 
-function sessionLabel(session: BrowserSessionSummary, index: number) {
+function sessionLabel(session: BrowserSessionSummary) {
   if (session.title.trim()) return session.title.trim();
   if (session.url && session.url !== "about:blank") {
     try {
@@ -104,7 +104,8 @@ function sessionLabel(session: BrowserSessionSummary, index: number) {
       return session.url;
     }
   }
-  return tx(`浏览器 ${index + 1}`, `Browser ${index + 1}`);
+  const suffix = session.id.slice(-4);
+  return tx(`浏览器 ${suffix}`, `Browser ${suffix}`);
 }
 
 function summaryFromPreview(
@@ -481,9 +482,9 @@ export function AgentBrowserPanel({
           }}
         >
           {sessions.length === 0 && <option value="">{tx("暂无会话", "No sessions")}</option>}
-          {sessions.map((session, index) => (
+          {sessions.map((session) => (
             <option value={session.id} title={session.url} key={session.id}>
-              {sessionLabel(session, index)}
+              {sessionLabel(session)}
             </option>
           ))}
         </select>

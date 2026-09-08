@@ -112,7 +112,7 @@ AI 写作使用写作空间独立选择的文字模型路由，并复用既有�
 | 工具 | 默认策略 | 限制 |
 | --- | --- | --- |
 | `list_files` | 自动 | 忽略依赖、构建和 Git 目录，最多 400 项 |
-| `read_file` | 自动 | 自动识别 UTF-8/UTF-16/GBK/GB18030/Big5/Shift-JIS/Windows-1252；模型侧统一 LF；单文件最多 256 KiB |
+| `read_file` | 自动 | 自动识别 UTF-8/UTF-16/GBK/GB18030/Big5/Shift-JIS/Windows-1252；模型侧统一 LF；单文件最多 128 MiB |
 | `search_files` | 自动 | 使用同一编码边界搜索；短旧编码可传 `encoding`；最多 100 条结果 |
 | `write_file` | 询问 | 新文件默认为无 BOM UTF-8/LF；已有文本文件保留检测到的编码、BOM 和主导换行风格；写入最多 1 MiB |
 | `edit_file` | 询问 | 精确 `old_string` → `new_string` 替换；默认只接受唯一匹配，保留编码、BOM 和主导换行风格；同目录原子替换 |

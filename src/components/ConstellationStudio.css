@@ -89,6 +89,7 @@
   color: #475569;
   font-size: var(--font-caption);
   font-weight: 680;
+  white-space: nowrap;
   cursor: pointer;
   transition: transform .15s ease, border-color .15s ease, box-shadow .15s ease;
 }
@@ -677,7 +678,7 @@
 .canvas-brush-size input { min-width: 60px; flex: 1; accent-color: #f43f5e; }
 .canvas-brush-size b { min-width: 24px; color: #475569; font-size: .625rem; }
 .canvas-label-controls { gap: 5px; }
-.canvas-label-controls input[type="text"], .canvas-label-controls input:not([type]) { width: 150px; height: 30px; padding: 0 7px; border: 1px solid #dbe2ea; border-radius: 7px; outline: 0; background: #fff; font-size: .625rem; }
+.canvas-label-controls input[type="text"], .canvas-label-controls input:not([type]) { min-width: 0; height: 30px; padding: 0 7px; border: 1px solid #dbe2ea; border-radius: 7px; outline: 0; background: #fff; font-size: .625rem; }
 .canvas-label-controls input[type="color"] { width: 30px; height: 30px; padding: 2px; border: 1px solid #dbe2ea; border-radius: 7px; background: #fff; }
 .canvas-expand-controls { gap: 3px; margin-left: auto; color: #64748b; font-size: .625rem; }
 .canvas-expand-controls > span { margin-right: 3px; }
@@ -708,8 +709,7 @@
 .constellation-open-blueprints { display: flex; }
 
 @container (max-width: 1080px) {
-  .constellation-topbar { grid-template-columns: minmax(150px, 1fr) minmax(120px, .8fr) auto; }
-  .constellation-mode-switch { display: none; }
+  .constellation-topbar { grid-template-columns: minmax(148px, .78fr) minmax(0, .92fr) auto minmax(250px, 1fr); gap: 10px; padding: 0 12px; }
   .constellation-workbench.left-open.right-open { grid-template-columns: 206px minmax(0, 1fr) 0; }
   .constellation-workbench.right-open:not(.left-open) { grid-template-columns: 0 minmax(0, 1fr) 0; }
   .constellation-blueprint-panel { position: absolute; top: 0; right: 0; bottom: 0; width: 258px; transform: translateX(100%); opacity: 0; transition: transform .2s ease, opacity .15s ease; }
@@ -719,6 +719,7 @@
 
 @container (max-width: 760px) {
   .constellation-topbar { grid-template-columns: minmax(138px, 1fr) auto; padding: 0 10px; }
+  .constellation-mode-switch { display: none; }
   .constellation-title-input { display: none; }
   .constellation-topbar-actions button:not(.primary):not(.danger):not(.icon-only) { width: 34px; padding: 0; font-size: 0; }
   .constellation-topbar-actions button:not(.primary):not(.danger):not(.icon-only) svg { width: 15px; height: 15px; }

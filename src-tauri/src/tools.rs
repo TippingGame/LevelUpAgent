@@ -12,7 +12,7 @@ use crate::models::{ToolExecutionRequest, ToolExecutionResponse};
 use crate::process::hide_console_window;
 use crate::text_encoding::{self, DecodedText};
 
-const MAX_FILE_BYTES: u64 = 256 * 1024;
+const MAX_FILE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_WRITE_BYTES: usize = 1024 * 1024;
 const MAX_OUTPUT_CHARS: usize = 120_000;
 
@@ -923,6 +923,22 @@ mod tests {
                 .is_ok()
         );
         let _ = std::fs::remove_dir_all(suite);
+    }
+
+    #[tokio::test]
+    async fn read_file_accepts_text_files_above_the_old_256_kib_limit() {
+        let root =
+            std::env::temp_dir().join(format!("levelup-read-large-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("large.txt");
+        let content = "A".repeat(300 * 1024);
+        std::fs::write(&path, content.as_bytes()).unwrap();
+        let canonical = std::fs::canonicalize(&root).unwrap();
+
+        let output = read_file(&canonical, "large.txt", None).await.unwrap();
+        assert_eq!(output.len(), content.len());
+        assert_eq!(output, content);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[cfg(unix)]

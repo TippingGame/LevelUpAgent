@@ -28,7 +28,6 @@ import {
   Folder,
   FolderMinus,
   FolderOpen,
-  FolderPlus,
   FileText,
   Gauge,
   GitBranch,
@@ -2337,8 +2336,11 @@ function App() {
     });
   }, []);
 
-  const reviewChangedFile = async (changeSet: ConversationChangeSet, file: ConversationFileChange) => {
-    if (reviewedFile?.path === file.path) {
+  const reviewChangedFile = useCallback(async (changeSet: ConversationChangeSet, file: ConversationFileChange) => {
+    const reviewedPath = reviewedFile?.path ?? null;
+    setInspectorTab("changes");
+    setRightPanelOpen(true);
+    if (reviewedPath === file.path) {
       reviewedDiffRequestRef.current += 1;
       setReviewedFile(null);
       setReviewedDiff(null);
@@ -2368,7 +2370,7 @@ function App() {
     } finally {
       if (reviewedDiffRequestRef.current === requestId) setReviewedDiffBusy(false);
     }
-  };
+  }, [reviewedFile?.path]);
 
   const openChangedFileDirectory = async (
     changeSet: ConversationChangeSet,
@@ -4720,9 +4722,6 @@ function App() {
             <Plus size={16} />
             {tr("新会话", "New conversation")}
           </button>
-          <IconButton className="open-project-button" label={tr("打开项目", "Open project")} onClick={() => void openProject()}>
-            <FolderPlus size={17} />
-          </IconButton>
         </div>
 
         <button
@@ -4854,10 +4853,29 @@ function App() {
               </section>
             );
           })}
-          {visibleProjectGroups.length === 0 && (
-            <div className="sidebar-empty-search">{tr("没有匹配的项目或会话", "No matching projects or conversations")}</div>
-          )}
-        </nav>
+        {visibleProjectGroups.length === 0 && (
+          <div className="sidebar-empty-search">{tr("没有匹配的项目或会话", "No matching projects or conversations")}</div>
+        )}
+      </nav>
+
+        <div className="project-footer">
+          <button
+            className="project-open-button"
+            type="button"
+            aria-label={activeThread.workspace ? tr("更换项目", "Change project") : tr("打开项目", "Open project")}
+            title={activeThread.workspace
+              ? `${tr("更换项目", "Change project")} · ${shortPath(activeThread.workspace)}`
+              : tr("选择本地工作区", "Choose a local workspace")}
+            onClick={() => void openProject()}
+          >
+            <FolderOpen size={16} />
+            <span>
+              <strong>{activeThread.workspace ? tr("更换项目", "Change project") : tr("打开项目", "Open project")}</strong>
+              <small>{activeThread.workspace ? shortPath(activeThread.workspace) : tr("选择本地工作区", "Choose a local workspace")}</small>
+            </span>
+            <ChevronRight size={14} />
+          </button>
+        </div>
 
         <div className="sidebar-footer">
           {availableAppUpdate && (
@@ -5099,6 +5117,7 @@ function App() {
                   pet={activePetProfile}
                   endRef={endRef}
                   onReviewChanges={reviewChangeSet}
+                  onReviewFile={reviewChangedFile}
                   onEdit={editConversationMessage}
                 />
               </div>
@@ -6260,6 +6279,7 @@ function AssistantMessageGroup({
   defaultOpen = false,
   pet,
   onReviewChanges,
+  onReviewFile,
 }: {
   items: AgentMessage[];
   pending: PendingApproval | null;
@@ -6269,6 +6289,7 @@ function AssistantMessageGroup({
   defaultOpen?: boolean;
   pet?: PetProfile;
   onReviewChanges: (changeSet: ConversationChangeSet) => void;
+  onReviewFile: (changeSet: ConversationChangeSet, file: ConversationFileChange) => void;
 }) {
   const [open, setOpen] = useState(defaultOpen || !collapsible);
   const previousDisplayState = useRef({ collapsible, defaultOpen });
@@ -6361,9 +6382,6 @@ function AssistantMessageGroup({
       {durationMs != null && (
         <div className="message-duration"><Timer size={13} />{tr("处理总时长", "Total processing time")} {formatDuration(durationMs)}</div>
       )}
-      {changeSet && changeSet.files.length > 0 && (
-        <ChangeSetSummary changeSet={changeSet} onReview={() => onReviewChanges(changeSet)} />
-      )}
     </>
   );
   const completionState = assistantCompletionState(items);
@@ -6400,6 +6418,13 @@ function AssistantMessageGroup({
             {messageDetails}
           </>
         )}
+        {changeSet && changeSet.files.length > 0 && (
+          <ChangeSetSummary
+            changeSet={changeSet}
+            onReview={() => onReviewChanges(changeSet)}
+            onReviewFile={(file) => onReviewFile(changeSet, file)}
+          />
+        )}
       </div>
     </article>
   );
@@ -6408,14 +6433,25 @@ function AssistantMessageGroup({
 function ChangeSetSummary({
   changeSet,
   onReview,
+  onReviewFile,
 }: {
   changeSet: ConversationChangeSet;
   onReview: () => void;
+  onReviewFile: (file: ConversationFileChange) => void;
 }) {
+  const [filesExpanded, setFilesExpanded] = useState(false);
+  useEffect(() => {
+    setFilesExpanded(false);
+  }, [changeSet.operationId]);
   const counts = changeSet.files.reduce((result, file) => {
     result[file.kind] += 1;
     return result;
   }, { added: 0, modified: 0, deleted: 0, renamed: 0 });
+  const canToggle = changeSet.files.length > 3;
+  const visibleFiles = filesExpanded
+    ? changeSet.files
+    : changeSet.files.slice(0, canToggle ? 2 : 3);
+  const hiddenCount = filesExpanded ? 0 : Math.max(0, changeSet.files.length - visibleFiles.length);
   const statusLabel = changeSet.status === "completed"
     ? tr("本轮变更", "Turn changes")
     : changeSet.status === "failed"
@@ -6424,26 +6460,58 @@ function ChangeSetSummary({
         ? tr("取消前产生的变更", "Changes made before cancellation")
         : tr("中断前产生的变更", "Changes made before interruption");
   return (
-    <button className="change-set-summary" type="button" onClick={onReview}>
-      <span className="change-set-summary-icon"><FileCode2 size={16} /></span>
-      <span>
-        <strong>{statusLabel}</strong>
-        <small>{changeSet.files.length === 0
-          ? tr("未修改文件", "No files changed")
-          : [
-              counts.added ? tr(`新增 ${counts.added}`, `${counts.added} added`) : "",
-              counts.modified ? tr(`修改 ${counts.modified}`, `${counts.modified} modified`) : "",
-              counts.deleted ? tr(`删除 ${counts.deleted}`, `${counts.deleted} deleted`) : "",
-              counts.renamed ? tr(`重命名 ${counts.renamed}`, `${counts.renamed} renamed`) : "",
-            ].filter(Boolean).join(" · ")}</small>
-        {changeSet.snapshotTruncated && (
-          <small className="change-set-summary-warning">
-            {tr("目录较大，仅显示已扫描范围", "Large folder; showing the scanned range only")}
-          </small>
+    <div className="change-set-summary-shell">
+      <button className="change-set-summary" type="button" onClick={onReview}>
+        <span className="change-set-summary-icon"><FileCode2 size={16} /></span>
+        <span>
+          <strong>{statusLabel}</strong>
+          <small>{changeSet.files.length === 0
+            ? tr("未修改文件", "No files changed")
+            : [
+                counts.added ? tr(`新增 ${counts.added}`, `${counts.added} added`) : "",
+                counts.modified ? tr(`修改 ${counts.modified}`, `${counts.modified} modified`) : "",
+                counts.deleted ? tr(`删除 ${counts.deleted}`, `${counts.deleted} deleted`) : "",
+                counts.renamed ? tr(`重命名 ${counts.renamed}`, `${counts.renamed} renamed`) : "",
+              ].filter(Boolean).join(" · ")}</small>
+          {changeSet.snapshotTruncated && (
+            <small className="change-set-summary-warning">
+              {tr("目录较大，仅显示已扫描范围", "Large folder; showing the scanned range only")}
+            </small>
+          )}
+        </span>
+        <span className="change-set-summary-action">{tr("在侧栏查看", "Review in side panel")}<ChevronRight size={14} /></span>
+      </button>
+      <div className="change-set-file-list">
+        {visibleFiles.map((file) => (
+          <button
+            key={`${file.kind}:${file.path}`}
+            className="change-set-file-row"
+            type="button"
+            onClick={() => onReviewFile(file)}
+          >
+            <span className={`file-change-kind ${file.kind}`}>{fileChangeKindLabel(file.kind)}</span>
+            <span className="change-set-file-path" title={file.path}>{file.path}</span>
+            <small className="change-set-file-counts">
+              {(file.additions != null || file.deletions != null) && (
+                <><span className="positive">+{file.additions ?? 0}</span><span className="negative">-{file.deletions ?? 0}</span></>
+              )}
+            </small>
+          </button>
+        ))}
+        {canToggle && (
+          <button
+            className="change-set-file-toggle"
+            type="button"
+            onClick={() => setFilesExpanded((current) => !current)}
+          >
+            {filesExpanded
+              ? tr("收起变更", "Collapse changes")
+              : tr(`再显示 ${hiddenCount} 个变更，可展开全部变更文件`, `Show ${hiddenCount} more changes, expand all files`)}
+            <ChevronDown size={14} className={filesExpanded ? "active" : ""} />
+          </button>
         )}
-      </span>
-      <span className="change-set-summary-action">{tr("在侧栏查看", "Review in side panel")}<ChevronRight size={14} /></span>
-    </button>
+      </div>
+    </div>
   );
 }
 
@@ -6714,6 +6782,7 @@ const MemoizedAssistantMessageGroup = memo(AssistantMessageGroup, (previous, nex
   && previous.defaultOpen === next.defaultOpen
   && previous.pet === next.pet
   && previous.onReviewChanges === next.onReviewChanges
+  && previous.onReviewFile === next.onReviewFile
   && previous.items === next.items
 ));
 
@@ -6726,6 +6795,7 @@ const ConversationMessageList = memo(({
   pet,
   endRef,
   onReviewChanges,
+  onReviewFile,
   onEdit,
 }: {
   blocks: ConversationBlock[];
@@ -6736,6 +6806,7 @@ const ConversationMessageList = memo(({
   pet?: PetProfile;
   endRef: RefObject<HTMLDivElement | null>;
   onReviewChanges: (changeSet: ConversationChangeSet) => void;
+  onReviewFile: (changeSet: ConversationChangeSet, file: ConversationFileChange) => void;
   onEdit: (content: string) => void;
 }) => {
   const latestAssistantBlockIndex = useMemo(() => {
@@ -6781,6 +6852,7 @@ const ConversationMessageList = memo(({
           defaultOpen={!running && blockIndex === latestAssistantBlockIndex}
           pet={pet}
           onReviewChanges={onReviewChanges}
+          onReviewFile={onReviewFile}
         />
       ))}
       {running && latestConnectionStatus !== "reconnecting" && <ThinkingRow />}

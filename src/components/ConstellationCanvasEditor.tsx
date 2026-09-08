@@ -72,6 +72,10 @@ interface CanvasView {
   y: number;
 }
 
+interface CanvasLabelControlStyle {
+  width?: string;
+}
+
 interface CanvasPanGesture {
   pointerId: number;
   startX: number;
@@ -138,6 +142,9 @@ export function ConstellationCanvasEditor({
     offsetX: Math.round(imageSize.width * padding),
     offsetY: Math.round(imageSize.height * padding),
   }), [imageSize.height, imageSize.width, padding]);
+  const labelControlStyle = useMemo<CanvasLabelControlStyle>(() => ({
+    width: `${Math.max(92, Math.min(180, Math.round(Math.min(Math.max(imageSize.width, 1), Math.max(imageSize.height, 1)) / 3)))}px`,
+  }), [imageSize.height, imageSize.width]);
 
   useEffect(() => {
     let disposed = false;
@@ -527,7 +534,7 @@ export function ConstellationCanvasEditor({
             ] as const).map(([value, Icon, label]) => <button type="button" className={tool === value ? "active" : ""} aria-pressed={tool === value} title={label} onClick={() => setTool(value)} key={value}><Icon size={14} /><span>{label}</span></button>)}
           </div>
           {(tool === "mask" || tool === "erase") && <label className="canvas-brush-size"><span>{tr("笔刷", "Brush")}</span><input type="range" min="8" max="120" step="2" value={brushSize} onChange={(event) => setBrushSize(Number(event.target.value))} /><b>{brushSize}</b></label>}
-          {tool === "label" && <div className="canvas-label-controls"><input value={labelText} maxLength={80} placeholder={tr("标签文字", "Label text")} onChange={(event) => setLabelText(event.target.value)} /><input type="color" value={labelColor} aria-label={tr("标签颜色", "Label color")} onChange={(event) => setLabelColor(event.target.value)} /></div>}
+          {tool === "label" && <div className="canvas-label-controls"><input style={labelControlStyle} value={labelText} maxLength={80} placeholder={tr("标签文字", "Label text")} onChange={(event) => setLabelText(event.target.value)} /><input type="color" value={labelColor} aria-label={tr("标签颜色", "Label color")} onChange={(event) => setLabelColor(event.target.value)} /></div>}
           <div className="canvas-expand-controls"><Expand size={13} /><span>{tr("扩边", "Expand")}</span>{[0, .1, .25, .5].map((value) => <button type="button" className={padding === value ? "active" : ""} onClick={() => changePadding(value)} key={value}>{value === 0 ? tr("无", "None") : `+${Math.round(value * 100)}%`}</button>)}</div>
           <div className="canvas-history-controls"><button type="button" onClick={() => zoomCanvas(viewRef.current.zoom / 1.2)} title={tr("缩小", "Zoom out")}><ZoomOut size={14} /></button><button type="button" onClick={fitCanvas} title={tr("适应窗口", "Fit to window")}><Maximize2 size={14} /></button><button type="button" onClick={() => zoomCanvas(viewRef.current.zoom * 1.2)} title={tr("放大", "Zoom in")}><ZoomIn size={14} /></button><button type="button" disabled={undoStack.length === 0} onClick={undo} title={`${tr("撤销", "Undo")} Ctrl+Z`}><Undo2 size={14} /></button><button type="button" disabled={redoStack.length === 0} onClick={redo} title={`${tr("重做", "Redo")} Ctrl+Shift+Z`}><Redo2 size={14} /></button></div>
         </div>
