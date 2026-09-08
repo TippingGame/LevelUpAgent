@@ -8477,15 +8477,12 @@ function ConnectionDialog({
   };
 
   const selectDetectedModel = (modelId: string) => {
-    const detected = models.find((item) => item.id === modelId);
     setDraftProfile((current) => ({
       ...current,
       model: modelId,
-      // OpenCode Go is an intentional auto-router; selecting a model must not
-      // collapse it into one of the three concrete wire protocols.
-      protocol: current.protocol === "opencode_go"
-        ? current.protocol
-        : detected?.protocol ?? current.protocol,
+      // Preserve the currently selected protocol; this field is now free-form
+      // and should not silently rewrite the user's choice based on local lookup.
+      protocol: current.protocol,
     }));
   };
 
@@ -8808,7 +8805,7 @@ function ConnectionDialog({
                 list={`provider-models-${draftProfile.id}`}
                 value={draftProfile.model}
                 onChange={(event) => selectDetectedModel(event.target.value)}
-                placeholder={tr("可手动输入模型 ID", "Enter a model ID")}
+                placeholder={tr("选择或输入完整模型 ID", "Choose or enter the full model ID")}
               />
               <IconButton
                 className="model-id-clear"
@@ -8828,10 +8825,16 @@ function ConnectionDialog({
                 />
               ))}
             </datalist>
-            {models.length > 0 && <small>{tr(
-              `已从当前连接合并发现 ${models.length} 个模型；OpenCode Go 会显示每个模型的实际技术接口，Gemini 原生专用模型会自动采用 GenerateContent。`,
-              `${models.length} models merged from this connection; OpenCode Go shows each model's effective wire interface, while Gemini-native-only models select GenerateContent automatically.`,
-            )}</small>}
+            <small>{models.length > 0
+              ? tr(
+                `已从当前连接发现 ${models.length} 个模型，下面只是参考提示；你可以选择或直接输入完整模型 ID。`,
+                `${models.length} models were discovered from this connection; the suggestions below are only references, and you can choose or type the full model ID directly.`,
+              )
+              : tr(
+                "这里可以选择或直接输入任意完整模型 ID。",
+                "You can choose or type any full model ID here.",
+              )}
+            </small>
           </div>
           <div className="field connection-test">
             <span>{tr("连接检查", "Connection check")}</span>
