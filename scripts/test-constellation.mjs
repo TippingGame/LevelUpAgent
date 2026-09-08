@@ -200,7 +200,7 @@ test("constellation topbar keeps the action group on the first row before the mo
   assert.match(mediumTopbar, /\.constellation-topbar \{ grid-template-columns: minmax\(148px, \.78fr\) minmax\(0, \.92fr\) auto minmax\(250px, 1fr\);/);
   assert.doesNotMatch(mediumTopbar, /\.constellation-mode-switch \{ display: none; \}/);
   const compactTopbar = studioCss.match(/@container \(max-width: 760px\) \{[\s\S]*?\n\}/)?.[0] ?? "";
-  assert.match(compactTopbar, /\.constellation-mode-switch \{ display: none; \}/);
+  assert.match(compactTopbar, /\.constellation-studio \.constellation-mode-switch \{ display: none; \}/);
 });
 
 test("constellation canvas toolbar stays on one row and scrolls instead of wrapping", () => {

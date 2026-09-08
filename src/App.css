@@ -1869,6 +1869,44 @@ button.detail-row { padding: 0; border: 0; background: transparent; text-align: 
 .app-shell.armor-mode .side-diff-content .split-diff-cell.addition > .split-diff-marker { color: #86efac; }
 .app-shell.armor-mode .side-diff-content .diff-line.deletion > .diff-change-marker,
 .app-shell.armor-mode .side-diff-content .split-diff-cell.deletion > .split-diff-marker { color: #fda4af; }
+.app-shell.armor-mode .inspector.browser-active,
+.app-shell.armor-mode .inspector { border-left-color: rgba(34,211,238,.16); background: rgba(2,6,23,.82); }
+.app-shell.armor-mode .inspector-tabs { border-bottom-color: rgba(34,211,238,.15); background: rgba(2,6,23,.76); }
+.app-shell.armor-mode .inspector-tabs button { color: #9bd7e7; }
+.app-shell.armor-mode .inspector-tabs button:hover,
+.app-shell.armor-mode .inspector-tabs button.active { color: #ecfeff; }
+.app-shell.armor-mode .inspector-tabs small { background: rgba(8,47,73,.72); color: #67e8f9; }
+.app-shell.armor-mode .agent-browser-panel { background: #0b1220; color: #e5edff; }
+.app-shell.armor-mode .agent-browser-session-bar,
+.app-shell.armor-mode .agent-browser-navigation,
+.app-shell.armor-mode .agent-browser-view-options { border-color: rgba(34,211,238,.14); background: rgba(2,6,23,.8); }
+.app-shell.armor-mode .agent-browser-session-bar > select,
+.app-shell.armor-mode .agent-browser-address { border-color: rgba(34,211,238,.14); background: rgba(15,23,42,.82); color: #e5edff; }
+.app-shell.armor-mode .agent-browser-address input { color: #e5edff; }
+.app-shell.armor-mode .agent-browser-view-options { color: #9bd7e7; }
+.app-shell.armor-mode .agent-browser-viewport-switch button { color: #9bd7e7; }
+.app-shell.armor-mode .agent-browser-viewport-switch button:hover:not(:disabled),
+.app-shell.armor-mode .agent-browser-viewport-switch button.active { border-color: rgba(34,211,238,.22); background: rgba(34,211,238,.08); color: #ecfeff; }
+.app-shell.armor-mode .agent-browser-stage { background: #050b16; }
+.app-shell.armor-mode .agent-browser-empty { color: #9bd7e7; }
+.app-shell.armor-mode .agent-browser-empty strong { color: #f8fafc; }
+.app-shell.armor-mode .agent-browser-empty-icon { border-color: rgba(34,211,238,.14); background: rgba(8,47,73,.58); color: #67e8f9; }
+.app-shell.armor-mode .agent-browser-empty button { border-color: rgba(34,211,238,.14); background: rgba(15,23,42,.72); color: #e5edff; }
+.app-shell.armor-mode .agent-browser-empty button:hover:not(:disabled) { border-color: rgba(34,211,238,.24); background: rgba(34,211,238,.09); color: #ecfeff; }
+.app-shell.armor-mode .agent-browser-progress { background: rgba(2,6,23,.84); color: #9bd7e7; }
+.app-shell.armor-mode .agent-browser-statusbar { border-top-color: rgba(34,211,238,.12); background: rgba(2,6,23,.9); color: #9bd7e7; }
+.app-shell.armor-mode .agent-browser-statusbar span:last-child { color: #dff8ff; }
+.app-shell.armor-mode .agent-browser-console { border-top-color: rgba(34,211,238,.14); background: #0b1220; color: #dff8ff; }
+.app-shell.armor-mode .agent-browser-console > header { border-bottom-color: rgba(34,211,238,.12); background: rgba(2,6,23,.92); color: #ecfeff; }
+.app-shell.armor-mode .agent-browser-console > header > small { color: #9bd7e7; }
+.app-shell.armor-mode .agent-browser-console > header .icon-button { border: 1px solid rgba(34,211,238,.14); background: rgba(15,23,42,.66); color: #67e8f9; }
+.app-shell.armor-mode .agent-browser-console > header .icon-button:hover:not(:disabled) { border-color: rgba(34,211,238,.24); background: rgba(34,211,238,.09); color: #ecfeff; }
+.app-shell.armor-mode .agent-browser-console-list { background: rgba(2,6,23,.92); }
+.app-shell.armor-mode .agent-browser-console-entry { border-bottom-color: rgba(34,211,238,.08); }
+.app-shell.armor-mode .agent-browser-console-entry time,
+.app-shell.armor-mode .agent-browser-console-entry b { color: #9bd7e7; }
+.app-shell.armor-mode .agent-browser-console-entry code { color: #dff8ff; }
+.app-shell.armor-mode .agent-browser-console-empty { color: #9bd7e7; }
 
 .primary-button, .secondary-button, .danger-text-button { height: 32px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 12px; border-radius: 5px; font-size: var(--font-small); font-weight: 600; cursor: pointer; }
 .primary-button { border: 1px solid #262825; background: #2a2c29; color: #fff; }

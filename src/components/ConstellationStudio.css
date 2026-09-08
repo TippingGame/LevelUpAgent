@@ -726,7 +726,7 @@
 
 @container (max-width: 760px) {
   .constellation-topbar { grid-template-columns: minmax(138px, 1fr) auto; padding: 0 10px; }
-  .constellation-mode-switch { display: none; }
+  .constellation-studio .constellation-mode-switch { display: none; }
   .constellation-title-input { display: none; }
   .constellation-topbar-actions button:not(.primary):not(.danger):not(.icon-only) { width: 34px; padding: 0; font-size: 0; }
   .constellation-topbar-actions button:not(.primary):not(.danger):not(.icon-only) svg { width: 15px; height: 15px; }
