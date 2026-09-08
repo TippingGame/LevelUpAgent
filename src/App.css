@@ -1460,9 +1460,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .send-button:hover:not(:disabled) { color: #fff; background: #10110f; }
 
 @container composer (max-width: 760px) {
-  .composer-toolbar { grid-template-columns: minmax(0, 1fr); align-items: stretch; row-gap: 4px; }
-  .composer-toolbar-options { flex-wrap: wrap; overflow: visible; }
-  .composer-toolbar-actions { width: 100%; justify-content: flex-end; }
+  .composer:has(.armor-level-picker) .composer-toolbar { grid-template-columns: minmax(0, 1fr); align-items: stretch; row-gap: 4px; }
+  .composer:has(.armor-level-picker) .composer-toolbar-options { flex-wrap: wrap; overflow: visible; }
+  .composer:has(.armor-level-picker) .composer-toolbar-actions { width: 100%; justify-content: flex-end; }
+}
+
+@container composer (max-width: 640px) {
+  .composer:not(:has(.armor-level-picker)) .composer-toolbar { grid-template-columns: minmax(0, 1fr); align-items: stretch; row-gap: 4px; }
+  .composer:not(:has(.armor-level-picker)) .composer-toolbar-options { flex-wrap: wrap; overflow: visible; }
+  .composer:not(:has(.armor-level-picker)) .composer-toolbar-actions { width: 100%; justify-content: flex-end; }
 }
 
 @container composer (max-width: 560px) {
