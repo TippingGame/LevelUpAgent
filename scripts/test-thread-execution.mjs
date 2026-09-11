@@ -83,6 +83,20 @@ test("Harness completion defers to pending queue messages", () => {
   assert.match(harnessSource, /outcome": "queued_follow_up"/);
 });
 
+test("queued follow-ups wait for task completion, including tool and retry rounds", () => {
+  const runLoop = harnessSource.slice(
+    harnessSource.indexOf("async fn harness_run_loop("),
+    harnessSource.indexOf("fn is_context_limit_error("),
+  );
+  assert.match(runLoop, /let mut ready_for_follow_up = false;/);
+  assert.match(runLoop, /consume_next_harness_queue\(&operation_id, ready_for_follow_up\)/);
+  assert.match(runLoop, /ready_for_follow_up = false;\s+let mut turn_request/);
+  assert.doesNotMatch(runLoop, /list_harness_queue|for item in queued/);
+  const completionBranches = [...runLoop.matchAll(/HarnessCompletionDecision::QueuePending => \{\s+ready_for_follow_up = true;/g)];
+  assert.equal(completionBranches.length, 3);
+  assert.equal([...runLoop.matchAll(/ready_for_follow_up = true;/g)].length, completionBranches.length);
+});
+
 test("steering a provider turn is reclassified instead of looking like a cancel", () => {
   assert.match(harnessSource, /turn_cancellation\.is_cancelled\(\)[\s\S]*?REQUEST_STEER/);
   assert.match(harnessSource, /!cancellation\.is_cancelled\(\)/);

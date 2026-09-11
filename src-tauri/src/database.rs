@@ -2785,7 +2785,7 @@ impl Database {
         let mut statement = connection
             .prepare(
                 "SELECT id, operation_id, kind, body, status FROM harness_queues
-                 WHERE operation_id = ?1 AND status = 'pending' ORDER BY created_at",
+                 WHERE operation_id = ?1 AND status = 'pending' ORDER BY created_at, rowid",
             )
             .map_err(database_error)?;
         statement
@@ -2800,6 +2800,43 @@ impl Database {
             })
             .map_err(database_error)?
             .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)
+    }
+
+    /// Atomically claim one message. Ordinary follow-ups wait for task completion;
+    /// explicit steering may be injected between provider or tool rounds.
+    pub fn consume_next_harness_queue(
+        &self,
+        operation_id: &str,
+        include_follow_ups: bool,
+    ) -> Result<Option<HarnessQueueItem>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        connection
+            .query_row(
+                "UPDATE harness_queues SET status = 'injected', injected_at = ?3
+                 WHERE id = (
+                     SELECT id FROM harness_queues
+                     WHERE operation_id = ?1 AND status = 'pending'
+                       AND (?2 OR kind = 'steer')
+                     ORDER BY CASE WHEN kind = 'steer' THEN 0 ELSE 1 END, created_at, rowid
+                     LIMIT 1
+                 )
+                 RETURNING id, operation_id, kind, body, status",
+                params![operation_id, include_follow_ups, now_millis()],
+                |row| {
+                    Ok(HarnessQueueItem {
+                        id: row.get(0)?,
+                        operation_id: row.get(1)?,
+                        kind: row.get(2)?,
+                        body: row.get(3)?,
+                        status: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
             .map_err(database_error)
     }
 
@@ -3604,6 +3641,172 @@ mod tests {
                 .unwrap_err()
                 .contains("no longer active")
         );
+    }
+
+    fn queue_test_operation() -> (Database, String) {
+        let database = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        database.save_thread(&sample_thread()).unwrap();
+        let request = HarnessDraftRequest {
+            thread_id: "thread-1".to_owned(),
+            raw_user_input: "original task".to_owned(),
+            attachment_ids: Vec::new(),
+            mode: HarnessMode::Agent,
+            permission_level: PermissionLevel::Request,
+            requested_profile_id: Some("test".to_owned()),
+            workspace: Some("C:/workspace".to_owned()),
+            hatch: false,
+            hatch_run_dir: None,
+        };
+        let operation = database
+            .start_harness_operation(&request, "C:/workspace", "test")
+            .unwrap()
+            .into_started()
+            .unwrap();
+        (database, operation.operation_id)
+    }
+
+    #[test]
+    fn queued_follow_ups_are_consumed_one_at_a_time_after_task_completion() {
+        let (database, operation_id) = queue_test_operation();
+        let first = database
+            .enqueue_harness_item(&HarnessQueueRequest {
+                operation_id: operation_id.clone(),
+                kind: "follow_up".to_owned(),
+                body: "first queued task".to_owned(),
+            })
+            .unwrap();
+        let second = database
+            .enqueue_harness_item(&HarnessQueueRequest {
+                operation_id: operation_id.clone(),
+                kind: "next_turn".to_owned(),
+                body: "second queued task".to_owned(),
+            })
+            .unwrap();
+        database
+            .connection
+            .lock()
+            .unwrap()
+            .execute("UPDATE harness_queues SET created_at = 1", [])
+            .unwrap();
+
+        let payload = serde_json::json!({ "round": 1 });
+        for (index, expected) in [first, second].iter().enumerate() {
+            // The original task and each queued task may span multiple tool/retry rounds.
+            for _ in 0..3 {
+                assert!(
+                    database
+                        .consume_next_harness_queue(&operation_id, false)
+                        .unwrap()
+                        .is_none()
+                );
+            }
+            assert_eq!(
+                database
+                    .complete_harness_operation_if_queue_empty(&operation_id, &payload)
+                    .unwrap(),
+                HarnessCompletionDecision::QueuePending,
+            );
+            let consumed = database
+                .consume_next_harness_queue(&operation_id, true)
+                .unwrap()
+                .unwrap();
+            assert_eq!(consumed.id, expected.id);
+            assert_eq!(consumed.body, expected.body);
+            assert_eq!(consumed.status, "injected");
+            assert_eq!(database.list_harness_queue(&operation_id).unwrap().len(), 1 - index);
+        }
+        assert!(
+            database
+                .consume_next_harness_queue(&operation_id, true)
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            database
+                .complete_harness_operation_if_queue_empty(&operation_id, &payload)
+                .unwrap(),
+            HarnessCompletionDecision::Completed(_),
+        ));
+    }
+
+    #[test]
+    fn steering_consumes_only_the_promoted_message_without_draining_follow_ups() {
+        let (database, operation_id) = queue_test_operation();
+        let first = database
+            .enqueue_harness_item(&HarnessQueueRequest {
+                operation_id: operation_id.clone(),
+                kind: "follow_up".to_owned(),
+                body: "wait until the current task is done".to_owned(),
+            })
+            .unwrap();
+        let steer = database
+            .enqueue_harness_item(&HarnessQueueRequest {
+                operation_id: operation_id.clone(),
+                kind: "follow_up".to_owned(),
+                body: "change direction now".to_owned(),
+            })
+            .unwrap();
+        database
+            .promote_harness_queue_to_steer(&operation_id, &steer.id)
+            .unwrap();
+
+        let consumed = database
+            .consume_next_harness_queue(&operation_id, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(consumed.id, steer.id);
+        assert_eq!(consumed.kind, "steer");
+        assert!(
+            database
+                .consume_next_harness_queue(&operation_id, false)
+                .unwrap()
+                .is_none()
+        );
+        let pending = database.list_harness_queue(&operation_id).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, first.id);
+        assert_eq!(pending[0].status, "pending");
+    }
+
+    #[test]
+    fn queue_consumption_skips_cancelled_items_and_other_operations() {
+        let (database, operation_id) = queue_test_operation();
+        let cancelled = database
+            .enqueue_harness_item(&HarnessQueueRequest {
+                operation_id: operation_id.clone(),
+                kind: "follow_up".to_owned(),
+                body: "cancel this task".to_owned(),
+            })
+            .unwrap();
+        let next = database
+            .enqueue_harness_item(&HarnessQueueRequest {
+                operation_id: operation_id.clone(),
+                kind: "follow_up".to_owned(),
+                body: "keep this task".to_owned(),
+            })
+            .unwrap();
+        assert!(
+            database
+                .consume_next_harness_queue("different-operation", true)
+                .unwrap()
+                .is_none()
+        );
+        database.cancel_harness_queue(&cancelled.id).unwrap();
+        assert_eq!(
+            database
+                .consume_next_harness_queue(&operation_id, true)
+                .unwrap()
+                .unwrap()
+                .id,
+            next.id,
+        );
+        assert!(
+            database
+                .consume_next_harness_queue(&operation_id, true)
+                .unwrap()
+                .is_none()
+        );
+        assert!(database.consume_harness_queue(&cancelled.id).unwrap().is_none());
     }
 
     #[test]

@@ -5952,6 +5952,7 @@ async fn harness_run_loop(
     let mut theme_tool_violations = 0usize;
     let mut awaiting_post_tool_answer = false;
     let mut empty_post_tool_response_retries = 0usize;
+    let mut ready_for_follow_up = false;
     let mut browser_qa_completion_retries = database
         .count_harness_events(&operation_id, BROWSER_QA_COMPLETION_RETRY_EVENT)?
         .min(BROWSER_QA_COMPLETION_RETRIES);
@@ -5995,36 +5996,37 @@ async fn harness_run_loop(
             &operation_id,
             &crate::harness::types::RuntimeState::Running,
         )?;
-        let queued = database.list_harness_queue(&operation_id)?;
-        for item in queued {
-            if let Some(consumed) = database.consume_harness_queue(&item.id)? {
-                history.push(AgentMessage {
-                    role: "user".to_owned(),
-                    content: format!("[{}] {}", consumed.kind, consumed.body),
-                    tool_calls: Vec::new(),
-                    tool_call_id: None,
-                    provider_reasoning_blocks: Vec::new(),
-                    internal: true,
-                    attachments: Vec::new(),
-                });
-                let queue_payload = serde_json::json!({
-                    "queueId": consumed.id,
-                    "kind": consumed.kind,
-                    "body": consumed.body,
-                });
-                let sequence = database.append_harness_event(
-                    &operation_id,
-                    "queue_injected",
-                    &queue_payload,
-                )?;
-                let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
-                    &operation_id,
-                    sequence,
-                    "queue_injected",
-                    queue_payload,
-                ));
-            }
+        if let Some(consumed) =
+            database.consume_next_harness_queue(&operation_id, ready_for_follow_up)?
+        {
+            history.push(AgentMessage {
+                role: "user".to_owned(),
+                content: format!("[{}] {}", consumed.kind, consumed.body),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                provider_reasoning_blocks: Vec::new(),
+                internal: true,
+                attachments: Vec::new(),
+            });
+            let queue_payload = serde_json::json!({
+                "queueId": consumed.id,
+                "kind": consumed.kind,
+                "body": consumed.body,
+            });
+            let sequence = database.append_harness_event(
+                &operation_id,
+                "queue_injected",
+                &queue_payload,
+            )?;
+            let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+                &operation_id,
+                sequence,
+                "queue_injected",
+                queue_payload,
+            ));
         }
+        // Tool rounds and provider retries still belong to this same user task.
+        ready_for_follow_up = false;
         let mut turn_request = AgentTurnRequest {
             profile: request.profile.clone(),
             messages: history.clone(),
@@ -6635,6 +6637,7 @@ async fn harness_run_loop(
                     {
                         database::HarnessCompletionDecision::Completed(sequence) => sequence,
                         database::HarnessCompletionDecision::QueuePending => {
+                            ready_for_follow_up = true;
                             logging::write(
                                 "info",
                                 "harness",
@@ -7081,6 +7084,7 @@ async fn harness_run_loop(
                         {
                             database::HarnessCompletionDecision::Completed(sequence) => sequence,
                             database::HarnessCompletionDecision::QueuePending => {
+                                ready_for_follow_up = true;
                                 logging::write(
                                     "info",
                                     "harness",
@@ -7148,6 +7152,7 @@ async fn harness_run_loop(
                     {
                         database::HarnessCompletionDecision::Completed(sequence) => sequence,
                         database::HarnessCompletionDecision::QueuePending => {
+                            ready_for_follow_up = true;
                             logging::write(
                                 "info",
                                 "harness",
