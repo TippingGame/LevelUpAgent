@@ -1,0 +1,11 @@
+LevelUpAgent macOS 安装说明
+
+1. 将 LevelUpAgent.app 拖到 Applications 文件夹。
+2. 从 Applications 启动应用。
+3. 如果 macOS 提示无法验证开发者，请在“系统设置 → 隐私与安全性”中允许打开，
+   或在 Finder 中按住 Control 点击应用，选择“打开”，然后再次确认。
+
+本发布包会在完成资源复制后重新签名并验证 App 和 DMG。当前仓库没有配置 Apple
+Developer ID 证书和公证，因此使用 ad-hoc 签名时，首次在其他 Mac 上打开仍可能触发
+Gatekeeper。签名验证保证安装包内容在构建和发布过程中没有被意外替换，不代表 Apple
+公证或已知开发者身份。

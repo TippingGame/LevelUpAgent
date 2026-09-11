@@ -12,7 +12,7 @@
     <a href="https://levelup.mom/">LevelUpAPI</a>
   </p>
   <p>
-    <img alt="Version" src="https://img.shields.io/badge/version-1.0.47-ff5a4f?style=flat-square" />
+    <img alt="Version" src="https://img.shields.io/badge/version-1.0.50-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-可用预览-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -46,14 +46,15 @@
 ### 安装
 
 从 GitHub Releases 下载对应平台的安装包。`v*` tag 会由 GitHub Actions 原生构建 Windows、macOS
-和 Linux 资产；Windows updater 产物通过 Tauri 签名。当前未配置 Apple 公证和 Windows
-Authenticode，macOS 首次打开或 Windows SmartScreen 可能提示额外确认。
+和 Linux 资产；Windows updater 产物通过 Tauri 签名。macOS 应用在资源写入完成后执行
+ad-hoc 签名，并在 DMG 内及模拟安装后复验。当前未配置 Apple 公证和 Windows Authenticode，
+macOS 首次打开或 Windows SmartScreen 可能提示额外确认。
 
 | 平台 | 包格式 | 状态 |
 | --- | --- | --- |
 | Windows x64 | NSIS `.exe` / MSI | 已构建、已冒烟验证 |
 | Linux x64 | AppImage / DEB / RPM | GitHub Actions 原生构建 |
-| macOS Intel / Apple Silicon | DMG / App Bundle | GitHub Actions 原生构建；未公证 |
+| macOS Intel / Apple Silicon | DMG / App Bundle | ad-hoc 签名并校验；未公证 |
 
 ### 连接模型
 
@@ -139,7 +140,8 @@ cargo test --manifest-path src-tauri/Cargo.toml
 pnpm tauri build
 ```
 
-macOS 安装包使用 `pnpm build:macos`。正式更新还需要仓库所有者配置 Tauri updater 密钥和签名证书。
+macOS 安装包使用 `pnpm build:macos`。脚本会在资源写入完成后签名并校验 App 和 DMG；没有
+Developer ID 证书时使用 ad-hoc 签名，面向普通用户免确认分发仍需配置 Apple 公证。
 
 ## 文档
 
@@ -155,7 +157,7 @@ macOS 安装包使用 `pnpm build:macos`。正式更新还需要仓库所有者�
 
 ## 当前状态
 
-`1.0.47` 是当前发布里程碑。本轮变更审查改为直接点击文件名展开内联 diff，并提供复制路径、打开目录、自动换行、完整文件和左右对比开关；左右模式将源文件与修改后文件并排显示，并可与完整文件模式同时启用。会话展开任务记录时会同步准备本轮变更，但不会打断用户当前查看的侧栏页签；没有文件变化时不显示本轮变更入口。Windows 安装包使用 Tauri updater 签名但仍未配置 Authenticode，SmartScreen 可能提示“未知发布者”；macOS 安装包当前未公证。提交 Issue 时请附上复现步骤、应用日志和平台信息。
+`1.0.50` 是当前发布里程碑。模型连接的默认文字模型下拉框始终展示完整模型目录；当前对话队列会逐条发送，不再把多条队列消息合并到最后一次请求。macOS 发布流程会在资源写入后重新签名，并验证 DMG 内和模拟安装后的应用。Windows 安装包仍未配置 Authenticode，macOS 安装包仍未公证。提交 Issue 时请附上复现步骤、应用日志和平台信息。
 
 ## 许可证
 

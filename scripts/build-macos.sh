@@ -30,7 +30,8 @@ require_command shasum
 
 PNPM_BIN="$(command -v pnpm)"
 VERSION="$(node -p "require('./package.json').version")"
-OUTPUT_DIR="$ROOT_DIR/artifacts/macos"
+OUTPUT_DIR="${MACOS_OUTPUT_DIR:-$ROOT_DIR/artifacts/macos}"
+BUILD_TARGET="${MACOS_BUILD_TARGET:-}"
 SKIP_CHECK="${SKIP_CHECK:-0}"
 SIGNING_IDENTITY="${MACOS_SIGNING_IDENTITY:-${APPLE_SIGNING_IDENTITY:-}}"
 NOTARY_PROFILE="${MACOS_NOTARY_PROFILE:-}"
@@ -113,7 +114,7 @@ sign_app() {
     codesign --force --deep --options runtime --timestamp \
       --sign "$SIGNING_IDENTITY" "$app_path"
   fi
-  codesign --verify --deep --strict --verbose=2 "$app_path"
+  codesign --verify --deep --strict --all-architectures --verbose=2 "$app_path"
 }
 
 create_dmg() {
@@ -121,10 +122,17 @@ create_dmg() {
   local label="$2"
   local dmg_output="$3"
   local staging_dir="$WORK_DIR/staging-$label"
+  local install_notes="$ROOT_DIR/packaging/macos/INSTALL.txt"
+
+  if [[ ! -f "$install_notes" ]]; then
+    printf '错误：找不到 macOS 安装说明 %s。\n' "$install_notes" >&2
+    exit 1
+  fi
 
   mkdir -p "$staging_dir"
   ditto "$app_path" "$staging_dir/LevelUpAgent.app"
   ln -s /Applications "$staging_dir/Applications"
+  ditto "$install_notes" "$staging_dir/INSTALL.txt"
   hdiutil create \
     -volname "LevelUpAgent $VERSION ($label)" \
     -srcfolder "$staging_dir" \
@@ -151,8 +159,11 @@ verify_dmg() {
   local label="$2"
   local expected_arch="$3"
   local mount_dir="$WORK_DIR/mount-$label"
+  local installed_dir="$WORK_DIR/installed-$label"
   local bundled_app
   local bundled_binary
+  local installed_app
+  local installed_binary
   local actual_arch
 
   hdiutil verify "$dmg_path" >/dev/null
@@ -166,6 +177,10 @@ verify_dmg() {
     printf '错误：%s 内没有可执行的 LevelUpAgent 主程序。\n' "$dmg_path" >&2
     exit 1
   fi
+  if [[ ! -f "$mount_dir/INSTALL.txt" ]]; then
+    printf '错误：%s 内缺少 INSTALL.txt。\n' "$dmg_path" >&2
+    exit 1
+  fi
 
   actual_arch="$(lipo -archs "$bundled_binary")"
   if [[ "$actual_arch" != "$expected_arch" ]]; then
@@ -173,10 +188,23 @@ verify_dmg() {
       "$dmg_path" "$expected_arch" "$actual_arch" >&2
     exit 1
   fi
-  codesign --verify --deep --strict --verbose=2 "$bundled_app"
+  codesign --verify --deep --strict --all-architectures --verbose=2 "$bundled_app"
+
+  mkdir -p "$installed_dir"
+  installed_app="$installed_dir/LevelUpAgent.app"
+  ditto "$bundled_app" "$installed_app"
 
   hdiutil detach "$mount_dir" -quiet
   ACTIVE_MOUNT=""
+
+  installed_binary="$installed_app/Contents/MacOS/levelup-agent"
+  codesign --verify --deep --strict --all-architectures --verbose=2 "$installed_app"
+  actual_arch="$(lipo -archs "$installed_binary")"
+  if [[ "$actual_arch" != "$expected_arch" ]]; then
+    printf '错误：复制安装后的应用预期架构为 %s，实际为 %s。\n' \
+      "$expected_arch" "$actual_arch" >&2
+    exit 1
+  fi
 }
 
 resolve_signing_identity
@@ -190,7 +218,11 @@ fi
 
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/levelup-macos-build.XXXXXX")"
 
-printf 'LevelUpAgent %s macOS 双架构打包\n' "$VERSION"
+if [[ -n "$BUILD_TARGET" ]]; then
+  printf 'LevelUpAgent %s macOS 单架构打包（%s）\n' "$VERSION" "$BUILD_TARGET"
+else
+  printf 'LevelUpAgent %s macOS 双架构打包\n' "$VERSION"
+fi
 printf '项目目录：%s\n\n' "$ROOT_DIR"
 if [[ "$SIGNING_IDENTITY" == "-" ]]; then
   printf '警告：未找到 Developer ID Application 证书，将使用 ad-hoc 签名。\n'
@@ -204,8 +236,21 @@ else
   fi
 fi
 
-ensure_rust_target x86_64-apple-darwin
-ensure_rust_target aarch64-apple-darwin
+case "$BUILD_TARGET" in
+  ""|x86_64-apple-darwin|aarch64-apple-darwin)
+    ;;
+  *)
+    printf '错误：MACOS_BUILD_TARGET 必须是 x86_64-apple-darwin 或 aarch64-apple-darwin。\n' >&2
+    exit 1
+    ;;
+esac
+
+if [[ -n "$BUILD_TARGET" ]]; then
+  ensure_rust_target "$BUILD_TARGET"
+else
+  ensure_rust_target x86_64-apple-darwin
+  ensure_rust_target aarch64-apple-darwin
+fi
 
 printf '\n安装前端依赖...\n'
 "$PNPM_BIN" install --frozen-lockfile
@@ -248,7 +293,7 @@ build_target() {
   printf '签名 %s 应用包...\n' "$label"
   sign_app "$app_source"
 
-  dmg_output="$OUTPUT_DIR/LevelUpAgent_${VERSION}_${label}.dmg"
+  dmg_output="$OUTPUT_DIR/LevelUpAgent_${VERSION}_macOS_${label}.dmg"
   printf '创建并校验 %s DMG...\n' "$label"
   create_dmg "$app_source" "$label" "$dmg_output"
   verify_dmg "$dmg_output" "$label" "$expected_arch"
@@ -256,8 +301,19 @@ build_target() {
   printf '完成：%s\n' "$dmg_output"
 }
 
-build_target x86_64-apple-darwin x64 x86_64
-build_target aarch64-apple-darwin aarch64 arm64
+if [[ -n "$BUILD_TARGET" ]]; then
+  case "$BUILD_TARGET" in
+    x86_64-apple-darwin)
+      build_target x86_64-apple-darwin Intel-x64 x86_64
+      ;;
+    aarch64-apple-darwin)
+      build_target aarch64-apple-darwin Apple-Silicon arm64
+      ;;
+  esac
+else
+  build_target x86_64-apple-darwin Intel-x64 x86_64
+  build_target aarch64-apple-darwin Apple-Silicon arm64
+fi
 
-printf '\n全部完成。安装包位于：%s\n' "$OUTPUT_DIR"
+printf '\n构建完成。安装包位于：%s\n' "$OUTPUT_DIR"
 printf '校验文件：%s\n' "$SHA_FILE"

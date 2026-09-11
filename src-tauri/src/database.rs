@@ -3713,7 +3713,10 @@ mod tests {
             assert_eq!(consumed.id, expected.id);
             assert_eq!(consumed.body, expected.body);
             assert_eq!(consumed.status, "injected");
-            assert_eq!(database.list_harness_queue(&operation_id).unwrap().len(), 1 - index);
+            assert_eq!(
+                database.list_harness_queue(&operation_id).unwrap().len(),
+                1 - index
+            );
         }
         assert!(
             database
@@ -3806,7 +3809,12 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(database.consume_harness_queue(&cancelled.id).unwrap().is_none());
+        assert!(
+            database
+                .consume_harness_queue(&cancelled.id)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

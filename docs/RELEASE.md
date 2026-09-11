@@ -1,8 +1,9 @@
-# Windows 签名更新发布
+# 跨平台安装包与 Windows 签名更新发布
 
 LevelUpAgent 的本地 `pnpm tauri build` 始终允许生成开发/自用安装包，但这些产物不会伪装成已签名
-更新。正式发布只由 `v*` tag 触发 `.github/workflows/release.yml`，在 Windows runner 上构建并创建
-Draft Release。
+更新。正式发布只由 `v*` tag 触发 `.github/workflows/release.yml`，在 Windows、macOS 和 Linux
+runner 上构建并创建 Draft Release。macOS runner 在所有资源写入后对 App 执行 ad-hoc 签名，
+并验证 DMG 内及模拟复制安装后的签名；当前未配置 Apple Developer ID 和公证。
 
 ## 必需的仓库 Variables
 
@@ -27,7 +28,8 @@ Authenticode，因此安装包没有系统级发布者签名，首次下载或�
 3. 同步更新 `package.json`、`src-tauri/Cargo.toml` 与 `src-tauri/tauri.conf.json` 的版本。
 4. 在 `main` 上等待 CI 通过。
 5. 推送与应用版本一致的 tag，例如 `v1.0.1`。
-6. 检查 Draft Release 中的 NSIS/MSI、updater archive、`.sig` 和 `latest.json`，实体机验收后发布。
+6. 检查 Draft Release 中的 Windows NSIS/MSI、updater archive、`.sig`、`latest.json`、两个 macOS
+   DMG 及 Linux 安装包，实体机验收后发布。
 
 应用设置中的“检查更新”使用 Tauri updater 的签名验证；本地未配置 endpoint 的构建会明确显示
 更新未配置，不会回退到下载并执行未签名文件。

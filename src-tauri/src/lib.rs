@@ -6013,11 +6013,8 @@ async fn harness_run_loop(
                 "kind": consumed.kind,
                 "body": consumed.body,
             });
-            let sequence = database.append_harness_event(
-                &operation_id,
-                "queue_injected",
-                &queue_payload,
-            )?;
+            let sequence =
+                database.append_harness_event(&operation_id, "queue_injected", &queue_payload)?;
             let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
                 &operation_id,
                 sequence,

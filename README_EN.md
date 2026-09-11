@@ -12,7 +12,7 @@
     <a href="https://levelup.mom/">LevelUpAPI</a>
   </p>
   <p>
-    <img alt="Version" src="https://img.shields.io/badge/version-1.0.47-ff5a4f?style=flat-square" />
+    <img alt="Version" src="https://img.shields.io/badge/version-1.0.50-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-preview-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -45,13 +45,13 @@ Read the [Creative Studio capability audit](docs/CREATIVE_STUDIO_AUDIT.md) for t
 
 ### Install
 
-Download the package for your platform from GitHub **Releases**. The current `1.0.47` Windows x64 installers are built by GitHub Actions and signed with the Tauri updater key; they are not Authenticode-signed, so SmartScreen may show an unknown-publisher warning.
+Download the package for your platform from GitHub **Releases**. GitHub Actions builds the Windows, macOS, and Linux packages. Windows updater artifacts use the Tauri updater signature. macOS apps are ad-hoc signed after all resources are bundled and are verified both inside the DMG and after a simulated installation. Apple notarization and Windows Authenticode are not configured, so the operating system may ask for confirmation on first launch.
 
 | Platform | Package | Status |
 | --- | --- | --- |
 | Windows x64 | NSIS `.exe` / MSI | Built and smoke-tested |
-| Linux x64 | AppImage / DEB / RPM | Build from source |
-| macOS Intel / Apple Silicon | DMG / App Bundle | Use the dedicated build script |
+| Linux x64 | AppImage / DEB / RPM | Built by GitHub Actions |
+| macOS Intel / Apple Silicon | DMG / App Bundle | Ad-hoc signed and verified; not notarized |
 
 ### Connect a model
 
@@ -139,7 +139,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 pnpm tauri build
 ```
 
-Use `pnpm build:macos` for macOS packages. Signed public updates additionally require repository-owned Tauri updater keys and signing certificates.
+Use `pnpm build:macos` for macOS packages. The script signs after all resources are bundled and verifies the app and DMG. Without a Developer ID certificate it uses ad-hoc signing; distribution without first-launch confirmation still requires Apple notarization.
 
 ## Documentation
 
@@ -155,7 +155,7 @@ Use `pnpm build:macos` for macOS packages. Signed public updates additionally re
 
 ## Current status
 
-`1.0.47` is the current release milestone. Turn changes now open as inline diffs when a file name is clicked, with copy-path, open-folder, line-wrap, full-file, and side-by-side controls. Side-by-side mode places the source and modified file next to each other and can remain enabled together with full-file comparison. Expanding a task record prepares its turn changes without stealing the currently selected inspector tab, and tasks with no changed files omit the turn-changes entry. Windows installers use Tauri updater signatures but are not Authenticode-signed, so SmartScreen may show an unknown-publisher warning. When filing an issue, include reproduction steps, application logs, and platform details.
+`1.0.50` is the current release milestone. The default text-model dropdown always shows the complete discovered model catalog, and queued conversation messages are sent one at a time instead of being combined into the final request. The macOS release path reseals the app after resources are bundled and verifies both the DMG copy and a simulated installed copy. Windows installers are still not Authenticode-signed, and macOS packages are still not notarized. When filing an issue, include reproduction steps, application logs, and platform details.
 
 ## License
 
