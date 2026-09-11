@@ -8416,6 +8416,193 @@ function ThemeDialog({
   );
 }
 
+function ModelIdInput({
+  id,
+  value,
+  models,
+  protocol,
+  onChange,
+}: {
+  id: string;
+  value: string;
+  models: ModelInfo[];
+  protocol: ProviderProfile["protocol"];
+  onChange: (value: string) => void;
+}) {
+  const controlRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+  const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(-1);
+  const [placement, setPlacement] = useState({ above: false, maxHeight: 260 });
+  const expanded = open && models.length > 0;
+  const listId = `provider-models-${id}`;
+
+  useEffect(() => {
+    if (!expanded) return;
+    const dismiss = (event: PointerEvent) => {
+      if (!controlRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", dismiss);
+    return () => document.removeEventListener("pointerdown", dismiss);
+  }, [expanded]);
+
+  useLayoutEffect(() => {
+    if (!expanded) return;
+    const control = controlRef.current;
+    if (!control) return;
+    const dialog = control.closest(".dialog");
+    const positionList = (ensureVisible = false) => {
+      let bounds = control.getBoundingClientRect();
+      const dialogBounds = dialog?.getBoundingClientRect();
+      const headerBounds = dialog?.querySelector(".dialog-header")?.getBoundingClientRect();
+      const footerBounds = dialog?.querySelector(".dialog-footer")?.getBoundingClientRect();
+      const top = Math.max(0, headerBounds?.bottom ?? dialogBounds?.top ?? 0);
+      const bottom = Math.min(window.innerHeight, footerBounds?.top ?? dialogBounds?.bottom ?? window.innerHeight);
+      if (ensureVisible && dialog && (bounds.top < top || bounds.bottom > bottom)) {
+        dialog.scrollTop += bounds.top - (top + (bottom - top - bounds.height) / 2);
+        bounds = control.getBoundingClientRect();
+      }
+      if (bounds.bottom < top || bounds.top > bottom) {
+        setOpen(false);
+        return;
+      }
+      const below = bottom - bounds.bottom - 8;
+      const above = bounds.top - top - 8;
+      const showAbove = below < 200 && above > below;
+      setPlacement({ above: showAbove, maxHeight: Math.max(0, Math.min(260, showAbove ? above : below)) });
+    };
+    const updatePosition = () => positionList();
+    positionList(true);
+    window.addEventListener("resize", updatePosition);
+    dialog?.addEventListener("scroll", updatePosition);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      dialog?.removeEventListener("scroll", updatePosition);
+    };
+  }, [expanded]);
+
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    const option = list?.children[activeIndex] as HTMLElement | undefined;
+    if (!expanded || !list || !option) return;
+    // Keep keyboard navigation inside the list without scrolling the settings dialog.
+    if (option.offsetTop < list.scrollTop) list.scrollTop = option.offsetTop;
+    else if (option.offsetTop + option.offsetHeight > list.scrollTop + list.clientHeight) {
+      list.scrollTop = option.offsetTop + option.offsetHeight - list.clientHeight;
+    }
+  }, [activeIndex, expanded]);
+
+  const showModels = () => {
+    setActiveIndex(-1);
+    setOpen(true);
+  };
+
+  const chooseModel = (modelId: string) => {
+    onChange(modelId);
+    inputRef.current?.focus();
+    setOpen(false);
+    setActiveIndex(-1);
+  };
+
+  return (
+    <div
+      ref={controlRef}
+      className="model-id-control"
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && expanded) {
+          event.preventDefault();
+          event.stopPropagation();
+          setOpen(false);
+        }
+      }}
+    >
+      <div className="model-id-entry">
+        <input
+          ref={inputRef}
+          role="combobox"
+          aria-label={tr("模型 ID", "Model ID")}
+          aria-autocomplete="none"
+          aria-expanded={expanded}
+          aria-controls={expanded ? listId : undefined}
+          aria-activedescendant={expanded && models[activeIndex] ? `${listId}-${activeIndex}` : undefined}
+          autoComplete="off"
+          value={value}
+          onFocus={showModels}
+          onClick={showModels}
+          onChange={(event) => { onChange(event.target.value); showModels(); }}
+          onKeyDown={(event) => {
+            if (event.nativeEvent.isComposing) return;
+            if ((event.key === "ArrowDown" || event.key === "ArrowUp") && models.length > 0) {
+              event.preventDefault();
+              const current = expanded ? activeIndex : -1;
+              setActiveIndex(event.key === "ArrowDown"
+                ? (current + 1) % models.length
+                : (current <= 0 ? models.length : current) - 1);
+              setOpen(true);
+            } else if (event.key === "Enter" && expanded && models[activeIndex]) {
+              event.preventDefault();
+              chooseModel(models[activeIndex].id);
+            } else if (event.key === "Tab") {
+              setOpen(false);
+            }
+          }}
+          placeholder={tr("选择或输入完整模型 ID", "Choose or enter the full model ID")}
+        />
+        <IconButton
+          className="model-id-toggle"
+          label={tr("全部模型", "All models")}
+          aria-haspopup="listbox"
+          aria-expanded={expanded}
+          aria-controls={expanded ? listId : undefined}
+          disabled={models.length === 0}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => {
+            inputRef.current?.focus();
+            setActiveIndex(-1);
+            setOpen(!expanded);
+          }}
+        ><ChevronDown size={16} /></IconButton>
+      </div>
+      <IconButton
+        className="model-id-clear"
+        label={tr("清空模型 ID", "Clear model ID")}
+        disabled={!value}
+        onClick={() => { onChange(""); inputRef.current?.focus(); showModels(); }}
+      ><X size={16} /></IconButton>
+      {expanded && (
+        <ul
+          ref={listRef}
+          id={listId}
+          className={`model-id-options${placement.above ? " above" : ""}`}
+          role="listbox"
+          aria-label={tr("全部模型", "All models")}
+          style={{ maxHeight: placement.maxHeight }}
+          onMouseDown={(event) => event.preventDefault()}
+        >
+          {models.map((item, index) => (
+            <li
+              id={`${listId}-${index}`}
+              key={item.id}
+              role="option"
+              aria-label={item.id}
+              aria-selected={item.id === value}
+              className={index === activeIndex ? "active" : ""}
+              onClick={() => chooseModel(item.id)}
+            >
+              <span><span>{item.id}</span><small>{protocolLabel(item.protocol ?? (protocol === "opencode_go" ? opencodeWireProtocol(item.id) : protocol))}</small></span>
+              {item.id === value && <Check size={14} aria-hidden="true" />}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function ConnectionDialog({
   profiles,
   profile,
@@ -8799,40 +8986,22 @@ function ConnectionDialog({
           </label>
           <div className="field">
             <span>{tr("默认文字模型", "Default text model")}</span>
-            <div className="model-id-control">
-              <input
-                aria-label={tr("模型 ID", "Model ID")}
-                list={`provider-models-${draftProfile.id}`}
-                value={draftProfile.model}
-                onChange={(event) => selectDetectedModel(event.target.value)}
-                placeholder={tr("选择或输入完整模型 ID", "Choose or enter the full model ID")}
-              />
-              <IconButton
-                className="model-id-clear"
-                label={tr("清空模型 ID", "Clear model ID")}
-                disabled={!draftProfile.model}
-                onClick={() => update("model", "")}
-              >
-                <X size={16} />
-              </IconButton>
-            </div>
-            <datalist id={`provider-models-${draftProfile.id}`}>
-              {models.map((item) => (
-                <option
-                  value={item.id}
-                  label={protocolLabel(item.protocol ?? (draftProfile.protocol === "opencode_go" ? opencodeWireProtocol(item.id) : draftProfile.protocol))}
-                  key={item.id}
-                />
-              ))}
-            </datalist>
+            <ModelIdInput
+              key={draftProfile.id}
+              id={draftProfile.id}
+              value={draftProfile.model}
+              models={models}
+              protocol={draftProfile.protocol}
+              onChange={selectDetectedModel}
+            />
             <small>{models.length > 0
               ? tr(
-                `已从当前连接发现 ${models.length} 个模型，下面只是参考提示；你可以选择或直接输入完整模型 ID。`,
-                `${models.length} models were discovered from this connection; the suggestions below are only references, and you can choose or type the full model ID directly.`,
+                `已从当前连接发现 ${models.length} 个模型`,
+                `${models.length} models discovered from this connection`,
               )
               : tr(
-                "这里可以选择或直接输入任意完整模型 ID。",
-                "You can choose or type any full model ID here.",
+                "尚未检测到模型",
+                "No models discovered yet",
               )}
             </small>
           </div>
