@@ -1,4 +1,4 @@
-import type { PetBehavior } from "./types";
+import type { PetBehavior, PetPrompt } from "./types";
 import type { PetSpriteState } from "./petAnimation";
 
 export interface ScreenRect {
@@ -11,6 +11,19 @@ export interface ScreenRect {
 export interface ScreenPoint {
   x: number;
   y: number;
+}
+
+export const PET_NOTICE_DURATION_MS = 15_000;
+
+/** Backend ticks renew `since` even when the displayed thought is unchanged. */
+export function petThoughtNoticeKey(petId: string | undefined, behavior: PetBehavior | undefined) {
+  if (!petId || !behavior || behavior.state === "idle") return null;
+  return JSON.stringify([petId, behavior.state, behavior.reason, behavior.message]);
+}
+
+export function petStudyNoticeKey(petId: string | undefined, prompt: PetPrompt | undefined) {
+  if (!petId || prompt?.kind !== "study-launch") return null;
+  return JSON.stringify([petId, prompt.id, prompt.tier, prompt.message]);
 }
 
 export function localDateKey(date: Date = new Date()) {

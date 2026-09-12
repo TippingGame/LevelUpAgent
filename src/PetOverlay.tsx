@@ -17,10 +17,13 @@ import {
 import { getAppLocale } from "./lib/i18n";
 import {
   normalizedWindowPosition,
+  PET_NOTICE_DURATION_MS,
   patrolTarget,
   petBehaviorLabel,
   petBehaviorMessage,
   petBehaviorSprite,
+  petStudyNoticeKey,
+  petThoughtNoticeKey,
   restoredWindowPosition,
 } from "./lib/petAutonomy";
 import type { PetActivity, PetDashboard } from "./lib/types";
@@ -78,6 +81,12 @@ export function PetOverlay() {
     [activities],
   );
   const latestCompletion = completionActivities[0];
+  const showThoughtNotice = useTransientNotice(petThoughtNoticeKey(activePet?.id, dashboard?.life.behavior));
+  const showStudyNotice = useTransientNotice(petStudyNoticeKey(activePet?.id, dashboard?.life.prompt));
+  const visiblePrompt = dashboard?.life.prompt?.kind === "study-launch" && !showStudyNotice
+    ? undefined
+    : dashboard?.life.prompt;
+  const activityLimit = visiblePrompt ? 2 : 4;
 
   useEffect(() => {
     let disposed = false;
@@ -429,12 +438,12 @@ export function PetOverlay() {
   return (
     <main className="pet-overlay" style={overlayStyle}>
       <div className="pet-overlay-activities" aria-live="polite">
-        {dashboard.life.prompt && (
-          <article className={`pet-overlay-prompt ${dashboard.life.prompt.tier ?? dashboard.life.prompt.kind}`}>
+        {visiblePrompt && (
+          <article className={`pet-overlay-prompt ${visiblePrompt.tier ?? visiblePrompt.kind}`}>
             <span><CircleAlert size={13} /></span>
-            <div><strong>{promptTitle(dashboard.life.prompt.kind, dashboard.life.prompt.tier, locale)}</strong><small>{petPromptMessage(dashboard.life.prompt.message, dashboard.life.prompt.kind, dashboard.life.prompt.tier, locale)}</small></div>
+            <div><strong>{promptTitle(visiblePrompt.kind, visiblePrompt.tier, locale)}</strong><small>{petPromptMessage(visiblePrompt.message, visiblePrompt.kind, visiblePrompt.tier, locale)}</small></div>
             <footer>
-              {dashboard.life.prompt.actions.map((action) => (
+              {visiblePrompt.actions.map((action) => (
                 <button type="button" disabled={promptBusy !== null} onClick={() => void respondToPrompt(action)} key={action}>
                   {promptBusy === action ? <LoaderCircle className="spin" size={10} /> : promptActionLabel(action, locale)}
                 </button>
@@ -442,14 +451,14 @@ export function PetOverlay() {
             </footer>
           </article>
         )}
-        {activeActivities.slice(0, dashboard.life.prompt ? 2 : 4).map((activity) => (
+        {activeActivities.slice(0, activityLimit).map((activity) => (
           <article className={activity.state} key={activity.id}>
             <span>{activity.state === "generating" ? <Sparkles size={13} /> : activity.state === "waiting" ? <CircleAlert size={13} /> : <LoaderCircle className="spin" size={13} />}</span>
             <div><strong>{activity.title}</strong><small>{activity.detail}</small></div>
           </article>
         ))}
-        {activeActivities.length > (dashboard.life.prompt ? 2 : 4) && <b className="pet-overlay-more">+{activeActivities.length - (dashboard.life.prompt ? 2 : 4)}</b>}
-        {activeActivities.length === 0 && completionActivities.length === 0 && !dashboard.life.prompt && dashboard.life.behavior.state !== "idle" && (
+        {activeActivities.length > activityLimit && <b className="pet-overlay-more">+{activeActivities.length - activityLimit}</b>}
+        {activeActivities.length === 0 && completionActivities.length === 0 && !dashboard.life.prompt && showThoughtNotice && (
           <article className={`pet-overlay-thought ${dashboard.life.behavior.state}`}>
             <span>{behaviorIcon(dashboard.life.behavior.state)}</span>
             <div><strong>{petBehaviorLabel(dashboard.life.behavior.state, locale)}</strong><small>{petBehaviorMessage(dashboard.life.behavior, locale)}</small></div>
@@ -499,6 +508,17 @@ export function PetOverlay() {
       </div>
     </main>
   );
+}
+
+function useTransientNotice(key: string | null) {
+  const [expiredKey, setExpiredKey] = useState<string | null>(null);
+  useEffect(() => {
+    setExpiredKey(null);
+    if (key === null) return;
+    const timer = window.setTimeout(() => setExpiredKey(key), PET_NOTICE_DURATION_MS);
+    return () => window.clearTimeout(timer);
+  }, [key]);
+  return key !== null && key !== expiredKey;
 }
 
 async function persistCurrentWindowPosition(petId: string) {

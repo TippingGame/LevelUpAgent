@@ -10,8 +10,34 @@ import {
   petBehaviorLabel,
   petBehaviorMessage,
   petBehaviorSprite,
+  petStudyNoticeKey,
+  petThoughtNoticeKey,
   restoredWindowPosition,
 } from "../src/lib/petAutonomy.ts";
+
+test("ordinary pet notices are not renewed by background behavior ticks", () => {
+  const behavior = { state: "sleeping", reason: "quiet-hours", message: "Resting nearby.", since: 100, nextDecisionAt: 500 };
+  const key = petThoughtNoticeKey("yaoguang", behavior);
+  assert.ok(key);
+  assert.equal(petThoughtNoticeKey("yaoguang", { ...behavior, since: 1000, nextDecisionAt: 2000 }), key);
+  assert.notEqual(petThoughtNoticeKey("yaoguang", { ...behavior, state: "studying", reason: "active-study-session" }), key);
+  assert.notEqual(petThoughtNoticeKey("yaoguang", { ...behavior, message: "A new thought." }), key);
+  assert.notEqual(petThoughtNoticeKey("other-pet", behavior), key);
+  assert.equal(petThoughtNoticeKey("yaoguang", { ...behavior, state: "idle" }), null);
+  assert.equal(petThoughtNoticeKey(undefined, behavior), null);
+});
+
+test("study prompts expire per reminder while check-in and task reminders stay actionable", () => {
+  const prompt = { id: "study:morning:1", kind: "study-launch", tier: "playful", message: "Study together?", actions: ["start", "skip"] };
+  const key = petStudyNoticeKey("yaoguang", prompt);
+  assert.ok(key);
+  assert.equal(petStudyNoticeKey("yaoguang", { ...prompt }), key);
+  assert.notEqual(petStudyNoticeKey("yaoguang", { ...prompt, id: "study:morning:2" }), key);
+  assert.notEqual(petStudyNoticeKey("yaoguang", { ...prompt, tier: "firm" }), key);
+  assert.equal(petStudyNoticeKey("yaoguang", { ...prompt, kind: "check-in" }), null);
+  assert.equal(petStudyNoticeKey("yaoguang", { ...prompt, kind: "task-reminder" }), null);
+  assert.equal(petStudyNoticeKey("yaoguang", undefined), null);
+});
 
 test("browser preview uses the pet's local calendar date", () => {
   const localAfterMidnight = {
