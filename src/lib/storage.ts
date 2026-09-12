@@ -52,7 +52,7 @@ export const defaultProfile: ProviderProfile = {
   id: "levelup-api",
   name: "LevelUpAPI",
   baseUrl: DEFAULT_LEVELUP_BASE_URL,
-  model: "gpt-5.6-sol",
+  model: "gpt-6-astra",
   protocol: "openai_responses",
   allowUnauthenticated: false,
   priority: 10,
@@ -275,7 +275,7 @@ export function savePermissionLevel(level: PermissionLevel) {
 
 export function loadReasoningEffort(): ReasoningEffort {
   const stored = readStorageValue(REASONING_EFFORT_KEY);
-  return stored === "none" || stored === "minimal" || stored === "low" || stored === "medium"
+  return stored === "none" || stored === "adaptive" || stored === "minimal" || stored === "low" || stored === "medium"
     || stored === "high" || stored === "xhigh" || stored === "max"
     ? stored
     : "auto";

@@ -6869,6 +6869,7 @@ const ConversationMessageList = memo(({
 function reasoningEffortLabel(effort: ReasoningEffort) {
   if (effort === "auto") return tr("自动", "Auto");
   if (effort === "none") return tr("关闭", "Off");
+  if (effort === "adaptive") return tr("自适应", "Adaptive");
   if (effort === "minimal") return tr("极轻", "Minimal");
   if (effort === "low") return tr("低", "Low");
   if (effort === "medium") return tr("中", "Medium");
@@ -6880,6 +6881,7 @@ function reasoningEffortLabel(effort: ReasoningEffort) {
 function reasoningEffortDescription(effort: ReasoningEffort) {
   if (effort === "auto") return tr("沿用模型默认或自适应策略", "Use the model default or adaptive strategy");
   if (effort === "none") return tr("关闭额外推理，优先响应速度", "Disable extra reasoning and prioritize speed");
+  if (effort === "adaptive") return tr("启用思考，由模型决定推理深度", "Enable thinking with model-controlled depth");
   if (effort === "minimal") return tr("使用最少推理完成简单任务", "Use minimal reasoning for simple tasks");
   if (effort === "low") return tr("轻量推理，适合直接问题", "Light reasoning for straightforward questions");
   if (effort === "medium") return tr("平衡推理深度与响应速度", "Balance reasoning depth and response speed");
@@ -8030,7 +8032,9 @@ type ProtocolPlatform =
   | "opencode"
   | "zhipu"
   | "kimi"
-  | "deepseek";
+  | "deepseek"
+  | "minimax"
+  | "composite";
 
 const PROTOCOL_OPTIONS: Array<{
   value: ProviderProtocol;
@@ -8041,23 +8045,23 @@ const PROTOCOL_OPTIONS: Array<{
   {
     value: "openai_responses",
     label: "Responses",
-    platforms: ["openai", "anthropic", "grok", "zhipu", "kimi", "deepseek", "opencode"],
+    platforms: ["openai", "anthropic", "grok", "zhipu", "kimi", "deepseek", "minimax", "composite", "opencode"],
     recommended: true,
   },
   {
     value: "openai_chat",
     label: "Chat Completions",
-    platforms: ["openai", "anthropic", "grok", "zhipu", "kimi", "deepseek", "opencode"],
+    platforms: ["openai", "anthropic", "grok", "zhipu", "kimi", "deepseek", "minimax", "composite", "opencode"],
   },
   {
     value: "anthropic_messages",
     label: "Anthropic Messages",
-    platforms: ["anthropic", "openai", "gemini", "antigravity", "grok", "zhipu", "kimi", "deepseek", "opencode"],
+    platforms: ["anthropic", "openai", "gemini", "antigravity", "grok", "zhipu", "kimi", "deepseek", "minimax", "composite", "opencode"],
   },
   {
     value: "gemini_generate_content",
     label: "Gemini GenerateContent",
-    platforms: ["gemini", "antigravity"],
+    platforms: ["gemini", "antigravity", "composite"],
   },
   {
     value: "opencode_go",
@@ -8076,6 +8080,8 @@ function protocolPlatformLabel(platform: ProtocolPlatform) {
   if (platform === "zhipu") return "GLM";
   if (platform === "kimi") return "Kimi";
   if (platform === "deepseek") return "DeepSeek";
+  if (platform === "minimax") return "MiniMax";
+  if (platform === "composite") return "Composite";
   return "OpenCode";
 }
 
@@ -8970,9 +8976,13 @@ function ConnectionDialog({
                 : draftProfile.protocol === "gemini_generate_content"
                   ? tr("Gemini 原生请求使用 GenerateContent；模型目录会独立检查 /v1beta/models。", "Native Gemini requests use GenerateContent; the model catalog checks /v1beta/models independently.")
                   : draftProfile.protocol === "anthropic_messages"
-                    ? tr("Anthropic Messages 使用 /v1/messages；思考强度会转换为 thinking budget。", "Anthropic Messages uses /v1/messages; thinking effort is translated to a thinking budget.")
+                    ? tr("Anthropic Messages 使用 /v1/messages；思考参数按当前模型适配。", "Anthropic Messages uses /v1/messages with model-specific thinking parameters.")
                     : tr("OpenAI Responses 或 Chat Completions 使用当前选定的技术接口；思考强度会写入对应请求字段。", "OpenAI Responses or Chat Completions uses the selected wire interface; thinking effort is written to its corresponding request field.")}
             </small>
+            <small className="protocol-help">{tr(
+              "MiniMax 支持前三种协议，M3 可关闭或启用自适应思考，M2.x 沿用默认思考。Composite 按模型路由；Gemini 原生协议需分组配置对应路由。GPT-6 Astra 工具调用请选择 Responses。",
+              "MiniMax supports the first three protocols: M3 offers off/adaptive thinking, while M2.x keeps its default. Composite routes by model; native Gemini needs a matching group route. Use Responses for GPT-6 Astra tool calls."
+            )}</small>
           </div>
           <label className="field wide">
             <span>API Key <small>{localKeyConfigured
@@ -10289,6 +10299,17 @@ function providerEndpointPreview(profile: ProviderProfile) {
         : `/v1beta/models/${model}:generateContent`;
   try {
     const base = new URL(profile.baseUrl.trim());
+    if (["", "/", "/v1", "/anthropic", "/anthropic/v1"].includes(base.pathname.replace(/\/$/, ""))) {
+      const nativeMessages = ["api.deepseek.com", "api.minimax.io", "api.minimaxi.com"].includes(base.hostname)
+        && wireProtocol === "anthropic_messages";
+      const nativeDeepseekResponses = base.hostname === "api.deepseek.com" && wireProtocol === "openai_responses";
+      const nativeMinimaxOpenai = ["api.minimax.io", "api.minimaxi.com"].includes(base.hostname)
+        && (wireProtocol === "openai_responses" || wireProtocol === "openai_chat");
+      if (nativeMessages || nativeDeepseekResponses || nativeMinimaxOpenai) {
+        base.pathname = nativeMessages ? "/anthropic/v1/messages" : nativeDeepseekResponses ? "/responses" : path;
+        return base.toString();
+      }
+    }
     if (!base.pathname.endsWith("/")) base.pathname += "/";
     const requested = path.replace(/^\/+/, "").split("/");
     const baseSegments = base.pathname.split("/").filter(Boolean);

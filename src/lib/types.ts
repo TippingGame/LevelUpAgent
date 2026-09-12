@@ -9,7 +9,7 @@ export type ProviderProtocol =
  * Provider reasoning control. `auto` deliberately omits the provider field so
  * each model can keep its native default behavior.
  */
-export type ReasoningEffort = "auto" | "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export type ReasoningEffort = "auto" | "none" | "adaptive" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface ProviderProfile {
   id: string;

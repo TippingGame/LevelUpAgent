@@ -36,10 +36,11 @@ const PROFILE_FAMILY_HINTS: Array<[ModelFamily, RegExp]> = [
 // keep other providers on a recent general-purpose generation model when the
 // exact target is not exposed by that endpoint.
 const FAMILY_PREFERENCES: Record<ModelFamily, string[]> = {
-  openai: ["gpt-5.6-sol", "gpt-5.6", "gpt-5.5", "gpt-5.4", "gpt-5.3"],
+  openai: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6", "gpt-5.5", "gpt-5.4", "gpt-5.3"],
   grok: ["grok-4.6", "grok-4.5", "grok-4.1", "grok-4"],
-  claude: ["claude-fable-5", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6", "claude-opus-4-5"],
+  claude: ["claude-fable-5-1", "claude-fable-5", "claude-opus-5", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6", "claude-opus-4-5"],
   gemini: [
+    "gemini-3.8-flash",
     "gemini-3.6-flash",
     "gemini-3.1-pro",
     "gemini-3.1-pro-preview",
@@ -53,13 +54,13 @@ const FAMILY_PREFERENCES: Record<ModelFamily, string[]> = {
     "gemini-3.1-flash-lite",
     "gemini-2.5-flash",
   ],
-  deepseek: ["deepseek-v3.2", "deepseek-v3.1", "deepseek-r1", "deepseek-v3"],
-  qwen: ["qwen3.5-max", "qwen3-max", "qwen3.5-plus", "qwen3-plus", "qwen3-coder"],
-  glm: ["glm-5", "glm-4.7", "glm-4.6", "glm-4.5"],
-  kimi: ["kimi-k2.5", "kimi-k2", "moonshot-v1-128k"],
-  mistral: ["mistral-large-3", "mistral-large", "codestral-latest"],
+  deepseek: ["deepseek-v4-pro", "deepseek-flash", "deepseek-v4-flash", "deepseek-v3.2", "deepseek-v3.1", "deepseek-r1", "deepseek-v3"],
+  qwen: ["qwen3.8-max", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus", "qwen3.5-max", "qwen3-max", "qwen3.5-plus", "qwen3-plus", "qwen3-coder"],
+  glm: ["glm-5.3-flash", "glm-5.3", "glm-5.2", "glm-5.1", "glm-5", "glm-4.7", "glm-4.6", "glm-4.5"],
+  kimi: ["kimi-k3", "kimi-k2.7-code", "kimi-k2.6", "kimi-k2.5", "kimi-k2", "moonshot-v1-128k"],
+  mistral: ["mistral-medium-3-5", "mistral-medium-3", "mistral-medium-latest", "mistral-large-3", "mistral-large", "codestral-latest"],
   llama: ["llama-4-maverick", "llama-4-scout", "llama-3.3-70b"],
-  minimax: ["minimax-m2.5", "minimax-m2.1", "minimax-m2"],
+  minimax: ["minimax-m3", "minimax-m2.7", "minimax-m2.5", "minimax-m2.1", "minimax-m2"],
   opencode: ["gpt-5.6-luna", "grok-4.5", "glm-5.3", "kimi-k3", "qwen3.8-max", "deepseek-v4-pro", "minimax-m3"],
 };
 
@@ -114,6 +115,7 @@ export function opencodeWireProtocol(model: string): Exclude<ProviderProtocol, "
 }
 
 const AUTO_REASONING = ["auto"] as const satisfies readonly ReasoningEffort[];
+const GPT_6_ASTRA_REASONING = ["auto", "low", "medium", "high", "xhigh", "max"] as const satisfies readonly ReasoningEffort[];
 const GPT_56_REASONING = ["auto", "none", "low", "medium", "high", "xhigh", "max"] as const satisfies readonly ReasoningEffort[];
 const GPT_52_PLUS_REASONING = ["auto", "none", "low", "medium", "high", "xhigh"] as const satisfies readonly ReasoningEffort[];
 const GPT_53_CODEX_REASONING = ["auto", "low", "medium", "high", "xhigh"] as const satisfies readonly ReasoningEffort[];
@@ -122,7 +124,8 @@ const GPT_51_REASONING = ["auto", "none", "low", "medium", "high"] as const sati
 const GPT_5_REASONING = ["auto", "minimal", "low", "medium", "high"] as const satisfies readonly ReasoningEffort[];
 const THREE_LEVEL_REASONING = ["auto", "low", "medium", "high"] as const satisfies readonly ReasoningEffort[];
 const GROK_46_REASONING = ["auto", "low", "medium", "high", "xhigh"] as const satisfies readonly ReasoningEffort[];
-const LOW_HIGH_MAX_REASONING = ["auto", "low", "high", "max"] as const satisfies readonly ReasoningEffort[];
+const DEEPSEEK_REASONING = ["auto", "none", "low", "high", "max"] as const satisfies readonly ReasoningEffort[];
+const MINIMAX_M3_REASONING = ["auto", "none", "adaptive"] as const satisfies readonly ReasoningEffort[];
 const CLAUDE_STANDARD_REASONING = ["auto", "low", "medium", "high"] as const satisfies readonly ReasoningEffort[];
 const CLAUDE_MAX_REASONING = ["auto", "low", "medium", "high", "max"] as const satisfies readonly ReasoningEffort[];
 const CLAUDE_EXTENDED_REASONING = ["auto", "low", "medium", "high", "xhigh", "max"] as const satisfies readonly ReasoningEffort[];
@@ -163,15 +166,22 @@ export function reasoningEffortsForProfile(
     ? normalizeOpenCodeModelId(profile.model).toLocaleLowerCase()
     : bareModelId(profile.model);
 
+  if (modelOrVariant(id, "gpt-6-astra")) return GPT_6_ASTRA_REASONING;
   if (modelOrVariant(id, "gpt-5.6")) return GPT_56_REASONING;
   if (modelOrVariant(id, "grok-4.6")) return GROK_46_REASONING;
   if (modelOrVariant(id, "grok-4.5")) return THREE_LEVEL_REASONING;
-  if (/^deepseek-v4(?:[._-]|$)/i.test(id)) return LOW_HIGH_MAX_REASONING;
+  if (/^deepseek-(?:v4|flash)(?:[._-]|$)/i.test(id)) return DEEPSEEK_REASONING;
 
   // The remaining OpenCode Go models expose reasoning output, but the current
   // Go contract does not publish adjustable effort tiers for them. Keep their
   // provider default rather than pretending Anthropic/OpenAI levels transfer.
   if (profile.protocol === "opencode_go") return AUTO_REASONING;
+
+  // M3 exposes an on/off adaptive mode, not adjustable reasoning depth.
+  // Responses maps non-none efforts to the same adaptive mode. M2 stays on.
+  if (modelOrVariant(id, "minimax-m3") && profile.protocol !== "gemini_generate_content") {
+    return MINIMAX_M3_REASONING;
+  }
 
   if (/^qwen-?3\.8(?:[._-]|$)/i.test(id)) {
     if (profile.protocol === "openai_chat") return QWEN_38_CHAT_REASONING;
@@ -241,13 +251,16 @@ function profileFamily(profile: ProviderProfile, models: ModelInfo[]): ModelFami
   const hinted = PROFILE_FAMILY_HINTS.find(([, pattern]) => pattern.test(profileIdentity))?.[0];
   if (hinted) return hinted;
 
-  // Grok and other OpenAI-compatible providers may deliberately use the
-  // Anthropic wire protocol, so provider identity takes precedence here.
+  const families = new Set(models.map(modelFamily).filter((family): family is ModelFamily => family !== null));
+  if (families.size === 1) return [...families][0];
+
+  // Composite gateways may expose several families through one protocol.
+  if (/\bcomposite\b/i.test(profileIdentity)) return null;
+
+  // Grok and other compatible providers may use the Anthropic wire protocol.
   if (profile.protocol === "anthropic_messages") return "claude";
   if (profile.protocol === "gemini_generate_content") return "gemini";
-
-  const families = new Set(models.map(modelFamily).filter((family): family is ModelFamily => family !== null));
-  return families.size === 1 ? [...families][0] : null;
+  return null;
 }
 
 function newestGeneralModel(models: ModelInfo[]) {
@@ -266,12 +279,19 @@ export function preferredDetectedModel(profile: ProviderProfile, models: ModelIn
   const family = profileFamily(profile, models);
   const familyOrder = family
     ? [family]
-    : (["opencode", "openai", "grok", "claude", "gemini", "deepseek", "qwen", "glm", "kimi", "mistral", "llama", "minimax"] satisfies ModelFamily[]);
+    : (["openai", "grok", "claude", "gemini", "deepseek", "qwen", "glm", "kimi", "mistral", "llama", "minimax"] satisfies ModelFamily[]);
 
   for (const candidateFamily of familyOrder) {
     for (const preferredId of FAMILY_PREFERENCES[candidateFamily]) {
       const match = models.find((model) => modelMatches(model.id, preferredId));
-      if (match) return match;
+      if (match) {
+        // Astra's function calling contract requires Responses. Chat remains
+        // available as a manual choice for plain conversation.
+        if (preferredId === "gpt-6-astra" && profile.protocol === "openai_chat") {
+          return { ...match, protocol: "openai_responses" };
+        }
+        return match;
+      }
     }
   }
 

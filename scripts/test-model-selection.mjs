@@ -55,15 +55,47 @@ function platformPillRule(platform) {
   return match[1];
 }
 
-test("Gemini discovery recommends 3.6 Flash over older general models", () => {
+test("Gemini discovery recommends 3.8 Flash over older general models", () => {
   const selected = selection.preferredDetectedModel(geminiProfile, models(
     "gemini-2.5-pro",
     "gemini-3.1-pro-preview",
     "gemini-3.5-flash-lite",
     "gemini-3.6-flash",
+    "gemini-3.8-flash",
   ));
 
-  assert.equal(selected?.id, "gemini-3.6-flash");
+  assert.equal(selected?.id, "gemini-3.8-flash");
+});
+
+test("discovery prefers current models only when returned by the connection", () => {
+  for (const [name, preferred, older] of [
+    ["OpenAI", "gpt-6-astra", "gpt-5.6-sol"],
+    ["GLM", "glm-5.3-flash", "glm-5.3"],
+    ["DeepSeek", "deepseek-v4-pro", "deepseek-flash"],
+    ["MiniMax", "MiniMax-M3", "MiniMax-M2.7"],
+    ["Kimi", "kimi-k3", "kimi-k2.5"],
+    ["Qwen", "qwen3.8-max", "qwen3.5-max"],
+    ["Claude", "claude-fable-5-1", "claude-fable-5"],
+    ["Mistral", "mistral-medium-3-5", "mistral-large-3"],
+  ]) {
+    const profile = { ...grokProfile, name, baseUrl: "https://levelup.example/v1" };
+    assert.equal(selection.preferredDetectedModel(profile, models(older, preferred))?.id, preferred, name);
+    assert.equal(selection.preferredDetectedModel(profile, models(older))?.id, older, `${name} fallback`);
+  }
+  assert.match(storageSource, /model: "gpt-6-astra"/);
+  assert.equal(selection.preferredDetectedModel({ ...grokProfile, name: "OpenAI", baseUrl: "https://api.openai.com/v1", protocol: "openai_chat" }, models("gpt-6-astra"))?.protocol, "openai_responses");
+});
+
+test("Composite defaults and model capabilities follow concrete models", () => {
+  for (const protocol of ["openai_responses", "openai_chat", "anthropic_messages"]) {
+    const profile = { ...grokProfile, name: "Composite", baseUrl: "https://levelup.example", protocol };
+    assert.equal(selection.preferredDetectedModel(profile, models("gpt-5.6-luna", "gpt-6-astra", "claude-fable-5"))?.id, "gpt-6-astra");
+    assert.deepEqual(selection.reasoningEffortsForProfile({ ...profile, model: "deepseek-v4-pro" }), ["auto", "none", "low", "high", "max"]);
+    assert.deepEqual(selection.reasoningEffortsForProfile({ ...profile, model: "MiniMax-M3" }), ["auto", "none", "adaptive"]);
+    assert.deepEqual(selection.reasoningEffortsForProfile({ ...profile, model: "gpt-6-astra" }), ["auto", "low", "medium", "high", "xhigh", "max"]);
+  }
+  const unnamed = { ...grokProfile, name: "New connection", baseUrl: "https://levelup.example", protocol: "anthropic_messages" };
+  assert.equal(selection.preferredDetectedModel(unnamed, models("MiniMax-M2.7", "MiniMax-M3"))?.id, "MiniMax-M3");
 });
 
 test("Gemini Flash-Lite models remain ordered fallbacks", () => {
@@ -145,7 +177,7 @@ test("OpenCode Go recommends its current Luna coding model", () => {
 });
 
 test("LevelUpAPI CN platforms are shown on every compatible inbound protocol", () => {
-  const cnPlatforms = ["zhipu", "kimi", "deepseek"];
+  const cnPlatforms = ["zhipu", "kimi", "deepseek", "minimax"];
   for (const protocol of ["openai_responses", "openai_chat", "anthropic_messages"]) {
     const platforms = protocolPlatforms(protocol);
     for (const platform of cnPlatforms) assert.ok(platforms.includes(platform), `${protocol}: ${platform}`);
@@ -155,13 +187,19 @@ test("LevelUpAPI CN platforms are shown on every compatible inbound protocol", (
     for (const platform of cnPlatforms) assert.ok(!platforms.includes(platform), `${protocol}: ${platform}`);
   }
   assert.match(appSource, /if \(platform === "zhipu"\) return "GLM";/);
+  for (const protocol of ["openai_responses", "openai_chat", "anthropic_messages", "gemini_generate_content"]) {
+    assert.ok(protocolPlatforms(protocol).includes("composite"));
+  }
+  assert.ok(!protocolPlatforms("opencode_go").includes("composite"));
 });
 
 test("protocol platform pills use the requested and official brand colors", () => {
   assert.match(platformPillRule("opencode"), /rgba\(14,165,233,/);
-  assert.match(platformPillRule("zhipu"), /rgba\(18,110,246,/);
-  assert.match(platformPillRule("kimi"), /rgba\(0,124,255,/);
-  assert.match(platformPillRule("deepseek"), /rgba\(77,107,254,/);
+  assert.match(platformPillRule("zhipu"), /rgba\(99,102,241,/);
+  assert.match(platformPillRule("kimi"), /rgba\(236,72,153,/);
+  assert.match(platformPillRule("deepseek"), /rgba\(20,184,166,/);
+  assert.match(platformPillRule("minimax"), /rgba\(244,63,94,/);
+  assert.match(platformPillRule("composite"), /rgba\(6,182,212,/);
 });
 
 test("reasoning levels follow the selected model instead of one global list", () => {
@@ -176,7 +214,11 @@ test("reasoning levels follow the selected model instead of one global list", ()
   assert.deepEqual(efforts("grok-4.5"), ["auto", "low", "medium", "high"]);
   assert.deepEqual(efforts("glm-5.3"), ["auto"]);
   assert.deepEqual(efforts("glm-5.2"), ["auto"]);
-  assert.deepEqual(efforts("deepseek-v4-pro"), ["auto", "low", "high", "max"]);
+  assert.deepEqual(efforts("deepseek-v4-pro"), ["auto", "none", "low", "high", "max"]);
+  assert.deepEqual(efforts("deepseek-flash", "openai_chat"), ["auto", "none", "low", "high", "max"]);
+  assert.deepEqual(efforts("MiniMax-M3", "openai_responses"), ["auto", "none", "adaptive"]);
+  assert.deepEqual(efforts("MiniMax-M3", "anthropic_messages"), ["auto", "none", "adaptive"]);
+  assert.deepEqual(efforts("MiniMax-M2.7", "openai_chat"), ["auto"]);
 
   // These models expose reasoning output, but OpenCode Go does not publish a
   // configurable effort scale for them. The selector must not invent one.
@@ -231,4 +273,8 @@ test("unsupported persisted reasoning levels fall back to Auto on model switch",
   assert.equal(selection.reasoningEffortForProfile(minimax, "high"), "auto");
   assert.equal(selection.reasoningEffortForProfile(luna, "xhigh"), "xhigh");
   assert.equal(selection.reasoningEffortForProfile(luna, "minimal"), "auto");
+  const m3 = { ...minimax, protocol: "anthropic_messages" };
+  assert.equal(selection.reasoningEffortForProfile(m3, "adaptive"), "adaptive");
+  assert.equal(selection.reasoningEffortForProfile(m3, "high"), "auto");
+  assert.equal(selection.reasoningEffortForProfile({ ...luna, model: "gpt-6-astra" }, "none"), "auto");
 });

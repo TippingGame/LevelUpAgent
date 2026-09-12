@@ -809,6 +809,8 @@ where
         .eventsource();
     let mut content = String::new();
     let mut tools: BTreeMap<usize, ToolAccumulator> = BTreeMap::new();
+    let mut reasoning_content: Option<String> = None;
+    let mut reasoning_details: BTreeMap<usize, Value> = BTreeMap::new();
     let mut input_tokens = None;
     let mut output_tokens = None;
     let mut completed = false;
@@ -824,6 +826,35 @@ where
         let value: Value = serde_json::from_str(&event.data)
             .map_err(|error| format!("Invalid stream event: {error}"))?;
         check_stream_error(&value)?;
+        if let Some(delta) = value
+            .pointer("/choices/0/delta/reasoning_content")
+            .and_then(Value::as_str)
+        {
+            reasoning_content
+                .get_or_insert_with(String::new)
+                .push_str(delta);
+        }
+        if let Some(details) = value
+            .pointer("/choices/0/delta/reasoning_details")
+            .and_then(Value::as_array)
+        {
+            for (position, detail) in details.iter().enumerate() {
+                let index = detail
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(position as u64) as usize;
+                let accumulated = reasoning_details.entry(index).or_insert_with(|| json!({}));
+                if let Some(fields) = detail.as_object() {
+                    for (key, field) in fields {
+                        if key == "text" {
+                            append_json_string_field(Some(accumulated), key, Some(field));
+                        } else {
+                            accumulated[key] = field.clone();
+                        }
+                    }
+                }
+            }
+        }
         if let Some(delta) = value.pointer("/choices/0/delta/content") {
             let text = extract_text(Some(delta));
             if !text.is_empty() {
@@ -860,7 +891,10 @@ where
     Ok(AgentTurnResponse {
         content,
         tool_calls: finish_tools(tools),
-        provider_reasoning_blocks: Vec::new(),
+        provider_reasoning_blocks: chat_reasoning_blocks(&json!({
+            "reasoning_content": reasoning_content,
+            "reasoning_details": reasoning_details.into_values().collect::<Vec<_>>()
+        })),
         input_tokens,
         output_tokens,
         request_id,
@@ -917,6 +951,7 @@ where
     let mut input_tokens = None;
     let mut output_tokens = None;
     let mut completed_result = None;
+    let mut reasoning_blocks = BTreeMap::new();
     let mut completed = false;
     loop {
         let next =
@@ -942,6 +977,16 @@ where
                 }
             }
             "response.output_item.added" | "response.output_item.done" => {
+                if let Some(item) = value.get("item")
+                    && item.get("type").and_then(Value::as_str) == Some("reasoning")
+                    && event_type == "response.output_item.done"
+                {
+                    let index = value
+                        .get("output_index")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    reasoning_blocks.insert(index, item.clone());
+                }
                 if let Some(item) = value.get("item")
                     && item.get("type").and_then(Value::as_str) == Some("function_call")
                 {
@@ -978,9 +1023,13 @@ where
     if !completed {
         return Err(PROVIDER_STREAM_INTERRUPTED.to_owned());
     }
+    let mut provider_reasoning_blocks = reasoning_blocks.into_values().collect::<Vec<_>>();
     if let Some(completed) = completed_result {
         input_tokens = completed.input_tokens;
         output_tokens = completed.output_tokens;
+        if !completed.provider_reasoning_blocks.is_empty() {
+            provider_reasoning_blocks = completed.provider_reasoning_blocks;
+        }
         if content.is_empty() && !completed.content.is_empty() {
             content = completed.content.clone();
             emit(AgentStreamEvent::content(completed.content));
@@ -989,7 +1038,7 @@ where
             return Ok(AgentTurnResponse {
                 content,
                 tool_calls: completed.tool_calls,
-                provider_reasoning_blocks: completed.provider_reasoning_blocks,
+                provider_reasoning_blocks,
                 input_tokens,
                 output_tokens,
                 request_id,
@@ -1001,7 +1050,7 @@ where
     Ok(AgentTurnResponse {
         content,
         tool_calls: finish_tools(tools),
-        provider_reasoning_blocks: Vec::new(),
+        provider_reasoning_blocks,
         input_tokens,
         output_tokens,
         request_id,
@@ -1325,6 +1374,9 @@ fn chat_body(request: &AgentTurnRequest, stream: bool) -> Value {
     if stream {
         body["stream_options"] = json!({ "include_usage": true });
     }
+    if is_minimax_model(&request.profile) {
+        body["reasoning_split"] = json!(true);
+    }
     let tools = chat_tools(request);
     if request.mode != "chat" && !tools.is_empty() {
         body["tools"] = Value::Array(tools);
@@ -1332,8 +1384,14 @@ fn chat_body(request: &AgentTurnRequest, stream: bool) -> Value {
     }
     if let Some(effort) = normalized_reasoning_effort_value(request) {
         if is_deepseek_v4_model(&request.profile) {
-            body["reasoning_effort"] = json!(effort);
-            body["thinking"] = json!({ "type": "enabled" });
+            body["thinking"] =
+                json!({ "type": if effort == "none" { "disabled" } else { "enabled" } });
+            if effort != "none" {
+                body["reasoning_effort"] = json!(effort);
+            }
+        } else if is_minimax_m3_model(&request.profile) {
+            body["thinking"] =
+                json!({ "type": if effort == "none" { "disabled" } else { "adaptive" } });
         } else if is_qwen_3_8_model(&request.profile) && effort == "none" {
             body["enable_thinking"] = json!(false);
         } else {
@@ -1365,13 +1423,18 @@ fn responses_body(request: &AgentTurnRequest, stream: bool) -> Value {
         "stream": stream,
         "store": false
     });
+    if opencode_model_or_variant(&reasoning_model_id(&request.profile), "gpt-6-astra") {
+        // Stateless Astra tool turns must replay encrypted reasoning items.
+        body["include"] = json!(["reasoning.encrypted_content"]);
+    }
     let tools = responses_tools(request);
     if request.mode != "chat" && !tools.is_empty() {
         body["tools"] = Value::Array(tools);
         body["tool_choice"] = json!("auto");
     }
     if let Some(effort) = normalized_reasoning_effort_value(request) {
-        body["reasoning"] = json!({ "effort": effort });
+        // MiniMax accepts OpenAI's tiers as the same adaptive on-switch.
+        body["reasoning"] = json!({ "effort": if effort == "adaptive" { "high" } else { effort } });
         if effort != "none" {
             body["max_output_tokens"] = json!(reasoning_max_output_tokens_for_profile(
                 &request.profile,
@@ -1403,8 +1466,14 @@ fn anthropic_body(request: &AgentTurnRequest, stream: bool) -> Value {
     }
     if let Some(effort) = normalized_reasoning_effort_value(request) {
         if is_deepseek_v4_model(&request.profile) {
-            body["thinking"] = json!({ "type": "enabled" });
-            body["output_config"] = json!({ "effort": effort });
+            body["thinking"] =
+                json!({ "type": if effort == "none" { "disabled" } else { "enabled" } });
+            if effort != "none" {
+                body["output_config"] = json!({ "effort": effort });
+            }
+        } else if is_minimax_m3_model(&request.profile) {
+            body["thinking"] =
+                json!({ "type": if effort == "none" { "disabled" } else { "adaptive" } });
         } else if let Some(mode) = anthropic_thinking_mode(&request.profile) {
             body["thinking"] = match mode {
                 AnthropicThinkingMode::Adaptive => json!({ "type": "adaptive" }),
@@ -1551,7 +1620,18 @@ fn is_qwen_3_8_model(profile: &ProviderProfile) -> bool {
 }
 
 fn is_deepseek_v4_model(profile: &ProviderProfile) -> bool {
-    opencode_model_or_variant(&reasoning_model_id(profile), "deepseek-v4")
+    model_matches_any(
+        &reasoning_model_id(profile),
+        &["deepseek-v4", "deepseek-flash"],
+    )
+}
+
+fn is_minimax_model(profile: &ProviderProfile) -> bool {
+    opencode_model_or_variant(&reasoning_model_id(profile), "minimax")
+}
+
+fn is_minimax_m3_model(profile: &ProviderProfile) -> bool {
+    opencode_model_or_variant(&reasoning_model_id(profile), "minimax-m3")
 }
 
 fn is_original_gpt_5_model(id: &str) -> bool {
@@ -1592,7 +1672,7 @@ fn supported_reasoning_efforts(profile: &ProviderProfile) -> &'static [&'static 
     const GPT_56: &[&str] = &["none", "low", "medium", "high", "xhigh", "max"];
     const THREE_LEVEL: &[&str] = &["low", "medium", "high"];
     const GROK_46: &[&str] = &["low", "medium", "high", "xhigh"];
-    const LOW_HIGH_MAX: &[&str] = &["low", "high", "max"];
+    const DEEPSEEK: &[&str] = &["none", "low", "high", "max"];
     const LOW_MEDIUM_HIGH_MAX: &[&str] = &["low", "medium", "high", "max"];
     const LOW_MEDIUM_HIGH_XHIGH_MAX: &[&str] = &["low", "medium", "high", "xhigh", "max"];
     const GEMINI_WITH_OFF: &[&str] = &["none", "low", "medium", "high"];
@@ -1602,6 +1682,9 @@ fn supported_reasoning_efforts(profile: &ProviderProfile) -> &'static [&'static 
         &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
     let id = reasoning_model_id(profile);
+    if opencode_model_or_variant(&id, "gpt-6-astra") {
+        return LOW_MEDIUM_HIGH_XHIGH_MAX;
+    }
     if opencode_model_or_variant(&id, "gpt-5.6") {
         return GPT_56;
     }
@@ -1611,8 +1694,8 @@ fn supported_reasoning_efforts(profile: &ProviderProfile) -> &'static [&'static 
     if opencode_model_or_variant(&id, "grok-4.5") {
         return THREE_LEVEL;
     }
-    if opencode_model_or_variant(&id, "deepseek-v4") {
-        return LOW_HIGH_MAX;
+    if is_deepseek_v4_model(profile) {
+        return DEEPSEEK;
     }
     if opencode_model_or_variant(&id, "glm-5") {
         return &[];
@@ -1623,6 +1706,12 @@ fn supported_reasoning_efforts(profile: &ProviderProfile) -> &'static [&'static 
     // default and avoids transferring unrelated Anthropic/OpenAI variants.
     if matches!(profile.protocol, ProviderProtocol::OpencodeGo) {
         return &[];
+    }
+
+    if is_minimax_m3_model(profile)
+        && !matches!(profile.protocol, ProviderProtocol::GeminiGenerateContent)
+    {
+        return &["none", "adaptive"];
     }
 
     if is_qwen_3_8_model(profile) {
@@ -1714,24 +1803,10 @@ fn normalized_reasoning_effort_value(request: &AgentTurnRequest) -> Option<&str>
         .as_deref()?
         .trim()
         .to_ascii_lowercase();
-    let normalized = match value.as_str() {
-        "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" => match value.as_str() {
-            "none" => "none",
-            "minimal" => "minimal",
-            "low" => "low",
-            "medium" => "medium",
-            "high" => "high",
-            "xhigh" => "xhigh",
-            "max" => "max",
-            _ => unreachable!(),
-        },
-        _ => return None,
-    };
-    if supported_reasoning_efforts(&request.profile).contains(&normalized) {
-        Some(normalized)
-    } else {
-        None
-    }
+    supported_reasoning_efforts(&request.profile)
+        .iter()
+        .copied()
+        .find(|effort| *effort == value.as_str())
 }
 
 fn reasoning_budget_tokens(effort: &str) -> u64 {
@@ -1753,6 +1828,9 @@ fn reasoning_max_output_tokens(effort: &str) -> u64 {
 }
 
 fn reasoning_max_output_tokens_for_profile(profile: &ProviderProfile, effort: &str) -> u64 {
+    if is_minimax_m3_model(profile) && effort == "adaptive" {
+        return 131_072;
+    }
     if matches!(
         anthropic_thinking_mode(profile),
         Some(AnthropicThinkingMode::Adaptive)
@@ -1770,6 +1848,8 @@ fn reasoning_max_output_tokens_for_profile(profile: &ProviderProfile, effort: &s
 fn chat_completion_token_limit_field(profile: &ProviderProfile) -> &'static str {
     let id = reasoning_model_id(profile);
     if opencode_model_or_variant(&id, "gpt-5")
+        || opencode_model_or_variant(&id, "gpt-6-astra")
+        || is_minimax_model(profile)
         || ["o1", "o3", "o4"]
             .iter()
             .any(|family| opencode_model_or_variant(&id, family))
@@ -1803,7 +1883,7 @@ fn parse_openai_chat_value(
     Ok(AgentTurnResponse {
         content: extract_text(message.get("content")),
         tool_calls,
-        provider_reasoning_blocks: Vec::new(),
+        provider_reasoning_blocks: chat_reasoning_blocks(message),
         input_tokens: usage
             .and_then(|item| item.get("prompt_tokens"))
             .and_then(Value::as_u64),
@@ -1827,8 +1907,10 @@ fn parse_openai_responses_value(
         .unwrap_or_default();
     let mut content = String::new();
     let mut tool_calls = Vec::new();
+    let mut provider_reasoning_blocks = Vec::new();
     for item in output {
         match item.get("type").and_then(Value::as_str) {
+            Some("reasoning") => provider_reasoning_blocks.push(item),
             Some("message") => content.push_str(&extract_text(item.get("content"))),
             Some("function_call") => tool_calls.push(ToolCall {
                 id: item
@@ -1851,7 +1933,7 @@ fn parse_openai_responses_value(
     Ok(AgentTurnResponse {
         content,
         tool_calls,
-        provider_reasoning_blocks: Vec::new(),
+        provider_reasoning_blocks,
         input_tokens: usage
             .and_then(|item| item.get("input_tokens"))
             .and_then(Value::as_u64),
@@ -1862,6 +1944,25 @@ fn parse_openai_responses_value(
         provider_id: None,
         failover_count: 0,
     })
+}
+
+// Keep native Chat reasoning separate from visible answer text and from the
+// signed Anthropic/Responses blocks sharing the persisted history field.
+fn chat_reasoning_blocks(message: &Value) -> Vec<Value> {
+    let mut block = json!({ "type": "chat_reasoning" });
+    if let Some(content) = message.get("reasoning_content").and_then(Value::as_str) {
+        block["reasoning_content"] = json!(content);
+    }
+    if let Some(details) = message.get("reasoning_details").and_then(Value::as_array)
+        && !details.is_empty()
+    {
+        block["reasoning_details"] = json!(details);
+    }
+    if block.get("reasoning_content").is_some() || block.get("reasoning_details").is_some() {
+        vec![block]
+    } else {
+        Vec::new()
+    }
 }
 
 fn append_json_string_field(block: Option<&mut Value>, field: &str, delta: Option<&Value>) {
@@ -2715,6 +2816,17 @@ fn chat_message(message: &AgentMessage) -> Value {
         Value::String(message.content.clone())
     };
     let mut value = json!({ "role": message.role, "content": content });
+    if message.role == "assistant" {
+        for block in &message.provider_reasoning_blocks {
+            if block.get("type").and_then(Value::as_str) == Some("chat_reasoning") {
+                for field in ["reasoning_content", "reasoning_details"] {
+                    if let Some(reasoning) = block.get(field) {
+                        value[field] = reasoning.clone();
+                    }
+                }
+            }
+        }
+    }
     if !message.tool_calls.is_empty() {
         value["tool_calls"] = Value::Array(
             message
@@ -2746,6 +2858,15 @@ fn responses_input(messages: &[AgentMessage]) -> Vec<Value> {
                 "output": message.content
             })),
             "assistant" => {
+                input.extend(
+                    message
+                        .provider_reasoning_blocks
+                        .iter()
+                        .filter(|block| {
+                            block.get("type").and_then(Value::as_str) == Some("reasoning")
+                        })
+                        .cloned(),
+                );
                 if !message.content.is_empty() {
                     input.push(json!({
                         "role": "assistant",
@@ -3186,6 +3307,28 @@ fn extract_text(value: Option<&Value>) -> String {
 
 pub(crate) fn endpoint(base_url: &str, path: &str) -> Result<Url, String> {
     let mut base = parse_base_url(base_url)?;
+    // Direct vendor APIs have protocol-specific roots. Apply this only to
+    // their exact official hosts and standard roots, never a proxy URL.
+    let host = base.host_str().unwrap_or_default();
+    if matches!(
+        base.path().trim_end_matches('/'),
+        "" | "/v1" | "/anthropic" | "/anthropic/v1"
+    ) {
+        let native_path = match (host, path) {
+            ("api.deepseek.com", "/v1/responses") => Some("/responses"),
+            ("api.deepseek.com" | "api.minimax.io" | "api.minimaxi.com", "/v1/messages") => {
+                Some("/anthropic/v1/messages")
+            }
+            ("api.minimax.io" | "api.minimaxi.com", "/v1/chat/completions" | "/v1/responses") => {
+                Some(path)
+            }
+            _ => None,
+        };
+        if let Some(native_path) = native_path {
+            base.set_path(native_path);
+            return Ok(base);
+        }
+    }
     if !base.path().ends_with('/') {
         base.set_path(&format!("{}/", base.path()));
     }
@@ -4639,9 +4782,10 @@ mod tests {
         serde_json::from_str(body).unwrap()
     }
 
-    fn mock_sse_server(expected_path: &'static str, events: &'static str) -> String {
+    fn mock_sse_server(expected_path: &'static str, events: &str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
+        let events = events.to_owned();
         thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = vec![0_u8; 32 * 1024];
@@ -5660,7 +5804,7 @@ mod tests {
             ("grok-4.6", &["low", "medium", "high", "xhigh"]),
             ("grok-4.5", &["low", "medium", "high"]),
             ("glm-5.3", &[]),
-            ("deepseek-v4-pro", &["low", "high", "max"]),
+            ("deepseek-v4-pro", &["none", "low", "high", "max"]),
             ("kimi-k3", &[]),
             ("minimax-m3", &[]),
             ("qwen3.8-max", &[]),
@@ -5673,6 +5817,9 @@ mod tests {
 
         profile.protocol = ProviderProtocol::AnthropicMessages;
         let claude_cases: &[(&str, &[&str])] = &[
+            ("MiniMax-M3", &["none", "adaptive"]),
+            ("MiniMax-M2.7", &[]),
+            ("deepseek-flash", &["none", "low", "high", "max"]),
             ("claude-opus-4-5", &["low", "medium", "high"]),
             ("claude-sonnet-4-6", &["low", "medium", "high", "max"]),
             (
@@ -5708,6 +5855,7 @@ mod tests {
 
         profile.protocol = ProviderProtocol::OpenaiResponses;
         let openai_cases: &[(&str, &[&str])] = &[
+            ("gpt-6-astra", &["low", "medium", "high", "xhigh", "max"]),
             (
                 "gpt-5.6-sol",
                 &["none", "low", "medium", "high", "xhigh", "max"],
@@ -5727,6 +5875,281 @@ mod tests {
         for (model, expected) in openai_cases {
             profile.model = (*model).to_owned();
             assert_eq!(supported_reasoning_efforts(&profile), *expected, "{model}");
+        }
+    }
+
+    #[test]
+    fn minimax_and_deepseek_thinking_switches_use_native_fields() {
+        for model in ["deepseek-v4-pro", "deepseek-flash", "MiniMax-M3"] {
+            let mut request = test_request(
+                "https://levelup.example".to_owned(),
+                ProviderProtocol::OpenaiChat,
+            );
+            request.profile.model = model.to_owned();
+            for stream in [false, true] {
+                request.reasoning_effort = Some("none".to_owned());
+                let body = chat_body(&request, stream);
+                assert_eq!(
+                    body.pointer("/thinking/type"),
+                    Some(&json!("disabled")),
+                    "{model}"
+                );
+                assert!(body.get("reasoning_effort").is_none());
+                request.profile.protocol = ProviderProtocol::AnthropicMessages;
+                let body = anthropic_body(&request, stream);
+                assert_eq!(body.pointer("/thinking/type"), Some(&json!("disabled")));
+                assert!(body.get("output_config").is_none());
+                request.profile.protocol = ProviderProtocol::OpenaiResponses;
+                assert_eq!(
+                    responses_body(&request, stream).pointer("/reasoning/effort"),
+                    Some(&json!("none"))
+                );
+                request.profile.protocol = ProviderProtocol::OpenaiChat;
+            }
+        }
+
+        let mut request = test_request(
+            "https://levelup.example".to_owned(),
+            ProviderProtocol::OpenaiChat,
+        );
+        request.profile.model = "MiniMax-M3".to_owned();
+        request.reasoning_effort = Some("adaptive".to_owned());
+        let chat = chat_body(&request, true);
+        assert_eq!(chat.pointer("/thinking/type"), Some(&json!("adaptive")));
+        assert_eq!(chat["reasoning_split"], true);
+        assert_eq!(chat["max_completion_tokens"], 131_072);
+        assert!(chat.get("reasoning_effort").is_none());
+        request.profile.protocol = ProviderProtocol::AnthropicMessages;
+        let messages = anthropic_body(&request, true);
+        assert_eq!(messages.pointer("/thinking/type"), Some(&json!("adaptive")));
+        assert!(messages.get("output_config").is_none());
+        assert!(messages.pointer("/thinking/budget_tokens").is_none());
+        request.profile.protocol = ProviderProtocol::OpenaiResponses;
+        assert_eq!(
+            responses_body(&request, true).pointer("/reasoning/effort"),
+            Some(&json!("high"))
+        );
+
+        request.reasoning_effort = Some("auto".to_owned());
+        assert!(responses_body(&request, false).get("reasoning").is_none());
+        request.profile.model = "MiniMax-M2.7".to_owned();
+        request.reasoning_effort = Some("none".to_owned());
+        assert!(chat_body(&request, false).get("thinking").is_none());
+        assert!(anthropic_body(&request, false).get("thinking").is_none());
+        assert!(responses_body(&request, false).get("reasoning").is_none());
+
+        request.profile.model = "gpt-6-astra".to_owned();
+        request.reasoning_effort = Some("max".to_owned());
+        let astra = responses_body(&request, true);
+        assert_eq!(astra.pointer("/reasoning/effort"), Some(&json!("max")));
+        assert_eq!(astra["include"], json!(["reasoning.encrypted_content"]));
+        request.reasoning_effort = Some("none".to_owned());
+        assert!(responses_body(&request, false).get("reasoning").is_none());
+    }
+
+    #[test]
+    fn direct_vendor_roots_do_not_change_composite_proxy_endpoints() {
+        for (base, path, expected) in [
+            (
+                "https://api.deepseek.com/v1",
+                "/v1/responses",
+                "https://api.deepseek.com/responses",
+            ),
+            (
+                "https://api.deepseek.com",
+                "/v1/messages",
+                "https://api.deepseek.com/anthropic/v1/messages",
+            ),
+            (
+                "https://api.minimax.io/v1",
+                "/v1/messages",
+                "https://api.minimax.io/anthropic/v1/messages",
+            ),
+            (
+                "https://api.minimaxi.com/anthropic",
+                "/v1/responses",
+                "https://api.minimaxi.com/v1/responses",
+            ),
+            (
+                "https://api.minimax.io/anthropic/v1",
+                "/v1/chat/completions",
+                "https://api.minimax.io/v1/chat/completions",
+            ),
+            (
+                "https://levelup.example/v1",
+                "/v1/messages",
+                "https://levelup.example/v1/messages",
+            ),
+            (
+                "https://levelup.example/v1",
+                "/v1/responses",
+                "https://levelup.example/v1/responses",
+            ),
+            (
+                "https://proxy.example/api.deepseek.com",
+                "/v1/responses",
+                "https://proxy.example/api.deepseek.com/v1/responses",
+            ),
+        ] {
+            assert_eq!(endpoint(base, path).unwrap().as_str(), expected);
+        }
+    }
+
+    fn assistant_from_response(response: AgentTurnResponse) -> AgentMessage {
+        AgentMessage {
+            role: "assistant".to_owned(),
+            content: response.content,
+            tool_calls: response.tool_calls,
+            tool_call_id: None,
+            provider_reasoning_blocks: response.provider_reasoning_blocks,
+            internal: false,
+            attachments: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_tool_continuations_replay_deepseek_and_minimax_reasoning() {
+        for model in ["deepseek-flash", "MiniMax-M3"] {
+            let response = json!({"choices":[{"message":{
+                "role":"assistant", "content":"Checking.", "reasoning_content":"Inspect files first.",
+                "reasoning_details":[{"type":"reasoning.text","text":"Inspect files first.","id":"r1","format":"MiniMax-response-v1","index":0}],
+                "tool_calls":[{"id":"call1","type":"function","function":{"name":"list_files","arguments":"{}"}}]
+            }}]});
+            let first = parse_openai_chat_value(&response, None).unwrap();
+            assert_eq!(first.content, "Checking.");
+            let (base, captured) =
+                mock_contract_server(r#"{"choices":[{"message":{"content":"Done."}}]}"#);
+            let mut request = test_request(base, ProviderProtocol::OpenaiChat);
+            request.profile.model = model.to_owned();
+            // Reasoning from an earlier final answer must survive too, even
+            // when that assistant turn did not issue a tool call.
+            request.messages.push(assistant_from_response(parse_openai_chat_value(&json!({
+                "choices":[{"message":{"content":"Earlier answer.","reasoning_content":"Earlier reasoning."}}]
+            }), None).unwrap()));
+            request.messages.push(assistant_from_response(first));
+            request.messages.push(AgentMessage {
+                role: "tool".to_owned(),
+                content: "file.txt".to_owned(),
+                tool_calls: Vec::new(),
+                tool_call_id: Some("call1".to_owned()),
+                provider_reasoning_blocks: Vec::new(),
+                internal: false,
+                attachments: Vec::new(),
+            });
+            assert_eq!(
+                run_turn(&Client::new(), request, "test-key")
+                    .await
+                    .unwrap()
+                    .content,
+                "Done."
+            );
+            let body = captured_json_request(
+                captured
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap(),
+                "/v1/chat/completions",
+            );
+            let assistants = body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|m| m["role"] == "assistant")
+                .collect::<Vec<_>>();
+            assert_eq!(assistants[0]["reasoning_content"], "Earlier reasoning.");
+            assert_eq!(assistants[1]["reasoning_content"], "Inspect files first.");
+            assert_eq!(
+                assistants[1]["reasoning_details"],
+                response["choices"][0]["message"]["reasoning_details"]
+            );
+            assert_eq!(assistants[1]["tool_calls"][0]["id"], "call1");
+            assert_eq!(
+                body["messages"].as_array().unwrap().last().unwrap()["tool_call_id"],
+                "call1"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_chat_keeps_native_reasoning_out_of_visible_answer() {
+        let events = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Inspect \",\"reasoning_details\":[{\"type\":\"reasoning.text\",\"id\":\"r1\",\"format\":\"MiniMax-response-v1\",\"index\":0,\"text\":\"Inspect \"}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"files.\",\"reasoning_details\":[{\"index\":0,\"text\":\"files.\"}],\"content\":\"Checking.\",\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"list_files\",\"arguments\":\"{}\"}}]}}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let request = test_request(
+            mock_sse_server("/v1/chat/completions", events),
+            ProviderProtocol::OpenaiChat,
+        );
+        let mut emitted = Vec::new();
+        let result = run_turn_stream(
+            &Client::new(),
+            request,
+            "test-key",
+            CancellationToken::new(),
+            |event| emitted.push(event),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.content, "Checking.");
+        let replay = chat_message(&assistant_from_response(result));
+        assert_eq!(replay["reasoning_content"], "Inspect files.");
+        assert_eq!(replay["reasoning_details"][0]["text"], "Inspect files.");
+        assert_eq!(
+            replay["reasoning_details"][0]["format"],
+            "MiniMax-response-v1"
+        );
+        assert_eq!(replay["tool_calls"][0]["id"], "c1");
+        assert!(
+            !serde_json::to_string(&emitted)
+                .unwrap()
+                .contains("Inspect files")
+        );
+    }
+
+    #[tokio::test]
+    async fn responses_tool_continuations_replay_native_reasoning_items() {
+        for reasoning in [
+            json!({"type":"reasoning","id":"r1","content":[{"type":"reasoning_text","text":"Inspect files."}]}),
+            json!({"type":"reasoning","id":"r2","summary":[{"type":"summary_text","text":"Inspect files."}]}),
+            json!({"type":"reasoning","id":"r3","summary":[],"encrypted_content":"opaque-provider-state"}),
+        ] {
+            let output = json!({"output":[reasoning.clone(), {"type":"function_call","call_id":"c1","name":"list_files","arguments":"{}"}]});
+            let result = parse_openai_responses_value(&output, None).unwrap();
+            let replay = responses_input(&[assistant_from_response(result)]);
+            assert_eq!(replay[0], reasoning);
+            assert_eq!(replay[1]["call_id"], "c1");
+
+            // Cover streams that accumulated tool calls before the terminal
+            // response as well as gateways that only end with [DONE].
+            for terminal in [
+                format!(
+                    "event: response.completed\ndata: {}\n\n",
+                    json!({"type":"response.completed","response":output})
+                ),
+                "data: [DONE]\n\n".to_owned(),
+            ] {
+                let events = format!(
+                    "event: response.output_item.done\ndata: {}\n\nevent: response.output_item.done\ndata: {}\n\n{terminal}",
+                    json!({"type":"response.output_item.done","output_index":0,"item":reasoning}),
+                    json!({"type":"response.output_item.done","output_index":1,"item":output["output"][1]})
+                );
+                let request = test_request(
+                    mock_sse_server("/v1/responses", &events),
+                    ProviderProtocol::OpenaiResponses,
+                );
+                let result = run_turn_stream(
+                    &Client::new(),
+                    request,
+                    "test-key",
+                    CancellationToken::new(),
+                    |_| {},
+                )
+                .await
+                .unwrap();
+                assert_eq!(result.provider_reasoning_blocks, vec![reasoning.clone()]);
+                assert_eq!(result.tool_calls[0].id, "c1");
+                assert!(result.content.is_empty());
+            }
         }
     }
 
