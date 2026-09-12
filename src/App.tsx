@@ -80,6 +80,7 @@ import type { PetLifeView } from "./components/PetLifeWorkspace";
 import { PetAvatar } from "./components/PetSprite";
 import { DeclarativeLayout, type LayoutActions, type LayoutData } from "./components/DeclarativeLayout";
 import packageMetadata from "../package.json";
+import { brandForMessage, brandForProfile, modelAvatarSource, providerBrandLabel } from "./lib/modelAvatars";
 import defaultLayoutJson from "../layouts/default.layout.json";
 import {
   agentTurnStream,
@@ -6320,9 +6321,7 @@ function AssistantMessageGroup({
     }
   }
   const identityModelName = identity?.modelName?.trim();
-  const providerBrand = identity?.providerBrand ?? (identityModelName
-    ? modelProviderBrandFromName(identityModelName)
-    : "levelup");
+  const providerBrand = brandForMessage(identityModelName ?? "", identity?.providerBrand);
   const modelName = identityModelName || providerBrandLabel(providerBrand);
   const renderedSegments = items.map((item, index) => {
     if (!isToolActivityMessage(item)) {
@@ -6522,7 +6521,7 @@ function ChangeSetSummary({
 
 function AssistantAvatar({ brand, modelName }: { brand: ModelProviderBrand; modelName: string }) {
   const [useFallback, setUseFallback] = useState(false);
-  const source = useFallback || brand === "levelup" ? "/logo.png" : `/avatars/${brand}.png`;
+  const source = useFallback ? "/logo.png" : modelAvatarSource(brand);
   return (
     <div className={`message-avatar assistant-avatar assistant-avatar-${brand}`} title={`${modelName} · ${providerBrandLabel(brand)}`}>
       <img src={source} alt="" onError={() => setUseFallback(true)} />
@@ -10867,29 +10866,7 @@ async function bootstrapHatchHistory(
 }
 
 function modelProviderBrand(profile: ProviderProfile): ModelProviderBrand {
-  if (profile.protocol === "opencode_go") return "opencode";
-  return modelProviderBrandFromName(`${profile.name} ${profile.model} ${profile.baseUrl}`);
-}
-
-function modelProviderBrandFromName(value: string): ModelProviderBrand {
-  const identity = value.toLocaleLowerCase();
-  if (identity.includes("antigravity")) return "antigravity";
-  if (identity.includes("opencode")) return "opencode";
-  if (/\b(grok|xai|x\.ai)\b/.test(identity)) return "grok";
-  if (/\b(claude|anthropic)\b/.test(identity)) return "anthropic";
-  if (/\b(gemini|google|generativelanguage)\b/.test(identity)) return "gemini";
-  if (/\b(gpt|openai|o1|o3|o4)\b/.test(identity)) return "openai";
-  return "levelup";
-}
-
-function providerBrandLabel(brand: ModelProviderBrand) {
-  if (brand === "openai") return "OpenAI";
-  if (brand === "anthropic") return "Anthropic";
-  if (brand === "gemini") return "Gemini";
-  if (brand === "antigravity") return "Antigravity";
-  if (brand === "grok") return "Grok / xAI";
-  if (brand === "opencode") return "OpenCode Go";
-  return "LevelUpAgent";
+  return brandForProfile(profile);
 }
 
 function finalizeConversationMessages(messages: AgentMessage[], startedAt: number) {

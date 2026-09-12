@@ -196,6 +196,16 @@ export type ModelProviderBrand =
   | "antigravity"
   | "grok"
   | "opencode"
+  | "deepseek"
+  | "qwen"
+  | "glm"
+  | "kimi"
+  | "minimax"
+  | "mistral"
+  | "llama"
+  | "mimo"
+  | "hunyuan"
+  | "muse"
   | "levelup";
 
 export interface AgentMessage {
