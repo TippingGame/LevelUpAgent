@@ -214,8 +214,16 @@ pub(super) fn native_video_body(
         request.video_mode,
         VideoGenerationMode::Image | VideoGenerationMode::FirstLast
     );
+    let prompt = numbered_reference_prompt(
+        request.prompt.trim(),
+        urls.len(),
+        request.video_mode == VideoGenerationMode::FirstLast,
+    );
+    if prompt.chars().count() > 7000 {
+        return Err("The video prompt including reference order must contain at most 7,000 characters".to_owned());
+    }
     if is_minimax_video_model(model) {
-        let mut content = vec![json!({"type": "text", "text": request.prompt.trim()})];
+        let mut content = vec![json!({"type": "text", "text": prompt})];
         content.extend(urls.iter().enumerate().map(|(index, url)| json!({
             "type": "image_url", "image_url": {"url": url},
             "role": if frame_mode { if index == 0 { "first_frame" } else { "last_frame" } } else { "reference_image" }
@@ -231,7 +239,7 @@ pub(super) fn native_video_body(
                 "Seedance local references must be uploaded before video generation".to_owned(),
             );
         }
-        let mut body = json!({"model": model, "prompt": request.prompt.trim(), "duration": request.seconds.unwrap_or(5),
+        let mut body = json!({"model": model, "prompt": prompt, "duration": request.seconds.unwrap_or(5),
             "resolution": request.video_resolution.as_deref().unwrap_or("480p")});
         // Anyu normalizes historical Auto to an omitted ratio for frame inputs.
         if !frame_mode {
@@ -389,7 +397,7 @@ fn minimax_image_body(
             "MiniMax images support character references, not explicit edit masks".to_owned(),
         );
     }
-    let prompt = effective_image_prompt(request);
+    let prompt = numbered_reference_prompt(&effective_image_prompt(request), references.len(), false);
     if prompt.chars().count() > 1500 {
         return Err("MiniMax image prompts must contain at most 1,500 characters".to_owned());
     }
@@ -540,6 +548,12 @@ mod tests {
         assert_eq!(body["ratio"], "adaptive");
         assert_eq!(body["duration"], 10);
         assert!(body.get("prompt").is_none());
+        assert!(body["content"][0]["text"].as_str().unwrap().contains("Image 1 / 图 1 is the first frame"));
+        request.reference_urls.swap(0, 1);
+        let swapped = native_video_body("MiniMax-H3", &request, &[]).unwrap();
+        assert_eq!(swapped["content"][1]["image_url"]["url"], "https://cdn.test/last.png");
+        assert_eq!(swapped["content"][1]["role"], "first_frame");
+        assert_eq!(swapped["content"][2]["role"], "last_frame");
         request.seconds = Some(30);
         assert!(native_video_body("MiniMax-H3", &request, &[]).is_err());
         request.seconds = Some(10);
@@ -560,6 +574,11 @@ mod tests {
         assert_eq!(body["last_image"], "https://cdn.test/last.png");
         assert!(body.get("ratio").is_none());
         assert!(body.get("images").is_none());
+        assert!(body["prompt"].as_str().unwrap().contains("Image 2 / 图 2 is the last frame"));
+        request.reference_urls.swap(0, 1);
+        let swapped = native_video_body("Seedance-2.5", &request, &[]).unwrap();
+        assert_eq!(swapped["first_image"], "https://cdn.test/last.png");
+        assert_eq!(swapped["last_image"], "https://cdn.test/first.png");
         assert!(native_video_body("Seedance-2", &request, &[]).is_err());
         request.video_resolution = Some("1080p".into());
         assert!(native_video_body("Seedance-2.5", &request, &[]).is_err());
@@ -630,6 +649,12 @@ mod tests {
         assert_eq!(body["response_format"], "base64");
         assert_eq!(body["subject_reference"][0]["type"], "character");
         assert!(body.get("size").is_none());
+        let mut other = reference.clone();
+        other.bytes = vec![4, 5, 6];
+        let ordered = minimax_image_body("image-01", &request, &[other.clone(), reference.clone()], None).unwrap();
+        assert!(ordered["prompt"].as_str().unwrap().contains("Reference image order: 2 images"));
+        assert_eq!(ordered["subject_reference"][0]["image_file"], reference_data_url(&other));
+        assert_eq!(ordered["subject_reference"][1]["image_file"], reference_data_url(&reference));
         assert!(minimax_image_body("image-01-live", &request, &[], None).is_err());
         assert!(minimax_image_body("image-01", &request, &[], Some(&reference)).is_err());
     }

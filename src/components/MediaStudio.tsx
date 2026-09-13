@@ -62,6 +62,7 @@ import {
 } from "../lib/armorMode";
 import { copyText } from "../lib/clipboard";
 import { isMiniMaxImageModel, mediaModelSupportsExplicitImageMask, selectStudioMediaModel, videoModelCapabilities } from "../lib/mediaCapabilities";
+import { createMediaReferenceUrl, moveMediaReference, orderedMediaReferenceUrls, type MediaReferenceUrl } from "../lib/mediaReferences";
 import type {
   ImageAttachment,
   MediaAsset,
@@ -70,7 +71,7 @@ import type {
   MediaModelInfo,
   VideoGenerationMode,
 } from "../lib/types";
-import { AttachmentChip } from "./AttachmentChip";
+import { MediaReferenceList, MediaReferenceOrderHint, MediaReferenceUrlList } from "./MediaReferenceList";
 import {
   ConstellationCanvasEditor,
   type CanvasEditorSaveMeta,
@@ -179,7 +180,7 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
   const [imageEditSelectionId, setImageEditSelectionId] = useState<string | null>(null);
   const [imageEditorOpen, setImageEditorOpen] = useState(false);
   const [videoReferences, setVideoReferences] = useState<ImageAttachment[]>([]);
-  const [videoReferenceUrls, setVideoReferenceUrls] = useState<string[]>([]);
+  const [videoReferenceUrls, setVideoReferenceUrls] = useState<MediaReferenceUrl[]>([]);
   const [videoReferenceSource, setVideoReferenceSource] = useState<"url" | "local">("local");
   const [videoMode, setVideoMode] = useState<VideoGenerationMode>("text");
   const [videoResolution, setVideoResolution] = useState("720p");
@@ -232,11 +233,11 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
   const videoDurationOptions = videoModelCapabilities(selectedModelId, activeVideoMode).durations;
   const videoReferenceMaximum = videoModelCapabilities(selectedModelId, activeVideoMode).referenceLimit;
   const useReferenceUrls = isNativeVideo && videoReferenceSource === "url";
-  const enteredVideoUrls = videoReferenceUrls.map((url) => url.trim()).filter(Boolean);
+  const enteredVideoUrls = orderedMediaReferenceUrls(videoReferenceUrls);
   const referenceCount = useReferenceUrls ? enteredVideoUrls.length : videoReferences.length;
   const videoReferenceReady = !hasVideoControls || activeVideoMode === "text" || (
     (activeVideoMode === "reference" ? referenceCount > 0 && referenceCount <= videoReferenceMaximum : referenceCount === videoReferenceMaximum)
-    && (useReferenceUrls || videoReferences.every((item) => item.kind === (activeVideoMode === "video" ? "video" : "image")))
+    && (useReferenceUrls ? enteredVideoUrls.every(Boolean) : videoReferences.every((item) => item.kind === (activeVideoMode === "video" ? "video" : "image")))
   );
   const imageDimensions = minimaxImage ? selectedModelId === "image-01-live" ? [] : IMAGE_DIMENSION_OPTIONS.filter((option) => !option.experimental || option.value === "2048x2048") : IMAGE_DIMENSION_OPTIONS;
   const imageRatios = minimaxImage ? IMAGE_RATIO_OPTIONS.filter((ratio) => ratio !== "9:21" && (selectedModelId !== "image-01-live" || ratio !== "21:9")) : IMAGE_RATIO_OPTIONS;
@@ -359,7 +360,12 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
       void Promise.all(discarded.map((item) => deleteImageAttachment(item.id).catch(() => false)));
       return retained;
     });
-    setVideoReferenceUrls((current) => current.slice(0, maximum));
+    setVideoReferenceUrls((current) => {
+      const retained = current.slice(0, maximum);
+      const minimum = activeVideoMode === "first_last" ? 2 : maximum > 0 ? 1 : 0;
+      while (retained.length < minimum) retained.push(createMediaReferenceUrl());
+      return retained;
+    });
   }, [kind, activeVideoMode, selectedModelId]);
 
   useEffect(() => {
@@ -682,6 +688,14 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
     await deleteImageAttachment(attachment.id).catch(() => undefined);
   };
 
+  const removeVideoReferenceUrl = (id: string) => {
+    setVideoReferenceUrls((current) => {
+      if (activeVideoMode === "first_last") return current.map((item) => item.id === id ? { ...item, url: "" } : item);
+      const remaining = current.filter((item) => item.id !== id);
+      return remaining.length > 0 ? remaining : [createMediaReferenceUrl()];
+    });
+  };
+
   const removeImageEditEntry = async (entry: ImageEditEntry) => {
     const nextEntries = imageEditEntries.filter((item) => item.id !== entry.id);
     await replaceImageEditEntries(nextEntries);
@@ -718,7 +732,9 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
       return;
     }
     if (!videoReferenceReady) {
-      setError(videoReferenceRequirement(activeVideoMode));
+      setError(useReferenceUrls && enteredVideoUrls.some((url) => !url)
+        ? tr("请填写或移除空白图片地址，保持图号与发送顺序一致", "Fill or remove empty image URLs to keep image numbers aligned with the submitted order")
+        : videoReferenceRequirement(activeVideoMode));
       return;
     }
     setError(null);
@@ -1049,15 +1065,24 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
                 <span>{tr("参考图", "References")}<small>{pastingReferences ? tr("正在粘贴图片…", "Pasting images…") : tr("可拖拽、选择，或按 Ctrl+V 粘贴外部图片", "Drop, choose, or press Ctrl+V to paste images")}</small></span>
                 <button disabled={pastingReferences || imageReferences.length >= 8} onClick={() => void addImageReferences()}>{pastingReferences ? <LoaderCircle className="spin" size={14} /> : <ImagePlus size={14} />}{tr("选择图片", "Choose images")}</button>
               </div>
-              <div>{imageReferences.map((attachment) => <AttachmentChip attachment={attachment} onRemove={() => void removeImageReference(attachment)} key={attachment.id} />)}</div>
+              <MediaReferenceOrderHint />
+              <MediaReferenceList attachments={imageReferences} onMove={(id, direction) => setImageReferences((current) => moveMediaReference(current, current.findIndex((item) => item.id === id), direction))} onRemove={(attachment) => void removeImageReference(attachment)} />
             </div>
           )}
 
           {isNativeVideo && activeVideoMode !== "text" && <div className="media-reference-row">
             <label className="media-wide-field media-reference-source"><span>{tr("素材来源", "Reference source")}</span><select value={videoReferenceSource} onChange={(event) => setVideoReferenceSource(event.target.value as "url" | "local")}><option value="url">{tr("公网 HTTPS 图片地址（通用）", "Public HTTPS image URLs")}</option><option value="local">{tr("本地图片（自动上传）", "Local images (automatic upload)")}</option></select></label>
             {useReferenceUrls && <>
-              <div className="media-reference-heading"><span>{videoReferenceTitle(activeVideoMode)}<small>{tr("使用上游无需登录即可访问的 HTTPS 图片地址", "Use HTTPS image URLs accessible without signing in")}</small></span></div>
-              {Array.from({ length: activeVideoMode === "reference" ? Math.min(videoReferenceMaximum, Math.max(1, videoReferenceUrls.length + 1)) : videoReferenceMaximum }, (_, index) => <label className="media-wide-field" key={index}><span>{activeVideoMode === "first_last" ? index === 0 ? tr("首帧", "First frame") : tr("尾帧", "Last frame") : tr(`参考图 ${index + 1}`, `Reference ${index + 1}`)}</span><input type="url" value={videoReferenceUrls[index] ?? ""} placeholder="https://…" onChange={(event) => setVideoReferenceUrls((current) => { const next = [...current]; next[index] = event.target.value; return next; })} /></label>)}
+              <div className="media-reference-heading">
+                <span>{videoReferenceTitle(activeVideoMode)}<small>{tr("使用上游无需登录即可访问的 HTTPS 图片地址", "Use HTTPS image URLs accessible without signing in")}</small></span>
+                {activeVideoMode === "reference" && <button type="button" disabled={videoReferenceUrls.length >= videoReferenceMaximum} onClick={() => setVideoReferenceUrls((current) => [...current, createMediaReferenceUrl()])}><Plus size={14} />{tr("添加地址", "Add URL")}</button>}
+              </div>
+              <MediaReferenceOrderHint mode={activeVideoMode} />
+              <MediaReferenceUrlList references={videoReferenceUrls} mode={activeVideoMode}
+                onMove={(id, direction) => setVideoReferenceUrls((current) => moveMediaReference(current, current.findIndex((item) => item.id === id), direction))}
+                onChange={(id, url) => setVideoReferenceUrls((current) => current.map((item) => item.id === id ? { ...item, url } : item))}
+                onRemove={removeVideoReferenceUrl} />
+              {enteredVideoUrls.some((url) => !url) && <p className="media-reference-order-hint">{tr("请填写或移除空白地址后再生成；首尾帧需要两张图片。", "Fill or remove empty URLs before generating; first/last frames require two images.")}</p>}
               <small>{tr(`最多 ${videoReferenceMaximum} 张；首尾帧与多图参考分别使用`, `Up to ${videoReferenceMaximum} images; frame and multi-reference modes are separate`)}</small>
             </>}
             {!useReferenceUrls && <small>{tr("本地图片会随生成请求发送到所选连接；通过 LevelUpAPI 时自动上传，无需配置图床", "Local images are sent to the selected connection; LevelUpAPI uploads them automatically")}</small>}
@@ -1072,7 +1097,8 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
                   {activeVideoMode === "video" ? tr("选择视频", "Choose video") : tr("选择图片", "Choose images")}
                 </button>
               </div>
-              <div>{videoReferences.map((attachment, index) => <span className="media-frame-reference" key={attachment.id}>{activeVideoMode === "first_last" && <small>{index === 0 ? tr("首帧", "First frame") : tr("尾帧", "Last frame")}</small>}<AttachmentChip attachment={attachment} onRemove={() => void removeVideoReference(attachment)} /></span>)}</div>
+              <MediaReferenceOrderHint mode={activeVideoMode} />
+              <MediaReferenceList attachments={videoReferences} mode={activeVideoMode} onMove={(id, direction) => setVideoReferences((current) => moveMediaReference(current, current.findIndex((item) => item.id === id), direction))} onRemove={(attachment) => void removeVideoReference(attachment)} />
             </div>
           )}
 

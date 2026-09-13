@@ -963,7 +963,7 @@ async fn call_openai_images(
     references: &[ManagedReference],
     mask: Option<&ManagedReference>,
 ) -> Result<Vec<GeneratedBlob>, String> {
-    let prompt = effective_image_prompt(request);
+    let prompt = numbered_reference_prompt(&effective_image_prompt(request), references.len(), false);
     let grok = is_grok_image_model(model);
     let result = if references.is_empty() {
         let url = agent::endpoint(&provider.profile.base_url, "/v1/images/generations")?;
@@ -1102,15 +1102,16 @@ async fn call_gemini_image(
         &provider.profile.base_url,
         &format!("/v1beta/models/{model}:generateContent"),
     )?;
-    let mut parts = vec![json!({ "text": effective_image_prompt(request) })];
-    parts.extend(references.iter().map(|image| {
-        json!({
+    let mut parts = vec![json!({ "text": numbered_reference_prompt(&effective_image_prompt(request), references.len(), false) })];
+    for (index, image) in references.iter().enumerate() {
+        parts.push(json!({ "text": format!("Image {} / 图 {}:", index + 1, index + 1) }));
+        parts.push(json!({
             "inlineData": {
                 "mimeType": image.mime_type,
                 "data": base64::engine::general_purpose::STANDARD.encode(&image.bytes)
             }
-        })
-    }));
+        }));
+    }
     let mut generation_config = json!({ "responseModalities": ["TEXT", "IMAGE"] });
     let mut image_config = serde_json::Map::new();
     if let Some(size) = request.size.as_deref().and_then(gemini_aspect_ratio) {
@@ -1705,7 +1706,7 @@ fn grok_video_request(
     };
     let mut body = json!({
         "model": model,
-        "prompt": request.prompt.trim(),
+        "prompt": numbered_reference_prompt(request.prompt.trim(), if request.video_mode == VideoGenerationMode::Video { 0 } else { references.len() }, false),
     });
     match request.video_mode {
         VideoGenerationMode::Text => {}
@@ -2491,6 +2492,22 @@ fn video_size_label(request: &MediaGenerationRequest) -> Option<String> {
     }
 }
 
+/// These labels describe actual input positions, including after a UI reorder.
+/// Only provider prompts receive this context; saved user prompts stay editable.
+fn numbered_reference_prompt(prompt: &str, count: usize, first_last: bool) -> String {
+    if count == 0 {
+        return prompt.to_owned();
+    }
+    let frames = if first_last {
+        " Image 1 / 图 1 is the first frame; Image 2 / 图 2 is the last frame."
+    } else {
+        ""
+    };
+    format!(
+        "{prompt}\n\n[Reference image order: {count} images, numbered 1 through {count} in the order attached. 'Image N', '图 N', and ordinal phrases such as 'first image' / '第一张图' refer to that input position.{frames} Use these numbers to identify references; do not render the labels unless the user requests them.]"
+    )
+}
+
 fn effective_image_prompt(request: &MediaGenerationRequest) -> String {
     let prompt = request.prompt.trim();
     let Some(requirement) = request.size.as_deref().and_then(image_output_requirement) else {
@@ -3064,7 +3081,9 @@ mod tests {
         request.video_mode = VideoGenerationMode::Reference;
         request.video_resolution = Some("720p".to_owned());
         request.seconds = Some(10);
-        let references = vec![image.clone(), image.clone()];
+        let mut second_image = image.clone();
+        second_image.bytes = b"\x89PNG\r\n\x1a\nsecond-reference".to_vec();
+        let references = vec![second_image.clone(), image.clone()];
         assert!(validate_model_request("grok-imagine-video", &request, &references).is_ok());
         let (_, body) = grok_video_request("grok-imagine-video", &request, &references).unwrap();
         assert_eq!(
@@ -3074,6 +3093,9 @@ mod tests {
             Some(2)
         );
         assert!(body.get("image").is_none());
+        assert_eq!(body["reference_images"][0]["url"], reference_data_url(&second_image));
+        assert_eq!(body["reference_images"][1]["url"], reference_data_url(&image));
+        assert!(body["prompt"].as_str().unwrap().contains("Reference image order: 2 images"));
 
         let video = ManagedReference {
             file_name: "source.mp4".to_owned(),
@@ -3093,6 +3115,7 @@ mod tests {
                 .is_some_and(|value| value.starts_with("data:video/mp4;base64,"))
         );
         assert!(body.get("duration").is_none());
+        assert_eq!(body["prompt"], request.prompt.trim());
         assert!(body.get("resolution").is_none());
         assert!(body.get("aspect_ratio").is_none());
 
@@ -3299,6 +3322,8 @@ mod tests {
             let request = String::from_utf8_lossy(request);
             assert!(request.contains("name=\"n\"\r\n\r\n1\r\n"));
             assert!(!request.contains("name=\"n\"\r\n\r\n2\r\n"));
+            assert!(request.contains("Reference image order: 2 images"));
+            assert!(request.find("mock-reference-z").unwrap() < request.find("mock-reference-a").unwrap());
         });
         let mut provider = provider("primary", "gpt-image-2");
         provider.profile.base_url = base_url;
@@ -3307,12 +3332,12 @@ mod tests {
             model: "gpt-image-2".to_owned(),
             protocol: ProviderProtocol::OpenaiChat,
         };
-        let references = vec![ManagedReference {
-            file_name: "reference.png".to_owned(),
+        let references = ["z", "a"].map(|name| ManagedReference {
+            file_name: format!("{name}.png"),
             mime_type: "image/png".to_owned(),
-            bytes: b"\x89PNG\r\n\x1a\nmock-reference".to_vec(),
+            bytes: format!("mock-reference-{name}").into_bytes(),
             kind: AttachmentKind::Image,
-        }];
+        });
         let (root, database) = temp_storage("openai-edit-multiple");
         let result = generate_batch(
             &Client::new(),
@@ -3328,6 +3353,7 @@ mod tests {
 
         assert_eq!(result.assets.len(), 2);
         assert!(result.errors.is_empty());
+        assert!(result.assets.iter().all(|asset| asset.prompt == "A useful test output"));
         server.join().unwrap();
         drop(database);
         let _ = std::fs::remove_dir_all(root);
@@ -3444,13 +3470,22 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        let (base_url, server) = mock_sequence(vec![MockResponse {
+        let (base_url, server) = mock_sequence_inspecting(vec![MockResponse {
             method: "POST",
             path: "/v1beta/models/gemini-3.1-flash-image:generateContent",
             status: 200,
             content_type: "application/json",
             body,
-        }]);
+        }], |_, request| {
+            let text = String::from_utf8_lossy(request);
+            let body: Value = serde_json::from_str(text.split_once("\r\n\r\n").unwrap().1).unwrap();
+            let parts = body["contents"][0]["parts"].as_array().unwrap();
+            assert!(parts[0]["text"].as_str().unwrap().contains("Reference image order: 2 images"));
+            assert_eq!(parts[1]["text"], "Image 1 / 图 1:");
+            assert_eq!(parts[2]["inlineData"]["data"], "eg==");
+            assert_eq!(parts[3]["text"], "Image 2 / 图 2:");
+            assert_eq!(parts[4]["inlineData"]["data"], "YQ==");
+        });
         let mut provider = provider("gemini", "gemini-3.1-flash-image");
         provider.profile.base_url = format!("{base_url}/v1");
         provider.profile.protocol = ProviderProtocol::GeminiGenerateContent;
@@ -3461,6 +3496,12 @@ mod tests {
         };
         let (root, database) = temp_storage("gemini-image");
         let storage = root.join("media");
+        let references = ["z", "a"].map(|name| ManagedReference {
+            file_name: format!("{name}.png"),
+            mime_type: "image/png".to_owned(),
+            bytes: name.as_bytes().to_vec(),
+            kind: AttachmentKind::Image,
+        });
         let result = generate_batch(
             &Client::new(),
             &storage,
@@ -3468,7 +3509,7 @@ mod tests {
             &selection,
             &request(MediaKind::Image, 1),
             None,
-            &[],
+            &references,
         )
         .await
         .unwrap();
