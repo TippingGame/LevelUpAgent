@@ -623,6 +623,7 @@ pub enum VideoGenerationMode {
     #[default]
     Text,
     Image,
+    FirstLast,
     Reference,
     Video,
 }
@@ -681,6 +682,10 @@ pub struct MediaGenerationRequest {
     pub video_aspect_ratio: Option<String>,
     #[serde(default)]
     pub reference_attachment_ids: Vec<String>,
+    /// Public HTTPS image references, ordered first frame then last frame in
+    /// first_last mode. Compatible video relays cannot fetch local files.
+    #[serde(default)]
+    pub reference_urls: Vec<String>,
     /// Optional PNG mask for OpenAI-compatible image edits. Transparent pixels
     /// identify the region that may be replaced.
     #[serde(default)]

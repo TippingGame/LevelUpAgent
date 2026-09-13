@@ -663,7 +663,7 @@ export interface ProviderModelCatalog {
 
 export type MediaKind = "image" | "video" | "audio";
 export type MediaStatus = "queued" | "in_progress" | "completed" | "failed";
-export type VideoGenerationMode = "text" | "image" | "reference" | "video";
+export type VideoGenerationMode = "text" | "image" | "first_last" | "reference" | "video";
 
 export interface MediaModelInfo {
   id: string;
@@ -698,6 +698,7 @@ export interface MediaGenerationRequest {
   videoResolution?: string;
   videoAspectRatio?: string;
   referenceAttachmentIds: string[];
+  referenceUrls?: string[];
   maskAttachmentId?: string;
 }
 

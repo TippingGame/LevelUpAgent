@@ -18,6 +18,9 @@ use crate::models::{
     ProviderProtocol, VideoGenerationMode,
 };
 
+mod native_media;
+use native_media::*;
+
 const MAX_PROMPT_CHARS: usize = 32_000;
 const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_IMAGE_REFERENCE_TOTAL_BYTES: usize = 64 * 1024 * 1024;
@@ -89,33 +92,13 @@ pub async fn discover_catalog(
     let mut seen = HashSet::new();
 
     for (provider, response) in providers.iter().zip(responses) {
-        let mut discovered = match response {
+        let discovered = match response {
             Ok(items) => items,
             Err(error) => {
                 errors.push(format!("{}: {error}", provider.profile.name));
                 Vec::new()
             }
         };
-        let configured_model = provider.profile.model.trim().trim_start_matches("models/");
-        if !configured_model.is_empty()
-            && !discovered.iter().any(|model| {
-                model
-                    .id
-                    .trim()
-                    .trim_start_matches("models/")
-                    .eq_ignore_ascii_case(configured_model)
-            })
-        {
-            discovered.push(ModelInfo {
-                id: provider.profile.model.clone(),
-                owned_by: None,
-                protocol: Some(provider.profile.protocol.clone()),
-                protocols: vec![provider.profile.protocol.clone()],
-                supported_generation_methods: Vec::new(),
-                input_modalities: Vec::new(),
-                output_modalities: Vec::new(),
-            });
-        }
         for model in discovered {
             let id = model.id.trim().trim_start_matches("models/").to_owned();
             if id.is_empty() {
@@ -158,11 +141,29 @@ fn mark_recommended_models(models: &mut [MediaModelInfo], active_profile_id: &st
     for model in models.iter_mut() {
         model.recommended = false;
     }
-    for kind in [MediaKind::Image, MediaKind::Video, MediaKind::Audio] {
+    // Preserve the overall recommendation and also expose a useful default
+    // within each new media platform, even when other providers are connected.
+    for (kind, family) in [
+        (MediaKind::Image, None),
+        (MediaKind::Video, None),
+        (MediaKind::Audio, None),
+        (MediaKind::Image, Some("minimax")),
+        (MediaKind::Video, Some("minimax")),
+        (MediaKind::Video, Some("seedance")),
+    ] {
         let preferred = models
             .iter()
             .enumerate()
-            .filter(|(_, item)| item.kind == kind)
+            .filter(|(_, item)| {
+                item.kind == kind
+                    && match family {
+                        Some("minimax") => {
+                            is_minimax_image_model(&item.id) || is_minimax_video_model(&item.id)
+                        }
+                        Some("seedance") => is_seedance_video_model(&item.id),
+                        _ => true,
+                    }
+            })
             .max_by(|(_, left), (_, right)| {
                 left.rank
                     .cmp(&right.rank)
@@ -410,7 +411,11 @@ pub async fn refresh_asset(
     {
         poll_gemini_video(client, provider, &remote_id).await
     } else {
-        poll_openai_video(client, provider, &remote_id).await
+        if is_minimax_video_model(&asset.model) {
+            poll_minimax_video(client, provider, &remote_id).await
+        } else {
+            poll_openai_video(client, provider, &remote_id).await
+        }
     };
     let now = now_millis();
     match result {
@@ -464,6 +469,7 @@ fn classify_media_model(model: &str) -> Vec<(MediaKind, i64)> {
         || id.contains("imagen")
         || (id.contains("gemini") && id.contains("image"))
         || id.contains("image-generation")
+        || is_minimax_image_model(&id)
         || id == "grok-imagine"
         || id == "grok-imagine-edit"
         || id.starts_with("grok-imagine-image")
@@ -482,6 +488,8 @@ fn classify_media_model(model: &str) -> Vec<(MediaKind, i64)> {
         || id.contains("video-generation")
         || id.contains("text-to-video")
         || id.starts_with("grok-imagine-video")
+        || is_minimax_video_model(&id)
+        || is_seedance_video_model(&id)
     {
         kinds.push((MediaKind::Video, video_rank(&id)));
     }
@@ -522,7 +530,9 @@ fn is_native_gemini_media_family(model: &str, kind: &MediaKind) -> bool {
 }
 
 fn image_rank(id: &str) -> i64 {
-    let family = if id == "gpt-image-2" || id.ends_with("/gpt-image-2") {
+    let family = if id.ends_with("gpt-image-2.5-sunburst") {
+        10_500_000_000
+    } else if id == "gpt-image-2" || id.ends_with("/gpt-image-2") {
         9_900_000_000
     } else if id.starts_with("gpt-image-2-") {
         9_800_000_000
@@ -548,6 +558,10 @@ fn image_rank(id: &str) -> i64 {
         8_100_000_000
     } else if id.starts_with("grok-imagine-image") {
         8_000_000_000
+    } else if id == "image-01" {
+        7_500_000_000
+    } else if id == "image-01-live" {
+        7_400_000_000
     } else if id.contains("dall-e-3") {
         7_000_000_000
     } else {
@@ -586,6 +600,14 @@ fn video_rank(id: &str) -> i64 {
         9_100_000_000
     } else if id.starts_with("grok-imagine-video") {
         8_900_000_000
+    } else if id == "seedance-2.5" {
+        7_900_000_000
+    } else if matches!(id, "seedance-2" | "seedance-2.0") {
+        7_800_000_000
+    } else if id == "minimax-h3" {
+        7_700_000_000
+    } else if id == "minimax-h3-max" {
+        7_600_000_000
     } else if id.contains("sora") {
         8_000_000_000
     } else {
@@ -693,39 +715,45 @@ fn validate_video_references(
     if total > 64 * 1024 * 1024 {
         return Err("Video reference attachments may total at most 64 MiB".to_owned());
     }
+    if !request.reference_urls.is_empty() && !references.is_empty() {
+        return Err(
+            "Choose either public reference URLs or local reference files, not both".to_owned(),
+        );
+    }
+    for url in &request.reference_urls {
+        validate_public_reference_url(url)?;
+    }
+    let count = references.len() + request.reference_urls.len();
+    let all_images = references
+        .iter()
+        .all(|item| item.kind == AttachmentKind::Image);
     match request.video_mode {
-        VideoGenerationMode::Text => {
-            if !references.is_empty() {
-                return Err(
-                    "Text-to-video cannot be combined with reference attachments".to_owned(),
-                );
-            }
+        VideoGenerationMode::Text if count != 0 => {
+            return Err("Text-to-video cannot include references".to_owned());
         }
-        VideoGenerationMode::Image => {
-            if references.len() != 1 || references[0].kind != AttachmentKind::Image {
-                return Err("Image-to-video requires exactly one source image".to_owned());
-            }
+        VideoGenerationMode::Image if count != 1 || !all_images => {
+            return Err("First-frame generation requires one image".to_owned());
         }
-        VideoGenerationMode::Reference => {
-            if references.is_empty()
-                || references.len() > 7
-                || references
-                    .iter()
-                    .any(|reference| reference.kind != AttachmentKind::Image)
-            {
-                return Err("Reference-to-video requires between 1 and 7 images".to_owned());
-            }
-            if request.seconds.is_some_and(|seconds| seconds > 10) {
-                return Err(
-                    "Reference-to-video supports a maximum duration of 10 seconds".to_owned(),
-                );
-            }
+        VideoGenerationMode::FirstLast if count != 2 || !all_images => {
+            return Err(
+                "First/last-frame generation requires two images, first frame then last frame"
+                    .to_owned(),
+            );
         }
-        VideoGenerationMode::Video => {
-            if references.len() != 1 || references[0].kind != AttachmentKind::Video {
-                return Err("Video editing requires exactly one MP4 source video".to_owned());
-            }
+        VideoGenerationMode::Reference if count == 0 || count > 30 || !all_images => {
+            return Err(
+                "Reference generation requires 1–30 images within the selected model limit"
+                    .to_owned(),
+            );
         }
+        VideoGenerationMode::Video
+            if references.len() != 1
+                || references[0].kind != AttachmentKind::Video
+                || !request.reference_urls.is_empty() =>
+        {
+            return Err("Video editing requires exactly one local MP4 source video".to_owned());
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -749,6 +777,16 @@ fn validate_model_request(
     }
     if request.kind == MediaKind::Video {
         let normalized = model.trim_start_matches("models/").to_ascii_lowercase();
+        if is_minimax_video_model(model) || is_seedance_video_model(model) {
+            return validate_native_video_request(model, request, references);
+        }
+        if !request.reference_urls.is_empty()
+            || request.video_mode == VideoGenerationMode::FirstLast
+        {
+            return Err(
+                "The selected video model does not support these reference modes".to_owned(),
+            );
+        }
         if !is_grok_video_model(model) {
             if request.video_mode != VideoGenerationMode::Text || !references.is_empty() {
                 return Err(
@@ -757,6 +795,11 @@ fn validate_model_request(
                 );
             }
             return Ok(());
+        }
+        if request.video_mode == VideoGenerationMode::Reference
+            && (references.len() > 7 || request.seconds.is_some_and(|value| value > 10))
+        {
+            return Err("Grok references support at most 7 images and 10 seconds".to_owned());
         }
         let is_15 = normalized.contains("grok-imagine-video-1.5");
         if is_15 && request.video_mode != VideoGenerationMode::Image {
@@ -846,7 +889,17 @@ async fn generate_images(
     let mut provider_request = request.clone();
     provider_request.count = 1;
     let calls = (0..request.count).map(|_| async {
-        if native_gemini {
+        if is_minimax_image_model(&selection.model) {
+            call_minimax_image(
+                client,
+                &selection.provider,
+                &selection.model,
+                &provider_request,
+                references,
+                mask,
+            )
+            .await
+        } else if native_gemini {
             call_gemini_image(
                 client,
                 &selection.provider,
@@ -1493,11 +1546,36 @@ async fn generate_videos(
     references: &[ManagedReference],
     batch_id: String,
 ) -> Result<MediaBatchResult, String> {
+    let mut published_request = request.clone();
+    let needs_upload = !references.is_empty()
+        && (is_seedance_video_model(&selection.model)
+            || (is_minimax_video_model(&selection.model)
+                && !uses_direct_minimax_media(&selection.provider)));
+    let references = if needs_upload {
+        published_request.reference_urls =
+            upload_video_references(client, &selection.provider, references).await?;
+        published_request.reference_attachment_ids.clear();
+        &[][..]
+    } else {
+        references
+    };
+    let request = &published_request;
     let calls = (0..request.count).map(|_| async {
         if matches!(selection.protocol, ProviderProtocol::GeminiGenerateContent)
             && is_gemini_video_model(&selection.model)
         {
             create_gemini_video(client, &selection.provider, &selection.model, request).await
+        } else if is_minimax_video_model(&selection.model)
+            || is_seedance_video_model(&selection.model)
+        {
+            create_native_video(
+                client,
+                &selection.provider,
+                &selection.model,
+                request,
+                references,
+            )
+            .await
         } else if is_grok_video_model(&selection.model) {
             create_grok_video(
                 client,
@@ -1631,6 +1709,9 @@ fn grok_video_request(
     });
     match request.video_mode {
         VideoGenerationMode::Text => {}
+        VideoGenerationMode::FirstLast => {
+            return Err("Grok does not support first/last frames".to_owned());
+        }
         VideoGenerationMode::Image => {
             let reference = references
                 .first()
@@ -2606,6 +2687,7 @@ mod tests {
             video_resolution: None,
             video_aspect_ratio: None,
             reference_attachment_ids: Vec::new(),
+            reference_urls: Vec::new(),
             mask_attachment_id: None,
         }
     }
@@ -2624,6 +2706,10 @@ mod tests {
     fn classifies_and_ranks_current_generation_models() {
         assert_eq!(classify_media_model("gpt-image-2")[0].0, MediaKind::Image);
         assert!(image_rank("gpt-image-2") > image_rank("gpt-image-1.5"));
+        assert!(image_rank("gpt-image-2.5-sunburst") > image_rank("gpt-image-2"));
+        assert_eq!(classify_media_model("image-01")[0].0, MediaKind::Image);
+        assert_eq!(classify_media_model("MiniMax-H3")[0].0, MediaKind::Video);
+        assert_eq!(classify_media_model("Seedance-2.5")[0].0, MediaKind::Video);
         assert!(image_rank("gemini-3.1-flash-image") > image_rank("gemini-2.5-flash-image"));
         assert_eq!(
             classify_media_model("gemini-3.1-flash-lite-image")[0].0,
@@ -2797,6 +2883,7 @@ mod tests {
             video_resolution: None,
             video_aspect_ratio: None,
             reference_attachment_ids: Vec::new(),
+            reference_urls: Vec::new(),
             mask_attachment_id: None,
         };
         let selected = selection_candidates(&providers, &catalog, &request);
@@ -3796,5 +3883,419 @@ mod tests {
         download_server.join().unwrap();
         drop(database);
         let _ = std::fs::remove_dir_all(root);
+    }
+    #[tokio::test]
+    async fn generates_and_persists_native_minimax_images() {
+        let png = b"\x89PNG\r\n\x1a\nminimax-image";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(png);
+        let (base_url, server) = mock_sequence_inspecting(vec![MockResponse {
+            method: "POST", path: "/v1/image_generation", status: 200, content_type: "application/json",
+            body: json!({"base_resp": {"status_code": 0}, "data": {"image_base64": [encoded]}, "metadata": {"success_count": 1, "failed_count": 0}}).to_string().into_bytes(),
+        }], |_, bytes| {
+            let text = String::from_utf8_lossy(bytes);
+            let body: Value = serde_json::from_str(text.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(body["model"], "image-01");
+            assert_eq!(body["response_format"], "base64");
+            assert!(body.get("size").is_none());
+        });
+        let mut provider = provider("minimax", "image-01");
+        provider.profile.base_url = format!("{base_url}/v1");
+        let selection = MediaSelection {
+            provider,
+            model: "image-01".into(),
+            protocol: ProviderProtocol::OpenaiChat,
+        };
+        let (root, database) = temp_storage("minimax-image");
+        let result = generate_batch(
+            &Client::new(),
+            &root.join("media"),
+            &database,
+            &selection,
+            &request(MediaKind::Image, 1),
+            None,
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.assets[0].status, MediaStatus::Completed);
+        assert_eq!(
+            std::fs::read(result.assets[0].file_path.as_deref().unwrap()).unwrap(),
+            png
+        );
+        server.join().unwrap();
+        drop(database);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn minimax_v2_job_downloads_without_forwarding_credentials_to_cdn() {
+        let (download_base, download_server) = mock_sequence_inspecting(
+            vec![MockResponse {
+                method: "GET",
+                path: "/output.mp4",
+                status: 200,
+                content_type: "video/mp4",
+                body: b"minimax-video-output".to_vec(),
+            }],
+            |_, bytes| {
+                assert!(
+                    !String::from_utf8_lossy(bytes)
+                        .to_ascii_lowercase()
+                        .contains("authorization:")
+                )
+            },
+        );
+        let (base_url, server) = mock_sequence_inspecting(vec![
+            MockResponse { method: "POST", path: "/v2/video_generation", status: 200, content_type: "application/json", body: br#"{"task_id":"h3-task"}"#.to_vec() },
+            MockResponse { method: "GET", path: "/v2/query/video_generation/h3-task", status: 200, content_type: "application/json", body: br#"{"task":{"id":"h3-task","status":"running"}}"#.to_vec() },
+            MockResponse { method: "GET", path: "/v2/query/video_generation/h3-task", status: 200, content_type: "application/json", body: json!({"task": {"id": "h3-task", "status": "succeeded", "content": {"url": format!("{download_base}/output.mp4")}}}).to_string().into_bytes() },
+        ], |index, bytes| {
+            let text = String::from_utf8_lossy(bytes);
+            assert!(text.to_ascii_lowercase().contains("authorization: bearer secret"));
+            if index == 0 {
+                let body: Value = serde_json::from_str(text.split_once("\r\n\r\n").unwrap().1).unwrap();
+                assert_eq!(body["content"][0]["type"], "text");
+                assert_eq!(body["resolution"], "768P");
+            }
+        });
+        let mut provider = provider("minimax", "MiniMax-H3");
+        provider.profile.base_url = format!("{base_url}/v1");
+        let selection = MediaSelection {
+            provider: provider.clone(),
+            model: "MiniMax-H3".into(),
+            protocol: ProviderProtocol::OpenaiChat,
+        };
+        let (root, database) = temp_storage("minimax-video");
+        let storage = root.join("media");
+        let created = generate_batch(
+            &Client::new(),
+            &storage,
+            &database,
+            &selection,
+            &request(MediaKind::Video, 1),
+            None,
+            &[],
+        )
+        .await
+        .unwrap();
+        let running = refresh_asset(
+            &Client::new(),
+            &storage,
+            &database,
+            &provider,
+            created.assets[0].clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(running.status, MediaStatus::InProgress);
+        let completed = refresh_asset(&Client::new(), &storage, &database, &provider, running)
+            .await
+            .unwrap();
+        assert_eq!(completed.status, MediaStatus::Completed);
+        assert!(Path::new(completed.file_path.as_deref().unwrap()).is_file());
+        server.join().unwrap();
+        download_server.join().unwrap();
+        drop(database);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn seedance_compatible_job_uses_task_id_and_content_download() {
+        let (base_url, server) = mock_sequence_inspecting(
+            vec![
+                MockResponse {
+                    method: "POST",
+                    path: "/v1/videos",
+                    status: 200,
+                    content_type: "application/json",
+                    body: br#"{"task_id":"seedance-task","status":"queued"}"#.to_vec(),
+                },
+                MockResponse {
+                    method: "GET",
+                    path: "/v1/videos/seedance-task",
+                    status: 200,
+                    content_type: "application/json",
+                    body: br#"{"id":"seedance-task","status":"completed"}"#.to_vec(),
+                },
+                MockResponse {
+                    method: "GET",
+                    path: "/v1/videos/seedance-task/content",
+                    status: 200,
+                    content_type: "video/mp4",
+                    body: b"seedance-video-output".to_vec(),
+                },
+            ],
+            |index, bytes| {
+                if index == 0 {
+                    let text = String::from_utf8_lossy(bytes);
+                    assert!(text.contains("application/json"));
+                    let body: Value =
+                        serde_json::from_str(text.split_once("\r\n\r\n").unwrap().1).unwrap();
+                    assert_eq!(body["duration"], 30);
+                    assert_eq!(body["first_image"], "https://cdn.test/first.png");
+                    assert_eq!(body["last_image"], "https://cdn.test/last.png");
+                }
+            },
+        );
+        let mut provider = provider("seedance", "Seedance-2.5");
+        provider.profile.base_url = format!("{base_url}/v1");
+        let selection = MediaSelection {
+            provider: provider.clone(),
+            model: "Seedance-2.5".into(),
+            protocol: ProviderProtocol::OpenaiChat,
+        };
+        let (root, database) = temp_storage("seedance-video");
+        let storage = root.join("media");
+        let mut request = request(MediaKind::Video, 1);
+        request.seconds = Some(30);
+        request.video_mode = VideoGenerationMode::FirstLast;
+        request.reference_urls = vec![
+            "https://cdn.test/first.png".into(),
+            "https://cdn.test/last.png".into(),
+        ];
+        let created = generate_batch(
+            &Client::new(),
+            &storage,
+            &database,
+            &selection,
+            &request,
+            None,
+            &[],
+        )
+        .await
+        .unwrap();
+        let completed = refresh_asset(
+            &Client::new(),
+            &storage,
+            &database,
+            &provider,
+            created.assets[0].clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(completed.status, MediaStatus::Completed);
+        assert!(Path::new(completed.file_path.as_deref().unwrap()).is_file());
+        server.join().unwrap();
+        drop(database);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn seedance_uploads_local_frames_once_before_parallel_generation() {
+        let (base_url, server) = mock_sequence_inspecting(vec![
+            MockResponse { method: "POST", path: "/v1/media/references", status: 201, content_type: "application/json", body: br#"{"id":"ref-first","url":"https://public.test/media/references/ref-first","expires_at":99999999}"#.to_vec() },
+            MockResponse { method: "POST", path: "/v1/media/references", status: 201, content_type: "application/json", body: br#"{"id":"ref-last","url":"https://public.test/media/references/ref-last","expires_at":99999999}"#.to_vec() },
+            MockResponse { method: "POST", path: "/v1/videos", status: 200, content_type: "application/json", body: br#"{"task_id":"seedance-1"}"#.to_vec() },
+            MockResponse { method: "POST", path: "/v1/videos", status: 200, content_type: "application/json", body: br#"{"task_id":"seedance-2"}"#.to_vec() },
+        ], |index, bytes| {
+            let text = String::from_utf8_lossy(bytes);
+            assert!(text.to_ascii_lowercase().contains("authorization: bearer secret"));
+            if index < 2 {
+                assert!(text.contains("multipart/form-data"));
+                assert!(text.contains("name=\"file\""));
+            } else {
+                let body: Value = serde_json::from_str(text.split_once("\r\n\r\n").unwrap().1).unwrap();
+                assert_eq!(body["first_image"], "https://public.test/media/references/ref-first");
+                assert_eq!(body["last_image"], "https://public.test/media/references/ref-last");
+                assert!(!text.contains("data:image"));
+            }
+        });
+        let mut provider = provider("seedance", "Seedance-2");
+        provider.profile.base_url = format!("{base_url}/v1");
+        let selection = MediaSelection {
+            provider,
+            model: "Seedance-2".into(),
+            protocol: ProviderProtocol::OpenaiChat,
+        };
+        let (root, database) = temp_storage("seedance-uploads");
+        let mut request = request(MediaKind::Video, 2);
+        request.video_mode = VideoGenerationMode::FirstLast;
+        let references = vec![
+            ManagedReference {
+                file_name: "first.png".into(),
+                mime_type: "image/png".into(),
+                bytes: b"first-image".to_vec(),
+                kind: AttachmentKind::Image,
+            },
+            ManagedReference {
+                file_name: "last.png".into(),
+                mime_type: "image/png".into(),
+                bytes: b"last-image".to_vec(),
+                kind: AttachmentKind::Image,
+            },
+        ];
+        let result = generate_batch(
+            &Client::new(),
+            &root.join("media"),
+            &database,
+            &selection,
+            &request,
+            None,
+            &references,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.assets.len(), 2);
+        server.join().unwrap();
+        drop(database);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn failed_reference_upload_never_submits_a_video_job() {
+        let (base_url, server) = mock_sequence(vec![MockResponse {
+            method: "POST",
+            path: "/v1/media/references",
+            status: 400,
+            content_type: "application/json",
+            body: br#"{"error":{"message":"public HTTPS URL is not configured"}}"#.to_vec(),
+        }]);
+        let mut provider = provider("minimax", "MiniMax-H3");
+        provider.profile.base_url = base_url;
+        let selection = MediaSelection {
+            provider,
+            model: "MiniMax-H3".into(),
+            protocol: ProviderProtocol::OpenaiChat,
+        };
+        let (root, database) = temp_storage("failed-upload");
+        let mut request = request(MediaKind::Video, 1);
+        request.video_mode = VideoGenerationMode::Image;
+        let references = [ManagedReference {
+            file_name: "first.png".into(),
+            mime_type: "image/png".into(),
+            bytes: b"first-image".to_vec(),
+            kind: AttachmentKind::Image,
+        }];
+        let error = generate_batch(
+            &Client::new(),
+            &root.join("media"),
+            &database,
+            &selection,
+            &request,
+            None,
+            &references,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(error.contains("Could not upload"));
+        assert!(error.contains("public HTTPS URL is not configured"));
+        server.join().unwrap();
+        drop(database);
+        let _ = std::fs::remove_dir_all(root);
+    }
+    #[tokio::test]
+    async fn minimax_gateway_downloads_only_its_task_bound_relative_content_with_auth() {
+        let (base_url, server) = mock_sequence_inspecting(vec![
+            MockResponse { method: "GET", path: "/v2/query/video_generation/mm-relay", status: 200, content_type: "application/json", body: br#"{"task":{"id":"mm-relay","status":"succeeded","content":{"url":"/v1/videos/mm-relay/content"}}}"#.to_vec() },
+            MockResponse { method: "GET", path: "/v1/videos/mm-relay/content", status: 200, content_type: "video/mp4", body: b"relay-video-output".to_vec() },
+        ], |_, bytes| assert!(String::from_utf8_lossy(bytes).to_ascii_lowercase().contains("authorization: bearer secret")));
+        let mut provider = provider("minimax", "MiniMax-H3");
+        provider.profile.base_url = format!("{base_url}/v1");
+        let result = poll_minimax_video(&Client::new(), &provider, "mm-relay")
+            .await
+            .unwrap();
+        assert!(matches!(result, VideoPoll::Completed { .. }));
+        server.join().unwrap();
+    }
+    #[test]
+    fn media_recommendation_covers_each_native_platform_and_available_fallbacks() {
+        let model = |id: &str, profile: &str| {
+            let (kind, rank) = classify_media_model(id).into_iter().next().unwrap();
+            MediaModelInfo {
+                id: id.into(),
+                profile_id: profile.into(),
+                profile_name: profile.into(),
+                protocol: ProviderProtocol::OpenaiChat,
+                kind,
+                rank,
+                recommended: false,
+            }
+        };
+        let mut models = vec![
+            model("gpt-image-2.5-sunburst", "openai"),
+            model("image-01-live", "minimax"),
+            model("image-01", "minimax"),
+            model("sora-2", "openai"),
+            model("MiniMax-H3-Max", "minimax"),
+            model("MiniMax-H3", "minimax"),
+            model("Seedance-2", "seedance"),
+            model("Seedance-2.5", "seedance"),
+        ];
+        mark_recommended_models(&mut models, "minimax");
+        let recommended: Vec<_> = models
+            .iter()
+            .filter(|model| model.recommended)
+            .map(|model| model.id.as_str())
+            .collect();
+        assert_eq!(
+            recommended,
+            vec![
+                "gpt-image-2.5-sunburst",
+                "image-01",
+                "sora-2",
+                "MiniMax-H3",
+                "Seedance-2.5"
+            ]
+        );
+        models.retain(|model| {
+            !matches!(
+                model.id.as_str(),
+                "image-01" | "MiniMax-H3" | "Seedance-2.5"
+            )
+        });
+        mark_recommended_models(&mut models, "minimax");
+        for fallback in ["image-01-live", "MiniMax-H3-Max", "Seedance-2"] {
+            assert!(
+                models
+                    .iter()
+                    .find(|model| model.id == fallback)
+                    .unwrap()
+                    .recommended
+            );
+        }
+        let original_count = models.len();
+        mark_recommended_models(&mut models, "unavailable-profile");
+        assert_eq!(
+            models.len(),
+            original_count,
+            "recommendation must never invent a model"
+        );
+    }
+
+    #[tokio::test]
+    async fn media_catalog_never_injects_a_configured_model_missing_from_discovery() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                    let mut bytes = [0u8; 4096];
+                    let read = socket.read(&mut bytes).unwrap();
+                    assert!(read > 0);
+                    request.extend_from_slice(&bytes[..read]);
+                }
+                let body = r#"{"data":[{"id":"image-01-live"}]}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        let mut provider = provider("minimax", "image-01");
+        provider.profile.base_url = format!("http://{address}/v1");
+        let catalog = discover_catalog(&Client::new(), &[provider], "minimax").await;
+        assert!(catalog.errors.is_empty());
+        assert_eq!(catalog.models.len(), 1);
+        assert_eq!(catalog.models[0].id, "image-01-live");
+        assert!(catalog.models[0].recommended);
+        server.join().unwrap();
     }
 }

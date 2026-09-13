@@ -39,7 +39,7 @@
 
 ![创作空间：图片参数、参考图与本地历史](docs/images/creative-studio.png)
 
-更多设计取舍和 Image Studio 对照见 [创作空间能力审计](docs/CREATIVE_STUDIO_AUDIT.md)，星图协议和交互细节见 [星图文档](docs/CONSTELLATION.md)。
+更多设计取舍和 Image Studio 对照见 [创作空间能力审计](docs/CREATIVE_STUDIO_AUDIT.md)，MiniMax / Seedance 的模型、素材上传和接口说明见 [媒体平台接入](docs/MEDIA_PLATFORMS.md)，星图协议和交互细节见 [星图文档](docs/CONSTELLATION.md)。
 
 ## 快速开始
 

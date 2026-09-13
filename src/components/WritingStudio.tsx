@@ -91,7 +91,7 @@ import {
   type ArmorSkillState,
   type ArmorWritingIntensity,
 } from "../lib/armorMode";
-import { isTextGenerationModel, reasoningEffortForProfile } from "../lib/modelSelection";
+import { isTextGenerationModel, profileHasTextModel, reasoningEffortForProfile } from "../lib/modelSelection";
 import type { AgentMessage, ProviderModelInfo, ProviderProfile, ReasoningEffort } from "../lib/types";
 import {
   autoLayoutStoryNodes,
@@ -574,7 +574,7 @@ export function WritingStudio({
       attachments: [],
     }];
     const fallbackProfiles = profiles
-      .filter((profile) => profile.id !== writingRunProfile.id && profile.failoverEnabled)
+      .filter((profile) => profile.id !== writingRunProfile.id && profile.failoverEnabled && profileHasTextModel(profile))
       .sort((left, right) => left.priority - right.priority);
     try {
       const response = await agentTurnStream(
@@ -953,7 +953,7 @@ export function WritingStudio({
       attachments: [],
     }];
     const fallbackProfiles = profiles
-      .filter((profile) => profile.id !== writingRunProfile.id && profile.failoverEnabled)
+      .filter((profile) => profile.id !== writingRunProfile.id && profile.failoverEnabled && profileHasTextModel(profile))
       .sort((left, right) => left.priority - right.priority);
     try {
       const response = await agentTurnStream(

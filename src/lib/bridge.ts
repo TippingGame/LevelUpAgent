@@ -356,7 +356,7 @@ export async function importClipboardImages(files: File[]): Promise<ImageAttachm
 
 export async function importMediaReferences(sourcePaths: string[]): Promise<ImageAttachment[]> {
   if (!isDesktop() || sourcePaths.length === 0) return [];
-  return invoke<ImageAttachment[]>("import_media_references", { sourcePaths: sourcePaths.slice(0, 7) });
+  return invoke<ImageAttachment[]>("import_media_references", { sourcePaths: sourcePaths.slice(0, 30) });
 }
 
 export async function importClipboardAttachments(files: File[]): Promise<ImageAttachment[]> {
@@ -384,7 +384,7 @@ export async function previewAttachment(attachment: ImageAttachment): Promise<At
   });
 }
 
-export async function selectImageReferences(): Promise<ImageAttachment[]> {
+export async function selectImageReferences(maximum = 8, forVideo = false): Promise<ImageAttachment[]> {
   if (!isDesktop()) return [];
   const selected = await open({
     multiple: true,
@@ -392,7 +392,8 @@ export async function selectImageReferences(): Promise<ImageAttachment[]> {
     filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "gif"] }],
   });
   const paths = typeof selected === "string" ? [selected] : Array.isArray(selected) ? selected : [];
-  return importAttachments(paths.slice(0, 8));
+  if (paths.length > maximum) throw new Error(`Choose at most ${maximum} reference images for this mode`);
+  return forVideo ? importMediaReferences(paths) : importAttachments(paths);
 }
 
 export async function regeneratePetDailyPlan(petId: string): Promise<PetDashboard> {

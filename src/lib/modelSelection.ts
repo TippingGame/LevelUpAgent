@@ -222,15 +222,20 @@ export function reasoningEffortForProfile(
   return reasoningEffortsForProfile(profile).includes(effort) ? effort : "auto";
 }
 
-const NON_CHAT_MODEL = /(?:^|[\/:._-])(?:audio|dall-e|embed(?:ding|dings)?|image|imagen|imagine|moderation|realtime|speech|sora|stt|transcri|tts|veo|video|vision-preview|whisper)(?:[\/:._-]|$)/i;
+const NON_CHAT_MODEL = /(?:^|[\/:._-])(?:audio|dall-e|embed(?:ding|dings)?|image|imagen|imagine|moderation|realtime|speech|sora|stt|transcri|tts|veo|video|vision-preview|whisper|seedance|hailuo|minimax[._-]h[0-9]+)(?:[\/:._-]|$)/i;
 const LIGHTWEIGHT_MODEL = /(?:^|[\/:._-])(?:flash|haiku|mini|nano|small|lite)(?:[\/:._-]|$)/i;
 
 /** Keep text selectors and automatic defaults aligned as new media model names appear. */
 export function isTextGenerationModel(model: Pick<ModelInfo, "id" | "outputModalities">) {
-  if (NON_CHAT_MODEL.test(model.id)) return false;
+  if (!model.id.trim() || NON_CHAT_MODEL.test(model.id)) return false;
   const outputModalities = model.outputModalities ?? [];
   return outputModalities.length === 0
     || outputModalities.some((modality) => modality.toLocaleLowerCase() === "text");
+}
+
+/** A blank model represents a connection reserved for Media Studio. */
+export function profileHasTextModel(profile: Pick<ProviderProfile, "model">) {
+  return isTextGenerationModel({ id: profile.model });
 }
 
 function modelMatches(id: string, preferredId: string) {
@@ -274,6 +279,7 @@ function newestGeneralModel(models: ModelInfo[]) {
 
 /** Select the preferred, recent chat model from a freshly detected model list. */
 export function preferredDetectedModel(profile: ProviderProfile, models: ModelInfo[]): ModelInfo | undefined {
+  models = models.filter(isTextGenerationModel);
   if (models.length === 0) return undefined;
 
   const family = profileFamily(profile, models);

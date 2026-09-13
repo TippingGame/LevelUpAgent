@@ -109,7 +109,7 @@ import {
 } from "../lib/constellation";
 import { tr } from "../lib/i18n";
 import { mediaModelSupportsExplicitImageMask } from "../lib/mediaCapabilities";
-import { isTextGenerationModel, reasoningEffortForProfile } from "../lib/modelSelection";
+import { isTextGenerationModel, profileHasTextModel, reasoningEffortForProfile } from "../lib/modelSelection";
 import type {
   AgentMessage,
   ImageAttachment,
@@ -879,7 +879,7 @@ function ConstellationStudioInner({
             updateRuntimeOutput(node.id, { text: { type: "text", text: streamed, createdAt: Date.now() } }, "running");
           },
           undefined,
-          profiles.filter((item) => item.id !== profile.id && item.failoverEnabled),
+          profiles.filter((item) => item.id !== profile.id && item.failoverEnabled && profileHasTextModel(item)),
           false,
           false,
           undefined,

@@ -8,6 +8,7 @@ import {
   type WheelEvent as ReactWheelEvent,
 } from "react";
 import { createPortal } from "react-dom";
+import "./MediaStudio.css";
 import {
   AudioLines,
   ArrowLeft,
@@ -60,7 +61,7 @@ import {
   type ArmorSkillState,
 } from "../lib/armorMode";
 import { copyText } from "../lib/clipboard";
-import { mediaModelSupportsExplicitImageMask } from "../lib/mediaCapabilities";
+import { isMiniMaxImageModel, mediaModelSupportsExplicitImageMask, selectStudioMediaModel, videoModelCapabilities } from "../lib/mediaCapabilities";
 import type {
   ImageAttachment,
   MediaAsset,
@@ -151,12 +152,9 @@ const IMAGE_DIMENSION_OPTIONS: ImageDimensionOption[] = [
   { value: "3840x2160", ratio: "16:9", experimental: true },
   { value: "2160x3840", ratio: "9:16", experimental: true },
 ];
-const IMAGE_RATIO_OPTIONS = ["16:9", "9:16", "21:9", "9:21"];
+const IMAGE_RATIO_OPTIONS = ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "21:9", "9:21"];
 const IMAGE_SIZE_OPTIONS = ["auto", ...IMAGE_DIMENSION_OPTIONS.map((option) => option.value), ...IMAGE_RATIO_OPTIONS];
 const VIDEO_SIZE_OPTIONS = ["1280x720", "720x1280", "16:9", "9:16"];
-const GROK_VIDEO_ASPECT_OPTIONS = ["16:9", "9:16"];
-const GROK_VIDEO_RESOLUTION_OPTIONS = ["480p", "720p"];
-const GROK_VIDEO_MODES: VideoGenerationMode[] = ["text", "image", "reference", "video"];
 const MEDIA_MODEL_ROUTES_KEY = "levelup-agent.media-model-routes.v1";
 const STUDIO_IMAGE_MODES: Array<{ value: StudioImageMode; label: string; labelEn: string }> = [
   { value: "generate", label: "生成", labelEn: "Generate" },
@@ -181,6 +179,8 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
   const [imageEditSelectionId, setImageEditSelectionId] = useState<string | null>(null);
   const [imageEditorOpen, setImageEditorOpen] = useState(false);
   const [videoReferences, setVideoReferences] = useState<ImageAttachment[]>([]);
+  const [videoReferenceUrls, setVideoReferenceUrls] = useState<string[]>([]);
+  const [videoReferenceSource, setVideoReferenceSource] = useState<"url" | "local">("local");
   const [videoMode, setVideoMode] = useState<VideoGenerationMode>("text");
   const [videoResolution, setVideoResolution] = useState("720p");
   const [videoAspectRatio, setVideoAspectRatio] = useState("16:9");
@@ -216,23 +216,30 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
     [models, requiresImageMask],
   );
   const selectedKey = selectedModels[kind];
-  const selected = eligibleModels.find((model) => modelKey(model) === selectedKey)
-    ?? eligibleModels.find((model) => model.recommended)
-    ?? eligibleModels[0];
-  const transparentBackgroundSupported = !selected?.id.toLocaleLowerCase().includes("gpt-image-2");
+  // Only picker changes are persisted; automatic fallbacks never overwrite
+  // a temporarily unavailable user choice.
+  const selected = selectStudioMediaModel(eligibleModels, selectedKey);
   const selectedModelId = selected?.id.toLocaleLowerCase() ?? "";
-  const isGrokVideo = kind === "video" && selectedModelId.startsWith("grok-imagine-video");
-  const isGrokVideo15 = isGrokVideo && selectedModelId.includes("grok-imagine-video-1.5");
-  const activeVideoMode: VideoGenerationMode = isGrokVideo15 ? "image" : isGrokVideo ? videoMode : "text";
-  const videoResolutionOptions = isGrokVideo15
-    ? [...GROK_VIDEO_RESOLUTION_OPTIONS, "1080p"]
-    : GROK_VIDEO_RESOLUTION_OPTIONS;
-  const videoDurationOptions = activeVideoMode === "reference" ? [4, 8, 10] : [4, 8, 12];
-  const videoReferenceReady = !isGrokVideo || activeVideoMode === "text" || (
-    activeVideoMode === "reference"
-      ? videoReferences.length > 0 && videoReferences.length <= 7 && videoReferences.every((item) => item.kind === "image")
-      : videoReferences.length === 1 && videoReferences[0]?.kind === (activeVideoMode === "video" ? "video" : "image")
+  const minimaxImage = kind === "image" && isMiniMaxImageModel(selectedModelId);
+  const transparentBackgroundSupported = !selectedModelId.includes("gpt-image-2") && !minimaxImage;
+  const videoCapabilities = videoModelCapabilities(selectedModelId, videoMode);
+  const isGrokVideo = kind === "video" && videoCapabilities.grok;
+  const isGrokVideo15 = isGrokVideo && videoCapabilities.grok15;
+  const isNativeVideo = kind === "video" && videoCapabilities.native;
+  const hasVideoControls = isGrokVideo || isNativeVideo;
+  const activeVideoMode: VideoGenerationMode = videoCapabilities.modes.includes(videoMode) ? videoMode : videoCapabilities.modes[0];
+  const videoResolutionOptions = videoCapabilities.resolutions;
+  const videoDurationOptions = videoModelCapabilities(selectedModelId, activeVideoMode).durations;
+  const videoReferenceMaximum = videoModelCapabilities(selectedModelId, activeVideoMode).referenceLimit;
+  const useReferenceUrls = isNativeVideo && videoReferenceSource === "url";
+  const enteredVideoUrls = videoReferenceUrls.map((url) => url.trim()).filter(Boolean);
+  const referenceCount = useReferenceUrls ? enteredVideoUrls.length : videoReferences.length;
+  const videoReferenceReady = !hasVideoControls || activeVideoMode === "text" || (
+    (activeVideoMode === "reference" ? referenceCount > 0 && referenceCount <= videoReferenceMaximum : referenceCount === videoReferenceMaximum)
+    && (useReferenceUrls || videoReferences.every((item) => item.kind === (activeVideoMode === "video" ? "video" : "image")))
   );
+  const imageDimensions = minimaxImage ? selectedModelId === "image-01-live" ? [] : IMAGE_DIMENSION_OPTIONS.filter((option) => !option.experimental || option.value === "2048x2048") : IMAGE_DIMENSION_OPTIONS;
+  const imageRatios = minimaxImage ? IMAGE_RATIO_OPTIONS.filter((ratio) => ratio !== "9:21" && (selectedModelId !== "image-01-live" || ratio !== "21:9")) : IMAGE_RATIO_OPTIONS;
   const imageEditReady = imageMode === "generate"
     || imageEditEntries.length > 0;
   const visibleAssets = assets.filter((asset) => asset.kind === kind);
@@ -324,34 +331,27 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
   }, [active, kind]);
 
   useEffect(() => {
-    if (!selected) return;
-    const key = modelKey(selected);
-    if (selectedModels[kind] !== key) {
-      rememberSelectedModel(kind, key);
-    }
-  }, [kind, selected?.id, selected?.profileId]);
-
-  useEffect(() => {
     if (!transparentBackgroundSupported && background === "transparent") setBackground("auto");
   }, [transparentBackgroundSupported]);
 
   useEffect(() => {
     if (kind !== "video") return;
-    if (isGrokVideo15 && videoMode !== "image") setVideoMode("image");
-    else if (!isGrokVideo && videoMode !== "text") setVideoMode("text");
-    if (!videoResolutionOptions.includes(videoResolution)) setVideoResolution("720p");
-  }, [kind, isGrokVideo, isGrokVideo15, selectedModelId]);
+    if (!videoCapabilities.modes.includes(videoMode)) setVideoMode(videoCapabilities.modes[0]);
+    if (!videoResolutionOptions.includes(videoResolution)) setVideoResolution(videoResolutionOptions[0]);
+    if (!videoCapabilities.ratios.includes(videoAspectRatio)) setVideoAspectRatio("16:9");
+    if (!videoDurationOptions.includes(seconds)) setSeconds(videoDurationOptions[0]);
+  }, [kind, selectedModelId, activeVideoMode, videoMode]);
 
   useEffect(() => {
-    if (kind === "video" && activeVideoMode === "reference" && !videoDurationOptions.includes(seconds)) {
-      setSeconds(8);
-    }
-  }, [kind, activeVideoMode]);
+    if (!minimaxImage) return;
+    if (!["auto", ...imageDimensions.map((option) => option.value), ...imageRatios].includes(size)) setSize("auto");
+    if (imageMode === "outpaint" || imageMode === "inpaint") setImageMode("generate");
+  }, [minimaxImage, selectedModelId]);
 
   useEffect(() => {
     if (kind !== "video") return;
     const expectedKind = activeVideoMode === "video" ? "video" : "image";
-    const maximum = activeVideoMode === "reference" ? 7 : activeVideoMode === "text" ? 0 : 1;
+    const maximum = videoReferenceMaximum;
     setVideoReferences((current) => {
       const retained = current.filter((item) => item.kind === expectedKind).slice(0, maximum);
       const retainedIds = new Set(retained.map((item) => item.id));
@@ -359,7 +359,8 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
       void Promise.all(discarded.map((item) => deleteImageAttachment(item.id).catch(() => false)));
       return retained;
     });
-  }, [kind, activeVideoMode]);
+    setVideoReferenceUrls((current) => current.slice(0, maximum));
+  }, [kind, activeVideoMode, selectedModelId]);
 
   useEffect(() => {
     onPendingCountChange(pendingAssets.length);
@@ -539,7 +540,7 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
     try {
       const incoming = activeVideoMode === "video"
         ? await selectVideoReference()
-        : await selectImageReferences();
+        : await selectImageReferences(videoReferenceMaximum, true);
       await acceptVideoReferences(incoming, activeVideoMode);
     } catch (reason) {
       setError(errorText(reason));
@@ -548,7 +549,7 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
 
   const acceptVideoReferences = async (incoming: ImageAttachment[], targetMode: VideoGenerationMode) => {
     const expectedKind = targetMode === "video" ? "video" : "image";
-    const maximum = targetMode === "reference" ? 7 : targetMode === "text" ? 0 : 1;
+    const maximum = videoModelCapabilities(selectedModelId, targetMode).referenceLimit;
     const compatibleCurrent = videoReferences.filter((item) => item.kind === expectedKind).slice(0, maximum);
     const ids = new Set(compatibleCurrent.map((item) => item.id));
     const available = Math.max(0, maximum - compatibleCurrent.length);
@@ -566,29 +567,29 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
         : tr("当前视频模式只接受图片", "The current video mode accepts images only"));
     } else if (accepted.length < incoming.length) {
       setError(targetMode === "reference"
-        ? tr("最多添加 7 张视频参考图", "You can add up to 7 video reference images")
+        ? tr(`最多添加 ${maximum} 张视频参考图`, `You can add up to ${maximum} video reference images`)
         : tr("当前模式只能添加一个参考素材", "The current mode accepts one reference only"));
     }
   };
 
   const importReferencePaths = async (paths: string[]) => {
     if (kind === "video") {
-      if (!isGrokVideo) {
-        setError(tr("当前视频模型不支持本地参考素材", "The selected video model does not support local references"));
+      if (!hasVideoControls || useReferenceUrls) {
+        setError(tr("请填写 HTTPS 图片地址，或将素材来源切换为本地图片", "Enter HTTPS image URLs or switch the reference source to local images"));
         return;
       }
-      const imported = await importMediaReferences(paths.slice(0, 7));
+      const imported = await importMediaReferences(paths.slice(0, Math.max(videoReferenceMaximum, videoModelCapabilities(selectedModelId, "reference").referenceLimit)));
       const containsVideo = imported.some((item) => item.kind === "video");
       const targetMode: VideoGenerationMode = containsVideo
         ? "video"
-        : isGrokVideo15 || activeVideoMode === "image"
+        : activeVideoMode === "first_last" ? "first_last" : isGrokVideo15 || activeVideoMode === "image"
           ? "image"
           : activeVideoMode === "reference" || imported.length > 1
             ? "reference"
             : "image";
-      if (isGrokVideo15 && targetMode !== "image") {
+      if (!videoCapabilities.modes.includes(targetMode)) {
         await Promise.all(imported.map((item) => deleteImageAttachment(item.id).catch(() => false)));
-        setError(tr("Grok 1.5 只支持单张首帧图", "Grok 1.5 supports one first-frame image only"));
+        setError(tr("当前模型不支持这种参考模式，请先选择支持的生成方式", "This model does not support that reference mode; select a supported video mode first"));
         return;
       }
       await acceptVideoReferences(imported, targetMode);
@@ -608,18 +609,22 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
   };
 
   const importPastedReferences = async (files: File[]) => {
-    const targetVideoMode = kind === "video" && isGrokVideo
+    if (kind === "video" && useReferenceUrls) {
+      setError(tr("当前模式请填写公网 HTTPS 图片地址", "Enter public HTTPS image URLs for this mode"));
+      return;
+    }
+    const targetVideoMode = kind === "video" && hasVideoControls
       ? isGrokVideo15 || !matchesImageVideoMode(activeVideoMode) ? "image" : activeVideoMode
       : null;
     const targetImageEdit = kind === "image" && imageMode !== "generate";
-    const maximum = targetVideoMode === "reference" ? 7 : targetVideoMode || targetImageEdit ? 1 : 8;
+    const maximum = targetVideoMode ? videoModelCapabilities(selectedModelId, targetVideoMode).referenceLimit : targetImageEdit ? 1 : 8;
     const existing = targetVideoMode ? videoReferences.length : targetImageEdit ? 0 : imageReferences.length;
     const available = Math.max(0, maximum - existing);
     if (available === 0) {
       setError(tr("当前参考素材数量已达上限", "The reference limit has been reached"));
       return;
     }
-    const selectedFiles = files.slice(0, available);
+    const selectedFiles = files.slice(0, Math.min(available, 8));
     setPastingReferences(true);
     setError(null);
     try {
@@ -656,7 +661,7 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
       const files = clipboardImageFiles(event.clipboardData);
       if (files.length === 0) return;
       event.preventDefault();
-      if (kind !== "video" || !isGrokVideo) setKind("image");
+      if (kind !== "video" || !hasVideoControls) setKind("image");
       if (pastingReferences) {
         setError(tr("正在处理上一批粘贴图片", "The previous pasted images are still being processed"));
         return;
@@ -665,7 +670,7 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
     };
     window.addEventListener("paste", handlePaste);
     return () => window.removeEventListener("paste", handlePaste);
-  }, [active, pastingReferences, kind, isGrokVideo, isGrokVideo15, activeVideoMode, imageMode, imageReferences, videoReferences]);
+  }, [active, pastingReferences, kind, hasVideoControls, isGrokVideo15, activeVideoMode, imageMode, imageReferences, videoReferences, useReferenceUrls]);
 
   const removeImageReference = async (attachment: ImageAttachment) => {
     setImageReferences((current) => current.filter((item) => item.id !== attachment.id));
@@ -717,8 +722,9 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
       return;
     }
     setError(null);
-    const grokVideoHasOutputControls = isGrokVideo && activeVideoMode !== "video";
-    const videoSizeLabel = grokVideoHasOutputControls ? `${videoResolution} · ${videoAspectRatio}` : undefined;
+    const videoHasOutputControls = hasVideoControls && activeVideoMode !== "video";
+    const selectedVideoRatio = isNativeVideo && (activeVideoMode === "image" || activeVideoMode === "first_last") ? "adaptive" : videoAspectRatio;
+    const videoSizeLabel = videoHasOutputControls ? `${videoResolution} · ${selectedVideoRatio}` : undefined;
     const base: Omit<MediaGenerationRequest, "prompt"> = {
       kind,
       profileId: selected.profileId,
@@ -727,17 +733,18 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
       count,
       size: kind === "image"
         ? size !== "auto" ? size : undefined
-        : kind === "video" && !isGrokVideo ? size : undefined,
-      quality: kind === "image" && quality !== "auto" ? quality : undefined,
-      outputFormat: kind === "video" ? undefined : outputFormat,
-      background: kind === "image" && background !== "auto" ? background : undefined,
+        : kind === "video" && !hasVideoControls ? size : undefined,
+      quality: kind === "image" && !minimaxImage && quality !== "auto" ? quality : undefined,
+      outputFormat: kind === "video" || minimaxImage ? undefined : outputFormat,
+      background: kind === "image" && !minimaxImage && background !== "auto" ? background : undefined,
       voice: kind === "audio" && voice.trim() ? voice.trim() : undefined,
       instructions: kind === "audio" && instructions.trim() ? instructions.trim() : undefined,
       seconds: kind === "video" && activeVideoMode !== "video" ? seconds : undefined,
-      videoMode: kind === "video" && isGrokVideo ? activeVideoMode : "text",
-      videoResolution: grokVideoHasOutputControls ? videoResolution : undefined,
-      videoAspectRatio: grokVideoHasOutputControls ? videoAspectRatio : undefined,
+      videoMode: kind === "video" && hasVideoControls ? activeVideoMode : "text",
+      videoResolution: videoHasOutputControls ? videoResolution : undefined,
+      videoAspectRatio: videoHasOutputControls ? selectedVideoRatio : undefined,
       referenceAttachmentIds: [],
+      referenceUrls: useReferenceUrls && activeVideoMode !== "text" ? enteredVideoUrls : [],
     };
     const tasks = kind === "image"
       ? (imageMode === "generate"
@@ -789,7 +796,7 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
             ? imageMode === "generate"
               ? imageReferences.map((item) => item.id)
               : task.entry ? [task.entry.source.id] : []
-            : kind === "video" && isGrokVideo && activeVideoMode !== "text"
+            : kind === "video" && hasVideoControls && !useReferenceUrls && activeVideoMode !== "text"
               ? videoReferences.map((item) => item.id)
               : [],
           maskAttachmentId: kind === "image" && imageMode !== "generate" ? task.entry?.mask?.id : undefined,
@@ -915,15 +922,15 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
 
           {kind === "image" && <div className="media-image-mode-control">
             <span>{tr("创作方式", "Image mode")}</span>
-            <div role="radiogroup" aria-label={tr("图片创作方式", "Image creation mode")}>{STUDIO_IMAGE_MODES.map((mode) => <button
+            <div role="radiogroup" aria-label={tr("图片创作方式", "Image creation mode")}>{STUDIO_IMAGE_MODES.filter((mode) => !minimaxImage || mode.value === "generate" || mode.value === "edit").map((mode) => <button
               type="button"
               role="radio"
               aria-checked={imageMode === mode.value}
               className={imageMode === mode.value ? "active" : ""}
               onClick={() => changeImageMode(mode.value)}
               key={mode.value}
-            >{tr(mode.label, mode.labelEn)}</button>)}</div>
-            <small>{imageModeDescription(imageMode)}</small>
+            >{minimaxImage && mode.value === "edit" ? tr("人物参考", "Character reference") : tr(mode.label, mode.labelEn)}</button>)}</div>
+            <small>{minimaxImage ? tr("MiniMax 支持文生图和人物主体参考，不支持局部蒙版编辑", "MiniMax supports text-to-image and character references, without masked editing") : imageModeDescription(imageMode)}</small>
           </div>}
 
           {kind === "image" && imageMode !== "generate" && <section className="media-image-edit-panel">
@@ -959,11 +966,11 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
             {requiresImageMask && eligibleModels.length === 0 && <p className="media-image-mask-warning"><CircleAlert size={13} />{tr("已生成 PNG 蒙版，但当前连接里没有兼容模型；请配置支持 OpenAI Images Edit 的模型", "A PNG mask is ready, but no compatible model is configured. Add a model with OpenAI Images Edit support")}</p>}
           </section>}
 
-          {isGrokVideo && (
+          {hasVideoControls && (
             <div className="media-video-mode-control">
               <span>{tr("生成方式", "Video mode")}</span>
-              <div role="radiogroup" aria-label={tr("视频生成方式", "Video generation mode")}>
-                {GROK_VIDEO_MODES.map((mode) => {
+              <div role="radiogroup" aria-label={tr("视频生成方式", "Video generation mode")} style={{ gridTemplateColumns: `repeat(${videoCapabilities.modes.length}, minmax(0, 1fr))` }}>
+                {videoCapabilities.modes.map((mode) => {
                   const unsupported = isGrokVideo15 && mode !== "image";
                   return (
                     <button
@@ -991,7 +998,7 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
                 <div><span>{kind === "image" && imageMode !== "generate" ? tr("修改要求", "Edit instruction") : tr("提示词", "Prompt")} {prompts.length > 1 ? index + 1 : ""}</span>{prompts.length > 1 && <button onClick={() => removePrompt(item.id)} title={tr("删除提示词", "Remove prompt")}><X size={13} /></button>}</div>
                 <textarea
                   value={item.prompt}
-                  maxLength={32_000}
+                  maxLength={minimaxImage ? 1500 : isNativeVideo ? 7000 : 32_000}
                   placeholder={promptPlaceholder(kind, imageMode)}
                   onChange={(event) => updatePrompt(item.id, event.target.value)}
                 />
@@ -1005,30 +1012,30 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
               <label><span>{tr("尺寸 / 比例", "Size / ratio")}</span><select value={size} onChange={(event) => setSize(event.target.value)}>
                 <option value="auto">{tr("auto（模型自动，推荐）", "auto (model decides, recommended)")}</option>
                 <optgroup label={tr("像素尺寸", "Pixel dimensions")}>
-                  {IMAGE_DIMENSION_OPTIONS.map((option) => (
+                  {imageDimensions.map((option) => (
                     <option value={option.value} key={option.value}>
                       {option.value.replace("x", " × ")} · {option.ratio}{option.experimental ? tr(" · 实验性", " · Experimental") : ""}
                     </option>
                   ))}
                 </optgroup>
                 <optgroup label={tr("仅指定构图比例", "Aspect ratio only")}>
-                  {IMAGE_RATIO_OPTIONS.map((value) => <option value={value} key={value}>{value}</option>)}
+                  {imageRatios.map((value) => <option value={value} key={value}>{value}</option>)}
                 </optgroup>
               </select></label>
             )}
-            {kind === "video" && !isGrokVideo && <label><span>{tr("尺寸 / 比例", "Size / ratio")}</span><select value={size} onChange={(event) => setSize(event.target.value)}>{VIDEO_SIZE_OPTIONS.map((value) => <option value={value} key={value}>{value}</option>)}</select></label>}
-            {kind === "video" && isGrokVideo && activeVideoMode !== "video" && <>
-              <label><span>{tr("画面比例", "Aspect ratio")}</span><select value={videoAspectRatio} onChange={(event) => setVideoAspectRatio(event.target.value)}>{GROK_VIDEO_ASPECT_OPTIONS.map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
+            {kind === "video" && !hasVideoControls && <label><span>{tr("尺寸 / 比例", "Size / ratio")}</span><select value={size} onChange={(event) => setSize(event.target.value)}>{VIDEO_SIZE_OPTIONS.map((value) => <option value={value} key={value}>{value}</option>)}</select></label>}
+            {kind === "video" && hasVideoControls && activeVideoMode !== "video" && <>
+              <label><span>{tr("画面比例", "Aspect ratio")}</span><select disabled={isNativeVideo && (activeVideoMode === "image" || activeVideoMode === "first_last")} value={isNativeVideo && (activeVideoMode === "image" || activeVideoMode === "first_last") ? "adaptive" : videoAspectRatio} onChange={(event) => setVideoAspectRatio(event.target.value)}>{isNativeVideo && (activeVideoMode === "image" || activeVideoMode === "first_last") && <option value="adaptive">{tr("跟随首帧", "Follow first frame")}</option>}{videoCapabilities.ratios.map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
               <label><span>{tr("清晰度", "Resolution")}</span><select value={videoResolution} onChange={(event) => setVideoResolution(event.target.value)}>{videoResolutionOptions.map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
             </>}
             {kind === "video" && isGrokVideo && activeVideoMode === "video" && <div className="media-inherited-video-size"><span>{tr("尺寸与时长", "Size and duration")}</span><strong>{tr("继承源视频 · 最高 720p", "Inherited from source · up to 720p")}</strong></div>}
-            {kind === "image" && <label><span>{tr("质量", "Quality")}</span><select value={quality} onChange={(event) => setQuality(event.target.value)}>{["auto", "high", "medium", "2K", "4K"].map((value) => <option key={value}>{value}</option>)}</select></label>}
-            {kind === "image" && <label><span>{tr("背景", "Background")}</span><select value={background} onChange={(event) => setBackground(event.target.value)}>
+            {kind === "image" && !minimaxImage && <label><span>{tr("质量", "Quality")}</span><select value={quality} onChange={(event) => setQuality(event.target.value)}>{["auto", "high", "medium", "2K", "4K"].map((value) => <option key={value}>{value}</option>)}</select></label>}
+            {kind === "image" && !minimaxImage && <label><span>{tr("背景", "Background")}</span><select value={background} onChange={(event) => setBackground(event.target.value)}>
               <option value="auto">auto</option>
               <option value="transparent" disabled={!transparentBackgroundSupported}>{transparentBackgroundSupported ? "transparent" : tr("transparent（当前模型不支持）", "transparent (unsupported by this model)")}</option>
               <option value="opaque">opaque</option>
             </select></label>}
-            {kind !== "video" && <label><span>{tr("格式", "Format")}</span><select value={outputFormat} onChange={(event) => setOutputFormat(event.target.value)}>{(kind === "image" ? ["png", "webp", "jpeg"] : ["mp3", "wav", "aac", "flac", "opus"]).map((value) => <option key={value}>{value}</option>)}</select></label>}
+            {kind !== "video" && !minimaxImage && <label><span>{tr("格式", "Format")}</span><select value={outputFormat} onChange={(event) => setOutputFormat(event.target.value)}>{(kind === "image" ? ["png", "webp", "jpeg"] : ["mp3", "wav", "aac", "flac", "opus"]).map((value) => <option key={value}>{value}</option>)}</select></label>}
             {kind === "video" && activeVideoMode !== "video" && <label><span>{tr("时长", "Duration")}</span><select value={seconds} onChange={(event) => setSeconds(Number(event.target.value))}>{videoDurationOptions.map((value) => <option value={value} key={value}>{value}s</option>)}</select></label>}
             <label><span>{tr("每条数量", "Outputs each")}</span><select value={count} onChange={(event) => setCount(Number(event.target.value))}>{Array.from({ length: kind === "image" ? 8 : 4 }, (_, index) => index + 1).map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
             {kind === "audio" && <label><span>{tr("声音", "Voice")}</span><input value={voice} placeholder={tr("留空自动选择", "Automatic when empty")} onChange={(event) => setVoice(event.target.value)} /></label>}
@@ -1046,16 +1053,26 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
             </div>
           )}
 
-          {kind === "video" && isGrokVideo && activeVideoMode !== "text" && (
+          {isNativeVideo && activeVideoMode !== "text" && <div className="media-reference-row">
+            <label className="media-wide-field media-reference-source"><span>{tr("素材来源", "Reference source")}</span><select value={videoReferenceSource} onChange={(event) => setVideoReferenceSource(event.target.value as "url" | "local")}><option value="url">{tr("公网 HTTPS 图片地址（通用）", "Public HTTPS image URLs")}</option><option value="local">{tr("本地图片（自动上传）", "Local images (automatic upload)")}</option></select></label>
+            {useReferenceUrls && <>
+              <div className="media-reference-heading"><span>{videoReferenceTitle(activeVideoMode)}<small>{tr("使用上游无需登录即可访问的 HTTPS 图片地址", "Use HTTPS image URLs accessible without signing in")}</small></span></div>
+              {Array.from({ length: activeVideoMode === "reference" ? Math.min(videoReferenceMaximum, Math.max(1, videoReferenceUrls.length + 1)) : videoReferenceMaximum }, (_, index) => <label className="media-wide-field" key={index}><span>{activeVideoMode === "first_last" ? index === 0 ? tr("首帧", "First frame") : tr("尾帧", "Last frame") : tr(`参考图 ${index + 1}`, `Reference ${index + 1}`)}</span><input type="url" value={videoReferenceUrls[index] ?? ""} placeholder="https://…" onChange={(event) => setVideoReferenceUrls((current) => { const next = [...current]; next[index] = event.target.value; return next; })} /></label>)}
+              <small>{tr(`最多 ${videoReferenceMaximum} 张；首尾帧与多图参考分别使用`, `Up to ${videoReferenceMaximum} images; frame and multi-reference modes are separate`)}</small>
+            </>}
+            {!useReferenceUrls && <small>{tr("本地图片会随生成请求发送到所选连接；通过 LevelUpAPI 时自动上传，无需配置图床", "Local images are sent to the selected connection; LevelUpAPI uploads them automatically")}</small>}
+          </div>}
+
+          {kind === "video" && hasVideoControls && !useReferenceUrls && activeVideoMode !== "text" && (
             <div className="media-reference-row media-video-reference-row">
               <div className="media-reference-heading">
                 <span>{videoReferenceTitle(activeVideoMode)}<small>{videoReferenceHint(activeVideoMode, pastingReferences)}</small></span>
-                <button disabled={pastingReferences || videoReferences.length >= (activeVideoMode === "reference" ? 7 : 1)} onClick={() => void addVideoReferences()}>
+                <button disabled={pastingReferences || videoReferences.length >= videoReferenceMaximum} onClick={() => void addVideoReferences()}>
                   {pastingReferences ? <LoaderCircle className="spin" size={14} /> : activeVideoMode === "video" ? <Video size={14} /> : <ImagePlus size={14} />}
                   {activeVideoMode === "video" ? tr("选择视频", "Choose video") : tr("选择图片", "Choose images")}
                 </button>
               </div>
-              <div>{videoReferences.map((attachment) => <AttachmentChip attachment={attachment} onRemove={() => void removeVideoReference(attachment)} key={attachment.id} />)}</div>
+              <div>{videoReferences.map((attachment, index) => <span className="media-frame-reference" key={attachment.id}>{activeVideoMode === "first_last" && <small>{index === 0 ? tr("首帧", "First frame") : tr("尾帧", "Last frame")}</small>}<AttachmentChip attachment={attachment} onRemove={() => void removeVideoReference(attachment)} /></span>)}</div>
             </div>
           )}
 
@@ -1695,11 +1712,12 @@ function saveMediaModelRoutes(routes: Partial<Record<MediaKind, string>>) {
   }
 }
 
-function matchesImageVideoMode(mode: VideoGenerationMode): mode is "image" | "reference" {
-  return mode === "image" || mode === "reference";
+function matchesImageVideoMode(mode: VideoGenerationMode): mode is "image" | "first_last" | "reference" {
+  return mode === "image" || mode === "first_last" || mode === "reference";
 }
 
 function videoModeLabel(mode: VideoGenerationMode) {
+  if (mode === "first_last") return tr("首尾帧", "First / last frames");
   if (mode === "image") return tr("首帧图", "First frame");
   if (mode === "reference") return tr("参考图", "References");
   if (mode === "video") return tr("视频编辑", "Edit video");
@@ -1707,13 +1725,15 @@ function videoModeLabel(mode: VideoGenerationMode) {
 }
 
 function videoModeDescription(mode: VideoGenerationMode) {
+  if (mode === "first_last") return tr("用两张图片分别指定起始和结束画面", "Set the first and last frames with two images");
   if (mode === "image") return tr("以一张图片作为视频起始画面", "Animate one image as the starting frame");
-  if (mode === "reference") return tr("用 1–7 张图片引导人物、物体或服装一致性", "Guide people, objects, or clothing with 1–7 images");
+  if (mode === "reference") return tr("用多张图片引导人物、物体或服装一致性，数量依模型而定", "Guide people, objects, or clothing with multiple images within the model limit");
   if (mode === "video") return tr("根据提示词编辑一个不超过 8.7 秒的 MP4 视频", "Edit one MP4 video up to 8.7 seconds");
   return tr("仅根据提示词生成视频", "Generate a video from the prompt only");
 }
 
 function videoReferenceTitle(mode: VideoGenerationMode) {
+  if (mode === "first_last") return tr("首尾帧图片", "First and last frame images");
   if (mode === "video") return tr("源视频", "Source video");
   if (mode === "reference") return tr("视频参考图", "Video references");
   return tr("首帧图", "First-frame image");
@@ -1721,14 +1741,16 @@ function videoReferenceTitle(mode: VideoGenerationMode) {
 
 function videoReferenceHint(mode: VideoGenerationMode, busy: boolean) {
   if (busy) return tr("正在添加参考素材…", "Adding references…");
+  if (mode === "first_last") return tr("依次选择首帧和尾帧图片", "Choose the first frame, then the last frame");
   if (mode === "video") return tr("选择或拖入一个 MP4，最大 64 MiB", "Choose or drop one MP4, up to 64 MiB");
-  if (mode === "reference") return tr("选择、拖入或粘贴 1–7 张图片", "Choose, drop, or paste 1–7 images");
+  if (mode === "reference") return tr("选择、拖入或粘贴参考图片", "Choose, drop, or paste reference images");
   return tr("选择、拖入或粘贴一张图片", "Choose, drop, or paste one image");
 }
 
 function videoReferenceRequirement(mode: VideoGenerationMode) {
+  if (mode === "first_last") return tr("请分别添加首帧和尾帧图片", "Add both the first and last frame images");
   if (mode === "video") return tr("请先添加一个 MP4 源视频", "Add one MP4 source video first");
-  if (mode === "reference") return tr("请先添加 1–7 张视频参考图", "Add 1–7 video reference images first");
+  if (mode === "reference") return tr("请先添加模型数量限制内的视频参考图", "Add video references within the selected model limit");
   return tr("请先添加一张首帧图", "Add one first-frame image first");
 }
 

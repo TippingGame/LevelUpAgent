@@ -135,6 +135,34 @@ test("Nano Banana image models are never selected as the default text model", ()
   assert.equal(selection.isTextGenerationModel({ id: "provider-model", outputModalities: ["IMAGE"] }), false);
 });
 
+test("MiniMax defaults use discovered text models and exclude H3 and images", () => {
+  const profile = { ...grokProfile, name: "MiniMax", model: "inherited-text-model", baseUrl: "https://levelup.example" };
+  const media = ["MiniMax-H3", "MiniMax-H3-Max", "image-01", "image-01-live"];
+  for (const [available, expected] of [
+    [["MiniMax-M2.5", "MiniMax-M2.7", "MiniMax-M3"], "MiniMax-M3"],
+    [["MiniMax-M2.5", "MiniMax-M2.7"], "MiniMax-M2.7"],
+    [["MiniMax-M2.5"], "MiniMax-M2.5"],
+    [[], undefined],
+  ]) {
+    assert.equal(selection.preferredDetectedModel(profile, models(...media, ...available))?.id, expected);
+  }
+  assert.equal(selection.preferredDetectedModel(profile, [
+    { id: "MiniMax-M3", outputModalities: ["video"] },
+    { id: "MiniMax-M2.7", outputModalities: ["text"] },
+  ])?.id, "MiniMax-M2.7");
+});
+
+test("media-only connections have no text default and cannot be text fallbacks", () => {
+  for (const id of ["", "   ", "Seedance-2", "Seedance-2.0", "Seedance-2.5", "seedance/Seedance-2.5", "MiniMax-H3", "models/minimax/MiniMax-H3-Max", "MiniMax-Hailuo-2.3", "image-01", "image-01-live", "gpt-image-2.5-sunburst"]) {
+    assert.equal(selection.isTextGenerationModel({ id }), false, id);
+    assert.equal(selection.profileHasTextModel({ model: id }), false, id);
+    assert.equal(selection.preferredDetectedModel({ ...grokProfile, name: "Seedance" }, models(id)), undefined, id);
+  }
+  for (const model of ["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.5", "gpt-6-astra"]) {
+    assert.equal(selection.profileHasTextModel({ model }), true, model);
+  }
+});
+
 test("OpenCode Go strips config prefixes and routes every documented model family", () => {
   assert.equal(selection.normalizeOpenCodeModelId("models/OpenCode-Go/gpt-5.6-luna"), "gpt-5.6-luna");
 

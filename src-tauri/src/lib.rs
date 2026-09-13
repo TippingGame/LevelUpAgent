@@ -1720,7 +1720,12 @@ fn attach_media_tools(request: &mut AgentTurnRequest) {
                     "model": { "type": "string", "description": "Optional explicit video model; omit for newest recommended" },
                     "profileId": { "type": "string" },
                     "size": { "type": "string", "description": "Examples: 1280x720, 720x1280, 16:9, 9:16" },
-                    "seconds": { "type": "integer", "minimum": 1, "maximum": 20 }
+                    "seconds": { "type": "integer", "minimum": 1, "maximum": 30, "description": "Model-dependent duration. MiniMax H3 and Seedance-2 support up to 15 seconds; Seedance-2.5 supports up to 30." },
+                    "videoMode": { "type": "string", "enum": ["text", "image", "first_last", "reference", "video"], "description": "First/last frames are supported by MiniMax H3 and Seedance. Use model-supported modes only." },
+                    "videoResolution": { "type": "string", "description": "MiniMax H3: 768p or 2K; H3-Max: 480p or 768p; Seedance-2: 480p, 720p, 1080p, 4K; Seedance-2.5: 480p or 720p." },
+                    "videoAspectRatio": { "type": "string", "description": "Supported composition ratio; frame modes follow the source image." },
+                    "referenceAttachmentIds": { "type": "array", "items": { "type": "string" }, "maxItems": 30, "description": "Managed local image references. MiniMax/Seedance gateway connections upload these automatically through LevelUpAPI; explicit public referenceUrls are also supported." },
+                    "referenceUrls": { "type": "array", "items": { "type": "string" }, "maxItems": 30, "description": "Public HTTPS image URLs for MiniMax/Seedance; first frame then last frame in first_last mode. Do not combine with local attachment IDs." }
                 },
                 "required": ["prompt"]
             }),
@@ -2940,6 +2945,7 @@ fn autonomous_pet_learning_connection_ready(app: &tauri::AppHandle) -> bool {
         .profiles
         .iter()
         .filter(|profile| profile.id == settings.active_profile_id || profile.failover_enabled)
+        .filter(|profile| profile_supports_text(profile))
         .any(|profile| profile.allow_unauthenticated || load_api_key(&profile.id).is_ok())
 }
 
@@ -3627,12 +3633,32 @@ fn attach_images(app: &tauri::AppHandle, request: &mut AgentTurnRequest) -> Resu
     attachment::resolve(&attachment_storage(app)?, &mut request.messages)
 }
 
+fn profile_supports_text(profile: &ProviderProfile) -> bool {
+    let model = profile.model.trim().to_ascii_lowercase();
+    if model.is_empty() {
+        return false;
+    }
+    // Keep legacy media defaults out of text execution, including profiles
+    // saved before media-only connections used an empty default model.
+    let tokens = model.split(['/', ':', '.', '_', '-']).collect::<Vec<_>>();
+    !tokens.iter().any(|token| matches!(*token,
+        "audio" | "embed" | "embedding" | "embeddings" | "image" | "imagen"
+        | "imagine" | "moderation" | "realtime" | "speech" | "sora" | "stt"
+        | "transcri" | "tts" | "veo" | "video" | "whisper" | "seedance" | "hailuo"
+    )) && !tokens.windows(2).any(|pair| {
+        pair == ["dall", "e"] || pair == ["vision", "preview"]
+            || (pair[0] == "minimax" && pair[1].strip_prefix('h').is_some_and(|version| {
+                !version.is_empty() && version.bytes().all(|digit| digit.is_ascii_digit())
+            }))
+    })
+}
+
 fn provider_candidates(request: &AgentTurnRequest) -> Vec<ProviderProfile> {
     let mut seen = HashSet::from([request.profile.id.clone()]);
     let mut fallbacks = request
         .fallback_profiles
         .iter()
-        .filter(|profile| profile.failover_enabled)
+        .filter(|profile| profile.failover_enabled && profile_supports_text(profile))
         .cloned()
         .collect::<Vec<_>>();
     fallbacks.sort_by(|left, right| {
@@ -3641,7 +3667,10 @@ fn provider_candidates(request: &AgentTurnRequest) -> Vec<ProviderProfile> {
             .then_with(|| left.name.cmp(&right.name))
             .then_with(|| left.id.cmp(&right.id))
     });
-    let mut candidates = vec![request.profile.clone()];
+    let mut candidates = Vec::new();
+    if profile_supports_text(&request.profile) {
+        candidates.push(request.profile.clone());
+    }
     candidates.extend(
         fallbacks
             .into_iter()
@@ -4076,7 +4105,7 @@ where
     let round_deadline = Instant::now() + round_timeout;
     let candidates = provider_candidates(&request);
     request.fallback_profiles.clear();
-    let mut last_error = "No provider is available".to_owned();
+    let mut last_error = "No text model is configured; media-only connections can be used in Creative Studio".to_owned();
     let mut failover_attempts = 0_u32;
     let mut reconnecting = false;
     let mut last_reconnect_attempt = 0_u32;
@@ -4373,8 +4402,8 @@ fn validate_provider_settings(settings: &ProviderSettings) -> Result<(), String>
         if profile.name.trim().is_empty() || profile.name.chars().count() > 120 {
             return Err("Provider name must contain 1-120 characters".to_owned());
         }
-        if profile.model.trim().is_empty() || profile.model.chars().count() > 240 {
-            return Err("Provider model must contain 1-240 characters".to_owned());
+        if profile.model.chars().count() > 240 {
+            return Err("Provider model must contain at most 240 characters".to_owned());
         }
         if !(-100_000..=100_000).contains(&profile.priority) {
             return Err("Provider priority is outside the supported range".to_owned());
@@ -5051,8 +5080,8 @@ fn import_media_references(
     app: tauri::AppHandle,
     source_paths: Vec<String>,
 ) -> Result<Vec<ImageAttachment>, String> {
-    if source_paths.is_empty() || source_paths.len() > 7 {
-        return Err("Select between 1 and 7 media references at a time".to_owned());
+    if source_paths.is_empty() || source_paths.len() > 30 {
+        return Err("Select between 1 and 30 media references at a time".to_owned());
     }
     let storage = attachment_storage(&app)?;
     let mut imported = Vec::new();
@@ -5401,7 +5430,7 @@ async fn agent_turn_stream_inner(
         }
     }
 
-    let mut last_error = "No provider is available".to_owned();
+    let mut last_error = "No text model is configured; media-only connections can be used in Creative Studio".to_owned();
     let mut result = None;
     let mut failover_attempts = 0_u32;
     let mut reconnecting = false;
@@ -12577,6 +12606,42 @@ mod tests {
     }
 
     #[test]
+    fn provider_candidates_exclude_media_only_primary_and_fallbacks() {
+        let mut request = AgentTurnRequest {
+            profile: profile("primary", 10, true),
+            messages: Vec::new(),
+            mode: "chat".to_owned(),
+            workspace: None,
+            thread_id: None,
+            hatch: false,
+            hatch_skill_loaded: false,
+            available_tools: Vec::new(),
+            available_skills: Vec::new(),
+            goal: None,
+            fallback_profiles: Vec::new(),
+            custom_instructions: None,
+            router_metadata: None,
+            router_events: Vec::new(),
+            reasoning_effort: None,
+        };
+        for model in ["", "   ", "MiniMax-H3", "models/minimax/MiniMax-H3-Max", "MiniMax-Hailuo-2.3", "Seedance-2", "Seedance-2.0", "seedance/Seedance-2.5", "image-01", "image-01-live", "gpt-image-2.5-sunburst"] {
+            request.profile.model = model.to_owned();
+            let mut fallback = profile("media-fallback", 1, true);
+            fallback.model = model.to_owned();
+            request.fallback_profiles = vec![fallback];
+            assert!(provider_candidates(&request).is_empty(), "{model}");
+            request.fallback_profiles.push(profile("text-fallback", 50, true));
+            let candidates = provider_candidates(&request);
+            assert_eq!(candidates.len(), 1, "{model}");
+            assert_eq!(candidates[0].id, "text-fallback", "{model}");
+        }
+        for model in ["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.5", "gpt-6-astra"] {
+            request.profile.model = model.to_owned();
+            assert!(profile_supports_text(&request.profile), "{model}");
+        }
+    }
+
+    #[test]
     fn media_tools_are_attached_without_a_project_workspace() {
         let mut request = AgentTurnRequest {
             profile: profile("primary", 10, true),
@@ -12955,6 +13020,24 @@ mod tests {
         settings.profiles[0].base_url = "file:///tmp/provider".to_owned();
         settings.active_profile_id = settings.profiles[0].id.clone();
         assert!(validate_provider_settings(&settings).is_err());
+    }
+
+    #[test]
+    fn provider_settings_persist_media_only_connections_without_a_text_model() {
+        let root = std::env::temp_dir().join(format!("levelup-media-settings-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let database = database::Database::open(&root.join("test.sqlite3")).unwrap();
+        let mut media_profile = profile("seedance", 10, false);
+        media_profile.model.clear();
+        let settings = ProviderSettings {
+            active_profile_id: media_profile.id.clone(),
+            profiles: vec![media_profile],
+        };
+        assert!(validate_provider_settings(&settings).is_ok());
+        database.set_provider_settings(&settings).unwrap();
+        assert_eq!(database.provider_settings().unwrap(), Some(settings));
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -13441,6 +13524,7 @@ mod tests {
             video_resolution: None,
             video_aspect_ratio: None,
             reference_attachment_ids: Vec::new(),
+            reference_urls: Vec::new(),
             mask_attachment_id: None,
         };
         let selections = media::selection_candidates(&providers, &catalog, &request);

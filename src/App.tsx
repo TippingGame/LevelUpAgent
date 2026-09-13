@@ -294,8 +294,10 @@ import {
   type ThemeGenerationJob,
 } from "./lib/themeGeneration";
 import {
+  isTextGenerationModel,
   opencodeWireProtocol,
   preferredDetectedModel,
+  profileHasTextModel,
   reasoningEffortForProfile,
   reasoningEffortsForProfile,
 } from "./lib/modelSelection";
@@ -1005,7 +1007,7 @@ function App() {
   const activeUsesDefaultWorkspace = isDefaultWorkspace(activeThread.workspace, defaultWorkspace);
   const connectionReady = keyStatusLoaded
     && (keyConfigured || activeProfile.allowUnauthenticated)
-    && Boolean(activeProfile.model.trim());
+    && profileHasTextModel(activeProfile);
   const connectionNeedsSetup = keyStatusLoaded && !connectionReady;
   const normalizedSidebarQuery = sidebarQuery.trim().toLocaleLowerCase(locale);
   const visibleProjectGroups = useMemo(() => {
@@ -1253,7 +1255,7 @@ function App() {
     const created = createThread(workspace);
     const preparationStartedAt = Date.now();
     const runProfile = activeProfile;
-    const runFallbackProfiles = profiles.filter((profile) => profile.id !== runProfile.id);
+    const runFallbackProfiles = profiles.filter((profile) => profile.id !== runProfile.id && profileHasTextModel(profile));
     const preparationThread: AgentThread = {
       ...created,
       title: themeGenerationThreadTitle(generationRequest, locale),
@@ -1566,7 +1568,7 @@ function App() {
     };
     const goal = await createGoal(nextThread.id, summary);
     const runProfile = activeProfile;
-    const runFallbackProfiles = profiles.filter((profile) => profile.id !== runProfile.id);
+    const runFallbackProfiles = profiles.filter((profile) => profile.id !== runProfile.id && profileHasTextModel(profile));
     commitThread(nextThread);
     setActiveThreadId(nextThread.id);
     setGoalState(goal);
@@ -3342,7 +3344,7 @@ function App() {
     runPermission: PermissionLevel = permissionLevel,
     runStartedAt = Date.now(),
     runProfile: ProviderProfile = activeProfile,
-    runFallbackProfiles: ProviderProfile[] = profiles.filter((profile) => profile.id !== activeProfile.id),
+    runFallbackProfiles: ProviderProfile[] = profiles.filter((profile) => profile.id !== activeProfile.id && profileHasTextModel(profile)),
     rewardPetId: string = activePetIdRef.current,
     hatchToken: number | null = null,
     harnessOperationId?: string,
@@ -3918,7 +3920,7 @@ function App() {
       updatedAt: Date.now(),
     };
     const runProfile = activeProfile;
-    const runFallbackProfiles = profiles.filter((profile) => profile.id !== runProfile.id);
+    const runFallbackProfiles = profiles.filter((profile) => profile.id !== runProfile.id && profileHasTextModel(profile));
     const runMode = thread.kind === "pet" ? "chat" : mode;
     const commitSubmissionError = (reason: string) => {
       setDraft("");
@@ -4176,7 +4178,7 @@ function App() {
     const approval = pendingApprovalsRef.current[thread.id];
     if (!approval) return;
     const runProfile = profilesRef.current.find((profile) => profile.id === approval.profileId) ?? activeProfile;
-    const runFallbackProfiles = profilesRef.current.filter((profile) => profile.id !== runProfile.id);
+    const runFallbackProfiles = profilesRef.current.filter((profile) => profile.id !== runProfile.id && profileHasTextModel(profile));
     let harnessToken = approval.approvalTokens?.[0];
     if (isDesktop() && !approval.operationId) {
       setNotice(tr(
@@ -4438,18 +4440,23 @@ function App() {
     const updated = profiles.some((item) => item.id === profile.id)
       ? profiles.map((item) => (item.id === profile.id ? profile : item))
       : [...profiles, profile];
+    const nextActiveProfileId = profileHasTextModel(profile)
+      ? profile.id
+      : (updated.find((item) => item.id === activeProfileId && profileHasTextModel(item))
+        ?? updated.find(profileHasTextModel)
+        ?? profile).id;
     if (isDesktop() && databaseReadyRef.current) {
-      await saveProviderSettings({ profiles: updated, activeProfileId: profile.id });
+      await saveProviderSettings({ profiles: updated, activeProfileId: nextActiveProfileId });
     } else {
       saveProfiles(updated);
-      saveActiveProfileId(profile.id);
+      saveActiveProfileId(nextActiveProfileId);
     }
     setMediaCatalogRevision((current) => current + 1);
     profilesRef.current = updated;
-    activeProfileIdRef.current = profile.id;
+    activeProfileIdRef.current = nextActiveProfileId;
     setProfiles(updated);
-    setActiveProfileId(profile.id);
-    setKeyConfigured(await hasApiKey(profile.id));
+    setActiveProfileId(nextActiveProfileId);
+    setKeyConfigured(await hasApiKey(nextActiveProfileId));
     setKeyStatusLoaded(true);
     setSettingsOpen(false);
   };
@@ -4457,7 +4464,9 @@ function App() {
   const removeProfile = async (profileId: string) => {
     if (profiles.length <= 1) return;
     const updated = profiles.filter((profile) => profile.id !== profileId);
-    const nextActiveProfileId = activeProfileId === profileId ? updated[0].id : activeProfileId;
+    const nextActiveProfileId = activeProfileId === profileId
+      ? (updated.find(profileHasTextModel) ?? updated[0]).id
+      : activeProfileId;
     if (isDesktop() && databaseReadyRef.current) {
       await saveProviderSettings({ profiles: updated, activeProfileId: nextActiveProfileId });
     } else {
@@ -4471,7 +4480,7 @@ function App() {
     if (activeProfileId === profileId) {
       setActiveProfileId(nextActiveProfileId);
       setKeyStatusLoaded(false);
-      setKeyConfigured(await hasApiKey(updated[0].id));
+      setKeyConfigured(await hasApiKey(nextActiveProfileId));
       setKeyStatusLoaded(true);
     }
     await deleteApiKey(profileId).catch((error) => {
@@ -4509,7 +4518,7 @@ function App() {
       if (action === "resume") {
         setMode("goal");
         const runProfile = activeProfile;
-        const runFallbackProfiles = profiles.filter((profile) => profile.id !== runProfile.id);
+        const runFallbackProfiles = profiles.filter((profile) => profile.id !== runProfile.id && profileHasTextModel(profile));
         hatchRunToken = hatchThread ? beginHatchRun(activeThread.id) : null;
         if (hatchThread) setThreadRunning(activeThread.id, true);
         const resumePrompt = "Resume the active Goal from persisted state and take the next concrete action.";
@@ -5216,7 +5225,7 @@ function App() {
               </button>
               {!connectionNeedsSetup && profileMenuOpen && (
                 <div className="model-menu" role="menu" aria-label={tr("快速切换模型连接", "Quick model connection switcher")}>
-                  {[...profiles].sort((left, right) => left.priority - right.priority || left.name.localeCompare(right.name)).map((profile) => (
+                  {profiles.filter(profileHasTextModel).sort((left, right) => left.priority - right.priority || left.name.localeCompare(right.name)).map((profile) => (
                     <button role="menuitemradio" aria-checked={profile.id === activeProfile.id} className={profile.id === activeProfile.id ? "active" : ""} key={profile.id} onClick={() => activateProfile(profile.id)}>
                       <span className="model-menu-check">{profile.id === activeProfile.id ? <Check size={13} /> : null}</span>
                       <span><strong>{profile.name}</strong><small>{profile.model} · {protocolLabel(profile.protocol)} · P{profile.priority}</small></span>
@@ -7453,7 +7462,7 @@ function Inspector({
           <section>
         <div className="section-heading"><Cpu size={15} /><span>{tr("模型", "Model")}</span></div>
         <button className="detail-row clickable" onClick={onSettings}>
-          <span>{profile.model}</span><ChevronDown size={14} />
+          <span>{profileHasTextModel(profile) ? profile.model : tr("无可用文字模型（媒体连接）", "No text model (media connection)")}</span><ChevronDown size={14} />
         </button>
         <div className="detail-row"><span>{tr("协议", "Protocol")}</span><small>{protocolLabel(profile.protocol)}</small></div>
         <div className="detail-row"><span>{tr("状态", "Status")}</span><small className={keyConfigured ? "positive" : "negative"}>{keyConfigured ? tr("可用", "Available") : tr("未配置", "Not configured")}</small></div>
@@ -8648,6 +8657,9 @@ function ConnectionDialog({
   const [apiKey, setApiKey] = useState("");
   const [localKeyConfigured, setLocalKeyConfigured] = useState(keyConfigured);
   const [models, setModels] = useState<ModelInfo[]>([]);
+  const [modelsDetected, setModelsDetected] = useState(false);
+  const textModels = models.filter(isTextGenerationModel);
+  const hasTextModel = profileHasTextModel(draftProfile);
   const [candidates, setCandidates] = useState<ExternalConfigCandidate[] | null>(null);
   const [scanning, setScanning] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -8684,6 +8696,7 @@ function ConnectionDialog({
     setDraftProfile(selected);
     setApiKey("");
     setModels([]);
+    setModelsDetected(false);
     setDiagnostics(null);
     setError(null);
     setLocalKeyConfigured(await hasApiKey(selected.id));
@@ -8702,6 +8715,7 @@ function ConnectionDialog({
     });
     setApiKey("");
     setModels([]);
+    setModelsDetected(false);
     setError(null);
     setLocalKeyConfigured(false);
   };
@@ -8715,6 +8729,7 @@ function ConnectionDialog({
     });
     setApiKey("");
     setModels([]);
+    setModelsDetected(false);
     setDiagnostics(null);
     setError(null);
     setLocalKeyConfigured(false);
@@ -8750,6 +8765,7 @@ function ConnectionDialog({
     try {
       const result = await fetchModels(draftProfile, apiKey);
       setModels(result);
+      setModelsDetected(true);
       const preferredModel = preferredDetectedModel(draftProfile, result);
       if (preferredModel) {
         setDraftProfile((current) => ({
@@ -8759,6 +8775,8 @@ function ConnectionDialog({
             ? current.protocol
             : preferredModel.protocol ?? current.protocol,
         }));
+      } else {
+        setDraftProfile((current) => ({ ...current, model: "", failoverEnabled: false }));
       }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -8772,7 +8790,11 @@ function ConnectionDialog({
     setError(null);
     try {
       validateProviderBaseUrl(draftProfile.baseUrl);
-      await onSave(draftProfile, apiKey);
+      await onSave({
+        ...draftProfile,
+        model: hasTextModel ? draftProfile.model.trim() : "",
+        failoverEnabled: hasTextModel && draftProfile.failoverEnabled,
+      }, apiKey);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
       setBusy(false);
@@ -8876,10 +8898,12 @@ function ConnectionDialog({
               {!profiles.some((item) => item.id === draftProfile.id) && <option value="">{tr("新连接", "New connection")}</option>}
               {profiles.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
             </select>
+            <button className="secondary-button" type="button" onClick={addProfile}>
+              {tr("添加连接", "Add connection")}
+            </button>
             <IconButton label={tr("扫描外部配置", "Scan external configs")} onClick={scanConfigs} disabled={scanning}>
               <FileInput size={17} className={scanning ? "spin" : ""} />
             </IconButton>
-            <IconButton label={tr("添加连接", "Add connection")} onClick={addProfile}><Plus size={17} /></IconButton>
             <IconButton label={tr("复制当前连接（不复制密钥）", "Duplicate connection without API key")} onClick={duplicateProfile}><Copy size={16} /></IconButton>
             <IconButton
               label={tr("删除连接", "Delete connection")}
@@ -8999,19 +9023,23 @@ function ConnectionDialog({
               key={draftProfile.id}
               id={draftProfile.id}
               value={draftProfile.model}
-              models={models}
+              models={textModels}
               protocol={draftProfile.protocol}
               onChange={selectDetectedModel}
             />
-            <small>{models.length > 0
+            <small>{!hasTextModel
               ? tr(
-                `已从当前连接发现 ${models.length} 个模型`,
-                `${models.length} models discovered from this connection`,
+                "无可用文字模型。可保存为媒体连接，在创作空间检测和选择图片、视频模型。",
+                "No text model configured. Save this media connection to discover and select image and video models in Creative Studio.",
               )
-              : tr(
-                "尚未检测到模型",
-                "No models discovered yet",
-              )}
+              : textModels.length > 0
+              ? tr(
+                `已发现 ${textModels.length} 个文字模型，共 ${models.length} 个模型；图片和视频模型在创作空间选择`,
+                `${textModels.length} text models found (${models.length} total); choose image and video models in Creative Studio`,
+              )
+              : modelsDetected
+                ? tr("当前目录未返回文字模型，可手动填写；纯媒体连接可留空", "The catalog returned no text models; enter one manually or leave blank for media only")
+                : tr("尚未检测到模型；纯媒体连接可留空", "No models discovered yet; leave blank for a media-only connection")}
             </small>
           </div>
           <div className="field connection-test">
@@ -9022,8 +9050,10 @@ function ConnectionDialog({
             </button>
           </div>
           <label className="failover-toggle wide">
-            <input type="checkbox" checked={draftProfile.failoverEnabled} onChange={(event) => update("failoverEnabled", event.target.checked)} />
-            <span><strong>{tr("允许作为备用连接", "Allow as failover connection")}</strong><small>{tr("主连接出现超时、限流、鉴权或服务端错误时自动接管；流式内容开始后绝不切换。", "Takes over on primary timeouts, rate limits, authentication, or server errors; never switches after streaming begins.")}</small></span>
+            <input type="checkbox" checked={hasTextModel && draftProfile.failoverEnabled} disabled={!hasTextModel} onChange={(event) => update("failoverEnabled", event.target.checked)} />
+            <span><strong>{tr("允许作为文字备用连接", "Allow as text failover connection")}</strong><small>{hasTextModel
+              ? tr("主连接出现超时、限流、鉴权或服务端错误时自动接管；流式内容开始后绝不切换。", "Takes over on primary timeouts, rate limits, authentication, or server errors; never switches after streaming begins.")
+              : tr("媒体连接不参与文字任务的故障切换。", "Media-only connections are excluded from text task failover.")}</small></span>
           </label>
           <ProviderHealthPanel
             profile={draftProfile}
@@ -9034,11 +9064,11 @@ function ConnectionDialog({
             onDiagnose={runDiagnostics}
             onReset={clearHealth}
           />
-          <ConfigWritebackPanel
+          {hasTextModel && <ConfigWritebackPanel
             profile={draftProfile}
             reasoningEffort={reasoningEffortForProfile(draftProfile, reasoningEffort)}
             keyConfigured={localKeyConfigured}
-          />
+          />}
           {error && <div className="dialog-error">{error}</div>}
         </div>
         )}
@@ -9055,7 +9085,7 @@ function ConnectionDialog({
           </div>
           <span />
           <button className="secondary-button" onClick={onClose}>{tr("取消", "Cancel")}</button>
-          <button className="primary-button" onClick={saveConnection} disabled={!draftProfile.name.trim() || !draftProfile.baseUrl || !draftProfile.model || busy}>
+          <button className="primary-button" onClick={saveConnection} disabled={!draftProfile.name.trim() || !draftProfile.baseUrl || busy}>
             {tr("保存连接", "Save connection")}
           </button>
         </div> : <div className="dialog-footer general-settings-footer">

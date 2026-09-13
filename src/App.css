@@ -1981,7 +1981,8 @@ button.detail-row { padding: 0; border: 0; background: transparent; text-align: 
 .field { min-width: 0; display: flex; flex-direction: column; gap: 6px; color: #565954; font-size: var(--font-caption); font-weight: 650; }
 .field.wide, .dialog-error { grid-column: 1 / -1; }
 .connection-picker.wide { grid-column: 1 / -1; }
-.connection-picker { display: grid; grid-template-columns: minmax(0, 1fr) 32px 32px 32px 32px; gap: 6px; padding-bottom: 13px; border-bottom: 1px solid var(--line); }
+.connection-picker { display: grid; grid-template-columns: minmax(0, 1fr) auto repeat(3, 32px); align-items: center; gap: 6px; padding-bottom: 13px; border-bottom: 1px solid var(--line); }
+.connection-picker .secondary-button { white-space: nowrap; }
 .connection-picker select { min-width: 0; height: 32px; padding: 0 9px; border: 1px solid var(--line-strong); border-radius: 5px; outline: none; background: #fff; color: var(--text); font-size: var(--font-small); }
 .migration-results.wide { grid-column: 1 / -1; display: grid; gap: 5px; }
 .migration-heading { display: flex; align-items: center; justify-content: space-between; min-height: 20px; color: #555853; font-size: var(--font-caption); font-weight: 700; }
@@ -2210,7 +2211,7 @@ button.detail-row { padding: 0; border: 0; background: transparent; text-align: 
 .connection-dialog .levelup-connection-card { min-height: 68px; }
 .connection-dialog .levelup-connection-copy strong { font-size: var(--font-control); }
 .connection-dialog .levelup-connection-copy small { font-size: var(--font-small); line-height: 1.4; }
-.connection-dialog .connection-picker select { height: 38px; font-size: var(--font-body); }
+.connection-dialog .connection-picker select, .connection-dialog .connection-picker .secondary-button { height: 38px; font-size: var(--font-body); }
 .connection-dialog .field { gap: 7px; font-size: var(--font-body); }
 .connection-dialog .field > span { min-height: 17px; line-height: 1.4; }
 .connection-dialog .field > span small { font-size: var(--font-small); }

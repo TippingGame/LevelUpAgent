@@ -1,0 +1,23 @@
+.media-reference-source select {
+  width: 100%;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: var(--canvas);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--font-small);
+}
+
+.media-frame-reference {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 100%;
+}
+
+.media-frame-reference > small {
+  color: var(--muted);
+  font-size: var(--font-caption);
+}
