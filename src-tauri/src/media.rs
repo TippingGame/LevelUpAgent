@@ -963,7 +963,8 @@ async fn call_openai_images(
     references: &[ManagedReference],
     mask: Option<&ManagedReference>,
 ) -> Result<Vec<GeneratedBlob>, String> {
-    let prompt = numbered_reference_prompt(&effective_image_prompt(request), references.len(), false);
+    let prompt =
+        numbered_reference_prompt(&effective_image_prompt(request), references.len(), false);
     let grok = is_grok_image_model(model);
     let result = if references.is_empty() {
         let url = agent::endpoint(&provider.profile.base_url, "/v1/images/generations")?;
@@ -1102,7 +1103,9 @@ async fn call_gemini_image(
         &provider.profile.base_url,
         &format!("/v1beta/models/{model}:generateContent"),
     )?;
-    let mut parts = vec![json!({ "text": numbered_reference_prompt(&effective_image_prompt(request), references.len(), false) })];
+    let mut parts = vec![
+        json!({ "text": numbered_reference_prompt(&effective_image_prompt(request), references.len(), false) }),
+    ];
     for (index, image) in references.iter().enumerate() {
         parts.push(json!({ "text": format!("Image {} / 图 {}:", index + 1, index + 1) }));
         parts.push(json!({
@@ -3093,9 +3096,20 @@ mod tests {
             Some(2)
         );
         assert!(body.get("image").is_none());
-        assert_eq!(body["reference_images"][0]["url"], reference_data_url(&second_image));
-        assert_eq!(body["reference_images"][1]["url"], reference_data_url(&image));
-        assert!(body["prompt"].as_str().unwrap().contains("Reference image order: 2 images"));
+        assert_eq!(
+            body["reference_images"][0]["url"],
+            reference_data_url(&second_image)
+        );
+        assert_eq!(
+            body["reference_images"][1]["url"],
+            reference_data_url(&image)
+        );
+        assert!(
+            body["prompt"]
+                .as_str()
+                .unwrap()
+                .contains("Reference image order: 2 images")
+        );
 
         let video = ManagedReference {
             file_name: "source.mp4".to_owned(),
@@ -3323,7 +3337,10 @@ mod tests {
             assert!(request.contains("name=\"n\"\r\n\r\n1\r\n"));
             assert!(!request.contains("name=\"n\"\r\n\r\n2\r\n"));
             assert!(request.contains("Reference image order: 2 images"));
-            assert!(request.find("mock-reference-z").unwrap() < request.find("mock-reference-a").unwrap());
+            assert!(
+                request.find("mock-reference-z").unwrap()
+                    < request.find("mock-reference-a").unwrap()
+            );
         });
         let mut provider = provider("primary", "gpt-image-2");
         provider.profile.base_url = base_url;
@@ -3353,7 +3370,12 @@ mod tests {
 
         assert_eq!(result.assets.len(), 2);
         assert!(result.errors.is_empty());
-        assert!(result.assets.iter().all(|asset| asset.prompt == "A useful test output"));
+        assert!(
+            result
+                .assets
+                .iter()
+                .all(|asset| asset.prompt == "A useful test output")
+        );
         server.join().unwrap();
         drop(database);
         let _ = std::fs::remove_dir_all(root);
@@ -3470,22 +3492,31 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        let (base_url, server) = mock_sequence_inspecting(vec![MockResponse {
-            method: "POST",
-            path: "/v1beta/models/gemini-3.1-flash-image:generateContent",
-            status: 200,
-            content_type: "application/json",
-            body,
-        }], |_, request| {
-            let text = String::from_utf8_lossy(request);
-            let body: Value = serde_json::from_str(text.split_once("\r\n\r\n").unwrap().1).unwrap();
-            let parts = body["contents"][0]["parts"].as_array().unwrap();
-            assert!(parts[0]["text"].as_str().unwrap().contains("Reference image order: 2 images"));
-            assert_eq!(parts[1]["text"], "Image 1 / 图 1:");
-            assert_eq!(parts[2]["inlineData"]["data"], "eg==");
-            assert_eq!(parts[3]["text"], "Image 2 / 图 2:");
-            assert_eq!(parts[4]["inlineData"]["data"], "YQ==");
-        });
+        let (base_url, server) = mock_sequence_inspecting(
+            vec![MockResponse {
+                method: "POST",
+                path: "/v1beta/models/gemini-3.1-flash-image:generateContent",
+                status: 200,
+                content_type: "application/json",
+                body,
+            }],
+            |_, request| {
+                let text = String::from_utf8_lossy(request);
+                let body: Value =
+                    serde_json::from_str(text.split_once("\r\n\r\n").unwrap().1).unwrap();
+                let parts = body["contents"][0]["parts"].as_array().unwrap();
+                assert!(
+                    parts[0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Reference image order: 2 images")
+                );
+                assert_eq!(parts[1]["text"], "Image 1 / 图 1:");
+                assert_eq!(parts[2]["inlineData"]["data"], "eg==");
+                assert_eq!(parts[3]["text"], "Image 2 / 图 2:");
+                assert_eq!(parts[4]["inlineData"]["data"], "YQ==");
+            },
+        );
         let mut provider = provider("gemini", "gemini-3.1-flash-image");
         provider.profile.base_url = format!("{base_url}/v1");
         provider.profile.protocol = ProviderProtocol::GeminiGenerateContent;

@@ -12,7 +12,7 @@
     <a href="https://levelup.mom/">LevelUpAPI</a>
   </p>
   <p>
-    <img alt="Version" src="https://img.shields.io/badge/version-1.0.51-ff5a4f?style=flat-square" />
+    <img alt="Version" src="https://img.shields.io/badge/version-1.0.52-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-可用预览-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -157,7 +157,7 @@ Developer ID 证书时使用 ad-hoc 签名，面向普通用户免确认分发�
 
 ## 当前状态
 
-`1.0.51` 是当前发布里程碑。新增 MiniMax 与 Composite 连接支持并更新模型默认值；补齐 11 类模型头像，聚合平台会按实际模型显示头像；桌宠的入睡、休息、共学状态及共学催促气泡会在 15 秒后消失，会话等重要通知继续保留。模型连接的默认文字模型下拉框始终展示完整模型目录；当前对话队列会逐条发送，不再把多条队列消息合并到最后一次请求。macOS 发布流程会在资源写入后重新签名，并验证 DMG 内和模拟安装后的应用。Windows 安装包仍未配置 Authenticode，macOS 安装包仍未公证。提交 Issue 时请附上复现步骤、应用日志和平台信息。
+`1.0.52` 是当前发布里程碑。模型连接的“添加连接”改为选择框右侧的文本按钮；新增 MiniMax 图片、H3/H3-Max 视频及 Seedance 视频支持，纯媒体连接无需默认文字模型即可保存。创作空间的图片和视频参考图显示“图 1 / 图 2”编号，可调整本地图片及 URL 参考图顺序；首尾帧角色随顺序更新，生成请求同步携带编号说明，空 URL 会阻止生成以避免引用错位。macOS 发布流程会在资源写入后重新签名，并验证 DMG 内和模拟安装后的应用。Windows 安装包仍未配置 Authenticode，macOS 安装包仍未公证。提交 Issue 时请附上复现步骤、应用日志和平台信息。
 
 ## 许可证
 

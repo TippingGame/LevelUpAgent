@@ -3641,15 +3641,36 @@ fn profile_supports_text(profile: &ProviderProfile) -> bool {
     // Keep legacy media defaults out of text execution, including profiles
     // saved before media-only connections used an empty default model.
     let tokens = model.split(['/', ':', '.', '_', '-']).collect::<Vec<_>>();
-    !tokens.iter().any(|token| matches!(*token,
-        "audio" | "embed" | "embedding" | "embeddings" | "image" | "imagen"
-        | "imagine" | "moderation" | "realtime" | "speech" | "sora" | "stt"
-        | "transcri" | "tts" | "veo" | "video" | "whisper" | "seedance" | "hailuo"
-    )) && !tokens.windows(2).any(|pair| {
-        pair == ["dall", "e"] || pair == ["vision", "preview"]
-            || (pair[0] == "minimax" && pair[1].strip_prefix('h').is_some_and(|version| {
-                !version.is_empty() && version.bytes().all(|digit| digit.is_ascii_digit())
-            }))
+    !tokens.iter().any(|token| {
+        matches!(
+            *token,
+            "audio"
+                | "embed"
+                | "embedding"
+                | "embeddings"
+                | "image"
+                | "imagen"
+                | "imagine"
+                | "moderation"
+                | "realtime"
+                | "speech"
+                | "sora"
+                | "stt"
+                | "transcri"
+                | "tts"
+                | "veo"
+                | "video"
+                | "whisper"
+                | "seedance"
+                | "hailuo"
+        )
+    }) && !tokens.windows(2).any(|pair| {
+        pair == ["dall", "e"]
+            || pair == ["vision", "preview"]
+            || (pair[0] == "minimax"
+                && pair[1].strip_prefix('h').is_some_and(|version| {
+                    !version.is_empty() && version.bytes().all(|digit| digit.is_ascii_digit())
+                }))
     })
 }
 
@@ -4105,7 +4126,9 @@ where
     let round_deadline = Instant::now() + round_timeout;
     let candidates = provider_candidates(&request);
     request.fallback_profiles.clear();
-    let mut last_error = "No text model is configured; media-only connections can be used in Creative Studio".to_owned();
+    let mut last_error =
+        "No text model is configured; media-only connections can be used in Creative Studio"
+            .to_owned();
     let mut failover_attempts = 0_u32;
     let mut reconnecting = false;
     let mut last_reconnect_attempt = 0_u32;
@@ -5430,7 +5453,9 @@ async fn agent_turn_stream_inner(
         }
     }
 
-    let mut last_error = "No text model is configured; media-only connections can be used in Creative Studio".to_owned();
+    let mut last_error =
+        "No text model is configured; media-only connections can be used in Creative Studio"
+            .to_owned();
     let mut result = None;
     let mut failover_attempts = 0_u32;
     let mut reconnecting = false;
@@ -12624,13 +12649,27 @@ mod tests {
             router_events: Vec::new(),
             reasoning_effort: None,
         };
-        for model in ["", "   ", "MiniMax-H3", "models/minimax/MiniMax-H3-Max", "MiniMax-Hailuo-2.3", "Seedance-2", "Seedance-2.0", "seedance/Seedance-2.5", "image-01", "image-01-live", "gpt-image-2.5-sunburst"] {
+        for model in [
+            "",
+            "   ",
+            "MiniMax-H3",
+            "models/minimax/MiniMax-H3-Max",
+            "MiniMax-Hailuo-2.3",
+            "Seedance-2",
+            "Seedance-2.0",
+            "seedance/Seedance-2.5",
+            "image-01",
+            "image-01-live",
+            "gpt-image-2.5-sunburst",
+        ] {
             request.profile.model = model.to_owned();
             let mut fallback = profile("media-fallback", 1, true);
             fallback.model = model.to_owned();
             request.fallback_profiles = vec![fallback];
             assert!(provider_candidates(&request).is_empty(), "{model}");
-            request.fallback_profiles.push(profile("text-fallback", 50, true));
+            request
+                .fallback_profiles
+                .push(profile("text-fallback", 50, true));
             let candidates = provider_candidates(&request);
             assert_eq!(candidates.len(), 1, "{model}");
             assert_eq!(candidates[0].id, "text-fallback", "{model}");
@@ -13024,7 +13063,8 @@ mod tests {
 
     #[test]
     fn provider_settings_persist_media_only_connections_without_a_text_model() {
-        let root = std::env::temp_dir().join(format!("levelup-media-settings-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("levelup-media-settings-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let database = database::Database::open(&root.join("test.sqlite3")).unwrap();
         let mut media_profile = profile("seedance", 10, false);

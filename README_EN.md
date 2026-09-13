@@ -12,7 +12,7 @@
     <a href="https://levelup.mom/">LevelUpAPI</a>
   </p>
   <p>
-    <img alt="Version" src="https://img.shields.io/badge/version-1.0.51-ff5a4f?style=flat-square" />
+    <img alt="Version" src="https://img.shields.io/badge/version-1.0.52-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-preview-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -155,7 +155,7 @@ Use `pnpm build:macos` for macOS packages. The script signs after all resources 
 
 ## Current status
 
-`1.0.51` is the current release milestone. This release adds MiniMax and Composite connection support, refreshes model defaults, and adds avatars for 11 model families with model-aware gateway matching. Routine desktop-pet status and study prompts disappear after 15 seconds while important conversation notifications remain visible. The default text-model dropdown always shows the complete discovered model catalog, and queued conversation messages are sent one at a time instead of being combined into the final request. The macOS release path reseals the app after resources are bundled and verifies both the DMG copy and a simulated installed copy. Windows installers are still not Authenticode-signed, and macOS packages are still not notarized. When filing an issue, include reproduction steps, application logs, and platform details.
+`1.0.52` is the current release milestone. Add connection is now a visible text button beside the connection selector. This release adds MiniMax image generation, H3/H3-Max video generation, and Seedance video support; media-only connections can be saved without a default text model. Image and video references in the creative studio have visible numbers and reorder controls for local images and URLs. First/last-frame roles follow the order, generation requests include reference numbering guidance, and empty URLs block generation to prevent shifted references. The macOS release path reseals the app after resources are bundled and verifies both the DMG copy and a simulated installed copy. Windows installers are still not Authenticode-signed, and macOS packages are still not notarized. When filing an issue, include reproduction steps, application logs, and platform details.
 
 ## License
 

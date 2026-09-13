@@ -220,7 +220,10 @@ pub(super) fn native_video_body(
         request.video_mode == VideoGenerationMode::FirstLast,
     );
     if prompt.chars().count() > 7000 {
-        return Err("The video prompt including reference order must contain at most 7,000 characters".to_owned());
+        return Err(
+            "The video prompt including reference order must contain at most 7,000 characters"
+                .to_owned(),
+        );
     }
     if is_minimax_video_model(model) {
         let mut content = vec![json!({"type": "text", "text": prompt})];
@@ -397,7 +400,8 @@ fn minimax_image_body(
             "MiniMax images support character references, not explicit edit masks".to_owned(),
         );
     }
-    let prompt = numbered_reference_prompt(&effective_image_prompt(request), references.len(), false);
+    let prompt =
+        numbered_reference_prompt(&effective_image_prompt(request), references.len(), false);
     if prompt.chars().count() > 1500 {
         return Err("MiniMax image prompts must contain at most 1,500 characters".to_owned());
     }
@@ -548,10 +552,18 @@ mod tests {
         assert_eq!(body["ratio"], "adaptive");
         assert_eq!(body["duration"], 10);
         assert!(body.get("prompt").is_none());
-        assert!(body["content"][0]["text"].as_str().unwrap().contains("Image 1 / 图 1 is the first frame"));
+        assert!(
+            body["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Image 1 / 图 1 is the first frame")
+        );
         request.reference_urls.swap(0, 1);
         let swapped = native_video_body("MiniMax-H3", &request, &[]).unwrap();
-        assert_eq!(swapped["content"][1]["image_url"]["url"], "https://cdn.test/last.png");
+        assert_eq!(
+            swapped["content"][1]["image_url"]["url"],
+            "https://cdn.test/last.png"
+        );
         assert_eq!(swapped["content"][1]["role"], "first_frame");
         assert_eq!(swapped["content"][2]["role"], "last_frame");
         request.seconds = Some(30);
@@ -574,7 +586,12 @@ mod tests {
         assert_eq!(body["last_image"], "https://cdn.test/last.png");
         assert!(body.get("ratio").is_none());
         assert!(body.get("images").is_none());
-        assert!(body["prompt"].as_str().unwrap().contains("Image 2 / 图 2 is the last frame"));
+        assert!(
+            body["prompt"]
+                .as_str()
+                .unwrap()
+                .contains("Image 2 / 图 2 is the last frame")
+        );
         request.reference_urls.swap(0, 1);
         let swapped = native_video_body("Seedance-2.5", &request, &[]).unwrap();
         assert_eq!(swapped["first_image"], "https://cdn.test/last.png");
@@ -651,10 +668,27 @@ mod tests {
         assert!(body.get("size").is_none());
         let mut other = reference.clone();
         other.bytes = vec![4, 5, 6];
-        let ordered = minimax_image_body("image-01", &request, &[other.clone(), reference.clone()], None).unwrap();
-        assert!(ordered["prompt"].as_str().unwrap().contains("Reference image order: 2 images"));
-        assert_eq!(ordered["subject_reference"][0]["image_file"], reference_data_url(&other));
-        assert_eq!(ordered["subject_reference"][1]["image_file"], reference_data_url(&reference));
+        let ordered = minimax_image_body(
+            "image-01",
+            &request,
+            &[other.clone(), reference.clone()],
+            None,
+        )
+        .unwrap();
+        assert!(
+            ordered["prompt"]
+                .as_str()
+                .unwrap()
+                .contains("Reference image order: 2 images")
+        );
+        assert_eq!(
+            ordered["subject_reference"][0]["image_file"],
+            reference_data_url(&other)
+        );
+        assert_eq!(
+            ordered["subject_reference"][1]["image_file"],
+            reference_data_url(&reference)
+        );
         assert!(minimax_image_body("image-01-live", &request, &[], None).is_err());
         assert!(minimax_image_body("image-01", &request, &[], Some(&reference)).is_err());
     }
