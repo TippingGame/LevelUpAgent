@@ -31,7 +31,7 @@ pub(super) fn is_seedance_video_model(model: &str) -> bool {
     )
 }
 
-fn native_endpoint(base_url: &str, path: &str) -> Result<reqwest::Url, String> {
+pub(super) fn native_endpoint(base_url: &str, path: &str) -> Result<reqwest::Url, String> {
     let mut base =
         reqwest::Url::parse(base_url).map_err(|_| "Invalid media Base URL".to_owned())?;
     let current = base.path().trim_end_matches('/');
@@ -267,7 +267,32 @@ pub(super) async fn create_native_video(
     request: &MediaGenerationRequest,
     references: &[ManagedReference],
 ) -> Result<RemoteVideoJob, String> {
-    let body = native_video_body(model, request, references)?;
+    let direct_minimax = is_minimax_video_model(model) && uses_direct_minimax_media(provider);
+    let mut body = native_video_body(model, request, references)?;
+    if is_minimax_video_model(model) && !direct_minimax {
+        // Gateways expose the same compatible contract used by the web studio.
+        // Native content/role fields belong only to MiniMax's direct API.
+        let content = body["content"].as_array().unwrap();
+        let prompt = content[0]["text"].clone();
+        let urls: Vec<Value> = content
+            .iter()
+            .skip(1)
+            .map(|item| item["image_url"]["url"].clone())
+            .collect();
+        body.as_object_mut().unwrap().remove("content");
+        body["prompt"] = prompt;
+        if matches!(
+            request.video_mode,
+            VideoGenerationMode::Image | VideoGenerationMode::FirstLast
+        ) {
+            body["first_image"] = urls[0].clone();
+            if urls.len() == 2 {
+                body["last_image"] = urls[1].clone();
+            }
+        } else if !urls.is_empty() {
+            body["referenceImages"] = json!(urls);
+        }
+    }
     if is_minimax_video_model(model)
         && serde_json::to_vec(&body)
             .map_err(|error| format!("Could not encode MiniMax video request: {error}"))?
@@ -276,7 +301,7 @@ pub(super) async fn create_native_video(
     {
         return Err("MiniMax video requests may total at most 64 MiB including encoded references; use smaller images or public HTTPS URLs".to_owned());
     }
-    let path = if is_minimax_video_model(model) {
+    let path = if direct_minimax {
         "/v2/video_generation"
     } else {
         "/v1/videos"
@@ -294,16 +319,19 @@ pub(super) async fn create_native_video(
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| "The video provider returned no task ID".to_owned())?;
     // Even immediately completed tasks must be polled once to download output.
-    let status = parse_video_status(value.get("status").and_then(Value::as_str));
+    let task = video_task_payload(&value);
+    let status = parse_video_status(
+        task.get("status")
+            .or_else(|| task.get("state"))
+            .and_then(Value::as_str),
+    );
     if status == MediaStatus::Failed {
-        return Err(
-            provider_message(&value).unwrap_or_else(|| "Video generation failed".to_owned())
-        );
+        return Err(provider_message(task).unwrap_or_else(|| "Video generation failed".to_owned()));
     }
     Ok(RemoteVideoJob {
         id: id.to_owned(),
         status: MediaStatus::Queued,
-        progress: parse_progress(&value),
+        progress: parse_progress(task),
     })
 }
 

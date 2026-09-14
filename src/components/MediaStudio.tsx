@@ -389,6 +389,9 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
     const refreshPending = async () => {
       const results = await Promise.allSettled(pendingVideoIds.map(refreshMediaAsset));
       if (disposed) return;
+      const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+      const retryPrefix = tr("视频状态获取失败，将自动重试：", "Video status unavailable; retrying: ");
+      setError((current) => failures.length ? retryPrefix + errorText(failures[0].reason) : current?.startsWith(retryPrefix) ? null : current);
       setAssets((current) => mergeAssets(current, results.flatMap((result) => result.status === "fulfilled" ? [result.value] : [])));
     };
     const timer = window.setInterval(() => void refreshPending(), 5_000);

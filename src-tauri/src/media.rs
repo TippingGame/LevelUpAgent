@@ -411,10 +411,16 @@ pub async fn refresh_asset(
     {
         poll_gemini_video(client, provider, &remote_id).await
     } else {
-        if is_minimax_video_model(&asset.model) {
+        if is_minimax_video_model(&asset.model) && uses_direct_minimax_media(provider) {
             poll_minimax_video(client, provider, &remote_id).await
         } else {
-            poll_openai_video(client, provider, &remote_id).await
+            poll_openai_video(
+                client,
+                provider,
+                &remote_id,
+                is_minimax_video_model(&asset.model) || is_seedance_video_model(&asset.model),
+            )
+            .await
         }
     };
     let now = now_millis();
@@ -1811,27 +1817,72 @@ async fn poll_openai_video(
     client: &Client,
     provider: &MediaProvider,
     remote_id: &str,
+    canonical_v1: bool,
 ) -> Result<VideoPoll, String> {
     validate_remote_id(remote_id)?;
-    let url = agent::endpoint(
+    let endpoint = if canonical_v1 {
+        native_endpoint
+    } else {
+        agent::endpoint
+    };
+    let url = endpoint(
         &provider.profile.base_url,
         &format!("/v1/videos/{remote_id}"),
     )?;
     let value = send_json(bearer_auth_if_present(client.get(url), provider)).await?;
-    let status = parse_video_status(value.get("status").and_then(Value::as_str));
+    let task = video_task_payload(&value);
+    let raw_status = task
+        .get("status")
+        .or_else(|| task.get("state"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if !matches!(
+        raw_status.as_str(),
+        "queued"
+            | "pending"
+            | "submitted"
+            | "submitting"
+            | "in_progress"
+            | "processing"
+            | "running"
+            | "billing"
+            | "completed"
+            | "succeeded"
+            | "success"
+            | "done"
+            | "failed"
+            | "error"
+            | "cancelled"
+            | "canceled"
+            | "expired"
+    ) {
+        return Err(format!(
+            "Video provider returned a missing or unknown task status: {raw_status}"
+        ));
+    }
+    let status = parse_video_status(Some(&raw_status));
     if status == MediaStatus::Failed {
         return Ok(VideoPoll::Failed {
-            error: provider_message(&value)
+            error: provider_message(task)
                 .unwrap_or_else(|| "Video generation failed at the provider".to_owned()),
         });
     }
     if status != MediaStatus::Completed {
+        if task.get("error").is_some_and(|error| !error.is_null())
+            || task.get("error_message").is_some()
+        {
+            if let Some(message) = provider_message(task) {
+                return Err(message);
+            }
+        }
         return Ok(VideoPoll::Pending {
             status,
-            progress: parse_progress(&value),
+            progress: parse_progress(task),
         });
     }
-    let url = agent::endpoint(
+    let url = endpoint(
         &provider.profile.base_url,
         &format!("/v1/videos/{remote_id}/content"),
     )?;
@@ -2062,7 +2113,18 @@ async fn send_json(builder: reqwest::RequestBuilder) -> Result<Value, String> {
         .await
         .map_err(|error| format!("Media provider connection failed: {error}"))?;
     let status = response.status();
+    let response_path = response.url().path().to_owned();
+    let is_html = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().contains("text/html"));
     let bytes = read_limited_response(response, MAX_JSON_BYTES).await?;
+    if is_html || bytes.starts_with(b"<!doctype html") || bytes.starts_with(b"<!DOCTYPE html") {
+        return Err(format!(
+            "Media endpoint {response_path} returned an HTML page ({status}) instead of JSON. Check the connection Base URL and gateway media routes."
+        ));
+    }
     if !status.is_success() {
         return Err(format!(
             "Media provider request failed ({status}): {}",
@@ -2273,6 +2335,8 @@ fn provider_message(value: &Value) -> Option<String> {
     let candidates = [
         value.pointer("/error/message"),
         value.pointer("/error/status"),
+        value.get("error_message"),
+        value.get("error"),
         value.get("message"),
         value.get("detail"),
     ];
@@ -2308,12 +2372,28 @@ fn clean_content_type(value: &str) -> String {
 }
 
 fn parse_video_status(status: Option<&str>) -> MediaStatus {
-    match status.unwrap_or_default().to_ascii_lowercase().as_str() {
+    match status
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "completed" | "succeeded" | "success" | "done" => MediaStatus::Completed,
-        "failed" | "cancelled" | "canceled" | "expired" => MediaStatus::Failed,
-        "in_progress" | "processing" | "running" => MediaStatus::InProgress,
+        "failed" | "error" | "cancelled" | "canceled" | "expired" => MediaStatus::Failed,
+        "in_progress" | "processing" | "running" | "billing" => MediaStatus::InProgress,
         _ => MediaStatus::Queued,
     }
+}
+
+fn video_task_payload(value: &Value) -> &Value {
+    for key in ["task", "data", "video"] {
+        if let Some(task) = value.get(key).filter(|item| item.is_object()) {
+            if task.get("status").or_else(|| task.get("state")).is_some() {
+                return task;
+            }
+        }
+    }
+    value
 }
 
 fn parse_progress(value: &Value) -> Option<u32> {
@@ -4018,57 +4098,160 @@ mod tests {
             },
         );
         let (base_url, server) = mock_sequence_inspecting(vec![
-            MockResponse { method: "POST", path: "/v2/video_generation", status: 200, content_type: "application/json", body: br#"{"task_id":"h3-task"}"#.to_vec() },
             MockResponse { method: "GET", path: "/v2/query/video_generation/h3-task", status: 200, content_type: "application/json", body: br#"{"task":{"id":"h3-task","status":"running"}}"#.to_vec() },
             MockResponse { method: "GET", path: "/v2/query/video_generation/h3-task", status: 200, content_type: "application/json", body: json!({"task": {"id": "h3-task", "status": "succeeded", "content": {"url": format!("{download_base}/output.mp4")}}}).to_string().into_bytes() },
-        ], |index, bytes| {
+        ], |_, bytes| {
             let text = String::from_utf8_lossy(bytes);
             assert!(text.to_ascii_lowercase().contains("authorization: bearer secret"));
-            if index == 0 {
-                let body: Value = serde_json::from_str(text.split_once("\r\n\r\n").unwrap().1).unwrap();
-                assert_eq!(body["content"][0]["type"], "text");
-                assert_eq!(body["resolution"], "768P");
-            }
         });
         let mut provider = provider("minimax", "MiniMax-H3");
         provider.profile.base_url = format!("{base_url}/v1");
-        let selection = MediaSelection {
-            provider: provider.clone(),
-            model: "MiniMax-H3".into(),
-            protocol: ProviderProtocol::OpenaiChat,
-        };
-        let (root, database) = temp_storage("minimax-video");
-        let storage = root.join("media");
-        let created = generate_batch(
-            &Client::new(),
-            &storage,
-            &database,
-            &selection,
-            &request(MediaKind::Video, 1),
-            None,
-            &[],
-        )
-        .await
-        .unwrap();
-        let running = refresh_asset(
-            &Client::new(),
-            &storage,
-            &database,
-            &provider,
-            created.assets[0].clone(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(running.status, MediaStatus::InProgress);
-        let completed = refresh_asset(&Client::new(), &storage, &database, &provider, running)
+        let running = poll_minimax_video(&Client::new(), &provider, "h3-task")
             .await
             .unwrap();
-        assert_eq!(completed.status, MediaStatus::Completed);
-        assert!(Path::new(completed.file_path.as_deref().unwrap()).is_file());
+        assert!(matches!(
+            running,
+            VideoPoll::Pending {
+                status: MediaStatus::InProgress,
+                ..
+            }
+        ));
+        let completed = poll_minimax_video(&Client::new(), &provider, "h3-task")
+            .await
+            .unwrap();
+        assert!(matches!(completed, VideoPoll::Completed { .. }));
         server.join().unwrap();
         download_server.join().unwrap();
-        drop(database);
-        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn minimax_gateway_jobs_use_compatible_create_poll_and_content_routes() {
+        for model in ["MiniMax-H3", "MiniMax-H3-Max"] {
+            let (base_url, server) = mock_sequence_inspecting(
+                vec![
+                    MockResponse {
+                        method: "POST",
+                        path: "/v1/videos",
+                        status: 200,
+                        content_type: "application/json",
+                        body: br#"{"task_id":"mm-job","status":"queued"}"#.to_vec(),
+                    },
+                    MockResponse {
+                        method: "GET",
+                        path: "/v1/videos/mm-job",
+                        status: 200,
+                        content_type: "application/json",
+                        body: br#"{"id":"mm-job","status":"completed"}"#.to_vec(),
+                    },
+                    MockResponse {
+                        method: "GET",
+                        path: "/v1/videos/mm-job/content",
+                        status: 200,
+                        content_type: "video/mp4",
+                        body: b"mock-minimax-video".to_vec(),
+                    },
+                ],
+                |index, bytes| {
+                    let text = String::from_utf8_lossy(bytes);
+                    assert!(
+                        text.to_ascii_lowercase()
+                            .contains("authorization: bearer secret")
+                    );
+                    if index == 0 {
+                        let body: Value =
+                            serde_json::from_str(text.split_once("\r\n\r\n").unwrap().1).unwrap();
+                        assert!(body.get("content").is_none());
+                        assert!(body["prompt"].as_str().is_some_and(|s| !s.is_empty()));
+                        assert_eq!(body["first_image"], "https://cdn.test/first.png");
+                        assert_eq!(body["last_image"], "https://cdn.test/last.png");
+                        assert_eq!(body["ratio"], "adaptive");
+                        assert_eq!(body["resolution"], "768P");
+                    }
+                },
+            );
+            let mut provider = provider("minimax", model);
+            provider.profile.base_url = format!("{base_url}/v2");
+            let selection = MediaSelection {
+                provider: provider.clone(),
+                model: model.into(),
+                protocol: ProviderProtocol::OpenaiChat,
+            };
+            let (root, database) = temp_storage(model);
+            let mut request = request(MediaKind::Video, 1);
+            request.seconds = Some(5);
+            request.video_mode = VideoGenerationMode::FirstLast;
+            request.reference_urls = vec![
+                "https://cdn.test/first.png".into(),
+                "https://cdn.test/last.png".into(),
+            ];
+            let created = generate_batch(
+                &Client::new(),
+                &root.join("media"),
+                &database,
+                &selection,
+                &request,
+                None,
+                &[],
+            )
+            .await
+            .unwrap();
+            let completed = refresh_asset(
+                &Client::new(),
+                &root.join("media"),
+                &database,
+                &provider,
+                created.assets[0].clone(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(completed.status, MediaStatus::Completed);
+            assert!(Path::new(completed.file_path.as_deref().unwrap()).is_file());
+            server.join().unwrap();
+            drop(database);
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[tokio::test]
+    async fn media_html_errors_report_the_endpoint_without_dumping_the_webpage() {
+        let (base_url, server) = mock_sequence(vec![MockResponse {
+            method: "POST",
+            path: "/v2/video_generation",
+            status: 200,
+            content_type: "text/html",
+            body: b"<!doctype html><script>window.__APP_CONFIG__={private_setting:1}</script>"
+                .to_vec(),
+        }]);
+        let error = send_json(Client::new().post(format!("{base_url}/v2/video_generation")))
+            .await
+            .unwrap_err();
+        assert!(error.contains("/v2/video_generation"));
+        assert!(error.contains("HTML page"));
+        assert!(!error.contains("APP_CONFIG"));
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn video_poll_errors_remain_retryable_and_do_not_masquerade_as_queued() {
+        let (base_url, server) = mock_sequence(vec![
+            MockResponse { method: "GET", path: "/v1/videos/seed-task", status: 200, content_type: "application/json", body: br#"{"message":"temporarily unavailable"}"#.to_vec() },
+            MockResponse { method: "GET", path: "/v1/videos/seed-task", status: 200, content_type: "application/json", body: br#"{"status":"running","error":{"message":"Video generated; settlement will retry automatically"}}"#.to_vec() },
+            MockResponse { method: "GET", path: "/v1/videos/seed-task", status: 200, content_type: "application/json", body: br#"{"data":{"state":"failed","error_message":"reference image unavailable"}}"#.to_vec() },
+        ]);
+        let mut provider = provider("seedance", "Seedance-2.5");
+        provider.profile.base_url = base_url;
+        let client = Client::new();
+        let first = poll_openai_video(&client, &provider, "seed-task", true).await;
+        assert!(first.err().unwrap().contains("missing or unknown"));
+        let retry = poll_openai_video(&client, &provider, "seed-task", true).await;
+        assert!(retry.err().unwrap().contains("settlement will retry"));
+        let failed = poll_openai_video(&client, &provider, "seed-task", true)
+            .await
+            .unwrap();
+        assert!(
+            matches!(failed, VideoPoll::Failed { error } if error == "reference image unavailable")
+        );
+        server.join().unwrap();
     }
 
     #[tokio::test]
@@ -4087,7 +4270,7 @@ mod tests {
                     path: "/v1/videos/seedance-task",
                     status: 200,
                     content_type: "application/json",
-                    body: br#"{"id":"seedance-task","status":"completed"}"#.to_vec(),
+                    body: br#"{"data":{"id":"seedance-task","state":" completed "}}"#.to_vec(),
                 },
                 MockResponse {
                     method: "GET",
