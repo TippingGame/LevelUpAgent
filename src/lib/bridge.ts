@@ -1,5 +1,6 @@
 import { Channel, convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import type { LocalAttachmentPath } from "./localAttachments";
 import type {
   AgentMessage,
   AgentMode,
@@ -336,6 +337,15 @@ export async function selectAttachments(): Promise<ImageAttachment[]> {
   });
   const paths = typeof selected === "string" ? [selected] : Array.isArray(selected) ? selected : [];
   return importAttachments(paths);
+}
+
+export async function importMessagePathAttachments(
+  sourcePaths: LocalAttachmentPath[],
+  existingAttachments: ImageAttachment[],
+  workspace?: string,
+): Promise<ImageAttachment[]> {
+  if (!isDesktop() || sourcePaths.length === 0) return [];
+  return invoke<ImageAttachment[]>("import_message_path_attachments", { sourcePaths, existingAttachments, workspace });
 }
 
 export async function importAttachments(sourcePaths: string[]): Promise<ImageAttachment[]> {

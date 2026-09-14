@@ -12,7 +12,7 @@
     <a href="https://levelup.mom/">LevelUpAPI</a>
   </p>
   <p>
-    <img alt="Version" src="https://img.shields.io/badge/version-1.0.52-ff5a4f?style=flat-square" />
+    <img alt="Version" src="https://img.shields.io/badge/version-1.0.53-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-preview-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -155,7 +155,7 @@ Use `pnpm build:macos` for macOS packages. The script signs after all resources 
 
 ## Current status
 
-`1.0.52` is the current release milestone. Add connection is now a visible text button beside the connection selector. This release adds MiniMax image generation, H3/H3-Max video generation, and Seedance video support; media-only connections can be saved without a default text model. Image and video references in the creative studio have visible numbers and reorder controls for local images and URLs. First/last-frame roles follow the order, generation requests include reference numbering guidance, and empty URLs block generation to prevent shifted references. The macOS release path reseals the app after resources are bundled and verifies both the DMG copy and a simulated installed copy. Windows installers are still not Authenticode-signed, and macOS packages are still not notarized. When filing an issue, include reproduction steps, application logs, and platform details.
+`1.0.53` is the current release milestone. Model connections show all models returned by the service and provide an Open log directory button in the footer. Local paths in messages use the same import flow as selected or dropped attachments, including arbitrary extensions, extensionless files, and empty files. Common images, text, and PDF/Office content are read directly; other formats preserve original files for local tools. Full access allows file, command, and browser paths outside the workspace, while restricted modes retain scope checks. Completed background processes retain bounded output and status history, and stale process IDs no longer abort the entire task. Upstream stream read errors receive reconnect handling and clearer messages. Windows installers are still not Authenticode-signed, and macOS packages are still not notarized. When filing an issue, include reproduction steps, application logs, and platform details.
 
 ## License
 

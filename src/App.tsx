@@ -128,6 +128,7 @@ import {
   hasApiKey,
   importExternalConfig,
   importAttachments,
+  importMessagePathAttachments,
   importClipboardAttachments,
   importHatchedPets,
   installAppUpdate,
@@ -179,6 +180,7 @@ import {
   uninstallTheme,
   updatePetActivities,
 } from "./lib/bridge";
+import { localAttachmentPaths } from "./lib/localAttachments";
 import {
   parseConversationExport,
   serializeConversationExport,
@@ -3852,6 +3854,28 @@ function App() {
       setSettingsOpen(true);
       return;
     }
+    let attachments = draftAttachments;
+    const sourcePaths = localAttachmentPaths(value);
+    if (isDesktop() && sourcePaths.length > 0) {
+      attachmentPasteRef.current = true;
+      setAttachmentPasteBusy(true);
+      try {
+        const imported = await importMessagePathAttachments(sourcePaths, attachments, thread.workspace);
+        if (activeThreadIdRef.current !== thread.id) {
+          await Promise.all(imported.map((item) => deleteImageAttachment(item.id).catch(() => false)));
+          return;
+        }
+        attachments = [...attachments, ...imported];
+        draftAttachmentsRef.current = attachments;
+        setDraftAttachments(attachments);
+      } catch (error) {
+        setNotice(`${tr("无法读取消息中的文件", "Could not read a file from the message")}: ${errorText(error)}`);
+        return;
+      } finally {
+        attachmentPasteRef.current = false;
+        setAttachmentPasteBusy(false);
+      }
+    }
     if (mode === "goal" && useHarness) {
       try {
         let goal = await getGoal(thread.id);
@@ -3862,9 +3886,9 @@ function App() {
         }
         if (activeThreadIdRef.current === thread.id) setGoalState(goal);
       } catch (error) {
-        const failedUser = message("user", value, { attachments: draftAttachments });
+        const failedUser = message("user", value, { attachments });
         const failedTitle = thread.messages.length === 0 && isDefaultThreadTitle(thread.title)
-          ? (value || draftAttachments[0]?.name || tr("附件任务", "Attachment task")).slice(0, 42)
+          ? (value || attachments[0]?.name || tr("附件任务", "Attachment task")).slice(0, 42)
           : thread.title;
         const reason = `${tr("无法启动 Goal", "Could not start Goal")}: ${errorText(error)}`;
         setDraft("");
@@ -3909,9 +3933,9 @@ function App() {
         setNotice(`${tr("宠物记忆保存失败", "Could not save pet memory")}: ${errorText(error)}`);
       }
     }
-    const user = message("user", value, { attachments: draftAttachments });
+    const user = message("user", value, { attachments });
     const title = thread.kind !== "pet" && thread.messages.length === 0 && isDefaultThreadTitle(thread.title)
-      ? (value || draftAttachments[0]?.name || tr("附件任务", "Attachment task")).slice(0, 42)
+      ? (value || attachments[0]?.name || tr("附件任务", "Attachment task")).slice(0, 42)
       : thread.title;
     const next = {
       ...thread,
@@ -3953,7 +3977,7 @@ function App() {
         const harnessRequest = {
           threadId: thread.id,
           rawUserInput: rawValue,
-          attachmentIds: draftAttachments.map((attachment) => attachment.id),
+          attachmentIds: attachments.map((attachment) => attachment.id),
           mode: runMode,
           permissionLevel,
           requestedProfileId: runProfile.id,
@@ -8538,7 +8562,7 @@ function ModelIdInput({
         <input
           ref={inputRef}
           role="combobox"
-          aria-label={tr("模型 ID", "Model ID")}
+          aria-label={tr("模型", "Model")}
           aria-autocomplete="none"
           aria-expanded={expanded}
           aria-controls={expanded ? listId : undefined}
@@ -8659,7 +8683,8 @@ function ConnectionDialog({
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelsDetected, setModelsDetected] = useState(false);
   const textModels = models.filter(isTextGenerationModel);
-  const hasTextModel = profileHasTextModel(draftProfile);
+  const selectedModel = models.find((item) => item.id === draftProfile.model.trim());
+  const hasTextModel = isTextGenerationModel(selectedModel ?? { id: draftProfile.model });
   const [candidates, setCandidates] = useState<ExternalConfigCandidate[] | null>(null);
   const [scanning, setScanning] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -8972,29 +8997,23 @@ function ConnectionDialog({
             <span><strong>{tr("允许无 API Key", "Allow connection without an API key")}</strong><small>{tr("仅用于你信任的本机或局域网服务；如果已保存密钥，仍会优先发送密钥。", "Use only with a trusted local or LAN service. A saved key is still sent when present.")}</small></span>
           </label>
           <div className="field">
-            <span>{tr("默认文字模型", "Default text model")}</span>
+            <span>{tr("模型", "Model")}</span>
             <ModelIdInput
               key={draftProfile.id}
               id={draftProfile.id}
               value={draftProfile.model}
-              models={textModels}
+              models={models}
               protocol={draftProfile.protocol}
               onChange={selectDetectedModel}
             />
-            <small>{!hasTextModel
+            <small>{modelsDetected
               ? tr(
-                "无可用文字模型。可保存为媒体连接，在创作空间检测和选择图片、视频模型。",
-                "No text model configured. Save this media connection to discover and select image and video models in Creative Studio.",
+                `已获取 ${models.length} 个模型，其中 ${textModels.length} 个文字模型`,
+                `${models.length} models found, including ${textModels.length} text models`,
               )
-              : textModels.length > 0
-              ? tr(
-                `已发现 ${textModels.length} 个文字模型，共 ${models.length} 个模型；图片和视频模型在创作空间选择`,
-                `${textModels.length} text models found (${models.length} total); choose image and video models in Creative Studio`,
-              )
-              : modelsDetected
-                ? tr("当前目录未返回文字模型，可手动填写；纯媒体连接可留空", "The catalog returned no text models; enter one manually or leave blank for media only")
-                : tr("尚未检测到模型；纯媒体连接可留空", "No models discovered yet; leave blank for a media-only connection")}
+              : tr("尚未获取模型列表", "No model catalog loaded yet")}
             </small>
+            {!hasTextModel && <small>{tr("未配置对话模型", "No chat model configured")}</small>}
           </div>
           <div className="field connection-test">
             <span>{tr("连接检查", "Connection check")}</span>
@@ -9078,6 +9097,7 @@ function ConnectionDialog({
             <button className="secondary-button" onClick={onOpenSkills}><BookOpen size={14} /> Skills</button>
             <button className="secondary-button" onClick={onOpenInstructions}><BookOpen size={14} /> Instructions</button>
             <button className="secondary-button" onClick={onOpenLogs}><Activity size={14} /> {tr("请求日志", "Request logs")}</button>
+            <button className="secondary-button" type="button" onClick={() => void openAppLogDirectory().catch((reason) => setError(errorText(reason)))}><FolderOpen size={14} /> {tr("打开日志目录", "Open log directory")}</button>
             <button className="secondary-button" onClick={onOpenPet}><PawPrint size={14} /> {tr("摇光残影", "Starlight Echoes")}</button>
             <button className="secondary-button" onClick={onOpenThemes}><Palette size={14} /> {tr("主题", "Themes")}</button>
             <UpdateButton key={getAppLocale()} />
@@ -10058,6 +10078,12 @@ function errorText(reason: unknown) {
 
 function friendlyAgentError(reason: string) {
   const normalized = reason.toLowerCase();
+  if (normalized.includes("stream_read_error")) {
+    return tr(
+      "模型服务读取上游响应时连接中断（stream_read_error）。请重试本轮，或切换模型连接。已完成的工具结果仍保留。",
+      "The model service lost its upstream response stream (stream_read_error). Retry this turn or switch model connections. Completed tool results are preserved.",
+    );
+  }
   if (reason.includes("CURRENT_INPUT_TOO_LARGE")) {
     return tr(
       "当前消息和本轮工具上下文超过了模型请求预算。LevelUpAgent 没有截断你的消息；请缩短输入、减少附件或暂时停用不需要的工具后重试。",
@@ -10937,7 +10963,7 @@ function permissionLabel(level: PermissionLevel) {
 function permissionDescription(level: PermissionLevel) {
   if (level === "request") return tr("编辑文件和运行命令时始终询问", "Always ask before editing files or running commands");
   if (level === "agent") return tr("仅对检测到的风险操作请求批准", "Ask only for operations detected as risky");
-  return tr("本地工具可访问绝对路径并自动运行；凭据和未知外部工具仍会保护", "Local tools may use absolute paths and run automatically; credentials and unknown external tools remain protected");
+  return tr("本地文件和工具可跨目录访问并自动执行", "Local files and tools may be accessed across directories and run automatically");
 }
 
 function permissionBehaviorLabel(level: PermissionLevel, mode: AgentMode) {

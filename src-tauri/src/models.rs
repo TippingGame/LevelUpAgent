@@ -123,6 +123,9 @@ pub struct AgentTurnRequest {
     pub messages: Vec<AgentMessage>,
     pub mode: String,
     pub workspace: Option<String>,
+    /// Host-resolved file scope, never accepted from provider or IPC input.
+    #[serde(skip)]
+    pub allow_outside_workspace: bool,
     pub thread_id: Option<String>,
     #[serde(default)]
     pub hatch: bool,

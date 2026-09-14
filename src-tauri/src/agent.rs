@@ -630,6 +630,7 @@ pub fn is_retryable_provider_error(error: &str) -> bool {
         || error.contains("Could not read provider response")
         || error.contains("Invalid SSE stream")
         || error.contains(PROVIDER_STREAM_INTERRUPTED)
+        || error.to_ascii_lowercase().contains("stream_read_error")
         || error.contains("Invalid provider response")
         || error.contains("Base URL is invalid")
         || [
@@ -640,7 +641,11 @@ pub fn is_retryable_provider_error(error: &str) -> bool {
 }
 
 pub fn is_reconnectable_provider_error(error: &str) -> bool {
-    if error.contains("REQUEST_CANCELLED") {
+    if error.contains("REQUEST_CANCELLED")
+        || ["400 Bad Request", "422 Unprocessable Entity"]
+            .iter()
+            .any(|status| error.contains(status))
+    {
         return false;
     }
     error.contains("Connection failed")
@@ -648,6 +653,7 @@ pub fn is_reconnectable_provider_error(error: &str) -> bool {
         || error.contains("Could not read provider response")
         || error.contains("Invalid SSE stream")
         || error.contains(PROVIDER_STREAM_INTERRUPTED)
+        || error.to_ascii_lowercase().contains("stream_read_error")
         || ["408 ", "429 ", "500 ", "502 ", "503 ", "504 ", "524 "]
             .iter()
             .any(|status| error.contains(status))
@@ -2153,17 +2159,39 @@ fn ensure_success_status(response: &reqwest::Response) -> Result<(), String> {
 }
 
 fn check_stream_error(value: &Value) -> Result<(), String> {
-    let is_error =
-        value.get("type").and_then(Value::as_str) == Some("error") || value.get("error").is_some();
+    let error = value
+        .get("error")
+        .filter(|error| !error.is_null())
+        .or_else(|| {
+            value
+                .pointer("/response/error")
+                .filter(|error| !error.is_null())
+        });
+    let is_error = matches!(
+        value.get("type").and_then(Value::as_str),
+        Some("error" | "response.failed" | "response.incomplete")
+    ) || error.is_some();
     if !is_error {
         return Ok(());
     }
-    let detail = value
-        .pointer("/error/message")
-        .or_else(|| value.get("message"))
-        .and_then(Value::as_str)
+    let detail = error
+        .and_then(|error| {
+            error
+                .get("message")
+                .and_then(Value::as_str)
+                .or_else(|| error.as_str())
+        })
+        .or_else(|| value.get("message").and_then(Value::as_str))
         .unwrap_or("Provider stream failed");
-    Err(detail.to_owned())
+    let code = error
+        .and_then(|error| error.get("code"))
+        .or_else(|| value.get("code"))
+        .or_else(|| value.pointer("/response/incomplete_details/reason"))
+        .and_then(Value::as_str);
+    Err(match code {
+        Some(code) if code != detail => format!("Provider stream failed [{code}]: {detail}"),
+        _ => detail.to_owned(),
+    })
 }
 
 #[cfg(test)]
@@ -2639,6 +2667,17 @@ fn system_prompt_with_omission(request: &AgentTurnRequest, omission: &ContextOmi
             "{SYSTEM_PROMPT}\nNo project workspace is selected. Do not claim workspace file or shell access; use the non-workspace tools provided for this turn."
         ),
     };
+    if request_has_workspace(request)
+        && !request.hatch
+        && request.mode != "subagent"
+        && !theme_generation_bootstrapped(&request.messages)
+    {
+        prompt.push_str(if request.allow_outside_workspace {
+            "\n\nHost filesystem access: Full. The selected workspace is the default working directory, not a filesystem boundary. You may use absolute paths outside it with the available file tools and use workdir with run_command/start_process to run in another directory. Tools and executables do not need to be copied into the workspace. Work within the user's task; operating-system permissions and tool-specific checks still apply."
+        } else {
+            "\n\nHost filesystem access: Workspace. File paths and explicit command workdir values must resolve inside the selected workspace. Full access has not been granted for this operation."
+        });
+    }
     if let Some(instructions) = request
         .custom_instructions
         .as_deref()
@@ -3079,13 +3118,15 @@ fn text_attachment_block(attachment: &ImageAttachment) -> Option<String> {
     ))
 }
 
+const TOOL_PATH_DESCRIPTION: &str = "Absolute path or path relative to the selected workspace; Full permission allows paths outside the workspace";
+
 fn tool_specs() -> Vec<(&'static str, &'static str, Value)> {
     vec![
         (
             "list_files",
-            "List files and directories in the workspace.",
+            "List files and directories at a path. Defaults to the workspace; Full permission allows paths outside it.",
             json!({
-                "type": "object", "properties": { "path": { "type": "string" } }
+                "type": "object", "properties": { "path": { "type": "string", "description": TOOL_PATH_DESCRIPTION } }
             }),
         ),
         (
@@ -3093,14 +3134,14 @@ fn tool_specs() -> Vec<(&'static str, &'static str, Value)> {
             "Read a text file with automatic UTF-8/UTF-16/GBK/GB18030/Big5/Shift-JIS/Windows-1252 decoding. Line endings are normalized to LF for reliable edit_file matching. Pass encoding (gbk or gb2312 are equivalent aliases) when a legacy file is ambiguous, including an ASCII-only file in a known legacy project.",
             json!({
                 "type": "object", "properties": {
-                    "path": { "type": "string" },
+                    "path": { "type": "string", "description": TOOL_PATH_DESCRIPTION },
                     "encoding": { "type": "string", "enum": ["utf-8", "utf-16le", "utf-16be", "gbk", "gb2312", "gb18030", "big5", "shift-jis", "windows-1252"] }
                 }, "required": ["path"]
             }),
         ),
         (
             "search_files",
-            "Search workspace file names and contents with the same encoding-aware boundary as read_file. Pass encoding (gbk or gb2312 are equivalent aliases) when a short legacy file is ambiguous.",
+            "Search file names and contents at a path using the same file scope as read_file. Defaults to the workspace; Full permission allows paths outside it. Pass encoding (gbk or gb2312 are equivalent aliases) when a short legacy file is ambiguous.",
             json!({
                 "type": "object", "properties": {
                     "query": { "type": "string" },
@@ -3115,7 +3156,7 @@ fn tool_specs() -> Vec<(&'static str, &'static str, Value)> {
             "Create a new text file or deliberately replace a whole file. Existing files keep their detected encoding (UTF-8/UTF-16/GBK/GB18030/Big5/Shift-JIS/Windows-1252), BOM, and line-ending style; prefer edit_file for ordinary code changes. Pass encoding (gbk or gb2312) for an ambiguous legacy file, including ASCII-only content in a known legacy project.",
             json!({
                 "type": "object", "properties": {
-                    "path": { "type": "string" },
+                    "path": { "type": "string", "description": TOOL_PATH_DESCRIPTION },
                     "content": { "type": "string" },
                     "encoding": { "type": "string", "enum": ["utf-8", "utf-16le", "utf-16be", "gbk", "gb2312", "gb18030", "big5", "shift-jis", "windows-1252"] }
                 }, "required": ["path", "content"]
@@ -3127,7 +3168,7 @@ fn tool_specs() -> Vec<(&'static str, &'static str, Value)> {
             json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string" },
+                    "path": { "type": "string", "description": TOOL_PATH_DESCRIPTION },
                     "old_string": { "type": "string", "description": "Exact existing text; include enough surrounding context to match once" },
                     "new_string": { "type": "string" },
                     "encoding": { "type": "string", "enum": ["utf-8", "utf-16le", "utf-16be", "gbk", "gb2312", "gb18030", "big5", "shift-jis", "windows-1252"] },
@@ -3138,16 +3179,19 @@ fn tool_specs() -> Vec<(&'static str, &'static str, Value)> {
         ),
         (
             "delete_file",
-            "Delete one regular file in the workspace, subject to the selected permission level.",
+            "Delete one regular file, subject to the selected permission level. Full permission allows paths outside the workspace.",
             json!({
-                "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"]
+                "type": "object", "properties": { "path": { "type": "string", "description": TOOL_PATH_DESCRIPTION } }, "required": ["path"]
             }),
         ),
         (
             "run_command",
-            "Run a shell command in the workspace, subject to the selected permission level. For text/code changes use edit_file or write_file instead: shell redirection and editor defaults can change a file's encoding or line endings.",
+            "Run a shell command, subject to the selected permission level. Defaults to the workspace; use workdir to choose an execution directory. Executables may be installed outside the workspace. For text/code changes use edit_file or write_file instead: shell redirection and editor defaults can change a file's encoding or line endings.",
             json!({
-                "type": "object", "properties": { "command": { "type": "string" } }, "required": ["command"]
+                "type": "object", "properties": {
+                    "command": { "type": "string" },
+                    "workdir": { "type": "string", "description": TOOL_PATH_DESCRIPTION }
+                }, "required": ["command"]
             }),
         ),
     ]
@@ -3651,6 +3695,8 @@ mod tests {
             "Could not read provider response: connection closed",
             "Invalid SSE stream: connection reset",
             PROVIDER_STREAM_INTERRUPTED,
+            "stream_read_error",
+            "Provider stream failed [stream_read_error]: upstream disconnected",
             "Invalid provider response",
             "Base URL is invalid",
         ] {
@@ -3677,6 +3723,8 @@ mod tests {
             "Could not read provider response: connection closed",
             "Invalid SSE stream: connection reset",
             PROVIDER_STREAM_INTERRUPTED,
+            "stream_read_error",
+            "Provider stream failed [stream_read_error]: upstream disconnected",
         ] {
             assert!(is_reconnectable_provider_error(error), "{error}");
         }
@@ -3689,9 +3737,51 @@ mod tests {
             "Provider returned 404 Not Found",
             "Provider returned 422 Unprocessable Entity",
             "Invalid provider response",
+            "Could not read reference image: permission denied",
+            "Provider returned 400 Bad Request: stream_read_error is not a valid field",
         ] {
             assert!(!is_reconnectable_provider_error(error), "{error}");
         }
+    }
+
+    #[test]
+    fn stream_errors_preserve_nested_codes_and_ignore_null_success_errors() {
+        for event in [
+            json!({ "type": "error", "error": { "code": "stream_read_error", "message": "upstream disconnected" } }),
+            json!({ "type": "response.failed", "response": { "error": { "code": "stream_read_error", "message": "upstream disconnected" } } }),
+            json!({ "type": "error", "code": "stream_read_error", "message": "upstream disconnected" }),
+        ] {
+            let error = check_stream_error(&event).unwrap_err();
+            assert!(error.contains("stream_read_error"));
+            assert!(error.contains("upstream disconnected"));
+            assert!(is_reconnectable_provider_error(&error));
+        }
+        assert!(
+            check_stream_error(&json!({ "type": "response.completed", "error": null })).is_ok()
+        );
+        let error = check_stream_error(&json!({ "type": "response.incomplete", "response": { "incomplete_details": { "reason": "max_output_tokens" } } })).unwrap_err();
+        assert!(error.contains("max_output_tokens"));
+        assert!(!is_reconnectable_provider_error(&error));
+    }
+
+    #[tokio::test]
+    async fn provider_stream_read_errors_are_reported_as_reconnectable() {
+        let base_url = mock_sse_server(
+            "/v1/responses",
+            "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"stream_read_error\",\"message\":\"upstream disconnected\"}}}\n\n",
+        );
+        let request = test_request(base_url, ProviderProtocol::OpenaiResponses);
+        let error = run_turn_stream(
+            &Client::new(),
+            request,
+            "test-key",
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("stream_read_error"));
+        assert!(is_reconnectable_provider_error(&error));
     }
 
     #[test]
@@ -4465,38 +4555,46 @@ mod tests {
     }
 
     #[test]
-    fn binary_fbx_attachments_send_only_untrusted_workspace_references_in_all_protocols() {
-        let mut request = test_request(
-            "https://levelup.example".to_owned(),
-            ProviderProtocol::OpenaiResponses,
-        );
-        let reference = ".levelup-attachments/0123456789abcdef0123456789abcdef.fbx";
-        request.messages[0].attachments.push(ImageAttachment {
-            id: "0123456789abcdef0123456789abcdef".to_owned(),
-            name: "asset<test>.fbx".to_owned(),
-            mime_type: "application/vnd.autodesk.fbx".to_owned(),
-            size_bytes: 64 * 1024 * 1024,
-            kind: AttachmentKind::File,
-            data_base64: None,
-            text_content: Some(format!(
-                "[Context metadata: status=binary_file_reference]\n{reference}"
-            )),
-        });
-        for (body, pointer) in [
-            (responses_body(&request, false), "/input/0/content"),
-            (chat_body(&request, false), "/messages/1/content"),
-            (anthropic_body(&request, false), "/messages/0/content"),
-            (gemini_body(&request), "/contents/0/parts"),
+    fn original_files_send_only_untrusted_workspace_references_in_all_protocols() {
+        for (extension, mime_type) in [
+            ("fbx", "application/vnd.autodesk.fbx"),
+            ("zip", "application/octet-stream"),
+            ("mp4", "video/mp4"),
+            ("custom", "application/octet-stream"),
         ] {
-            let parts = body.pointer(pointer).unwrap().as_array().unwrap();
-            assert_eq!(parts.len(), 2);
-            let context = parts[1]["text"].as_str().unwrap();
-            assert!(context.contains(reference));
-            assert!(context.contains("managed_context_file"));
-            assert!(context.contains("asset&lt;test&gt;.fbx"));
-            assert!(context.contains("binary_file_reference"));
+            let mut request = test_request(
+                "https://levelup.example".to_owned(),
+                ProviderProtocol::OpenaiResponses,
+            );
+            let reference =
+                format!(".levelup-attachments/0123456789abcdef0123456789abcdef.{extension}");
+            request.messages[0].attachments.push(ImageAttachment {
+                id: "0123456789abcdef0123456789abcdef".to_owned(),
+                name: format!("asset<test>.{extension}"),
+                mime_type: mime_type.to_owned(),
+                size_bytes: 64 * 1024 * 1024,
+                kind: AttachmentKind::File,
+                data_base64: None,
+                text_content: Some(format!(
+                    "[Context metadata: status=binary_file_reference]\n{reference}"
+                )),
+            });
+            for (body, pointer) in [
+                (responses_body(&request, false), "/input/0/content"),
+                (chat_body(&request, false), "/messages/1/content"),
+                (anthropic_body(&request, false), "/messages/0/content"),
+                (gemini_body(&request), "/contents/0/parts"),
+            ] {
+                let parts = body.pointer(pointer).unwrap().as_array().unwrap();
+                assert_eq!(parts.len(), 2);
+                let context = parts[1]["text"].as_str().unwrap();
+                assert!(context.contains(&reference));
+                assert!(context.contains("managed_context_file"));
+                assert!(context.contains(&format!("asset&lt;test&gt;.{extension}")));
+                assert!(context.contains("binary_file_reference"));
+            }
+            assert!(system_prompt(&request).contains("untrusted data"));
         }
-        assert!(system_prompt(&request).contains("untrusted data"));
     }
 
     #[test]
@@ -4605,6 +4703,38 @@ mod tests {
             Some(&json!("generate_images"))
         );
         assert!(system_prompt(&request).contains("No project workspace is selected"));
+    }
+
+    #[test]
+    fn filesystem_scope_prompt_follows_host_permission() {
+        let mut request = test_request(
+            "https://levelup.example".to_owned(),
+            ProviderProtocol::OpenaiResponses,
+        );
+        assert!(system_prompt(&request).contains("Host filesystem access: Workspace."));
+        request.allow_outside_workspace = true;
+        let prompt = system_prompt(&request);
+        assert!(prompt.contains("Host filesystem access: Full."));
+        assert!(prompt.contains("not a filesystem boundary"));
+        request.mode = "subagent".to_owned();
+        assert!(!system_prompt(&request).contains("Host filesystem access: Full."));
+        request.mode = "agent".to_owned();
+        request.hatch = true;
+        assert!(!system_prompt(&request).contains("Host filesystem access: Full."));
+    }
+
+    #[test]
+    fn provider_input_cannot_grant_full_filesystem_scope() {
+        let request: AgentTurnRequest = serde_json::from_value(json!({
+            "profile": {
+                "id": "test", "name": "test", "baseUrl": "https://example.invalid",
+                "model": "test", "protocol": "openai_responses"
+            },
+            "messages": [], "mode": "agent", "workspace": "workspace",
+            "allowOutsideWorkspace": true
+        }))
+        .unwrap();
+        assert!(!request.allow_outside_workspace);
     }
 
     #[tokio::test]
@@ -4948,6 +5078,7 @@ mod tests {
             custom_instructions: None,
             router_metadata: None,
             router_events: Vec::new(),
+            allow_outside_workspace: false,
             reasoning_effort: None,
         }
     }

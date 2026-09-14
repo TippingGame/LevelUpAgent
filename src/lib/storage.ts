@@ -266,7 +266,7 @@ export function saveActiveThreadId(threadId: string) {
 
 export function loadPermissionLevel(): PermissionLevel {
   const stored = readStorageValue(PERMISSION_LEVEL_KEY);
-  return stored === "request" || stored === "agent" || stored === "full" ? stored : "request";
+  return stored === "request" || stored === "agent" || stored === "full" ? stored : "full";
 }
 
 export function savePermissionLevel(level: PermissionLevel) {

@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -16,7 +17,7 @@ use reqwest::Client;
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::process::{Child, Command};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use url::Url;
 
@@ -65,6 +66,8 @@ struct BrowserSession {
     profile_dir: PathBuf,
     allowed_domains: Vec<String>,
     workspace: Option<PathBuf>,
+    allow_outside_workspace: AtomicBool,
+    tool_scope_lock: Arc<Mutex<()>>,
     thread_id: Option<String>,
     created_at: u64,
     last_active_at: Mutex<u64>,
@@ -87,6 +90,7 @@ impl BrowserManager {
         allowed_domains: Vec<String>,
         workspace: Option<&Path>,
         thread_id: Option<&str>,
+        allow_outside_workspace: bool,
     ) -> Result<String, String> {
         if self.sessions.lock().await.len() >= MAX_SESSIONS {
             return Err(format!(
@@ -94,7 +98,7 @@ impl BrowserManager {
             ));
         }
         if let Some(url) = initial_url {
-            validate_browser_url(url, &allowed_domains, workspace)?;
+            validate_browser_url_scoped(url, &allowed_domains, workspace, allow_outside_workspace)?;
         }
         let executable = browser_executable()?;
         let root = app_data.join("browser").join("sessions");
@@ -160,6 +164,8 @@ impl BrowserManager {
             profile_dir,
             allowed_domains,
             workspace: workspace.map(Path::to_path_buf),
+            allow_outside_workspace: AtomicBool::new(allow_outside_workspace),
+            tool_scope_lock: Arc::new(Mutex::new(())),
             thread_id: thread_id.map(ToOwned::to_owned),
             created_at: now_millis(),
             last_active_at: Mutex::new(now_millis()),
@@ -252,6 +258,29 @@ impl BrowserManager {
         for id in ids {
             let _ = self.close(&id).await;
         }
+    }
+
+    pub async fn set_file_scope(
+        &self,
+        id: &str,
+        allow_outside_workspace: bool,
+        destination: Option<&str>,
+    ) -> Result<OwnedMutexGuard<()>, String> {
+        let session = self.session(id).await?;
+        // Hold this guard through the tool action so concurrent operations
+        // cannot replace its permission while navigation is in progress.
+        let guard = session.tool_scope_lock.clone().lock_owned().await;
+        session
+            .allow_outside_workspace
+            .store(allow_outside_workspace, Ordering::Relaxed);
+        let current_url = session.last_url.lock().await;
+        validate_browser_url_scoped(
+            destination.unwrap_or(&current_url),
+            &session.allowed_domains,
+            session.workspace.as_deref(),
+            allow_outside_workspace,
+        )?;
+        Ok(guard)
     }
 
     pub async fn navigate(&self, id: &str, url: &str) -> Result<String, String> {
@@ -677,10 +706,11 @@ impl BrowserManager {
         session: &Arc<BrowserSession>,
         raw_url: &str,
     ) -> Result<String, String> {
-        validate_browser_url(
+        validate_browser_url_scoped(
             raw_url,
             &session.allowed_domains,
             session.workspace.as_deref(),
+            session.allow_outside_workspace.load(Ordering::Relaxed),
         )?;
         let result = self
             .command(session, "Page.navigate", json!({"url": raw_url}))
@@ -725,10 +755,11 @@ impl BrowserManager {
             .get("url")
             .and_then(Value::as_str)
             .unwrap_or("about:blank");
-        validate_browser_url(
+        validate_browser_url_scoped(
             target_url,
             &session.allowed_domains,
             session.workspace.as_deref(),
+            session.allow_outside_workspace.load(Ordering::Relaxed),
         )?;
         self.command(
             &session,
@@ -955,10 +986,20 @@ fn browser_key_metadata(key: &str) -> Result<(&'static str, u16), String> {
     }
 }
 
+#[cfg(test)]
 fn validate_browser_url(
     raw_url: &str,
     allowed_domains: &[String],
     workspace: Option<&Path>,
+) -> Result<(), String> {
+    validate_browser_url_scoped(raw_url, allowed_domains, workspace, false)
+}
+
+fn validate_browser_url_scoped(
+    raw_url: &str,
+    allowed_domains: &[String],
+    workspace: Option<&Path>,
+    allow_outside_workspace: bool,
 ) -> Result<(), String> {
     let url = Url::parse(raw_url).map_err(|_| "Browser URL must be absolute".to_owned())?;
     if !matches!(url.scheme(), "http" | "https" | "file" | "about") {
@@ -975,10 +1016,10 @@ fn validate_browser_url(
             let workspace =
                 std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
             let target = std::fs::canonicalize(&path).unwrap_or(path);
-            if !target.starts_with(&workspace) {
+            if !allow_outside_workspace && !target.starts_with(&workspace) {
                 return Err("Browser file URL must stay inside the task workspace".to_owned());
             }
-        } else {
+        } else if !allow_outside_workspace {
             return Err("Browser file URLs require a task workspace".to_owned());
         }
     }
@@ -1186,8 +1227,89 @@ mod tests {
         std::fs::write(&outside_page, "<h1>outside</h1>").unwrap();
         let outside_url = url::Url::from_file_path(&outside_page).unwrap().to_string();
         assert!(validate_browser_url(&outside_url, &[], Some(&root)).is_err());
+        assert!(validate_browser_url_scoped(&outside_url, &[], Some(&root), true).is_ok());
+        assert!(validate_browser_url_scoped(&outside_url, &[], None, true).is_ok());
+        assert!(validate_browser_url_scoped(&outside_url, &[], Some(&root), false).is_err());
+        assert!(
+            validate_browser_url_scoped("javascript:alert(1)", &[], Some(&root), true).is_err()
+        );
+        assert!(
+            validate_browser_url_scoped("https://user:pass@example.com", &[], Some(&root), true)
+                .is_err()
+        );
+        assert!(
+            validate_browser_url_scoped(
+                "https://outside.example.net",
+                &["example.com".to_owned()],
+                Some(&root),
+                true
+            )
+            .is_err()
+        );
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[tokio::test]
+    async fn reused_browser_sessions_recheck_file_scope_and_can_return_inside() {
+        let suite =
+            std::env::temp_dir().join(format!("levelup-browser-scope-{}", uuid::Uuid::new_v4()));
+        let workspace = suite.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let outside = suite.join("outside.html");
+        let inside = workspace.join("inside.html");
+        std::fs::write(&outside, "outside").unwrap();
+        std::fs::write(&inside, "inside").unwrap();
+        let outside_url = Url::from_file_path(&outside).unwrap().to_string();
+        let inside_url = Url::from_file_path(&inside).unwrap().to_string();
+        let manager = BrowserManager::default();
+        let session = Arc::new(BrowserSession {
+            id: "scope-test".to_owned(),
+            port: 0,
+            ws_url: Mutex::new(String::new()),
+            profile_dir: suite.join("profile"),
+            allowed_domains: Vec::new(),
+            workspace: Some(workspace),
+            allow_outside_workspace: AtomicBool::new(false),
+            tool_scope_lock: Arc::new(Mutex::new(())),
+            thread_id: Some("task".to_owned()),
+            created_at: 0,
+            last_active_at: Mutex::new(0),
+            last_url: Mutex::new(outside_url),
+            last_title: Mutex::new(String::new()),
+            viewport: Mutex::new(BrowserViewport {
+                width: 800,
+                height: 600,
+                mobile: false,
+            }),
+            child: Mutex::new(None),
+        });
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert(session.id.clone(), session.clone());
+        let guard = manager
+            .set_file_scope(&session.id, true, None)
+            .await
+            .unwrap();
+        assert!(session.allow_outside_workspace.load(Ordering::Relaxed));
+        assert!(session.tool_scope_lock.try_lock().is_err());
+        drop(guard);
+        assert!(
+            manager
+                .set_file_scope(&session.id, false, None)
+                .await
+                .is_err()
+        );
+        assert!(!session.allow_outside_workspace.load(Ordering::Relaxed));
+        drop(
+            manager
+                .set_file_scope(&session.id, false, Some(&inside_url))
+                .await
+                .unwrap(),
+        );
+        std::fs::remove_dir_all(suite).unwrap();
     }
 
     #[test]
@@ -1256,6 +1378,7 @@ mod tests {
                 Vec::new(),
                 Some(&root),
                 Some("test-thread"),
+                false,
             )
             .await
             .unwrap();

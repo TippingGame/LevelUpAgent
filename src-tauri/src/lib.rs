@@ -1443,13 +1443,13 @@ fn attach_extended_tools(request: &mut AgentTurnRequest) -> Result<(), String> {
         },
         AgentToolDefinition {
             name: "list_processes".to_owned(),
-            description: "List background processes started by this task's host sandbox, including bounded lifetime and workspace metadata.".to_owned(),
+            description: "List running and recently completed background processes for the selected workspace, including exit codes. IDs last only for the current app run; completed history is bounded.".to_owned(),
             input_schema: serde_json::json!({ "type": "object", "properties": {} }),
             read_only: true,
         },
         AgentToolDefinition {
             name: "process_output".to_owned(),
-            description: "Read the bounded, untrusted stdout/stderr tail of a background sandbox process for local app diagnostics.".to_owned(),
+            description: "Read the bounded, untrusted stdout/stderr tail and exit code of a running or recently completed background process. If its ID has expired, use list_processes to find current IDs before deciding whether to start a command again.".to_owned(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": { "processId": { "type": "string" } },
@@ -1464,11 +1464,12 @@ fn attach_extended_tools(request: &mut AgentTurnRequest) -> Result<(), String> {
             capability::client_action_tool()?,
             AgentToolDefinition {
                 name: "start_process".to_owned(),
-                description: "Start a bounded background shell process in the selected workspace, typically a local dev server for browser QA. The host returns a process ID; stop it when testing finishes.".to_owned(),
+                description: "Start a bounded background shell process, typically a local dev server for browser QA. Defaults to the selected workspace; Full permission may use workdir to run in another directory. The host returns a process ID; stop it when testing finishes.".to_owned(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "command": { "type": "string", "description": "Command to run in the selected workspace" },
+                        "command": { "type": "string", "description": "Shell command to run" },
+                        "workdir": { "type": "string", "description": "Optional execution directory, relative to the workspace or absolute; Full permission allows directories outside the workspace" },
                         "label": { "type": "string", "description": "Optional human-readable purpose" }
                     },
                     "required": ["command"]
@@ -1477,7 +1478,7 @@ fn attach_extended_tools(request: &mut AgentTurnRequest) -> Result<(), String> {
             },
             AgentToolDefinition {
                 name: "stop_process".to_owned(),
-                description: "Stop a background sandbox process started by this task and its child tree when supported by the host.".to_owned(),
+                description: "Stop a background sandbox process started by this task and its child tree when supported by the host. Recent output remains available through process_output; repeated stops are harmless.".to_owned(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": { "processId": { "type": "string" } },
@@ -1702,6 +1703,7 @@ fn attach_media_tools(request: &mut AgentTurnRequest) {
                     "outputFormat": { "type": "string", "enum": ["png", "jpeg", "webp"] },
                     "background": { "type": "string", "enum": ["auto", "transparent", "opaque"], "description": "Set transparent only when the user explicitly requests a transparent background; omit it otherwise. Model compatibility is enforced by the media backend." },
                     "referenceAttachmentIds": { "type": "array", "items": { "type": "string" }, "maxItems": 8, "description": "Managed image attachment IDs for edits or visual references" },
+                    "referenceImagePaths": { "type": "array", "items": { "type": "string" }, "maxItems": 8, "description": "Existing local image files for edits or references. Relative paths use the workspace; Full permission allows absolute paths outside it. The host sends the actual image bytes to the image model, so users do not need to upload these files again. Unavailable in hatch mode, which uses manifest references." },
                     "hatchRunDir": { "type": "string", "description": "Hatch-pet run directory returned by prepare_pet_run.py; only used by the bundled hatch adapter" },
                     "hatchJobId": { "type": "string", "description": "Pending imagegen-jobs.json job ID for a hatch-pet row; the adapter loads that job's grounding images" }
                 },
@@ -2125,6 +2127,7 @@ fn isolated_pet_agent_request(
         custom_instructions: None,
         router_metadata: None,
         router_events: Vec::new(),
+        allow_outside_workspace: false,
         reasoning_effort: None,
     })
 }
@@ -4660,6 +4663,58 @@ fn read_media_mask(
     attachment::read_managed_reference(&storage, id).map(Some)
 }
 
+fn read_tool_image_references(
+    storage: &Path,
+    request: &ToolExecutionRequest,
+    generation: &MediaGenerationRequest,
+) -> Result<Option<Vec<attachment::ManagedReference>>, String> {
+    let Some(paths) = request.arguments.get("referenceImagePaths") else {
+        return Ok(None);
+    };
+    let paths: Vec<String> = serde_json::from_value(paths.clone())
+        .map_err(|_| "referenceImagePaths must be an array of file paths".to_owned())?;
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    if request.hatch {
+        return Err("Hatch image references must come from the prepared job manifest or managed attachment IDs".to_owned());
+    }
+    if paths.len() + generation.reference_attachment_ids.len() > 8 {
+        return Err("Image edits accept at most 8 references in total".to_owned());
+    }
+    let workspace = std::fs::canonicalize(&request.workspace)
+        .map_err(|error| format!("Workspace is unavailable: {error}"))?;
+    let mut references = generation
+        .reference_attachment_ids
+        .iter()
+        .map(|id| attachment::read_managed_reference(storage, id))
+        .collect::<Result<Vec<_>, _>>()?;
+    for path in paths {
+        let path =
+            tools::resolve_existing_scoped(&workspace, &path, request.allow_outside_workspace)
+                .map_err(|error| format!("Could not read reference image '{path}': {error}"))?;
+        let reference = attachment::read_local_media_reference(&path)?;
+        if reference.kind != models::AttachmentKind::Image {
+            return Err("referenceImagePaths accepts image files only".to_owned());
+        }
+        if !references
+            .iter()
+            .any(|existing| existing.bytes == reference.bytes)
+        {
+            references.push(reference);
+        }
+        if references
+            .iter()
+            .map(|item| item.bytes.len())
+            .sum::<usize>()
+            > media::MAX_IMAGE_REFERENCE_TOTAL_BYTES
+        {
+            return Err("Image references may total at most 64 MiB".to_owned());
+        }
+    }
+    Ok(Some(references))
+}
+
 #[derive(Debug, Deserialize)]
 struct HatchJobManifest {
     #[serde(default)]
@@ -5073,6 +5128,24 @@ fn delete_media_asset(
     asset_id: String,
 ) -> Result<bool, String> {
     media::delete_asset(&database, &media_storage(&app)?, &asset_id)
+}
+
+#[tauri::command]
+fn import_message_path_attachments(
+    app: tauri::AppHandle,
+    source_paths: Vec<attachment::MessagePath>,
+    existing_attachments: Vec<ImageAttachment>,
+    workspace: Option<String>,
+) -> Result<Vec<ImageAttachment>, String> {
+    attachment::import_message_paths(
+        &attachment_storage(&app)?,
+        &source_paths,
+        &existing_attachments,
+        workspace
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(Path::new),
+    )
 }
 
 #[tauri::command]
@@ -6100,6 +6173,10 @@ async fn harness_run_loop(
             custom_instructions: request.custom_instructions.clone(),
             router_metadata: None,
             router_events: Vec::new(),
+            allow_outside_workspace: matches!(
+                request.permission_level,
+                crate::harness::types::PermissionLevel::Full
+            ),
             reasoning_effort: request.reasoning_effort.clone(),
         };
         attach_default_workspace(app, &mut turn_request)?;
@@ -7695,6 +7772,7 @@ where
             ),
             router_metadata: None,
             router_events: Vec::new(),
+            allow_outside_workspace: false,
             reasoning_effort: None,
         };
         let response = run_agent_turn_with_failover(client, database, turn, |profile_id| {
@@ -8123,6 +8201,60 @@ fn untrusted_json_tool_output<T: serde::Serialize>(
     response
 }
 
+async fn execute_background_process_tool(
+    sandbox: &sandbox::ProcessManager,
+    request: &ToolExecutionRequest,
+) -> ToolExecutionResponse {
+    // Operational failures are tool results so the Harness can record them and continue.
+    let result: Result<ToolExecutionResponse, String> = async {
+        let workspace = Path::new(&request.workspace);
+        match request.name.as_str() {
+            "start_process" => {
+                let command = required_tool_string(&request.arguments, "command")?;
+                let label = optional_tool_string(&request.arguments, "label");
+                let workdir = tools::resolve_workdir(
+                    workspace,
+                    request
+                        .arguments
+                        .get("workdir")
+                        .and_then(serde_json::Value::as_str),
+                    request.allow_outside_workspace,
+                )?;
+                let snapshot = sandbox
+                    .start(workspace, &command, label.as_deref(), Some(&workdir))
+                    .await?;
+                Ok(untrusted_json_tool_output(&snapshot, "BACKGROUND PROCESS"))
+            }
+            "list_processes" => {
+                let snapshots = sandbox.list(workspace).await?;
+                Ok(untrusted_json_tool_output(
+                    &snapshots,
+                    "BACKGROUND PROCESSES",
+                ))
+            }
+            "process_output" => {
+                let process_id = required_tool_string(&request.arguments, "processId")?;
+                let output = sandbox.output(&process_id, workspace).await?;
+                Ok(untrusted_json_tool_output(
+                    &output,
+                    "BACKGROUND PROCESS OUTPUT",
+                ))
+            }
+            "stop_process" => {
+                let process_id = required_tool_string(&request.arguments, "processId")?;
+                let stopped = sandbox.stop(&process_id, workspace).await?;
+                Ok(json_tool_output(&serde_json::json!({
+                    "stopped": stopped,
+                    "processId": process_id
+                })))
+            }
+            _ => Err("Unknown background process tool".to_owned()),
+        }
+    }
+    .await;
+    result.unwrap_or_else(|error| tool_execution_result(Err(error)))
+}
+
 fn media_request_from_tool(
     name: &str,
     arguments: &serde_json::Value,
@@ -8171,12 +8303,19 @@ async fn execute_media_generation_tool(
                 generation.count = 1;
                 generation.output_format = Some("png".to_owned());
             }
-            let hatch_references = if request.hatch && generation.kind == MediaKind::Image {
-                read_hatch_job_references(request)
+            let references = if generation.kind == MediaKind::Image {
+                attachment_storage(app).and_then(|storage| {
+                    let local = read_tool_image_references(&storage, request, &generation)?;
+                    if request.hatch {
+                        read_hatch_job_references(request)
+                    } else {
+                        Ok(local)
+                    }
+                })
             } else {
                 Ok(None)
             };
-            match hatch_references {
+            match references {
                 Ok(references_override) => {
                     generate_media_internal(
                         app,
@@ -9021,6 +9160,7 @@ async fn browser_panel_start(
             Vec::new(),
             workspace,
             Some(&request.thread_id),
+            false,
         )
         .await?;
     browser.preview(&id).await
@@ -9557,28 +9697,11 @@ async fn execute_tool_inner(
             created: false,
             backup_path: trash.map(|value| value.to_string_lossy().into_owned()),
         })
-    } else if request.name == "start_process" {
-        let command = required_tool_string(&request.arguments, "command")?;
-        let label = optional_tool_string(&request.arguments, "label");
-        let snapshot = sandbox
-            .start(Path::new(&request.workspace), &command, label.as_deref())
-            .await?;
-        untrusted_json_tool_output(&snapshot, "BACKGROUND PROCESS")
-    } else if request.name == "list_processes" {
-        let snapshots = sandbox.list(Path::new(&request.workspace)).await?;
-        untrusted_json_tool_output(&snapshots, "BACKGROUND PROCESSES")
-    } else if request.name == "process_output" {
-        let process_id = required_tool_string(&request.arguments, "processId")?;
-        let output = sandbox
-            .output(&process_id, Path::new(&request.workspace))
-            .await?;
-        untrusted_json_tool_output(&output, "BACKGROUND PROCESS OUTPUT")
-    } else if request.name == "stop_process" {
-        let process_id = required_tool_string(&request.arguments, "processId")?;
-        let stopped = sandbox
-            .stop(&process_id, Path::new(&request.workspace))
-            .await?;
-        json_tool_output(&serde_json::json!({ "stopped": stopped, "processId": process_id }))
+    } else if matches!(
+        request.name.as_str(),
+        "start_process" | "list_processes" | "process_output" | "stop_process"
+    ) {
+        execute_background_process_tool(sandbox, &request).await
     } else if request.name == "mcp_status" {
         let mut snapshots = Vec::new();
         for server in database.list_mcp_servers()? {
@@ -9680,6 +9803,28 @@ async fn execute_tool_inner(
         let browser = app
             .try_state::<browser::BrowserManager>()
             .ok_or_else(|| "Browser manager is unavailable".to_owned())?;
+        let _browser_scope = if request.name != "browser_close"
+            && let Some(session_id) = request
+                .arguments
+                .get("sessionId")
+                .and_then(serde_json::Value::as_str)
+        {
+            let destination = (request.name == "browser_navigate")
+                .then(|| {
+                    request
+                        .arguments
+                        .get("url")
+                        .and_then(serde_json::Value::as_str)
+                })
+                .flatten();
+            Some(
+                browser
+                    .set_file_scope(session_id, request.allow_outside_workspace, destination)
+                    .await?,
+            )
+        } else {
+            None
+        };
         match request.name.as_str() {
             "browser_start" => {
                 let initial_url = optional_tool_string(&request.arguments, "url");
@@ -9707,6 +9852,7 @@ async fn execute_tool_inner(
                         (!request.workspace.trim().is_empty())
                             .then(|| Path::new(&request.workspace)),
                         request.thread_id.as_deref(),
+                        request.allow_outside_workspace,
                     )
                     .await;
                 tool_execution_result(result)
@@ -10976,6 +11122,7 @@ pub fn run() {
             export_media_asset,
             delete_media_asset,
             import_image_attachments,
+            import_message_path_attachments,
             import_media_references,
             import_clipboard_images,
             import_clipboard_attachments,
@@ -11151,6 +11298,115 @@ mod tests {
     use std::thread;
 
     use crate::models::McpTransport;
+
+    #[test]
+    fn tool_image_paths_send_original_bytes_and_enforce_the_current_file_scope() {
+        let root =
+            std::env::temp_dir().join(format!("levelup-image-paths-{}", uuid::Uuid::new_v4()));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let source = root.join("external image.png");
+        let bytes = b"\x89PNG\r\n\x1a\noriginal-image-reference";
+        std::fs::write(&source, bytes).unwrap();
+        let mut request: ToolExecutionRequest = serde_json::from_value(serde_json::json!({
+            "name": "generate_images",
+            "arguments": { "prompt": "edit the original", "referenceImagePaths": [source] },
+            "workspace": workspace,
+        }))
+        .unwrap();
+        let generation = media_request_from_tool(&request.name, &request.arguments).unwrap();
+        assert!(read_tool_image_references(&root, &request, &generation).is_err());
+        request.allow_outside_workspace = true;
+        let references = read_tool_image_references(&root, &request, &generation)
+            .unwrap()
+            .unwrap();
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].bytes, bytes);
+        assert_eq!(references[0].mime_type, "image/png");
+        request.hatch = true;
+        assert!(
+            read_tool_image_references(&root, &request, &generation)
+                .err()
+                .unwrap()
+                .contains("manifest")
+        );
+        request.hatch = false;
+        request.allow_outside_workspace = false;
+        let local = workspace.join("local.png");
+        std::fs::write(&local, bytes).unwrap();
+        request.arguments["referenceImagePaths"] = serde_json::json!(["local.png"]);
+        assert_eq!(
+            read_tool_image_references(&root, &request, &generation)
+                .unwrap()
+                .unwrap()[0]
+                .bytes,
+            bytes
+        );
+        request.arguments["referenceImagePaths"] = serde_json::json!(["missing.png"]);
+        assert!(read_tool_image_references(&root, &request, &generation).is_err());
+        request.arguments["referenceImagePaths"] = serde_json::json!(vec!["local.png"; 9]);
+        assert!(read_tool_image_references(&root, &request, &generation).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn background_process_tool_errors_allow_followup_queries() {
+        let manager = sandbox::ProcessManager::default();
+        let mut request: ToolExecutionRequest = serde_json::from_value(serde_json::json!({
+            "name": "process_output",
+            "arguments": { "processId": "expired-process-id" },
+            "workspace": std::env::temp_dir().to_string_lossy()
+        }))
+        .unwrap();
+        let response = execute_background_process_tool(&manager, &request).await;
+        assert!(response.is_error);
+        assert!(response.output.contains("list_processes"));
+        assert!(response.output.contains("app may have restarted"));
+
+        request.name = "list_processes".to_owned();
+        request.arguments = serde_json::json!({});
+        let response = execute_background_process_tool(&manager, &request).await;
+        assert!(!response.is_error);
+        assert!(
+            response
+                .output
+                .starts_with("[UNTRUSTED BACKGROUND PROCESSES]")
+        );
+        assert!(response.output.contains("[]"));
+
+        for (name, missing_argument) in [
+            ("start_process", "command"),
+            ("process_output", "processId"),
+            ("stop_process", "processId"),
+        ] {
+            request.name = name.to_owned();
+            let response = execute_background_process_tool(&manager, &request).await;
+            assert!(response.is_error, "{name}");
+            assert!(
+                response.output.contains(missing_argument),
+                "{}",
+                response.output
+            );
+        }
+
+        request.name = "stop_process".to_owned();
+        request.arguments = serde_json::json!({ "processId": "expired-process-id" });
+        let response = execute_background_process_tool(&manager, &request).await;
+        assert!(!response.is_error);
+        let output: serde_json::Value = serde_json::from_str(&response.output).unwrap();
+        assert_eq!(output["stopped"], false);
+
+        request.name = "start_process".to_owned();
+        request.arguments = serde_json::json!({
+            "command": "exit 0",
+            "workdir": format!("missing-process-directory-{}", uuid::Uuid::new_v4())
+        });
+        assert!(
+            execute_background_process_tool(&manager, &request)
+                .await
+                .is_error
+        );
+    }
 
     fn delayed_response_body_server(delay: Duration) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -11854,6 +12110,7 @@ mod tests {
             custom_instructions: None,
             router_metadata: None,
             router_events: Vec::new(),
+            allow_outside_workspace: false,
             reasoning_effort: None,
         };
         attach_extended_tools(&mut request).unwrap();
@@ -11901,6 +12158,7 @@ mod tests {
             custom_instructions: None,
             router_metadata: None,
             router_events: Vec::new(),
+            allow_outside_workspace: false,
             reasoning_effort: None,
         };
         attach_extended_tools(&mut request).unwrap();
@@ -12445,6 +12703,7 @@ mod tests {
             custom_instructions: Some("Persisted instructions.".to_owned()),
             router_metadata: None,
             router_events: Vec::new(),
+            allow_outside_workspace: false,
             reasoning_effort: None,
         };
 
@@ -12508,6 +12767,7 @@ mod tests {
             custom_instructions: Some("Persisted instructions.".to_owned()),
             router_metadata: None,
             router_events: Vec::new(),
+            allow_outside_workspace: false,
             reasoning_effort: Some("low".to_owned()),
         };
 
@@ -12576,6 +12836,7 @@ mod tests {
             custom_instructions: None,
             router_metadata: None,
             router_events: Vec::new(),
+            allow_outside_workspace: false,
             reasoning_effort: None,
         };
         let selected = preload_router_skill(&mut request, &skills).unwrap();
@@ -12625,6 +12886,7 @@ mod tests {
             custom_instructions: None,
             router_metadata: None,
             router_events: Vec::new(),
+            allow_outside_workspace: false,
             reasoning_effort: None,
         };
         let ids = provider_candidates(&request)
@@ -12651,6 +12913,7 @@ mod tests {
             custom_instructions: None,
             router_metadata: None,
             router_events: Vec::new(),
+            allow_outside_workspace: false,
             reasoning_effort: None,
         };
         for model in [
@@ -12701,6 +12964,7 @@ mod tests {
             custom_instructions: None,
             router_metadata: None,
             router_events: Vec::new(),
+            allow_outside_workspace: false,
             reasoning_effort: None,
         };
         attach_media_tools(&mut request);
@@ -12742,6 +13006,7 @@ mod tests {
             custom_instructions: None,
             router_metadata: None,
             router_events: Vec::new(),
+            allow_outside_workspace: false,
             reasoning_effort: None,
         };
         attach_media_tools(&mut request);
@@ -12784,6 +13049,7 @@ mod tests {
             custom_instructions: None,
             router_metadata: None,
             router_events: Vec::new(),
+            allow_outside_workspace: false,
             reasoning_effort: None,
         };
 
@@ -12836,6 +13102,7 @@ mod tests {
             custom_instructions: None,
             router_metadata: None,
             router_events: Vec::new(),
+            allow_outside_workspace: false,
             reasoning_effort: None,
         };
 
@@ -13141,6 +13408,7 @@ mod tests {
             custom_instructions: None,
             router_metadata: None,
             router_events: Vec::new(),
+            allow_outside_workspace: false,
             reasoning_effort: Some("max".to_owned()),
         };
 
@@ -13287,6 +13555,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_read_errors_reconnect_before_output_and_preserve_partial_output() {
+        for partial_output in [false, true] {
+            let root =
+                std::env::temp_dir().join(format!("levelup-stream-retry-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&root).unwrap();
+            let database = database::Database::open(&root.join("test.sqlite3")).unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let mut first = String::new();
+            if partial_output {
+                first.push_str(
+                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+                );
+            }
+            first.push_str("data: {\"type\":\"error\",\"error\":{\"code\":\"stream_read_error\",\"message\":\"upstream disconnected\"}}\n\n");
+            let mut replies = vec![first];
+            if !partial_output {
+                replies.push("data: {\"type\":\"response.output_text.delta\",\"delta\":\"recovered\"}\n\ndata: {\"type\":\"response.completed\",\"error\":null}\n\n".to_owned());
+            }
+            let server = thread::spawn(move || {
+                for body in replies {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut reader = std::io::BufReader::new(&mut stream);
+                    let mut content_length = 0;
+                    let mut header_bytes = 0;
+                    loop {
+                        let mut line = String::new();
+                        let size = std::io::BufRead::read_line(&mut reader, &mut line).unwrap();
+                        assert!(size > 0, "Unexpected EOF in the request headers");
+                        header_bytes += size;
+                        assert!(header_bytes <= 32 * 1024);
+                        if line == "\r\n" {
+                            break;
+                        }
+                        if let Some((key, value)) = line.split_once(':')
+                            && key.eq_ignore_ascii_case("content-length")
+                        {
+                            content_length = value.trim().parse::<usize>().unwrap();
+                        }
+                    }
+                    assert!(content_length <= 32 * 1024);
+                    reader.read_exact(&mut vec![0_u8; content_length]).unwrap();
+                    drop(reader);
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    stream.write_all(response.as_bytes()).unwrap();
+                }
+            });
+            let mut profile = profile("stream-retry", 0, false);
+            profile.base_url = format!("http://{address}");
+            let request: AgentTurnRequest = serde_json::from_value(serde_json::json!({
+                "profile": profile,
+                "messages": [{ "role": "user", "content": "test" }],
+                "mode": "chat"
+            }))
+            .unwrap();
+            let mut deltas = String::new();
+            let result = run_agent_turn_with_failover_events_inner(
+                &Client::new(),
+                &database,
+                request,
+                None,
+                None,
+                |_| Ok("test-key".to_owned()),
+                true,
+                Duration::from_secs(5),
+                CancellationToken::new(),
+                |_, _, _, _| {},
+                |event| {
+                    if let Some(delta) = event.delta {
+                        deltas.push_str(&delta);
+                    }
+                },
+            )
+            .await;
+            server.join().unwrap();
+            if partial_output {
+                assert!(result.unwrap_err().contains("stream_read_error"));
+                assert_eq!(deltas, "partial");
+                assert_eq!(database.list_provider_requests(10).unwrap().len(), 1);
+            } else {
+                assert_eq!(result.unwrap().content, "recovered");
+                assert_eq!(deltas, "recovered");
+                let logs = database.list_provider_requests(10).unwrap();
+                assert_eq!(logs.len(), 2);
+                assert!(logs.iter().any(|item| item.status == "retrying"));
+            }
+            drop(database);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn transient_provider_failures_reconnect_five_times_before_succeeding() {
         let root = std::env::temp_dir().join(format!(
             "levelup-provider-reconnect-{}",
@@ -13329,6 +13695,7 @@ mod tests {
             custom_instructions: None,
             router_metadata: None,
             router_events: Vec::new(),
+            allow_outside_workspace: false,
             reasoning_effort: None,
         };
 
@@ -13412,6 +13779,7 @@ mod tests {
             custom_instructions: None,
             router_metadata: None,
             router_events: Vec::new(),
+            allow_outside_workspace: false,
             reasoning_effort: None,
         };
         let result = run_agent_turn_with_failover(&Client::new(), &database, request, |_| {
@@ -13477,6 +13845,7 @@ mod tests {
             custom_instructions: None,
             router_metadata: None,
             router_events: Vec::new(),
+            allow_outside_workspace: false,
             reasoning_effort: None,
         };
         let result = run_agent_turn_with_failover(&Client::new(), &database, request, |_| {

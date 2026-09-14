@@ -1870,12 +1870,11 @@ async fn poll_openai_video(
         });
     }
     if status != MediaStatus::Completed {
-        if task.get("error").is_some_and(|error| !error.is_null())
-            || task.get("error_message").is_some()
+        if (task.get("error").is_some_and(|error| !error.is_null())
+            || task.get("error_message").is_some())
+            && let Some(message) = provider_message(task)
         {
-            if let Some(message) = provider_message(task) {
-                return Err(message);
-            }
+            return Err(message);
         }
         return Ok(VideoPoll::Pending {
             status,
@@ -2387,10 +2386,10 @@ fn parse_video_status(status: Option<&str>) -> MediaStatus {
 
 fn video_task_payload(value: &Value) -> &Value {
     for key in ["task", "data", "video"] {
-        if let Some(task) = value.get(key).filter(|item| item.is_object()) {
-            if task.get("status").or_else(|| task.get("state")).is_some() {
-                return task;
-            }
+        if let Some(task) = value.get(key).filter(|item| item.is_object())
+            && task.get("status").or_else(|| task.get("state")).is_some()
+        {
+            return task;
         }
     }
     value

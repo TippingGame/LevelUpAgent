@@ -92,7 +92,17 @@ async fn execute_inner(request: &ToolExecutionRequest) -> Result<String, String>
             )
             .await
         }
-        "run_command" => run_command(&root, required_arg(&request.arguments, "command")?).await,
+        "run_command" => {
+            let workdir = resolve_workdir(
+                &root,
+                string_arg(&request.arguments, "workdir"),
+                allow_outside,
+            )?;
+            if request.hatch && workdir != root {
+                return Err("Hatch commands must run in their prepared workspace".to_owned());
+            }
+            run_command(&workdir, required_arg(&request.arguments, "command")?).await
+        }
         _ => Err(format!("Unknown tool: {}", request.name)),
     }
 }
@@ -648,6 +658,27 @@ async fn delete_file_scoped(
     Ok(format!("Deleted {relative}"))
 }
 
+pub(crate) fn resolve_workdir(
+    workspace: &Path,
+    workdir: Option<&str>,
+    allow_outside: bool,
+) -> Result<PathBuf, String> {
+    let root = std::fs::canonicalize(workspace)
+        .map_err(|error| format!("Workspace is unavailable: {error}"))?;
+    let target = resolve_existing_scoped(
+        &root,
+        workdir
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("."),
+        allow_outside,
+    )?;
+    if !target.is_dir() {
+        return Err("Command workdir must be a directory".to_owned());
+    }
+    Ok(target)
+}
+
 async fn run_command(root: &Path, command: &str) -> Result<String, String> {
     let mut process = if cfg!(target_os = "windows") {
         let mut process = Command::new("powershell");
@@ -691,7 +722,7 @@ fn resolve_existing(root: &Path, relative: &str) -> Result<PathBuf, String> {
     resolve_existing_scoped(root, relative, false)
 }
 
-fn resolve_existing_scoped(
+pub(crate) fn resolve_existing_scoped(
     root: &Path,
     relative: &str,
     allow_outside: bool,
@@ -923,6 +954,98 @@ mod tests {
                 .is_ok()
         );
         let _ = std::fs::remove_dir_all(suite);
+    }
+
+    #[tokio::test]
+    async fn command_workdir_uses_the_requested_directory_only_with_matching_scope() {
+        let suite = std::env::temp_dir().join(format!("levelup-workdir-{}", uuid::Uuid::new_v4()));
+        let workspace = suite.join("workspace");
+        let outside = suite.join("outside");
+        std::fs::create_dir_all(workspace.join("nested")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("marker.txt"), "external-workdir-fixture").unwrap();
+        assert_eq!(
+            resolve_workdir(&workspace, None, false).unwrap(),
+            std::fs::canonicalize(&workspace).unwrap()
+        );
+        assert!(resolve_workdir(&workspace, Some("nested"), false).is_ok());
+        assert!(resolve_workdir(&workspace, Some("../outside"), false).is_err());
+        assert!(resolve_workdir(&workspace, Some(&outside.to_string_lossy()), false).is_err());
+        assert!(
+            resolve_workdir(
+                &workspace,
+                Some(&outside.join("marker.txt").to_string_lossy()),
+                true
+            )
+            .is_err()
+        );
+
+        let arguments = serde_json::json!({
+            "command": if cfg!(windows) { "Get-Content marker.txt" } else { "cat marker.txt" },
+            "workdir": outside.to_string_lossy(),
+        });
+        let mut request: ToolExecutionRequest = serde_json::from_value(serde_json::json!({
+            "name": "run_command", "workspace": workspace.to_string_lossy(),
+            "arguments": arguments, "allowOutsideWorkspace": true
+        }))
+        .unwrap();
+        let result = execute_inner(&request).await.unwrap();
+        assert!(result.contains("external-workdir-fixture"));
+        request.allow_outside_workspace = false;
+        assert!(execute_inner(&request).await.is_err());
+        request.allow_outside_workspace = true;
+        request.hatch = true;
+        assert!(execute_inner(&request).await.is_err());
+        std::fs::remove_dir_all(suite).unwrap();
+    }
+
+    #[tokio::test]
+    async fn full_scope_file_operations_can_access_another_project() {
+        let suite =
+            std::env::temp_dir().join(format!("levelup-full-files-{}", uuid::Uuid::new_v4()));
+        let workspace = suite.join("workspace");
+        let outside = suite.join("other-project");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let path = outside.join("note.txt").to_string_lossy().into_owned();
+        write_file_scoped(&workspace, &path, "before", None, true)
+            .await
+            .unwrap();
+        assert!(
+            read_file_scoped(&workspace, &path, None, false)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            read_file_scoped(&workspace, &path, None, true)
+                .await
+                .unwrap(),
+            "before"
+        );
+        edit_file_scoped(&workspace, &path, "before", "after", None, false, true)
+            .await
+            .unwrap();
+        assert!(
+            search_files_scoped(
+                &workspace,
+                "after",
+                None,
+                None,
+                true,
+                Some(&outside.to_string_lossy())
+            )
+            .unwrap()
+            .contains("note.txt")
+        );
+        assert!(
+            list_files_scoped(&workspace, &outside.to_string_lossy(), true)
+                .unwrap()
+                .contains("note.txt")
+        );
+        assert!(delete_file_scoped(&workspace, &path, false).await.is_err());
+        delete_file_scoped(&workspace, &path, true).await.unwrap();
+        assert!(!Path::new(&path).exists());
+        std::fs::remove_dir_all(suite).unwrap();
     }
 
     #[tokio::test]

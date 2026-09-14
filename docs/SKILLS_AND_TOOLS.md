@@ -55,15 +55,54 @@ only. Full permission enables absolute paths for local file tools and automatic
 external tool execution, while unknown credential-sensitive tools still require
 an explicit approval.
 
+Explicit local file paths in a submitted composer message are imported through
+the same managed attachment pipeline as selected or dropped files. Recognized
+paths include drive paths, quoted paths with spaces, `file://` URLs, Unix
+absolute paths, and `./` or `../` paths relative to the selected workspace.
+Paths have no extension allowlist, including dotfiles and extensionless files.
+Quoted paths are exact; unquoted paths use the longest existing filename so
+spaces in names and trailing prose can coexist. Existing files appear as message attachments, including files outside
+the workspace explicitly supplied by the user. Directories and missing paths
+remain text so a request to create a new file can proceed. Each file may be up
+to 64 MiB, including empty files. Supported images are sent as images; reliably
+decoded text and PDF/Office text are extracted up to the existing context limits.
+Unrecognized binary formats, unparseable documents and text/documents above
+20 MiB use original-file references for local tools. These references preserve
+bytes and safe filenames, including extensions, under `.levelup-attachments/`.
+Text and document context also includes an original-file reference when a
+workspace is available. Repeated tool calls preserve edits to working copies.
+Import does not execute files or automatically unpack arbitrary archives, and
+file contents remain untrusted data. A file reference does not imply that the
+model has decoded the format or that the necessary local software is installed.
+For image editing, `generate_images.referenceImagePaths` accepts existing local
+images and sends their actual bytes through the media provider adapter. These
+model-supplied paths follow the tool's current workspace/Full permission scope;
+hatch jobs continue to obtain their references from their prepared manifest.
+
+Provider `stream_read_error` failures retain their upstream error codes and use
+the bounded reconnect policy before output begins. An interrupted partial reply
+is preserved instead of being replayed automatically. The conversation displays
+an upstream stream interruption message, distinct from a local file permission
+failure, while completed tool results remain in history.
+
 The sandbox process tools (`start_process`, `list_processes`, `process_output`,
 and `stop_process`) keep local dev servers alive for the duration of a task,
 capture a bounded stdout/stderr tail, and bind process operations to the
-selected workspace. This is a host-managed QA sandbox, not a VM or a security
-container: the selected permission level still governs the command and its
-filesystem access. The browser tool creates a temporary Chromium profile, binds CDP to loopback,
+selected workspace. Up to eight processes may run concurrently. Starting a
+process or listing processes retains the 64 most recently observed completed
+records, including output and exit codes; stopping a process also preserves its
+recent output. Completed records do not consume running-process slots. IDs are
+local to the current application run and are not restored after a restart.
+An unavailable ID returns a recoverable tool error directing the Agent to
+`list_processes`, rather than aborting the task. This is a host-managed QA
+sandbox, not a VM or a security container: the selected permission level still
+governs the command and its filesystem access. Full permission may use `workdir`
+outside the workspace without changing which workspace owns the process.
+The browser tool creates a temporary Chromium profile, binds CDP to loopback,
 and exposes only bounded snapshot/wait/click/type/assert/console/screenshot/viewport
 operations. File
-URLs are restricted to the active workspace, session HTTP URLs can be narrowed
+URLs may point outside the active workspace under Full permission; other modes
+restrict them to the workspace. Session HTTP URLs can be narrowed
 with `allowedDomains`, and assertions use CDP side-effect detection plus a
 restricted expression filter that rejects common navigation, storage, and DOM
 mutation calls. Public web and Skill downloads filter local/private DNS answers

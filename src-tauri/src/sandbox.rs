@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -19,6 +19,7 @@ use tokio::sync::Mutex;
 use crate::process::hide_console_window;
 
 const MAX_PROCESSES: usize = 8;
+const MAX_COMPLETED_PROCESSES: usize = 64;
 const MAX_COMMAND_CHARS: usize = 16_000;
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -30,8 +31,10 @@ pub struct ProcessSnapshot {
     pub pid: Option<u32>,
     pub command: String,
     pub workspace: String,
+    pub workdir: String,
     pub label: Option<String>,
     pub running: bool,
+    pub exit_code: Option<i32>,
     pub started_at: i64,
 }
 
@@ -42,6 +45,7 @@ pub struct ProcessOutput {
     pub stdout: String,
     pub stderr: String,
     pub running: bool,
+    pub exit_code: Option<i32>,
 }
 
 #[derive(Default)]
@@ -51,11 +55,62 @@ pub struct ProcessManager {
 
 struct ManagedProcess {
     snapshot: ProcessSnapshot,
-    child: Mutex<Child>,
+    state: Mutex<ProcessState>,
     stdout: Arc<OutputTail>,
     stderr: Arc<OutputTail>,
     stdout_reader: Mutex<Option<tokio::task::JoinHandle<()>>>,
     stderr_reader: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+struct ProcessState {
+    child: Option<Child>,
+    exit_code: Option<i32>,
+    finished_at: Option<Instant>,
+    stopped: bool,
+}
+
+impl ProcessState {
+    fn refresh(&mut self) -> Result<(), String> {
+        if let Some(child) = self.child.as_mut()
+            && let Some(status) = child
+                .try_wait()
+                .map_err(|error| format!("Could not inspect background process: {error}"))?
+        {
+            self.exit_code = status.code();
+            self.finished_at = Some(Instant::now());
+            self.child = None;
+        }
+        Ok(())
+    }
+}
+
+impl ManagedProcess {
+    async fn snapshot(&self) -> Result<ProcessSnapshot, String> {
+        let mut state = self.state.lock().await;
+        state.refresh()?;
+        let mut snapshot = self.snapshot.clone();
+        snapshot.running = state.child.is_some();
+        snapshot.exit_code = state.exit_code;
+        Ok(snapshot)
+    }
+
+    async fn finish_readers(&self) {
+        tokio::join!(
+            finish_reader(&self.stdout_reader),
+            finish_reader(&self.stderr_reader)
+        );
+    }
+}
+
+impl Drop for ManagedProcess {
+    fn drop(&mut self) {
+        // Eviction must also release readers whose pipes were inherited by descendants.
+        for reader in [&mut self.stdout_reader, &mut self.stderr_reader] {
+            if let Some(task) = reader.get_mut().take() {
+                task.abort();
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -92,6 +147,7 @@ impl ProcessManager {
         workspace: &Path,
         command: &str,
         label: Option<&str>,
+        workdir: Option<&Path>,
     ) -> Result<ProcessSnapshot, String> {
         let command = command.trim();
         if command.is_empty() || command.chars().count() > MAX_COMMAND_CHARS {
@@ -100,25 +156,10 @@ impl ProcessManager {
             ));
         }
         let workspace = canonical_workspace(workspace)?;
+        let workdir = canonical_workspace(workdir.unwrap_or(&workspace))?;
 
         let mut processes = self.processes.lock().await;
-        let mut finished = Vec::new();
-        for (id, process) in processes.iter() {
-            if process
-                .child
-                .lock()
-                .await
-                .try_wait()
-                .map_err(|error| format!("Could not inspect background process: {error}"))?
-                .is_some()
-            {
-                finished.push(id.clone());
-            }
-        }
-        for id in finished {
-            processes.remove(&id);
-        }
-        if processes.len() >= MAX_PROCESSES {
+        if refresh_processes(&mut processes).await? >= MAX_PROCESSES {
             return Err(format!(
                 "At most {MAX_PROCESSES} background processes may run at once"
             ));
@@ -126,7 +167,7 @@ impl ProcessManager {
 
         let mut process = shell_command(command);
         process
-            .current_dir(&workspace)
+            .current_dir(&workdir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -152,11 +193,13 @@ impl ProcessManager {
             pid,
             command: command.to_owned(),
             workspace: workspace.to_string_lossy().into_owned(),
+            workdir: workdir.to_string_lossy().into_owned(),
             label: label
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(ToOwned::to_owned),
             running: true,
+            exit_code: None,
             started_at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|value| value.as_millis().min(i64::MAX as u128) as i64)
@@ -166,7 +209,12 @@ impl ProcessManager {
             id,
             Arc::new(ManagedProcess {
                 snapshot: snapshot.clone(),
-                child: Mutex::new(child),
+                state: Mutex::new(ProcessState {
+                    child: Some(child),
+                    exit_code: None,
+                    finished_at: None,
+                    stopped: false,
+                }),
                 stdout,
                 stderr,
                 stdout_reader: Mutex::new(stdout_reader),
@@ -178,22 +226,14 @@ impl ProcessManager {
 
     pub async fn list(&self, workspace: &Path) -> Result<Vec<ProcessSnapshot>, String> {
         let workspace = canonical_workspace(workspace)?;
-        let processes = self.processes.lock().await;
+        let mut processes = self.processes.lock().await;
+        refresh_processes(&mut processes).await?;
         let mut snapshots = Vec::with_capacity(processes.len());
         for process in processes.values() {
             if process.snapshot.workspace != workspace.to_string_lossy() {
                 continue;
             }
-            let running = process
-                .child
-                .lock()
-                .await
-                .try_wait()
-                .map_err(|error| format!("Could not inspect background process: {error}"))?
-                .is_none();
-            let mut snapshot = process.snapshot.clone();
-            snapshot.running = running;
-            snapshots.push(snapshot);
+            snapshots.push(process.snapshot().await?);
         }
         snapshots.sort_by_key(|snapshot| snapshot.started_at);
         Ok(snapshots)
@@ -202,39 +242,49 @@ impl ProcessManager {
     pub async fn output(&self, id: &str, workspace: &Path) -> Result<ProcessOutput, String> {
         let workspace = canonical_workspace(workspace)?;
         let process = self.process(id, &workspace).await?;
-        let running = process
-            .child
-            .lock()
-            .await
-            .try_wait()
-            .map_err(|error| format!("Could not inspect background process: {error}"))?
-            .is_none();
-        if !running {
-            finish_reader(&process.stdout_reader).await;
-            finish_reader(&process.stderr_reader).await;
+        let snapshot = process.snapshot().await?;
+        if !snapshot.running {
+            process.finish_readers().await;
         }
         Ok(ProcessOutput {
             id: id.to_owned(),
             stdout: crate::logging::redact_sensitive(&process.stdout.text().await),
             stderr: crate::logging::redact_sensitive(&process.stderr.text().await),
-            running,
+            running: snapshot.running,
+            exit_code: snapshot.exit_code,
         })
     }
 
     pub async fn stop(&self, id: &str, workspace: &Path) -> Result<bool, String> {
         let workspace = canonical_workspace(workspace)?;
         let process = {
-            let mut processes = self.processes.lock().await;
-            let belongs = processes
+            let processes = self.processes.lock().await;
+            processes
                 .get(id)
-                .is_some_and(|process| process.snapshot.workspace == workspace.to_string_lossy());
-            if belongs { processes.remove(id) } else { None }
+                .filter(|process| process.snapshot.workspace == workspace.to_string_lossy())
+                .cloned()
         };
         let Some(process) = process else {
             return Ok(false);
         };
-        let mut child = process.child.lock().await;
-        terminate_child(&mut child).await;
+        let mut state = process.state.lock().await;
+        if state.stopped {
+            return Ok(false);
+        }
+        state.refresh()?;
+        if let Some(child) = state.child.as_mut() {
+            terminate_child(child).await;
+            state.refresh()?;
+            if state.child.is_some() {
+                return Err(
+                    "Could not stop background process; use list_processes to check its status"
+                        .to_owned(),
+                );
+            }
+        }
+        state.stopped = true;
+        drop(state);
+        process.finish_readers().await;
         Ok(true)
     }
 
@@ -256,8 +306,11 @@ impl ProcessManager {
         let Some(process) = process else {
             return Ok(false);
         };
-        let mut child = process.child.lock().await;
-        terminate_child(&mut child).await;
+        let mut state = process.state.lock().await;
+        state.refresh()?;
+        if let Some(child) = state.child.as_mut() {
+            terminate_child(child).await;
+        }
         Ok(true)
     }
 
@@ -268,12 +321,38 @@ impl ProcessManager {
             .await
             .get(id)
             .cloned()
-            .ok_or_else(|| format!("Background process does not exist: {id}"))?;
+            .ok_or_else(|| {
+                format!(
+                    "Background process ID is no longer available: {id}. IDs are local to this app run; the app may have restarted or the completed record may have expired. Use list_processes to find current IDs and inspect their status before deciding whether a command needs to be started again."
+                )
+            })?;
         if process.snapshot.workspace != workspace.to_string_lossy() {
             return Err("Background process belongs to a different workspace".to_owned());
         }
         Ok(process)
     }
+}
+
+async fn refresh_processes(
+    processes: &mut HashMap<String, Arc<ManagedProcess>>,
+) -> Result<usize, String> {
+    let mut running = 0;
+    let mut finished = Vec::new();
+    for (id, process) in processes.iter() {
+        let mut state = process.state.lock().await;
+        state.refresh()?;
+        if let Some(finished_at) = state.finished_at {
+            finished.push((finished_at, id.clone()));
+        } else {
+            running += 1;
+        }
+    }
+    finished.sort_unstable();
+    let excess = finished.len().saturating_sub(MAX_COMPLETED_PROCESSES);
+    for (_, id) in finished.into_iter().take(excess) {
+        processes.remove(&id);
+    }
+    Ok(running)
 }
 
 fn canonical_workspace(workspace: &Path) -> Result<std::path::PathBuf, String> {
@@ -325,9 +404,17 @@ where
 }
 
 async fn finish_reader(reader: &Mutex<Option<tokio::task::JoinHandle<()>>>) {
-    if let Some(task) = reader.lock().await.take() {
-        let _ = tokio::time::timeout(STOP_TIMEOUT, task).await;
+    // Keep ownership of the handle if the caller is cancelled while waiting.
+    let mut reader = reader.lock().await;
+    if let Some(task) = reader.as_mut()
+        && tokio::time::timeout(STOP_TIMEOUT, &mut *task)
+            .await
+            .is_err()
+    {
+        task.abort();
+        let _ = task.await;
     }
+    reader.take();
 }
 
 async fn terminate_child(child: &mut Child) {
@@ -346,6 +433,226 @@ async fn terminate_child(child: &mut Child) {
 mod tests {
     use super::*;
 
+    fn idle_command() -> &'static str {
+        if cfg!(windows) {
+            "Start-Sleep -Seconds 60"
+        } else {
+            "exec sleep 60"
+        }
+    }
+
+    async fn wait_for_exit(manager: &ProcessManager, id: &str, workspace: &Path) -> ProcessOutput {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let output = manager.output(id, workspace).await.unwrap();
+                if !output.running {
+                    return output;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("fixture process did not exit")
+    }
+
+    #[tokio::test]
+    async fn cancelling_process_output_keeps_the_reader_available_for_cleanup() {
+        let (writer, stream) = tokio::io::duplex(1024);
+        let reader = Mutex::new(Some(spawn_reader(stream, Arc::new(OutputTail::default()))));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), finish_reader(&reader))
+                .await
+                .is_err()
+        );
+        assert!(reader.lock().await.is_some());
+        drop(writer);
+        finish_reader(&reader).await;
+        assert!(reader.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn completed_output_and_exit_code_survive_starting_another_process() {
+        let root =
+            std::env::temp_dir().join(format!("levelup-process-history-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let manager = ProcessManager::default();
+        let command = if cfg!(windows) {
+            "[Console]::Out.WriteLine('completed-process-fixture'); [Console]::Error.WriteLine('completed-process-stderr'); exit 7"
+        } else {
+            "printf completed-process-fixture; printf completed-process-stderr >&2; exit 7"
+        };
+        let first = manager.start(&root, command, None, None).await.unwrap();
+        let original = wait_for_exit(&manager, &first.id, &root).await;
+        manager
+            .start(&root, idle_command(), None, None)
+            .await
+            .unwrap();
+        let retained = manager.output(&first.id, &root).await.unwrap();
+        let snapshots = manager.list(&root).await.unwrap();
+        manager.stop_all().await;
+
+        assert_eq!(original.exit_code, Some(7));
+        assert!(retained.stdout.contains("completed-process-fixture"));
+        assert!(retained.stderr.contains("completed-process-stderr"));
+        assert_eq!(retained.stdout, original.stdout);
+        assert_eq!(retained.stderr, original.stderr);
+        assert_eq!(retained.exit_code, Some(7));
+        assert!(!retained.running);
+        assert_eq!(snapshots.len(), 2);
+        let completed = snapshots
+            .iter()
+            .find(|snapshot| snapshot.id == first.id)
+            .unwrap();
+        assert!(!completed.running);
+        assert_eq!(completed.exit_code, Some(7));
+        assert!(manager.list(&root).await.unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn completed_history_does_not_use_running_process_slots() {
+        let root =
+            std::env::temp_dir().join(format!("levelup-process-slots-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let manager = ProcessManager::default();
+        let mut snapshots = Vec::new();
+        for _ in 0..MAX_PROCESSES {
+            snapshots.push(
+                manager
+                    .start(&root, idle_command(), None, None)
+                    .await
+                    .unwrap(),
+            );
+        }
+        let limit_error = manager
+            .start(&root, idle_command(), None, None)
+            .await
+            .unwrap_err();
+        assert!(limit_error.contains("at once"));
+        assert!(manager.stop(&snapshots[0].id, &root).await.unwrap());
+        manager
+            .start(&root, idle_command(), None, None)
+            .await
+            .unwrap();
+        let stopped = manager.output(&snapshots[0].id, &root).await.unwrap();
+        let snapshots = manager.list(&root).await.unwrap();
+        manager.stop_all().await;
+
+        assert!(!stopped.running);
+        assert_eq!(
+            snapshots.iter().filter(|snapshot| snapshot.running).count(),
+            MAX_PROCESSES
+        );
+        assert_eq!(snapshots.len(), MAX_PROCESSES + 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn history_evicts_oldest_completed_records_and_keeps_running_processes() {
+        let root =
+            std::env::temp_dir().join(format!("levelup-process-eviction-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let manager = ProcessManager::default();
+        let active = manager
+            .start(&root, idle_command(), None, None)
+            .await
+            .unwrap();
+        let finished_at = Instant::now();
+        {
+            let mut processes = manager.processes.lock().await;
+            for index in 0..=MAX_COMPLETED_PROCESSES {
+                let id = format!("completed-{index}");
+                processes.insert(
+                    id.clone(),
+                    Arc::new(ManagedProcess {
+                        snapshot: ProcessSnapshot {
+                            id,
+                            pid: None,
+                            running: false,
+                            exit_code: Some(0),
+                            ..active.clone()
+                        },
+                        state: Mutex::new(ProcessState {
+                            child: None,
+                            exit_code: Some(0),
+                            finished_at: Some(finished_at + Duration::from_millis(index as u64)),
+                            stopped: false,
+                        }),
+                        stdout: Arc::new(OutputTail::default()),
+                        stderr: Arc::new(OutputTail::default()),
+                        stdout_reader: Mutex::new(None),
+                        stderr_reader: Mutex::new(None),
+                    }),
+                );
+            }
+        }
+        manager
+            .start(&root, idle_command(), None, None)
+            .await
+            .unwrap();
+        let snapshots = manager.list(&root).await.unwrap();
+        let expired = manager.output("completed-0", &root).await.unwrap_err();
+        let retained = manager.output("completed-1", &root).await.unwrap();
+        manager.stop_all().await;
+
+        assert_eq!(snapshots.len(), MAX_COMPLETED_PROCESSES + 2);
+        assert_eq!(
+            snapshots.iter().filter(|snapshot| snapshot.running).count(),
+            2
+        );
+        assert!(snapshots.iter().any(|snapshot| snapshot.id == active.id));
+        assert!(expired.contains("list_processes"));
+        assert!(!retained.running);
+        assert_eq!(retained.exit_code, Some(0));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn external_workdir_keeps_process_ownership_in_the_original_workspace() {
+        let suite =
+            std::env::temp_dir().join(format!("levelup-process-workdir-{}", uuid::Uuid::new_v4()));
+        let workspace = suite.join("workspace");
+        let workdir = suite.join("external");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&workdir).unwrap();
+        std::fs::write(workdir.join("marker.txt"), "external-process-fixture").unwrap();
+        let manager = ProcessManager::default();
+        let command = if cfg!(windows) {
+            "Get-Content marker.txt; Start-Sleep -Seconds 5"
+        } else {
+            "cat marker.txt; sleep 5"
+        };
+        let snapshot = manager
+            .start(&workspace, command, None, Some(&workdir))
+            .await
+            .unwrap();
+        assert_eq!(
+            snapshot.workdir,
+            std::fs::canonicalize(&workdir).unwrap().to_string_lossy()
+        );
+        assert_eq!(manager.list(&workspace).await.unwrap().len(), 1);
+        assert!(manager.list(&workdir).await.unwrap().is_empty());
+        assert!(manager.output(&snapshot.id, &workdir).await.is_err());
+        let mut output = manager.output(&snapshot.id, &workspace).await.unwrap();
+        for _ in 0..100 {
+            if output.stdout.contains("external-process-fixture") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            output = manager.output(&snapshot.id, &workspace).await.unwrap();
+        }
+        let stopped = manager.stop(&snapshot.id, &workspace).await.unwrap();
+        assert!(stopped);
+        assert!(manager.output(&snapshot.id, &workdir).await.is_err());
+        assert!(!manager.stop(&snapshot.id, &workdir).await.unwrap());
+        assert!(
+            output.stdout.contains("external-process-fixture"),
+            "{}",
+            output.stderr
+        );
+        std::fs::remove_dir_all(suite).unwrap();
+    }
+
     #[tokio::test]
     async fn starts_captures_lists_and_stops_a_bounded_process() {
         let root = std::env::temp_dir().join(format!("levelup-process-{}", uuid::Uuid::new_v4()));
@@ -357,7 +664,7 @@ mod tests {
             "printf process-manager-fixture; sleep 0.3"
         };
         let snapshot = manager
-            .start(&root, command, Some("fixture"))
+            .start(&root, command, Some("fixture"), None)
             .await
             .unwrap();
         assert!(snapshot.running);
@@ -373,6 +680,9 @@ mod tests {
         assert!(output.stdout.contains("process-manager-fixture"));
         assert!(manager.stop(&snapshot.id, &root).await.unwrap());
         assert!(!manager.stop(&snapshot.id, &root).await.unwrap());
+        let stopped = manager.output(&snapshot.id, &root).await.unwrap();
+        assert!(!stopped.running);
+        assert!(stopped.stdout.contains("process-manager-fixture"));
         std::fs::remove_dir_all(root).unwrap();
     }
 }

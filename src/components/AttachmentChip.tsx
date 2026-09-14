@@ -3,6 +3,9 @@ import { createPortal } from "react-dom";
 import {
   Box,
   CircleAlert,
+  File,
+  FileArchive,
+  FileAudio,
   FileCode2,
   FileSpreadsheet,
   FileText,
@@ -93,7 +96,7 @@ export function AttachmentChip({ attachment, detailed = false, onRemove }: Attac
             <div className="attachment-video-preview"><FileVideo2 size={28} /><span>{tr("MP4 视频参考素材", "MP4 video reference")}</span></div>
           )}
           {preview?.kind === "file" && (
-            <div className="attachment-video-preview"><Box size={28} /><span>{tr("FBX 原始文件", "Original FBX file")}</span></div>
+            <div className="attachment-video-preview"><File size={28} /><span>{tr("原始文件", "Original file")}</span></div>
           )}
           {preview && (preview.kind === "text" || preview.kind === "document") && (
             <pre>{preview.text || tr("没有可预览的文本内容", "No text preview is available")}</pre>
@@ -109,7 +112,14 @@ function AttachmentGlyph({ attachment }: { attachment: ImageAttachment }) {
   if (attachment.kind === "image") return <ImagePlus size={14} />;
   if (attachment.kind === "video") return <FileVideo2 size={14} />;
   if (attachment.kind === "text") return <FileCode2 size={14} />;
-  if (attachment.kind === "file") return <Box size={14} />;
+  if (attachment.kind === "file") {
+    const extension = attachmentExtension(attachment);
+    if (["zip", "7z", "rar", "gz", "tar", "xz", "bz2"].includes(extension)) return <FileArchive size={14} />;
+    if (["mp3", "wav", "ogg", "flac", "m4a", "aac"].includes(extension)) return <FileAudio size={14} />;
+    if (["mp4", "mov", "webm", "mkv", "avi"].includes(extension)) return <FileVideo2 size={14} />;
+    if (["fbx", "blend", "glb", "gltf", "stl"].includes(extension)) return <Box size={14} />;
+    return <File size={14} />;
+  }
   if (attachment.mimeType.includes("spreadsheetml")) return <FileSpreadsheet size={14} />;
   if (attachment.mimeType.includes("presentationml")) return <Presentation size={14} />;
   return <FileText size={14} />;
@@ -119,12 +129,21 @@ function attachmentFormatLabel(attachment: ImageAttachment) {
   if (attachment.kind === "image") return tr("图片", "Image");
   if (attachment.kind === "video") return tr("视频", "Video");
   if (attachment.kind === "text") return tr("文本", "Text");
-  if (attachment.kind === "file") return "FBX";
+  if (attachment.kind === "file") {
+    if (attachment.mimeType === "application/vnd.autodesk.fbx") return "FBX";
+    return attachmentExtension(attachment).toUpperCase() || tr("文件", "File");
+  }
   if (attachment.mimeType === "application/pdf") return "PDF";
   if (attachment.mimeType.includes("wordprocessingml")) return "Word";
   if (attachment.mimeType.includes("spreadsheetml")) return "Excel";
   if (attachment.mimeType.includes("presentationml")) return "PowerPoint";
   return tr("文档", "Document");
+}
+
+function attachmentExtension(attachment: ImageAttachment) {
+  const dot = attachment.name.lastIndexOf(".");
+  const extension = dot > 0 ? attachment.name.slice(dot + 1) : "";
+  return extension.length <= 16 ? extension.toLowerCase() : "";
 }
 
 function formatBytes(bytes: number) {
