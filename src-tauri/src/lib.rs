@@ -122,6 +122,7 @@ struct BrowserPanelCommandRequest {
 struct AppState {
     client: Client,
     stream_client: Client,
+    media_refreshes: media::MediaRefreshes,
     active_requests: Mutex<HashMap<String, CancellationToken>>,
     harness_turn_cancellations: Mutex<HashMap<String, CancellationToken>>,
     harness_phases: Mutex<HashMap<String, HarnessPhase>>,
@@ -5095,7 +5096,10 @@ async fn refresh_media_asset_internal(
         api_key: load_profile_api_key(&profile)?,
         profile,
     };
-    media::refresh_asset(&state.client, &storage, database, &provider, asset).await
+    state
+        .media_refreshes
+        .refresh(&state.client, &storage, database, &provider, asset_id)
+        .await
 }
 
 #[tauri::command]
@@ -10958,6 +10962,7 @@ pub fn run() {
             // and provider-round deadlines. A total body deadline would cut
             // off healthy long-running reasoning streams.
             stream_client: build_http_client(None).expect("failed to build streaming HTTP client"),
+            media_refreshes: media::MediaRefreshes::default(),
             active_requests: Mutex::new(HashMap::new()),
             harness_turn_cancellations: Mutex::new(HashMap::new()),
             harness_phases: Mutex::new(HashMap::new()),

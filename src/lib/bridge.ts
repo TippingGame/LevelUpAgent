@@ -1,6 +1,7 @@
 import { Channel, convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import type { LocalAttachmentPath } from "./localAttachments";
+import { deduplicateMediaRefresh } from "./mediaPolling";
 import type {
   AgentMessage,
   AgentMode,
@@ -573,9 +574,9 @@ export async function listMediaAssets(kind: MediaKind, limit = 24, offset = 0): 
   return invoke<MediaAssetPage>("list_media_assets", { kind, limit, offset });
 }
 
-export async function refreshMediaAsset(assetId: string): Promise<MediaAsset> {
+export const refreshMediaAsset = deduplicateMediaRefresh((assetId: string): Promise<MediaAsset> => {
   return invoke<MediaAsset>("refresh_media_asset", { assetId });
-}
+});
 
 export async function exportMediaAsset(asset: MediaAsset): Promise<string | null> {
   if (!isDesktop() || asset.status !== "completed" || !asset.fileName) return null;

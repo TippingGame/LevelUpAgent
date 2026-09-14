@@ -63,6 +63,7 @@ import {
 import { copyText } from "../lib/clipboard";
 import { isMiniMaxImageModel, mediaModelSupportsExplicitImageMask, selectStudioMediaModel, videoModelCapabilities } from "../lib/mediaCapabilities";
 import { createMediaReferenceUrl, moveMediaReference, orderedMediaReferenceUrls, type MediaReferenceUrl } from "../lib/mediaReferences";
+import { createMediaPoller } from "../lib/mediaPolling";
 import type {
   ImageAttachment,
   MediaAsset,
@@ -195,6 +196,7 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
   const [instructions, setInstructions] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [videoRefreshErrors, setVideoRefreshErrors] = useState<Record<string, string>>({});
   const [refreshing, setRefreshing] = useState(false);
   const [pastingReferences, setPastingReferences] = useState(false);
   const [previewAsset, setPreviewAsset] = useState<MediaAsset | null>(null);
@@ -254,6 +256,10 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
   const pendingVideoIds = assets
     .filter((asset) => asset.kind === "video" && (asset.status === "queued" || asset.status === "in_progress"))
     .map((asset) => asset.id);
+  const videoRefreshError = pendingVideoIds.map((id) => videoRefreshErrors[id]).find(Boolean);
+  const visibleError = error ?? (videoRefreshError
+    ? tr("视频状态获取失败，将自动重试：", "Video status unavailable; retrying: ") + videoRefreshError
+    : null);
 
   const rememberSelectedModel = (targetKind: MediaKind, key: string) => {
     setSelectedModels((current) => {
@@ -369,8 +375,8 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
   }, [kind, activeVideoMode, selectedModelId]);
 
   useEffect(() => {
-    onPendingCountChange(pendingAssets.length);
-  }, [onPendingCountChange, pendingAssets.length]);
+    onPendingCountChange(pendingAssets.length + pendingVideoIds.length);
+  }, [onPendingCountChange, pendingAssets.length, pendingVideoIds.length]);
 
   useEffect(() => {
     if (kind === "image") {
@@ -385,20 +391,28 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
 
   useEffect(() => {
     if (pendingVideoIds.length === 0) return;
-    let disposed = false;
-    const refreshPending = async () => {
-      const results = await Promise.allSettled(pendingVideoIds.map(refreshMediaAsset));
-      if (disposed) return;
-      const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
-      const retryPrefix = tr("视频状态获取失败，将自动重试：", "Video status unavailable; retrying: ");
-      setError((current) => failures.length ? retryPrefix + errorText(failures[0].reason) : current?.startsWith(retryPrefix) ? null : current);
-      setAssets((current) => mergeAssets(current, results.flatMap((result) => result.status === "fulfilled" ? [result.value] : [])));
+    const poller = createMediaPoller(
+      refreshMediaAsset,
+      (asset) => setAssets((current) => mergeAssets(current, [asset])),
+      (id, reason) => setVideoRefreshErrors((current) => {
+        const next = { ...current };
+        if (reason === null) delete next[id];
+        else next[id] = errorText(reason);
+        return next;
+      }),
+    );
+    const refreshPending = () => {
+      poller.poll(pendingVideoIds);
     };
-    const timer = window.setInterval(() => void refreshPending(), 5_000);
-    void refreshPending();
+    const timer = window.setInterval(refreshPending, 5_000);
+    window.addEventListener("focus", refreshPending);
+    document.addEventListener("visibilitychange", refreshPending);
+    refreshPending();
     return () => {
-      disposed = true;
+      poller.stop();
       window.clearInterval(timer);
+      window.removeEventListener("focus", refreshPending);
+      document.removeEventListener("visibilitychange", refreshPending);
     };
   }, [pendingVideoIds.join("|")]);
 
@@ -1106,7 +1120,7 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
           )}
 
           {catalog && catalog.errors.length > 0 && <details className="media-catalog-warning"><summary><CircleAlert size={13} />{tr("部分连接无法读取模型", "Some connections could not list models")}</summary><p>{catalog.errors.join(" · ")}</p></details>}
-          {error && <div className="media-error"><CircleAlert size={14} /><span>{error}</span><button onClick={() => setError(null)}><X size={13} /></button></div>}
+          {visibleError && <div className="media-error"><CircleAlert size={14} /><span>{visibleError}</span><button onClick={() => { setError(null); setVideoRefreshErrors({}); }}><X size={13} /></button></div>}
 
           {models.length === 0 && !loading ? (
             <button className="media-configure-button" onClick={onConfigureConnection}><Settings2 size={15} />{tr("配置支持生成能力的模型连接", "Configure a media-capable model connection")}</button>

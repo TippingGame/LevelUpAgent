@@ -345,7 +345,11 @@ pub(super) async fn poll_minimax_video(
         &provider.profile.base_url,
         &format!("/v2/query/video_generation/{id}"),
     )?;
-    let value = send_json(bearer_auth_if_present(client.get(url), provider)).await?;
+    let value = send_json(bearer_auth_if_present(
+        client.get(url).timeout(VIDEO_STATUS_TIMEOUT),
+        provider,
+    ))
+    .await?;
     check_minimax_error(&value)?;
     let task = value
         .get("task")

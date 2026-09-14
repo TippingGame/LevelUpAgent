@@ -20,6 +20,8 @@ use crate::models::{
 
 mod native_media;
 use native_media::*;
+mod refresh;
+pub(crate) use refresh::MediaRefreshes;
 
 const MAX_PROMPT_CHARS: usize = 32_000;
 const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
@@ -27,6 +29,7 @@ pub(crate) const MAX_IMAGE_REFERENCE_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 const MAX_AUDIO_BYTES: usize = 64 * 1024 * 1024;
 const MAX_VIDEO_BYTES: usize = 1024 * 1024 * 1024;
 const MAX_JSON_BYTES: usize = 128 * 1024 * 1024;
+const VIDEO_STATUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 #[derive(Clone)]
 pub struct MediaProvider {
@@ -1829,7 +1832,11 @@ async fn poll_openai_video(
         &provider.profile.base_url,
         &format!("/v1/videos/{remote_id}"),
     )?;
-    let value = send_json(bearer_auth_if_present(client.get(url), provider)).await?;
+    let value = send_json(bearer_auth_if_present(
+        client.get(url).timeout(VIDEO_STATUS_TIMEOUT),
+        provider,
+    ))
+    .await?;
     let task = video_task_payload(&value);
     let raw_status = task
         .get("status")
@@ -1904,7 +1911,11 @@ async fn poll_gemini_video(
         format!("/v1beta/{}", remote_id.trim_start_matches('/'))
     };
     let url = agent::gemini_endpoint(&provider.profile.base_url, &operation_path)?;
-    let value = send_json(gemini_auth_if_present(client.get(url), provider)).await?;
+    let value = send_json(gemini_auth_if_present(
+        client.get(url).timeout(VIDEO_STATUS_TIMEOUT),
+        provider,
+    ))
+    .await?;
     if value.get("done").and_then(Value::as_bool) != Some(true) {
         return Ok(VideoPoll::Pending {
             status: MediaStatus::InProgress,
@@ -3805,7 +3816,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn moves_video_job_from_queued_to_downloaded_completion() {
+    async fn concurrent_video_refreshes_reuse_one_download_and_saved_completion() {
         let (base_url, server) = mock_sequence(vec![
             MockResponse {
                 method: "POST",
@@ -3850,18 +3861,24 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(created.assets[0].status, MediaStatus::Queued);
-        let completed = refresh_asset(
-            &Client::new(),
-            &storage,
-            &database,
-            &provider,
-            created.assets[0].clone(),
-        )
-        .await
-        .unwrap();
+        let client = Client::new();
+        let refreshes = MediaRefreshes::default();
+        let id = &created.assets[0].id;
+        let (first, second) = tokio::join!(
+            refreshes.refresh(&client, &storage, &database, &provider, id),
+            refreshes.refresh(&client, &storage, &database, &provider, id),
+        );
+        let completed = first.unwrap();
+        let second = second.unwrap();
         assert_eq!(completed.status, MediaStatus::Completed);
+        assert_eq!(second.status, MediaStatus::Completed);
+        assert_eq!(completed.file_path, second.file_path);
         assert_eq!(completed.progress, Some(100));
         assert!(Path::new(completed.file_path.as_deref().unwrap()).is_file());
+        assert_eq!(
+            get_asset(&database, &storage, id).unwrap().unwrap().status,
+            MediaStatus::Completed
+        );
         server.join().unwrap();
         drop(database);
         let _ = std::fs::remove_dir_all(root);
