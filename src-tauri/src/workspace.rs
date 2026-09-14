@@ -201,6 +201,7 @@ fn visible_entry(entry: &DirEntry) -> bool {
                 | ".venv"
                 | ".cache"
                 | "coverage"
+                | ".levelup-attachments"
         )
     )
 }
@@ -222,8 +223,10 @@ mod tests {
     async fn snapshots_plain_folder_without_git() {
         let root = temp_workspace("plain");
         std::fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        std::fs::create_dir_all(root.join(".levelup-attachments")).unwrap();
         std::fs::write(root.join("notes.txt"), "before\n").unwrap();
         std::fs::write(root.join("node_modules/pkg/ignored.txt"), "ignored\n").unwrap();
+        std::fs::write(root.join(".levelup-attachments/model.fbx"), b"cached model").unwrap();
         let root_text = root.to_string_lossy().into_owned();
 
         let before = snapshot(&root_text).await.unwrap();
@@ -233,7 +236,8 @@ mod tests {
             !before
                 .files
                 .iter()
-                .any(|file| file.path.contains("node_modules"))
+                .any(|file| file.path.contains("node_modules")
+                    || file.path.contains(".levelup-attachments"))
         );
 
         std::fs::write(root.join("notes.txt"), "after\n").unwrap();

@@ -4465,6 +4465,41 @@ mod tests {
     }
 
     #[test]
+    fn binary_fbx_attachments_send_only_untrusted_workspace_references_in_all_protocols() {
+        let mut request = test_request(
+            "https://levelup.example".to_owned(),
+            ProviderProtocol::OpenaiResponses,
+        );
+        let reference = ".levelup-attachments/0123456789abcdef0123456789abcdef.fbx";
+        request.messages[0].attachments.push(ImageAttachment {
+            id: "0123456789abcdef0123456789abcdef".to_owned(),
+            name: "asset<test>.fbx".to_owned(),
+            mime_type: "application/vnd.autodesk.fbx".to_owned(),
+            size_bytes: 64 * 1024 * 1024,
+            kind: AttachmentKind::File,
+            data_base64: None,
+            text_content: Some(format!(
+                "[Context metadata: status=binary_file_reference]\n{reference}"
+            )),
+        });
+        for (body, pointer) in [
+            (responses_body(&request, false), "/input/0/content"),
+            (chat_body(&request, false), "/messages/1/content"),
+            (anthropic_body(&request, false), "/messages/0/content"),
+            (gemini_body(&request), "/contents/0/parts"),
+        ] {
+            let parts = body.pointer(pointer).unwrap().as_array().unwrap();
+            assert_eq!(parts.len(), 2);
+            let context = parts[1]["text"].as_str().unwrap();
+            assert!(context.contains(reference));
+            assert!(context.contains("managed_context_file"));
+            assert!(context.contains("asset&lt;test&gt;.fbx"));
+            assert!(context.contains("binary_file_reference"));
+        }
+        assert!(system_prompt(&request).contains("untrusted data"));
+    }
+
+    #[test]
     fn auditing_goal_requires_evidence_in_the_system_prompt() {
         let mut request = test_request(
             "https://levelup.example".to_owned(),

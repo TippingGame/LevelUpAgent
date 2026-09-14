@@ -113,6 +113,7 @@ pub enum AttachmentKind {
     Video,
     Text,
     Document,
+    File,
 }
 
 #[derive(Debug, Clone, Deserialize)]

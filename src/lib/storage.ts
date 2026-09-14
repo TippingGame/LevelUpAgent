@@ -140,7 +140,7 @@ function normalizeAttachment(value: unknown): ImageAttachment | null {
     || typeof value.id !== "string"
     || typeof value.name !== "string"
     || typeof value.mimeType !== "string") return null;
-  const kind = value.kind === "video" || value.kind === "text" || value.kind === "document"
+  const kind = value.kind === "video" || value.kind === "text" || value.kind === "document" || value.kind === "file"
     ? value.kind
     : "image";
   return {

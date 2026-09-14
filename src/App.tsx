@@ -8961,6 +8961,48 @@ function ConnectionDialog({
             </small>
             <small>{tr("同一连接的模型发现会同时检查标准 /v1/models 与 Gemini /v1beta/models，不由下方生成协议限制。", "Model discovery checks both standard /v1/models and Gemini /v1beta/models for this connection; it is independent of the generation protocol below.")}</small>
           </label>
+          <label className="field wide">
+            <span>API Key <small>{localKeyConfigured
+              ? tr("已存入系统凭据库", "Stored in OS credential vault")
+              : draftProfile.allowUnauthenticated ? tr("可留空", "Optional") : tr("未保存", "Not saved")}</small></span>
+            <input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={localKeyConfigured ? "••••••••••••••••" : draftProfile.allowUnauthenticated ? tr("本地服务可留空", "Optional for local services") : "sk-…"} autoComplete="off" />
+          </label>
+          <label className="failover-toggle wide">
+            <input type="checkbox" checked={draftProfile.allowUnauthenticated} onChange={(event) => update("allowUnauthenticated", event.target.checked)} />
+            <span><strong>{tr("允许无 API Key", "Allow connection without an API key")}</strong><small>{tr("仅用于你信任的本机或局域网服务；如果已保存密钥，仍会优先发送密钥。", "Use only with a trusted local or LAN service. A saved key is still sent when present.")}</small></span>
+          </label>
+          <div className="field">
+            <span>{tr("默认文字模型", "Default text model")}</span>
+            <ModelIdInput
+              key={draftProfile.id}
+              id={draftProfile.id}
+              value={draftProfile.model}
+              models={textModels}
+              protocol={draftProfile.protocol}
+              onChange={selectDetectedModel}
+            />
+            <small>{!hasTextModel
+              ? tr(
+                "无可用文字模型。可保存为媒体连接，在创作空间检测和选择图片、视频模型。",
+                "No text model configured. Save this media connection to discover and select image and video models in Creative Studio.",
+              )
+              : textModels.length > 0
+              ? tr(
+                `已发现 ${textModels.length} 个文字模型，共 ${models.length} 个模型；图片和视频模型在创作空间选择`,
+                `${textModels.length} text models found (${models.length} total); choose image and video models in Creative Studio`,
+              )
+              : modelsDetected
+                ? tr("当前目录未返回文字模型，可手动填写；纯媒体连接可留空", "The catalog returned no text models; enter one manually or leave blank for media only")
+                : tr("尚未检测到模型；纯媒体连接可留空", "No models discovered yet; leave blank for a media-only connection")}
+            </small>
+          </div>
+          <div className="field connection-test">
+            <span>{tr("连接检查", "Connection check")}</span>
+            <button className="secondary-button" onClick={testModels} disabled={busy} title={tr("独立检测当前连接的标准与 Gemini 模型目录", "Discover standard and Gemini model catalogs independently from the generation protocol")}>
+              <RefreshCw size={14} className={busy ? "spin" : ""} />
+              {tr("检测模型", "Check models")}
+            </button>
+          </div>
           <div className="field wide">
             <span>
               {tr("协议", "Protocol")}
@@ -9006,48 +9048,6 @@ function ConnectionDialog({
               "MiniMax 支持前三种协议，M3 可关闭或启用自适应思考，M2.x 沿用默认思考。Composite 按模型路由；Gemini 原生协议需分组配置对应路由。GPT-6 Astra 工具调用请选择 Responses。",
               "MiniMax supports the first three protocols: M3 offers off/adaptive thinking, while M2.x keeps its default. Composite routes by model; native Gemini needs a matching group route. Use Responses for GPT-6 Astra tool calls."
             )}</small>
-          </div>
-          <label className="field wide">
-            <span>API Key <small>{localKeyConfigured
-              ? tr("已存入系统凭据库", "Stored in OS credential vault")
-              : draftProfile.allowUnauthenticated ? tr("可留空", "Optional") : tr("未保存", "Not saved")}</small></span>
-            <input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={localKeyConfigured ? "••••••••••••••••" : draftProfile.allowUnauthenticated ? tr("本地服务可留空", "Optional for local services") : "sk-…"} autoComplete="off" />
-          </label>
-          <label className="failover-toggle wide">
-            <input type="checkbox" checked={draftProfile.allowUnauthenticated} onChange={(event) => update("allowUnauthenticated", event.target.checked)} />
-            <span><strong>{tr("允许无 API Key", "Allow connection without an API key")}</strong><small>{tr("仅用于你信任的本机或局域网服务；如果已保存密钥，仍会优先发送密钥。", "Use only with a trusted local or LAN service. A saved key is still sent when present.")}</small></span>
-          </label>
-          <div className="field">
-            <span>{tr("默认文字模型", "Default text model")}</span>
-            <ModelIdInput
-              key={draftProfile.id}
-              id={draftProfile.id}
-              value={draftProfile.model}
-              models={textModels}
-              protocol={draftProfile.protocol}
-              onChange={selectDetectedModel}
-            />
-            <small>{!hasTextModel
-              ? tr(
-                "无可用文字模型。可保存为媒体连接，在创作空间检测和选择图片、视频模型。",
-                "No text model configured. Save this media connection to discover and select image and video models in Creative Studio.",
-              )
-              : textModels.length > 0
-              ? tr(
-                `已发现 ${textModels.length} 个文字模型，共 ${models.length} 个模型；图片和视频模型在创作空间选择`,
-                `${textModels.length} text models found (${models.length} total); choose image and video models in Creative Studio`,
-              )
-              : modelsDetected
-                ? tr("当前目录未返回文字模型，可手动填写；纯媒体连接可留空", "The catalog returned no text models; enter one manually or leave blank for media only")
-                : tr("尚未检测到模型；纯媒体连接可留空", "No models discovered yet; leave blank for a media-only connection")}
-            </small>
-          </div>
-          <div className="field connection-test">
-            <span>{tr("连接检查", "Connection check")}</span>
-            <button className="secondary-button" onClick={testModels} disabled={busy} title={tr("独立检测当前连接的标准与 Gemini 模型目录", "Discover standard and Gemini model catalogs independently from the generation protocol")}>
-              <RefreshCw size={14} className={busy ? "spin" : ""} />
-              {tr("检测模型", "Check models")}
-            </button>
           </div>
           <label className="failover-toggle wide">
             <input type="checkbox" checked={hasTextModel && draftProfile.failoverEnabled} disabled={!hasTextModel} onChange={(event) => update("failoverEnabled", event.target.checked)} />

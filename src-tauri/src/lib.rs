@@ -3630,7 +3630,11 @@ fn open_pet_workspace(
 }
 
 fn attach_images(app: &tauri::AppHandle, request: &mut AgentTurnRequest) -> Result<(), String> {
-    attachment::resolve(&attachment_storage(app)?, &mut request.messages)
+    attachment::resolve_with_workspace(
+        &attachment_storage(app)?,
+        &mut request.messages,
+        request.workspace.as_deref().map(Path::new),
+    )
 }
 
 fn profile_supports_text(profile: &ProviderProfile) -> bool {
