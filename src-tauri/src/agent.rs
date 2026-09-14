@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use eventsource_stream::Eventsource;
-use futures_util::{Stream, StreamExt, future::join_all};
+use futures_util::{Stream, StreamExt};
 use reqwest::{Client, RequestBuilder, Response};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -342,27 +342,24 @@ pub async fn fetch_models(
     profile: ProviderProfile,
     api_key: &str,
 ) -> Result<Vec<ModelInfo>, String> {
-    // Model discovery is a control-plane operation, not a generation
-    // protocol operation. A gateway may expose OpenAI and native Gemini model
-    // catalogs at the same Base URL, so probe both well-known endpoints and
-    // merge the results instead of deriving the list path from `protocol`.
-    let mut urls = Vec::new();
-    for version in ["v1", "v1beta"] {
-        let url = model_catalog_endpoint(&profile.base_url, version)?;
-        if !urls.iter().any(|candidate| candidate == &url) {
-            urls.push(url);
+    // Model discovery starts with the standard catalog. Native Gemini is an
+    // optional capability; probing it for every provider sends invalid
+    // requests to gateways whose key group is OpenAI, MiniMax, etc.
+    let standard_url = model_catalog_endpoint(&profile.base_url, "v1")?;
+    let configured_protocol = profile.protocol.clone();
+    let standard_response =
+        fetch_models_at(client, standard_url.clone(), api_key, &configured_protocol).await;
+    let probe_gemini =
+        should_probe_native_gemini(&profile, standard_response.as_ref().ok().map(Vec::as_slice));
+    let mut responses = vec![(standard_url, standard_response)];
+    if probe_gemini {
+        let gemini_url = model_catalog_endpoint(&profile.base_url, "v1beta")?;
+        if !responses.iter().any(|(url, _)| url == &gemini_url) {
+            let result =
+                fetch_models_at(client, gemini_url.clone(), api_key, &configured_protocol).await;
+            responses.push((gemini_url, result));
         }
     }
-
-    let configured_protocol = profile.protocol.clone();
-    let requests = urls.into_iter().map(|url| {
-        let configured_protocol = configured_protocol.clone();
-        async move {
-            let result = fetch_models_at(client, url.clone(), api_key, &configured_protocol).await;
-            (url, result)
-        }
-    });
-    let responses = join_all(requests).await;
     let mut successful_endpoints = 0_usize;
     let mut failures = Vec::new();
     let mut merged = BTreeMap::<String, ModelInfo>::new();
@@ -403,6 +400,51 @@ pub async fn fetch_models(
     }
     models.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(models)
+}
+
+fn should_probe_native_gemini(
+    profile: &ProviderProfile,
+    standard_models: Option<&[ModelInfo]>,
+) -> bool {
+    if matches!(profile.protocol, ProviderProtocol::GeminiGenerateContent) {
+        return true;
+    }
+    if model_id_looks_gemini(&profile.model) {
+        return true;
+    }
+    if Url::parse(&profile.base_url).ok().is_some_and(|url| {
+        is_native_gemini_model_url(&url)
+            || url
+                .host_str()
+                .is_some_and(|host| host.ends_with(".googleapis.com"))
+    }) {
+        return true;
+    }
+    if let Some(models) = standard_models {
+        return models.iter().any(model_info_looks_gemini);
+    }
+
+    false
+}
+
+fn model_info_looks_gemini(model: &ModelInfo) -> bool {
+    model
+        .protocols
+        .iter()
+        .any(|protocol| matches!(protocol, ProviderProtocol::GeminiGenerateContent))
+        || model_id_looks_gemini(&model.id)
+        || model.owned_by.as_deref().is_some_and(|owner| {
+            let owner = owner.trim();
+            owner.eq_ignore_ascii_case("gemini") || owner.eq_ignore_ascii_case("google")
+        })
+}
+
+fn model_id_looks_gemini(model: &str) -> bool {
+    let model = model
+        .trim()
+        .trim_start_matches("models/")
+        .to_ascii_lowercase();
+    model.starts_with("gemini") || model.starts_with("imagen") || model.starts_with("veo")
 }
 
 async fn fetch_models_at(
@@ -4830,6 +4872,86 @@ mod tests {
             .to_ascii_lowercase();
         assert!(gemini.contains("authorization: bearer discovery-key"));
         assert!(gemini.contains("x-goog-api-key: discovery-key"));
+    }
+
+    #[tokio::test]
+    async fn model_discovery_does_not_probe_gemini_for_standard_provider_catalog() {
+        for (owner, model) in [
+            ("openai", "gpt-5.5"),
+            ("minimax", "MiniMax-H3"),
+            ("seedance", "Seedance-2.5"),
+            ("anthropic", "claude-opus-4-6"),
+            ("deepseek", "deepseek-v4-pro"),
+            ("custom", "private-model"),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let (stop, stopped) = mpsc::channel();
+            let server = thread::spawn(move || {
+                let mut captured = Vec::new();
+                while matches!(stopped.try_recv(), Err(mpsc::TryRecvError::Empty)) {
+                    let (mut stream, _) = match listener.accept() {
+                        Ok(connection) => connection,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(std::time::Duration::from_millis(5));
+                            continue;
+                        }
+                        Err(error) => panic!("catalog accept failed: {error}"),
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    stream
+                        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                        .unwrap();
+                    let mut request = Vec::new();
+                    let mut buffer = [0_u8; 4096];
+                    while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                        let size = stream.read(&mut buffer).unwrap();
+                        assert!(size > 0);
+                        request.extend_from_slice(&buffer[..size]);
+                    }
+                    let request = String::from_utf8(request).unwrap();
+                    let (status, body) = if request.starts_with("GET /v1/models ") {
+                        (
+                            200,
+                            json!({"data": [{"id": model, "owned_by": owner}]}).to_string(),
+                        )
+                    } else {
+                        (
+                            400,
+                            r#"{"error":{"message":"API key group platform is not gemini"}}"#
+                                .to_owned(),
+                        )
+                    };
+                    captured.push(request);
+                    let response = format!(
+                        "HTTP/1.1 {status} Response\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    stream.write_all(response.as_bytes()).unwrap();
+                }
+                captured
+            });
+
+            let mut profile = test_request(
+                format!("http://{address}/v1"),
+                ProviderProtocol::OpenaiResponses,
+            )
+            .profile;
+            profile.model = model.to_owned();
+            let result = fetch_models(&Client::new(), profile, "discovery-key").await;
+            stop.send(()).unwrap();
+            let requests = server.join().unwrap();
+            let models = result.unwrap();
+            assert_eq!(models.len(), 1);
+            assert_eq!(models[0].id, model);
+            assert_eq!(
+                requests.len(),
+                1,
+                "unexpected extra catalog request for {owner}"
+            );
+            assert!(requests[0].starts_with("GET /v1/models "));
+        }
     }
 
     fn mock_server(expected_path: &'static str, response_body: &'static str) -> String {

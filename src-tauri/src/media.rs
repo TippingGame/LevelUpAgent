@@ -4522,26 +4522,25 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
-            for _ in 0..2 {
-                let (mut socket, _) = listener.accept().unwrap();
-                socket
-                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-                    .unwrap();
-                let mut request = Vec::new();
-                while !request.windows(4).any(|part| part == b"\r\n\r\n") {
-                    let mut bytes = [0u8; 4096];
-                    let read = socket.read(&mut bytes).unwrap();
-                    assert!(read > 0);
-                    request.extend_from_slice(&bytes[..read]);
-                }
-                let body = r#"{"data":[{"id":"image-01-live"}]}"#;
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                socket.write_all(response.as_bytes()).unwrap();
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                let mut bytes = [0u8; 4096];
+                let read = socket.read(&mut bytes).unwrap();
+                assert!(read > 0);
+                request.extend_from_slice(&bytes[..read]);
             }
+            assert!(String::from_utf8_lossy(&request).starts_with("GET /v1/models "));
+            let body = r#"{"data":[{"id":"image-01-live"}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).unwrap();
         });
         let mut provider = provider("minimax", "image-01");
         provider.profile.base_url = format!("http://{address}/v1");
