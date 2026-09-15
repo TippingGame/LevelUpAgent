@@ -12,7 +12,7 @@
     <a href="https://levelup.mom/">LevelUpAPI</a>
   </p>
   <p>
-    <img alt="Version" src="https://img.shields.io/badge/version-1.0.55-ff5a4f?style=flat-square" />
+    <img alt="Version" src="https://img.shields.io/badge/version-1.0.56-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-preview-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -155,7 +155,7 @@ Use `pnpm build:macos` for macOS packages. The script signs after all resources 
 
 ## Current status
 
-`1.0.55` is the current release milestone. Video tasks poll independently and deduplicate downloads. Model discovery reads the standard catalog first and probes the native Gemini catalog only when the configuration or returned models indicate Gemini support, avoiding invalid requests for other platforms' key groups. Model connections show all models returned by the service and provide an Open log directory button in the footer. Local paths in messages use the same import flow as selected or dropped attachments, including arbitrary extensions, extensionless files, and empty files. Common images, text, and PDF/Office content are read directly; other formats preserve original files for local tools. Full access allows file, command, and browser paths outside the workspace, while restricted modes retain scope checks. Completed background processes retain bounded output and status history, and stale process IDs no longer abort the entire task. Upstream stream read errors receive reconnect handling and clearer messages. Windows installers are still not Authenticode-signed, and macOS packages are still not notarized. When filing an issue, include reproduction steps, application logs, and platform details.
+`1.0.56` is the current release milestone. Video tasks poll independently and deduplicate downloads, preserve generated video outputs, report download progress, and support download recovery. Model discovery reads the standard catalog first and probes the native Gemini catalog only when the configuration or returned models indicate Gemini support, avoiding invalid requests for other platforms' key groups. Model connections show all models returned by the service and provide an Open log directory button in the footer. Local paths in messages use the same import flow as selected or dropped attachments, including arbitrary extensions, extensionless files, and empty files. Common images, text, and PDF/Office content are read directly; other formats preserve original files for local tools. Full access allows file, command, and browser paths outside the workspace, while restricted modes retain scope checks. Completed background processes retain bounded output and status history, and stale process IDs no longer abort the entire task. Upstream stream read errors receive reconnect handling and clearer messages. Windows installers are still not Authenticode-signed, and macOS packages are still not notarized. When filing an issue, include reproduction steps, application logs, and platform details.
 
 ## License
 

@@ -1934,7 +1934,7 @@ fn checked_video_status(task: &Value, submission: bool) -> Result<MediaStatus, S
         .unwrap_or_default()
         .trim()
         .to_ascii_lowercase();
-    if !matches!(
+    if !(matches!(
         raw.as_str(),
         "queued"
             | "pending"
@@ -1953,7 +1953,7 @@ fn checked_video_status(task: &Value, submission: bool) -> Result<MediaStatus, S
             | "cancelled"
             | "canceled"
             | "expired"
-    ) && !(submission && raw.is_empty())
+    ) || submission && raw.is_empty())
     {
         return Err(format!(
             "Video provider returned a missing or unknown task status: {raw}"

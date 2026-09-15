@@ -12,7 +12,7 @@
     <a href="https://levelup.mom/">LevelUpAPI</a>
   </p>
   <p>
-    <img alt="Version" src="https://img.shields.io/badge/version-1.0.55-ff5a4f?style=flat-square" />
+    <img alt="Version" src="https://img.shields.io/badge/version-1.0.56-ff5a4f?style=flat-square" />
     <img alt="Status" src="https://img.shields.io/badge/status-可用预览-35a36f?style=flat-square" />
     <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
@@ -157,7 +157,7 @@ Developer ID 证书时使用 ad-hoc 签名，面向普通用户免确认分发�
 
 ## 当前状态
 
-`1.0.55` 是当前发布里程碑。视频任务独立轮询，并对下载去重。模型发现优先读取标准目录，仅在配置或返回模型表明支持 Gemini 时探测原生 Gemini 目录，避免向其他平台密钥组发送无效请求。模型连接显示服务返回的全部模型，并在底部提供“打开日志目录”。消息中的本地文件路径与选择、拖入附件共用导入流程，支持任意扩展名、无扩展名和空文件；常见图片、文本及 PDF/Office 自动读取，其他格式保留原文件供本地工具处理。完全访问模式允许文件、命令和浏览器访问工作区外路径，受限模式仍保留范围校验。后台进程结束后保留有界的输出与状态记录，失效进程 ID 不再中断整个任务；上游流读取错误增加重连识别和清晰提示。Windows 安装包仍未配置 Authenticode，macOS 安装包仍未公证。提交 Issue 时请附上复现步骤、应用日志和平台信息。
+`1.0.56` 是当前发布里程碑。视频任务独立轮询，并对下载去重；保留已生成的视频输出，显示下载进度，并支持恢复下载。模型发现优先读取标准目录，仅在配置或返回模型表明支持 Gemini 时探测原生 Gemini 目录，避免向其他平台密钥组发送无效请求。模型连接显示服务返回的全部模型，并在底部提供“打开日志目录”。消息中的本地文件路径与选择、拖入附件共用导入流程，支持任意扩展名、无扩展名和空文件；常见图片、文本及 PDF/Office 自动读取，其他格式保留原文件供本地工具处理。完全访问模式允许文件、命令和浏览器访问工作区外路径，受限模式仍保留范围校验。后台进程结束后保留有界的输出与状态记录，失效进程 ID 不再中断整个任务；上游流读取错误增加重连识别和清晰提示。Windows 安装包仍未配置 Authenticode，macOS 安装包仍未公证。提交 Issue 时请附上复现步骤、应用日志和平台信息。
 
 ## 许可证
 
