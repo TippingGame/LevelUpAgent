@@ -718,7 +718,9 @@ export interface MediaAsset {
   remoteId?: string;
   revisedPrompt?: string;
   error?: string;
-  progress?: number;
+  progress?: number | null;
+  gatewayStatus?: string;
+  downloadProgress?: { receivedBytes: number; totalBytes?: number | null };
   size?: string;
   quality?: string;
   background?: string;

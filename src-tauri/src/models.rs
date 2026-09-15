@@ -718,7 +718,15 @@ pub struct MediaAsset {
     pub remote_id: Option<String>,
     pub revised_prompt: Option<String>,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_progress: Option<MediaDownloadProgress>,
+    // Persist privately so retrieval retries and app restarts retain completion.
+    #[serde(skip)]
+    pub video_output: Option<MediaVideoOutput>,
     pub size: Option<String>,
     pub quality: Option<String>,
     pub background: Option<String>,
@@ -729,6 +737,20 @@ pub struct MediaAsset {
     pub seconds: Option<u32>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaDownloadProgress {
+    pub received_bytes: u64,
+    pub total_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub enum MediaVideoOutput {
+    Compatible { url: Option<String> },
+    MiniMax { url: String },
+    Gemini { url: String },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]

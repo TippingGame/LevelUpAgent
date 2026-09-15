@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, Weak};
 use reqwest::Client;
 use tokio::sync::Mutex as AsyncMutex;
 
-use super::{MediaProvider, get_asset, refresh_asset};
+use super::{MediaProvider, get_asset, refresh_asset_with_updates};
 use crate::database::Database;
 use crate::models::MediaAsset;
 
@@ -22,6 +22,7 @@ impl MediaRefreshes {
         database: &Database,
         provider: &MediaProvider,
         asset_id: &str,
+        on_update: &(dyn Fn(&MediaAsset) + Send + Sync),
     ) -> Result<MediaAsset, String> {
         let lock = {
             let mut locks = self.locks.lock().map_err(|error| error.to_string())?;
@@ -40,6 +41,6 @@ impl MediaRefreshes {
         let _guard = lock.lock().await;
         let asset = get_asset(database, storage, asset_id)?
             .ok_or_else(|| "Media asset was not found".to_owned())?;
-        refresh_asset(client, storage, database, provider, asset).await
+        refresh_asset_with_updates(client, storage, database, provider, asset, on_update).await
     }
 }

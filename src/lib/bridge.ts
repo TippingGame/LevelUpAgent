@@ -1,3 +1,4 @@
+import { listen } from "@tauri-apps/api/event";
 import { Channel, convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import type { LocalAttachmentPath } from "./localAttachments";
@@ -1387,4 +1388,12 @@ export async function applyGitRollback(
   confirmationToken: string,
 ): Promise<GitRollbackResult> {
   return invoke<GitRollbackResult>("apply_git_rollback", { confirmationToken });
+}
+
+export function onMediaAssetUpdate(callback: (asset: MediaAsset) => void): () => void {
+  let stopped = false;
+  const subscription = listen<MediaAsset>("media-asset-updated", ({ payload }) => {
+    if (!stopped) callback(payload);
+  });
+  return () => { stopped = true; void subscription.then(unlisten => unlisten()); };
 }

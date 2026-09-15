@@ -14,13 +14,15 @@ use crate::attachment::ManagedReference;
 use crate::database::Database;
 use crate::models::{
     AttachmentKind, MediaAsset, MediaAssetPage, MediaBatchResult, MediaCatalog,
-    MediaGenerationRequest, MediaKind, MediaModelInfo, MediaStatus, ModelInfo, ProviderProfile,
-    ProviderProtocol, VideoGenerationMode,
+    MediaDownloadProgress, MediaGenerationRequest, MediaKind, MediaModelInfo, MediaStatus,
+    MediaVideoOutput, ModelInfo, ProviderProfile, ProviderProtocol, VideoGenerationMode,
 };
 
 mod native_media;
 use native_media::*;
 mod refresh;
+#[cfg(test)]
+mod video_recovery_tests;
 pub(crate) use refresh::MediaRefreshes;
 
 const MAX_PROMPT_CHARS: usize = 32_000;
@@ -79,6 +81,8 @@ struct RemoteVideoJob {
     id: String,
     status: MediaStatus,
     progress: Option<u32>,
+    output: Option<MediaVideoOutput>,
+    gateway_status: Option<String>,
 }
 
 pub async fn discover_catalog(
@@ -387,12 +391,24 @@ pub async fn export_asset(
     Ok(destination.to_path_buf())
 }
 
+#[cfg(test)]
 pub async fn refresh_asset(
     client: &Client,
     storage: &Path,
     database: &Database,
     provider: &MediaProvider,
+    asset: MediaAsset,
+) -> Result<MediaAsset, String> {
+    refresh_asset_with_updates(client, storage, database, provider, asset, &|_| {}).await
+}
+
+async fn refresh_asset_with_updates(
+    client: &Client,
+    storage: &Path,
+    database: &Database,
+    provider: &MediaProvider,
     mut asset: MediaAsset,
+    on_update: &(dyn Fn(&MediaAsset) + Send + Sync),
 ) -> Result<MediaAsset, String> {
     if asset.kind != MediaKind::Video
         || matches!(asset.status, MediaStatus::Completed | MediaStatus::Failed)
@@ -403,7 +419,9 @@ pub async fn refresh_asset(
         .remote_id
         .clone()
         .ok_or_else(|| "Video job has no provider job ID".to_owned())?;
-    let result = if (matches!(
+    let result = if let Some(output) = asset.video_output.clone() {
+        Ok(VideoPoll::Ready(output))
+    } else if (matches!(
         provider.profile.protocol,
         ProviderProtocol::GeminiGenerateContent
     ) || asset
@@ -426,11 +444,51 @@ pub async fn refresh_asset(
             .await
         }
     };
+    let result = match result {
+        Ok(VideoPoll::Ready(output)) => {
+            // Commit upstream completion before transferring bytes. A failed
+            // download retries this output, even after an application restart.
+            asset.video_output = Some(output.clone());
+            asset.status = MediaStatus::InProgress;
+            asset.gateway_status = None;
+            asset.progress = Some(100);
+            asset.download_progress = Some(MediaDownloadProgress {
+                received_bytes: 0,
+                total_bytes: None,
+            });
+            asset.error = None;
+            asset.updated_at = now_millis();
+            database.save_media_asset(&asset)?;
+            on_update(&asset);
+            let progress_asset = asset.clone();
+            download_video_output(
+                client,
+                provider,
+                &asset.model,
+                &remote_id,
+                &output,
+                &|progress| {
+                    let mut update = progress_asset.clone();
+                    update.download_progress = Some(progress);
+                    on_update(&update);
+                },
+            )
+            .await
+        }
+        other => other,
+    };
     let now = now_millis();
     match result {
-        Ok(VideoPoll::Pending { status, progress }) => {
+        Ok(VideoPoll::Pending {
+            status,
+            progress,
+            gateway_status,
+            error,
+        }) => {
             asset.status = status;
             asset.progress = progress;
+            asset.gateway_status = gateway_status;
+            asset.error = error;
             asset.updated_at = now;
         }
         Ok(VideoPoll::Completed { bytes, mime_type }) => {
@@ -438,6 +496,9 @@ pub async fn refresh_asset(
             let file_name = format!("{}.{}", asset.id, extension);
             let path = write_media_file(storage, &file_name, &bytes).await?;
             asset.status = MediaStatus::Completed;
+            asset.video_output = None;
+            asset.download_progress = None;
+            asset.gateway_status = None;
             asset.progress = Some(100);
             asset.mime_type = Some(mime_type);
             asset.file_name = Some(file_name);
@@ -450,9 +511,28 @@ pub async fn refresh_asset(
             asset.error = Some(error);
             asset.updated_at = now;
         }
-        Err(error) => return Err(error),
+        Ok(VideoPoll::Ready(_)) => unreachable!("output was already resolved"),
+        Err(error) => {
+            // Direct providers use expiring signed URLs. Refresh the URL after a
+            // transfer failure, without losing known completion or resubmitting.
+            let renewed = match asset.video_output.as_ref() {
+                Some(MediaVideoOutput::MiniMax { .. }) => {
+                    poll_minimax_video(client, provider, &remote_id).await.ok()
+                }
+                Some(MediaVideoOutput::Gemini { .. }) => {
+                    poll_gemini_video(client, provider, &remote_id).await.ok()
+                }
+                _ => None,
+            };
+            if let Some(VideoPoll::Ready(output)) = renewed {
+                asset.video_output = Some(output);
+                database.save_media_asset(&asset)?;
+            }
+            return Err(error);
+        }
     }
     database.save_media_asset(&asset)?;
+    on_update(&asset);
     enrich_asset(storage, asset)
 }
 
@@ -460,7 +540,10 @@ enum VideoPoll {
     Pending {
         status: MediaStatus,
         progress: Option<u32>,
+        gateway_status: Option<String>,
+        error: Option<String>,
     },
+    Ready(MediaVideoOutput),
     Completed {
         bytes: Vec<u8>,
         mime_type: String,
@@ -1616,7 +1699,19 @@ async fn generate_videos(
                     provider_id: selection.provider.profile.id.clone(),
                     provider_name: selection.provider.profile.name.clone(),
                     kind: MediaKind::Video,
-                    status: job.status,
+                    status: if job.output.is_some() {
+                        MediaStatus::InProgress
+                    } else {
+                        job.status.clone()
+                    },
+                    video_output: job.output,
+                    gateway_status: job.gateway_status,
+                    download_progress: (job.status == MediaStatus::Completed).then_some(
+                        MediaDownloadProgress {
+                            received_bytes: 0,
+                            total_bytes: None,
+                        },
+                    ),
                     prompt: request.prompt.trim().to_owned(),
                     model: selection.model.clone(),
                     mime_type: None,
@@ -1675,15 +1770,7 @@ async fn create_openai_video(
     }
     let value =
         send_json(bearer_auth_if_present(client.post(url), provider).multipart(form)).await?;
-    let id = find_string_by_keys(&value, &["id", "request_id", "requestId"])
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "The video provider returned no job ID".to_owned())?;
-    let status = parse_video_status(value.get("status").and_then(Value::as_str));
-    Ok(RemoteVideoJob {
-        id: id.to_owned(),
-        status,
-        progress: parse_progress(&value),
-    })
+    compatible_video_job(&value)
 }
 
 async fn create_grok_video(
@@ -1696,14 +1783,7 @@ async fn create_grok_video(
     let (path, body) = grok_video_request(model, request, references)?;
     let url = agent::endpoint(&provider.profile.base_url, path)?;
     let value = send_json(bearer_auth_if_present(client.post(url), provider).json(&body)).await?;
-    let id = find_string_by_keys(&value, &["id", "request_id", "requestId"])
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "The Grok video provider returned no request ID".to_owned())?;
-    Ok(RemoteVideoJob {
-        id: id.to_owned(),
-        status: parse_video_status(value.get("status").and_then(Value::as_str)),
-        progress: parse_progress(&value),
-    })
+    compatible_video_job(&value)
 }
 
 fn grok_video_request(
@@ -1812,8 +1892,95 @@ async fn create_gemini_video(
     Ok(RemoteVideoJob {
         id: name.to_owned(),
         status: MediaStatus::Queued,
-        progress: Some(0),
+        progress: None,
+        output: None,
+        gateway_status: None,
     })
+}
+
+fn compatible_video_job(value: &Value) -> Result<RemoteVideoJob, String> {
+    let task = video_task_payload(value);
+    let id = ["task_id", "id", "request_id", "requestId"]
+        .iter()
+        .find_map(|key| {
+            task.get(key)
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+        })
+        .ok_or_else(|| "The video provider returned no task ID".to_owned())?;
+    validate_remote_id(id)?;
+    let status = checked_video_status(task, true)?;
+    if status == MediaStatus::Failed {
+        return Err(provider_message(task).unwrap_or_else(|| "Video generation failed".to_owned()));
+    }
+    let output = (status == MediaStatus::Completed).then(|| compatible_video_output(task));
+    Ok(RemoteVideoJob {
+        id: id.to_owned(),
+        status,
+        progress: parse_progress(task),
+        output,
+        gateway_status: task
+            .get("gateway_status")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    })
+}
+
+fn checked_video_status(task: &Value, submission: bool) -> Result<MediaStatus, String> {
+    let raw = task
+        .get("status")
+        .or_else(|| task.get("state"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if !matches!(
+        raw.as_str(),
+        "queued"
+            | "pending"
+            | "submitted"
+            | "submitting"
+            | "in_progress"
+            | "processing"
+            | "running"
+            | "billing"
+            | "completed"
+            | "succeeded"
+            | "success"
+            | "done"
+            | "failed"
+            | "error"
+            | "cancelled"
+            | "canceled"
+            | "expired"
+    ) && !(submission && raw.is_empty())
+    {
+        return Err(format!(
+            "Video provider returned a missing or unknown task status: {raw}"
+        ));
+    }
+    Ok(parse_video_status(Some(&raw)))
+}
+
+fn compatible_video_output(task: &Value) -> MediaVideoOutput {
+    let url = [
+        "/content/url",
+        "/video/url",
+        "/url",
+        "/video_url",
+        "/download_url",
+    ]
+    .iter()
+    .find_map(|path| task.pointer(path).and_then(Value::as_str))
+    .map(str::to_owned);
+    MediaVideoOutput::Compatible { url }
+}
+
+fn video_status_request(request: RequestBuilder) -> RequestBuilder {
+    request
+        .timeout(VIDEO_STATUS_TIMEOUT)
+        .header("Cache-Control", "no-cache, no-store, max-age=0")
+        .header("Pragma", "no-cache")
 }
 
 async fn poll_openai_video(
@@ -1833,43 +2000,12 @@ async fn poll_openai_video(
         &format!("/v1/videos/{remote_id}"),
     )?;
     let value = send_json(bearer_auth_if_present(
-        client.get(url).timeout(VIDEO_STATUS_TIMEOUT),
+        video_status_request(client.get(url)),
         provider,
     ))
     .await?;
     let task = video_task_payload(&value);
-    let raw_status = task
-        .get("status")
-        .or_else(|| task.get("state"))
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-    if !matches!(
-        raw_status.as_str(),
-        "queued"
-            | "pending"
-            | "submitted"
-            | "submitting"
-            | "in_progress"
-            | "processing"
-            | "running"
-            | "billing"
-            | "completed"
-            | "succeeded"
-            | "success"
-            | "done"
-            | "failed"
-            | "error"
-            | "cancelled"
-            | "canceled"
-            | "expired"
-    ) {
-        return Err(format!(
-            "Video provider returned a missing or unknown task status: {raw_status}"
-        ));
-    }
-    let status = parse_video_status(Some(&raw_status));
+    let status = checked_video_status(task, false)?;
     if status == MediaStatus::Failed {
         return Ok(VideoPoll::Failed {
             error: provider_message(task)
@@ -1877,26 +2013,21 @@ async fn poll_openai_video(
         });
     }
     if status != MediaStatus::Completed {
-        if (task.get("error").is_some_and(|error| !error.is_null())
-            || task.get("error_message").is_some())
-            && let Some(message) = provider_message(task)
-        {
-            return Err(message);
-        }
         return Ok(VideoPoll::Pending {
             status,
             progress: parse_progress(task),
+            gateway_status: task
+                .get("gateway_status")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            error: task
+                .get("error")
+                .filter(|value| !value.is_null())
+                .or_else(|| task.get("error_message"))
+                .and_then(|_| provider_message(task)),
         });
     }
-    let url = endpoint(
-        &provider.profile.base_url,
-        &format!("/v1/videos/{remote_id}/content"),
-    )?;
-    let response = bearer_auth_if_present(client.get(url), provider)
-        .send()
-        .await
-        .map_err(|error| format!("Video download failed: {error}"))?;
-    download_video_response(response).await
+    Ok(VideoPoll::Ready(compatible_video_output(task)))
 }
 
 async fn poll_gemini_video(
@@ -1912,7 +2043,7 @@ async fn poll_gemini_video(
     };
     let url = agent::gemini_endpoint(&provider.profile.base_url, &operation_path)?;
     let value = send_json(gemini_auth_if_present(
-        client.get(url).timeout(VIDEO_STATUS_TIMEOUT),
+        video_status_request(client.get(url)),
         provider,
     ))
     .await?;
@@ -1920,6 +2051,8 @@ async fn poll_gemini_video(
         return Ok(VideoPoll::Pending {
             status: MediaStatus::InProgress,
             progress: parse_progress(&value),
+            gateway_status: None,
+            error: None,
         });
     }
     if let Some(error) = value.get("error") {
@@ -1933,14 +2066,100 @@ async fn poll_gemini_video(
         .ok_or_else(|| {
             "Gemini completed the video job without a downloadable video URI".to_owned()
         })?;
-    let response = gemini_auth_if_present(client.get(video_uri), provider)
-        .send()
-        .await
-        .map_err(|error| format!("Gemini video download failed: {error}"))?;
-    download_video_response(response).await
+    Ok(VideoPoll::Ready(MediaVideoOutput::Gemini {
+        url: video_uri.to_owned(),
+    }))
 }
 
-async fn download_video_response(response: Response) -> Result<VideoPoll, String> {
+async fn download_video_output(
+    client: &Client,
+    provider: &MediaProvider,
+    model: &str,
+    id: &str,
+    output: &MediaVideoOutput,
+    on_progress: &(dyn Fn(MediaDownloadProgress) + Send + Sync),
+) -> Result<VideoPoll, String> {
+    let content_path = format!("/v1/videos/{id}/content");
+    let download_request =
+        |request: RequestBuilder| request.timeout(std::time::Duration::from_secs(30 * 60));
+    let response = match output {
+        MediaVideoOutput::Compatible { url } => {
+            let endpoint = if is_minimax_video_model(model)
+                || is_seedance_video_model(model)
+                || id.starts_with("media_")
+            {
+                native_endpoint
+            } else {
+                agent::endpoint
+            };
+            // Prefer returned CDN bytes; a relay may spend minutes copying its
+            // content endpoint. Output URLs never receive API credentials.
+            if let Some(url) = url
+                .as_ref()
+                .filter(|url| url.starts_with("https://") || url.starts_with("http://"))
+            {
+                let parsed =
+                    reqwest::Url::parse(url).map_err(|_| "Invalid video output URL".to_owned())?;
+                if !parsed.username().is_empty() || parsed.password().is_some() {
+                    return Err("Video output URL contains credentials".to_owned());
+                }
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    download_request(client.get(parsed)).send(),
+                )
+                .await
+                {
+                    Ok(Ok(response)) if response.status().is_success() => {
+                        if let Ok(completed) = download_video_response(response, on_progress).await
+                        {
+                            return Ok(completed);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let url = endpoint(&provider.profile.base_url, &content_path)?;
+            download_request(bearer_auth_if_present(client.get(url), provider))
+        }
+        MediaVideoOutput::MiniMax { url } => {
+            if url == &content_path {
+                download_request(bearer_auth_if_present(
+                    client.get(native_endpoint(&provider.profile.base_url, url)?),
+                    provider,
+                ))
+            } else {
+                let parsed = reqwest::Url::parse(url)
+                    .map_err(|_| "Invalid MiniMax output URL".to_owned())?;
+                if !matches!(parsed.scheme(), "http" | "https")
+                    || !parsed.username().is_empty()
+                    || parsed.password().is_some()
+                {
+                    return Err("Invalid MiniMax output URL".to_owned());
+                }
+                download_request(client.get(parsed))
+            }
+        }
+        MediaVideoOutput::Gemini { url } => {
+            download_request(gemini_auth_if_present(client.get(url), provider))
+        }
+    };
+    on_progress(MediaDownloadProgress {
+        received_bytes: 0,
+        total_bytes: None,
+    });
+    let response = tokio::time::timeout(std::time::Duration::from_secs(30), response.send())
+        .await
+        .map_err(|_| {
+            "Video generated, but the download did not respond within 30 seconds".to_owned()
+        })?
+        .map_err(|error| format!("Video download failed: {error}"))?;
+    download_video_response(response, on_progress).await
+}
+
+async fn download_video_response(
+    response: Response,
+    on_progress: &(dyn Fn(MediaDownloadProgress) + Send + Sync),
+) -> Result<VideoPoll, String> {
     let status = response.status();
     let mime_type = response
         .headers()
@@ -1952,7 +2171,41 @@ async fn download_video_response(response: Response) -> Result<VideoPoll, String
     if !status.is_success() {
         return Err(response_error(response, MAX_JSON_BYTES).await);
     }
-    let bytes = read_limited_response(response, MAX_VIDEO_BYTES).await?;
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if content_type.contains("text/html") || content_type.contains("application/json") {
+        return Err("The video URL returned a document instead of video bytes".to_owned());
+    }
+    let total_bytes = response.content_length();
+    if total_bytes.is_some_and(|length| length > MAX_VIDEO_BYTES as u64) {
+        return Err("Video exceeds the 1024 MiB limit".to_owned());
+    }
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    let mut reported = std::time::Instant::now();
+    while let Some(chunk) = tokio::time::timeout(std::time::Duration::from_secs(30), stream.next())
+        .await
+        .map_err(|_| {
+            "Video generated, but the download stalled for 30 seconds; retry retrieval".to_owned()
+        })?
+    {
+        let chunk = chunk.map_err(|error| format!("Could not read video: {error}"))?;
+        if bytes.len().saturating_add(chunk.len()) > MAX_VIDEO_BYTES {
+            return Err("Video exceeds the 1024 MiB limit".to_owned());
+        }
+        let first = bytes.is_empty();
+        bytes.extend_from_slice(&chunk);
+        if first || reported.elapsed() >= std::time::Duration::from_millis(250) {
+            on_progress(MediaDownloadProgress {
+                received_bytes: bytes.len() as u64,
+                total_bytes,
+            });
+            reported = std::time::Instant::now();
+        }
+    }
     if bytes.is_empty() {
         return Err("The provider returned an empty video".to_owned());
     }
@@ -1987,6 +2240,9 @@ async fn save_completed_blob(
         file_name: Some(file_name),
         file_path: Some(path.to_string_lossy().into_owned()),
         remote_id: None,
+        video_output: None,
+        gateway_status: None,
+        download_progress: None,
         revised_prompt: blob.revised_prompt,
         error: None,
         progress: Some(100),
@@ -2032,6 +2288,9 @@ pub fn failed_asset(
         file_name: None,
         file_path: None,
         remote_id: None,
+        video_output: None,
+        gateway_status: None,
+        download_progress: None,
         revised_prompt: None,
         error: Some(error.to_owned()),
         progress: None,
@@ -2086,6 +2345,16 @@ async fn write_media_file(
 }
 
 fn enrich_asset(storage: &Path, mut asset: MediaAsset) -> Result<MediaAsset, String> {
+    if asset.status == MediaStatus::InProgress
+        && asset.video_output.is_some()
+        && asset.download_progress.is_none()
+    {
+        asset.download_progress = Some(MediaDownloadProgress {
+            received_bytes: 0,
+            total_bytes: None,
+        });
+    }
+
     asset.file_path = match asset.file_name.as_deref() {
         Some(file_name) => {
             let path = safe_media_path(storage, file_name)?;
@@ -2396,14 +2665,32 @@ fn parse_video_status(status: Option<&str>) -> MediaStatus {
 }
 
 fn video_task_payload(value: &Value) -> &Value {
-    for key in ["task", "data", "video"] {
-        if let Some(task) = value.get(key).filter(|item| item.is_object())
-            && task.get("status").or_else(|| task.get("state")).is_some()
-        {
-            return task;
+    fn unwrap(value: &Value, depth: usize, allow_id: bool) -> Option<&Value> {
+        if depth < 3 {
+            for key in ["task", "data", "video"] {
+                if let Some(child) = value.get(key).filter(|item| item.is_object())
+                    && let Some(task) = unwrap(child, depth + 1, key != "video")
+                {
+                    return Some(task);
+                }
+            }
         }
+        (value
+            .get("status")
+            .or_else(|| value.get("state"))
+            .is_some_and(Value::is_string)
+            || (allow_id
+                && ["task_id", "id", "request_id", "requestId"]
+                    .iter()
+                    .any(|key| {
+                        value
+                            .get(key)
+                            .and_then(Value::as_str)
+                            .is_some_and(|id| !id.trim().is_empty())
+                    })))
+        .then_some(value)
     }
-    value
+    unwrap(value, 0, true).unwrap_or(value)
 }
 
 fn parse_progress(value: &Value) -> Option<u32> {
@@ -2415,10 +2702,10 @@ fn parse_progress(value: &Value) -> Option<u32> {
     .into_iter()
     .flatten()
     .find_map(|item| {
-        item.as_u64()
-            .or_else(|| item.as_f64().map(|v| v.round() as u64))
+        item.as_f64()
+            .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
     })
-    .map(|value| value.min(100) as u32)
+    .map(|value| value.round() as u32)
 }
 
 fn find_string_by_keys<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
@@ -2681,7 +2968,7 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
 
-    fn provider(id: &str, model: &str) -> MediaProvider {
+    pub(super) fn provider(id: &str, model: &str) -> MediaProvider {
         MediaProvider {
             profile: ProviderProfile {
                 id: id.to_owned(),
@@ -2697,19 +2984,19 @@ mod tests {
         }
     }
 
-    struct MockResponse {
-        method: &'static str,
-        path: &'static str,
-        status: u16,
-        content_type: &'static str,
-        body: Vec<u8>,
+    pub(super) struct MockResponse {
+        pub(super) method: &'static str,
+        pub(super) path: &'static str,
+        pub(super) status: u16,
+        pub(super) content_type: &'static str,
+        pub(super) body: Vec<u8>,
     }
 
-    fn mock_sequence(responses: Vec<MockResponse>) -> (String, thread::JoinHandle<()>) {
+    pub(super) fn mock_sequence(responses: Vec<MockResponse>) -> (String, thread::JoinHandle<()>) {
         mock_sequence_inspecting(responses, |_, _| {})
     }
 
-    fn mock_sequence_inspecting<F>(
+    pub(super) fn mock_sequence_inspecting<F>(
         responses: Vec<MockResponse>,
         inspect: F,
     ) -> (String, thread::JoinHandle<()>)
@@ -2778,7 +3065,7 @@ mod tests {
         (format!("http://{address}"), handle)
     }
 
-    fn request(kind: MediaKind, count: u32) -> MediaGenerationRequest {
+    pub(super) fn request(kind: MediaKind, count: u32) -> MediaGenerationRequest {
         MediaGenerationRequest {
             profile_id: Some("primary".to_owned()),
             kind,
@@ -2802,7 +3089,7 @@ mod tests {
         }
     }
 
-    fn temp_storage(name: &str) -> (PathBuf, Database) {
+    pub(super) fn temp_storage(name: &str) -> (PathBuf, Database) {
         let root = std::env::temp_dir().join(format!(
             "levelup-media-{name}-{}",
             uuid::Uuid::new_v4().simple()
@@ -3865,8 +4152,8 @@ mod tests {
         let refreshes = MediaRefreshes::default();
         let id = &created.assets[0].id;
         let (first, second) = tokio::join!(
-            refreshes.refresh(&client, &storage, &database, &provider, id),
-            refreshes.refresh(&client, &storage, &database, &provider, id),
+            refreshes.refresh(&client, &storage, &database, &provider, id, &|_| {}),
+            refreshes.refresh(&client, &storage, &database, &provider, id, &|_| {}),
         );
         let completed = first.unwrap();
         let second = second.unwrap();
@@ -4135,6 +4422,19 @@ mod tests {
         let completed = poll_minimax_video(&Client::new(), &provider, "h3-task")
             .await
             .unwrap();
+        let VideoPoll::Ready(output) = completed else {
+            panic!("completion output missing")
+        };
+        let completed = download_video_output(
+            &Client::new(),
+            &provider,
+            "MiniMax-H3",
+            "h3-task",
+            &output,
+            &|_| {},
+        )
+        .await
+        .unwrap();
         assert!(matches!(completed, VideoPoll::Completed { .. }));
         server.join().unwrap();
         download_server.join().unwrap();
@@ -4260,7 +4560,9 @@ mod tests {
         let first = poll_openai_video(&client, &provider, "seed-task", true).await;
         assert!(first.err().unwrap().contains("missing or unknown"));
         let retry = poll_openai_video(&client, &provider, "seed-task", true).await;
-        assert!(retry.err().unwrap().contains("settlement will retry"));
+        assert!(
+            matches!(retry.unwrap(), VideoPoll::Pending { error: Some(error), .. } if error.contains("settlement will retry"))
+        );
         let failed = poll_openai_video(&client, &provider, "seed-task", true)
             .await
             .unwrap();
@@ -4466,6 +4768,19 @@ mod tests {
         let result = poll_minimax_video(&Client::new(), &provider, "mm-relay")
             .await
             .unwrap();
+        let VideoPoll::Ready(output) = result else {
+            panic!("completion output missing")
+        };
+        let result = download_video_output(
+            &Client::new(),
+            &provider,
+            "MiniMax-H3",
+            "mm-relay",
+            &output,
+            &|_| {},
+        )
+        .await
+        .unwrap();
         assert!(matches!(result, VideoPoll::Completed { .. }));
         server.join().unwrap();
     }

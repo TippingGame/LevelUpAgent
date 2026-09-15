@@ -315,24 +315,17 @@ pub(super) async fn create_native_video(
     )
     .await?;
     check_minimax_error(&value)?;
-    let id = find_string_by_keys(&value, &["task_id", "id", "request_id", "requestId"])
-        .filter(|id| !id.trim().is_empty())
-        .ok_or_else(|| "The video provider returned no task ID".to_owned())?;
-    // Even immediately completed tasks must be polled once to download output.
-    let task = video_task_payload(&value);
-    let status = parse_video_status(
-        task.get("status")
-            .or_else(|| task.get("state"))
-            .and_then(Value::as_str),
-    );
-    if status == MediaStatus::Failed {
-        return Err(provider_message(task).unwrap_or_else(|| "Video generation failed".to_owned()));
+    let mut job = compatible_video_job(&value)?;
+    if direct_minimax && job.status == MediaStatus::Completed {
+        let url = video_task_payload(&value)
+            .pointer("/content/url")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "MiniMax succeeded without a video URL".to_owned())?;
+        job.output = Some(MediaVideoOutput::MiniMax {
+            url: url.to_owned(),
+        });
     }
-    Ok(RemoteVideoJob {
-        id: id.to_owned(),
-        status: MediaStatus::Queued,
-        progress: parse_progress(task),
-    })
+    Ok(job)
 }
 
 pub(super) async fn poll_minimax_video(
@@ -346,7 +339,7 @@ pub(super) async fn poll_minimax_video(
         &format!("/v2/query/video_generation/{id}"),
     )?;
     let value = send_json(bearer_auth_if_present(
-        client.get(url).timeout(VIDEO_STATUS_TIMEOUT),
+        video_status_request(client.get(url)),
         provider,
     ))
     .await?;
@@ -366,6 +359,11 @@ pub(super) async fn poll_minimax_video(
                 MediaStatus::InProgress
             },
             progress: parse_progress(task),
+            gateway_status: task
+                .get("gateway_status")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            error: None,
         }),
         "failed" | "cancelled" => Ok(VideoPoll::Failed {
             error: provider_message(task).unwrap_or_else(|| format!("MiniMax video task {status}")),
@@ -375,30 +373,9 @@ pub(super) async fn poll_minimax_video(
                 .pointer("/content/url")
                 .and_then(Value::as_str)
                 .ok_or_else(|| "MiniMax succeeded without a video URL".to_owned())?;
-            // A gateway translating an OpenAI video relay may expose its own
-            // authenticated content route. Only this exact task-bound path
-            // receives the key; arbitrary output/CDN URLs never do.
-            if url == format!("/v1/videos/{id}/content") {
-                let endpoint = native_endpoint(&provider.profile.base_url, url)?;
-                let response = bearer_auth_if_present(client.get(endpoint), provider)
-                    .send()
-                    .await
-                    .map_err(|error| format!("Gateway video download failed: {error}"))?;
-                return download_video_response(response).await;
-            }
-            // Signed output URLs are independent of the API credential. Never
-            // attach the provider's Bearer key to the output CDN request.
-            let (bytes, mime) =
-                resolve_blob_source(client, None, Some(url.to_owned()), MAX_VIDEO_BYTES).await?;
-            if bytes.is_empty() {
-                return Err("MiniMax returned an empty video".to_owned());
-            }
-            Ok(VideoPoll::Completed {
-                bytes,
-                mime_type: mime
-                    .filter(|mime| mime.starts_with("video/"))
-                    .unwrap_or_else(|| "video/mp4".to_owned()),
-            })
+            Ok(VideoPoll::Ready(MediaVideoOutput::MiniMax {
+                url: url.to_owned(),
+            }))
         }
         _ => Err(format!("Unknown MiniMax video task status: {status}")),
     }

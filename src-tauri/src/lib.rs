@@ -5098,7 +5098,16 @@ async fn refresh_media_asset_internal(
     };
     state
         .media_refreshes
-        .refresh(&state.client, &storage, database, &provider, asset_id)
+        .refresh(
+            &state.client,
+            &storage,
+            database,
+            &provider,
+            asset_id,
+            &|asset| {
+                let _ = app.emit("media-asset-updated", asset);
+            },
+        )
         .await
 }
 

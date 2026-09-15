@@ -433,6 +433,11 @@ impl Database {
                 columns.collect::<Result<Vec<_>, _>>()
             })
             .map_err(database_error)?;
+        if !media_columns.iter().any(|column| column == "video_output") {
+            connection
+                .execute("ALTER TABLE media_assets ADD COLUMN video_output TEXT", [])
+                .map_err(database_error)?;
+        }
         if !media_columns.iter().any(|column| column == "background") {
             connection
                 .execute("ALTER TABLE media_assets ADD COLUMN background TEXT", [])
@@ -1008,10 +1013,10 @@ impl Database {
                  (id, batch_id, thread_id, provider_id, provider_name, kind, status, prompt,
                   model, mime_type, file_name, remote_id, revised_prompt, error, progress,
                   size, quality, output_format, voice, seconds, created_at, updated_at,
-                  background, generation_count)
+                  background, generation_count, video_output)
                  VALUES
                  (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                  ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
+                  ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)
                  ON CONFLICT(id) DO UPDATE SET
                    batch_id = excluded.batch_id,
                    thread_id = excluded.thread_id,
@@ -1034,6 +1039,7 @@ impl Database {
                    seconds = excluded.seconds,
                    background = excluded.background,
                    generation_count = excluded.generation_count,
+                   video_output = excluded.video_output,
                    updated_at = excluded.updated_at",
                 params![
                     asset.id,
@@ -1060,6 +1066,12 @@ impl Database {
                     asset.updated_at,
                     asset.background,
                     i64::from(asset.count),
+                    asset
+                        .video_output
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()
+                        .map_err(|error| error.to_string())?,
                 ],
             )
             .map_err(database_error)?;
@@ -1076,7 +1088,7 @@ impl Database {
                 "SELECT id, batch_id, thread_id, provider_id, provider_name, kind, status,
                         prompt, model, mime_type, file_name, remote_id, revised_prompt, error,
                         progress, size, quality, output_format, voice, seconds, created_at, updated_at,
-                        background, generation_count
+                        background, generation_count, video_output
                  FROM media_assets ORDER BY created_at DESC LIMIT ?1",
             )
             .map_err(database_error)?;
@@ -1102,7 +1114,7 @@ impl Database {
                 "SELECT id, batch_id, thread_id, provider_id, provider_name, kind, status,
                         prompt, model, mime_type, file_name, remote_id, revised_prompt, error,
                         progress, size, quality, output_format, voice, seconds, created_at, updated_at,
-                        background, generation_count
+                        background, generation_count, video_output
                  FROM media_assets
                  WHERE kind = ?1
                  ORDER BY created_at DESC, id DESC
@@ -1133,7 +1145,7 @@ impl Database {
                 "SELECT id, batch_id, thread_id, provider_id, provider_name, kind, status,
                         prompt, model, mime_type, file_name, remote_id, revised_prompt, error,
                         progress, size, quality, output_format, voice, seconds, created_at, updated_at,
-                        background, generation_count
+                        background, generation_count, video_output
                  FROM media_assets WHERE id = ?1",
                 [id],
                 media_asset_from_row,
@@ -3207,6 +3219,12 @@ fn media_asset_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MediaAsset>
         mime_type: row.get(9)?,
         file_name: row.get(10)?,
         file_path: None,
+        video_output: row
+            .get::<_, Option<String>>(24)?
+            .map(|value| serde_json::from_str(&value).map_err(json_column_error))
+            .transpose()?,
+        gateway_status: None,
+        download_progress: None,
         remote_id: row.get(11)?,
         revised_prompt: row.get(12)?,
         error: row.get(13)?,
@@ -4767,6 +4785,9 @@ mod tests {
             mime_type: None,
             file_name: None,
             file_path: None,
+            video_output: None,
+            gateway_status: None,
+            download_progress: None,
             remote_id: Some("video-1".to_owned()),
             revised_prompt: None,
             error: None,
@@ -4814,6 +4835,9 @@ mod tests {
             mime_type: None,
             file_name: None,
             file_path: None,
+            video_output: None,
+            gateway_status: None,
+            download_progress: None,
             remote_id: None,
             revised_prompt: None,
             error: None,

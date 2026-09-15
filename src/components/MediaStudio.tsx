@@ -50,6 +50,7 @@ import {
   mediaAssetUrl,
   previewAttachment,
   refreshMediaAsset,
+  onMediaAssetUpdate,
   selectImageReferences,
   selectVideoReference,
 } from "../lib/bridge";
@@ -388,6 +389,10 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
       setOutputFormat((current) => ["mp3", "wav", "aac", "flac", "opus"].includes(current) ? current : "mp3");
     }
   }, [kind]);
+
+  useEffect(() => onMediaAssetUpdate((asset) => {
+    setAssets((current) => mergeAssets(current, [asset]));
+  }), []);
 
   useEffect(() => {
     if (pendingVideoIds.length === 0) return;
@@ -1281,7 +1286,7 @@ export function MediaAssetCard({ asset, locale, onDelete, onPreview, onReuse, on
           if (videoWidth > 0 && videoHeight > 0) setVideoRatio(videoWidth / videoHeight);
         }} />}
         {asset.status === "completed" && url && asset.kind === "audio" && <div className="audio-preview"><AudioLines size={28} /><audio src={url} controls preload="metadata" /></div>}
-        {(asset.status === "queued" || asset.status === "in_progress") && <div className="pending-preview"><LoaderCircle className="spin" size={24} /><strong>{statusLabel(asset.status)}</strong><span>{pendingAssetDetail(asset)}</span></div>}
+        {(asset.status === "queued" || asset.status === "in_progress") && <div className="pending-preview"><LoaderCircle className="spin" size={24} /><strong>{asset.downloadProgress ? tr("已生成，正在下载", "Generated, downloading") : asset.gatewayStatus === "billing" ? tr("已生成，正在结算", "Generated, settling usage") : statusLabel(asset.status)}</strong><span>{pendingAssetDetail(asset)}</span></div>}
         {asset.status === "failed" && <div className="failed-preview"><CircleAlert size={24} /><strong>{tr("生成失败", "Generation failed")}</strong></div>}
       </div>
       <div className="media-asset-content">
@@ -1898,11 +1903,19 @@ function statusLabel(status: MediaAsset["status"]) {
 }
 
 function pendingAssetDetail(asset: StudioMediaAsset) {
+  if (asset.downloadProgress) {
+    const { receivedBytes, totalBytes } = asset.downloadProgress;
+    return `${formatAttachmentBytes(receivedBytes)}${totalBytes ? ` / ${formatAttachmentBytes(totalBytes)}` : ""}`;
+  }
+  if (asset.gatewayStatus === "billing") return asset.error || tr("视频生成已完成，正在保存使用记录", "Video generated; saving usage record");
   if (asset.pendingOutput) {
     const { index, total } = asset.pendingOutput;
     return total > 1 ? tr(`第 ${index} / ${total} 个结果`, `Output ${index} of ${total}`) : tr("请求已发送", "Request sent");
   }
-  return asset.progress === undefined ? tr("请求已发送", "Request sent") : `${asset.progress}%`;
+  if (typeof asset.progress === "number" && Number.isFinite(asset.progress)) return `${asset.progress}%`;
+  return asset.status === "queued"
+    ? tr("任务已受理，等待上游处理；上游未提供进度", "Task accepted, waiting for the provider; progress unavailable")
+    : tr("正在等待上游结果，上游未提供进度", "Waiting for the provider result; progress unavailable");
 }
 
 function promptPlaceholder(kind: MediaKind, imageMode: StudioImageMode) {
