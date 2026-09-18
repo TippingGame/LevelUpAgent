@@ -1,5 +1,7 @@
 # 提示词处理链路基线
 
+> 历史基线：本文记录 Harness 迁移前的链路，不代表当前缺口。2026-09 的实际行为见 [架构](ARCHITECTURE.md) 和 [Agent 工作流](AGENT_WORKFLOWS.md)。
+
 本文记录 LevelUpAgent 在提示词优化改造前的真实实现，作为后续设计、开发和回归对照基线。
 
 ## 基线信息

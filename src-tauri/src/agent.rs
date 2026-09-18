@@ -3173,10 +3173,14 @@ fn tool_specs() -> Vec<(&'static str, &'static str, Value)> {
         ),
         (
             "read_file",
-            "Read a text file with automatic UTF-8/UTF-16/GBK/GB18030/Big5/Shift-JIS/Windows-1252 decoding. Line endings are normalized to LF for reliable edit_file matching. Pass encoding (gbk or gb2312 are equivalent aliases) when a legacy file is ambiguous, including an ASCII-only file in a known legacy project.",
+            "Read a text file with automatic UTF-8/UTF-16/GBK/GB18030/Big5/Shift-JIS/Windows-1252 decoding. Use start_line and max_lines to inspect large files in bounded excerpts, with line numbers and a continuation hint. Line endings are normalized to LF for reliable edit_file matching. Pass encoding (gbk or gb2312 are equivalent aliases) when a legacy file is ambiguous, including an ASCII-only file in a known legacy project.",
             json!({
                 "type": "object", "properties": {
                     "path": { "type": "string", "description": TOOL_PATH_DESCRIPTION },
+                    "start_line": { "type": "integer", "minimum": 1, "description": "First line, 1-based; defaults to 1" },
+                    "end_line": { "type": "integer", "minimum": 1, "description": "Last line, inclusive; excerpts are capped at 2000 lines" },
+                    "max_lines": { "type": "integer", "minimum": 1, "maximum": 2000, "description": "Lines to read when end_line is absent; defaults to 200 for excerpts" },
+                    "line_numbers": { "type": "boolean", "description": "Include line numbers in excerpts; defaults to true" },
                     "encoding": { "type": "string", "enum": ["utf-8", "utf-16le", "utf-16be", "gbk", "gb2312", "gb18030", "big5", "shift-jis", "windows-1252"] }
                 }, "required": ["path"]
             }),

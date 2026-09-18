@@ -67,6 +67,8 @@ pub fn evaluate_tool_call(
     call: &ToolCall,
 ) -> PolicyDecision {
     if call.name == "run_command"
+        && mode.allows_tools()
+        && !matches!(mode, HarnessMode::Plan)
         && matches!(permission, PermissionLevel::Agent)
         && safe_process_command(&call.arguments)
     {
@@ -343,6 +345,33 @@ mod tests {
             ),
             PolicyDecision::Deny
         );
+    }
+
+    #[test]
+    fn automatic_command_approval_cannot_bypass_mode_restrictions() {
+        let command = ToolCall {
+            id: "mode-check".into(),
+            name: "run_command".into(),
+            arguments: json!({"command": "cargo test --lib"}),
+        };
+        for mode in [HarnessMode::Chat, HarnessMode::Plan] {
+            for permission in [
+                PermissionLevel::Request,
+                PermissionLevel::Agent,
+                PermissionLevel::Full,
+            ] {
+                assert_eq!(
+                    evaluate_tool_call(mode, permission, &command),
+                    PolicyDecision::Deny
+                );
+            }
+        }
+        for mode in [HarnessMode::Agent, HarnessMode::Goal] {
+            assert_eq!(
+                evaluate_tool_call(mode, PermissionLevel::Agent, &command),
+                PolicyDecision::Allow
+            );
+        }
     }
 
     #[test]

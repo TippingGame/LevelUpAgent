@@ -1,6 +1,9 @@
 use std::path::Path;
 use std::sync::Mutex;
 
+mod conversations;
+pub use conversations::{ComposerDraft, ThreadListQuery, ThreadPage};
+
 use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 
 use crate::harness::types::{
@@ -15,7 +18,7 @@ use crate::models::{
     ProviderSettings, StoredMessage, StoredThread, ToolCall, WritingProjectRecord,
 };
 
-const SCHEMA_VERSION: i64 = 18;
+const SCHEMA_VERSION: i64 = 19;
 
 fn paths_equal(left: &str, right: &str) -> bool {
     #[cfg(windows)]
@@ -113,6 +116,13 @@ impl Database {
                     ON threads(updated_at DESC);
                  CREATE INDEX IF NOT EXISTS idx_messages_thread_position
                     ON messages(thread_id, position);
+
+                 CREATE TABLE IF NOT EXISTS composer_drafts (
+                    thread_id TEXT PRIMARY KEY NOT NULL,
+                    content TEXT NOT NULL,
+                    attachments_json TEXT NOT NULL DEFAULT '[]',
+                    updated_at INTEGER NOT NULL
+                 );
 
                  CREATE TABLE IF NOT EXISTS mcp_servers (
                     id TEXT PRIMARY KEY NOT NULL,
@@ -481,6 +491,14 @@ impl Database {
     }
 
     pub fn list_threads(&self) -> Result<Vec<StoredThread>, String> {
+        self.load_threads(None)
+    }
+
+    pub fn get_thread(&self, thread_id: &str) -> Result<Option<StoredThread>, String> {
+        Ok(self.load_threads(Some(thread_id))?.into_iter().next())
+    }
+
+    fn load_threads(&self, thread_id: Option<&str>) -> Result<Vec<StoredThread>, String> {
         let connection = self
             .connection
             .lock()
@@ -488,11 +506,11 @@ impl Database {
         let mut statement = connection
             .prepare(
                 "SELECT id, title, workspace, kind, pet_id, updated_at, input_tokens, output_tokens
-                 FROM threads ORDER BY updated_at DESC LIMIT 200",
+                 FROM threads WHERE (?1 IS NULL OR id = ?1) ORDER BY updated_at DESC LIMIT 200",
             )
             .map_err(database_error)?;
         let rows = statement
-            .query_map([], |row| {
+            .query_map([thread_id], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -602,7 +620,11 @@ impl Database {
                     pet_id = excluded.pet_id,
                     updated_at = excluded.updated_at,
                     input_tokens = excluded.input_tokens,
-                    output_tokens = excluded.output_tokens",
+                    output_tokens = excluded.output_tokens
+                 WHERE (threads.title, threads.workspace, threads.kind, threads.pet_id,
+                        threads.updated_at, threads.input_tokens, threads.output_tokens)
+                    IS NOT (excluded.title, excluded.workspace, excluded.kind, excluded.pet_id,
+                            excluded.updated_at, excluded.input_tokens, excluded.output_tokens)",
                 params![
                     thread.id,
                     thread.title,
@@ -615,15 +637,53 @@ impl Database {
                 ],
             )
             .map_err(database_error)?;
-        transaction
-            .execute("DELETE FROM messages WHERE thread_id = ?1", [&thread.id])
-            .map_err(database_error)?;
+        // Preserve unchanged rows. Reordering only invalidates the suffix whose
+        // positions changed, so UNIQUE(thread_id, position) stays valid.
+        let existing_ids = {
+            let mut statement = transaction
+                .prepare("SELECT id FROM messages WHERE thread_id = ?1 ORDER BY position")
+                .map_err(database_error)?;
+            statement
+                .query_map([&thread.id], |row| row.get::<_, String>(0))
+                .map_err(database_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(database_error)?
+        };
+        let retained = existing_ids
+            .iter()
+            .zip(&thread.messages)
+            .take_while(|(id, message)| **id == message.id)
+            .count();
+        if retained < existing_ids.len() {
+            transaction
+                .execute(
+                    "DELETE FROM messages WHERE thread_id = ?1 AND position >= ?2",
+                    params![thread.id, retained as i64],
+                )
+                .map_err(database_error)?;
+        }
         {
             let mut statement = transaction
                 .prepare(
                     "INSERT INTO messages
                      (id, thread_id, position, role, content, tool_calls_json, tool_call_id, created_at, is_error, request_id, internal, attachments_json, model_name, provider_brand, change_set_json, status, provider_reasoning_blocks_json)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                     ON CONFLICT(thread_id, position) DO UPDATE SET
+                        role = excluded.role, content = excluded.content,
+                        tool_calls_json = excluded.tool_calls_json, tool_call_id = excluded.tool_call_id,
+                        created_at = excluded.created_at, is_error = excluded.is_error,
+                        request_id = excluded.request_id, internal = excluded.internal,
+                        attachments_json = excluded.attachments_json, model_name = excluded.model_name,
+                        provider_brand = excluded.provider_brand, change_set_json = excluded.change_set_json,
+                        status = excluded.status, provider_reasoning_blocks_json = excluded.provider_reasoning_blocks_json
+                     WHERE (messages.role, messages.content, messages.tool_calls_json, messages.tool_call_id,
+                            messages.created_at, messages.is_error, messages.request_id, messages.internal,
+                            messages.attachments_json, messages.model_name, messages.provider_brand,
+                            messages.change_set_json, messages.status, messages.provider_reasoning_blocks_json)
+                        IS NOT (excluded.role, excluded.content, excluded.tool_calls_json, excluded.tool_call_id,
+                                excluded.created_at, excluded.is_error, excluded.request_id, excluded.internal,
+                                excluded.attachments_json, excluded.model_name, excluded.provider_brand,
+                                excluded.change_set_json, excluded.status, excluded.provider_reasoning_blocks_json)",
                 )
                 .map_err(database_error)?;
             for (position, message) in thread.messages.iter().enumerate() {
@@ -693,6 +753,12 @@ impl Database {
             .map_err(database_error)?
             .is_some();
         if exists {
+            connection
+                .execute(
+                    "DELETE FROM composer_drafts WHERE thread_id = ?1",
+                    [thread_id],
+                )
+                .map_err(database_error)?;
             connection
                 .execute("DELETE FROM goals WHERE thread_id = ?1", [thread_id])
                 .map_err(database_error)?;
@@ -2641,6 +2707,10 @@ impl Database {
             .map_err(|_| "Could not lock conversation database".to_owned())?;
         let now = now_millis();
         let transaction = connection.transaction().map_err(database_error)?;
+        transaction.execute(
+            "UPDATE goals SET status = 'paused', updated_at = ?1 WHERE status IN ('active', 'auditing')",
+            [now],
+        ).map_err(database_error)?;
         let unknown_tool_executions = transaction
             .execute(
                 "UPDATE harness_tool_executions SET status = 'unknown' WHERE status = 'running'",
@@ -3377,7 +3447,7 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Barrier};
 
-    fn sample_thread() -> StoredThread {
+    pub(super) fn sample_thread() -> StoredThread {
         StoredThread {
             id: "thread-1".to_owned(),
             title: "Inspect project".to_owned(),
@@ -3442,6 +3512,45 @@ mod tests {
         let thread = sample_thread();
         database.save_thread(&thread).unwrap();
         assert_eq!(database.list_threads().unwrap(), vec![thread]);
+    }
+
+    #[test]
+    #[ignore = "Opt-in disk benchmark; run with --ignored --nocapture"]
+    fn benchmark_long_conversation_persistence() {
+        let directory = std::env::temp_dir().join(format!(
+            "levelup-persistence-bench-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let database = Database::open(&directory.join("bench.sqlite")).unwrap();
+        let mut thread = sample_thread();
+        let template = thread.messages[0].clone();
+        thread.messages = (0..2_000)
+            .map(|index| StoredMessage {
+                id: format!("bench-message-{index}"),
+                content: "A reproducible conversation message. ".repeat(64),
+                ..template.clone()
+            })
+            .collect();
+        database.save_thread(&thread).unwrap();
+        let changes_before = database.connection.lock().unwrap().total_changes();
+        let started = std::time::Instant::now();
+        for index in 2_000..2_020 {
+            thread.messages.push(StoredMessage {
+                id: format!("bench-message-{index}"),
+                content: format!("Next response {index}"),
+                ..template.clone()
+            });
+            database.save_thread(&thread).unwrap();
+        }
+        let elapsed = started.elapsed();
+        let changed_rows = database.connection.lock().unwrap().total_changes() - changes_before;
+        println!(
+            "PERSISTENCE_BENCH messages=2000 appended=20 elapsed_ms={} changed_rows={changed_rows}",
+            elapsed.as_millis()
+        );
+        assert_eq!(database.list_threads().unwrap()[0].messages.len(), 2_020);
+        drop(database);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -4306,6 +4415,49 @@ mod tests {
             database.list_threads().unwrap()[0].messages,
             thread.messages
         );
+    }
+
+    #[test]
+    fn saving_a_stream_delta_writes_only_the_changed_message() {
+        let database = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        let mut thread = sample_thread();
+        let mut last = thread.messages[0].clone();
+        last.id = "last-message".into();
+        thread.messages.push(last);
+        database.save_thread(&thread).unwrap();
+        let before = database.connection.lock().unwrap().total_changes();
+        database.save_thread(&thread).unwrap();
+        assert_eq!(database.connection.lock().unwrap().total_changes(), before);
+        thread.messages[1].content.push_str(" next delta");
+        database.save_thread(&thread).unwrap();
+        assert_eq!(
+            database.connection.lock().unwrap().total_changes() - before,
+            1
+        );
+        assert_eq!(database.list_threads().unwrap(), vec![thread]);
+    }
+
+    #[test]
+    fn incremental_saves_handle_reorder_truncation_and_colliding_ids_atomically() {
+        let database = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        let mut thread = sample_thread();
+        let mut second = thread.messages[0].clone();
+        second.id = "second-message".into();
+        thread.messages.push(second);
+        database.save_thread(&thread).unwrap();
+        thread.messages.swap(0, 1);
+        database.save_thread(&thread).unwrap();
+        assert_eq!(database.list_threads().unwrap(), vec![thread.clone()]);
+        thread.messages.truncate(1);
+        database.save_thread(&thread).unwrap();
+        assert_eq!(database.list_threads().unwrap(), vec![thread.clone()]);
+        let mut other = thread.clone();
+        other.id = "other-thread".into();
+        assert!(database.save_thread(&other).is_err());
+        assert_eq!(database.list_threads().unwrap(), vec![thread.clone()]);
+        thread.messages.clear();
+        database.save_thread(&thread).unwrap();
+        assert_eq!(database.list_threads().unwrap(), vec![thread]);
     }
 
     #[test]

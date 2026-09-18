@@ -9,6 +9,7 @@
 #![allow(dead_code)]
 
 pub mod context;
+pub mod instructions;
 pub mod interrupt;
 pub mod persistence;
 pub mod policy;

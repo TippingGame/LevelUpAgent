@@ -130,6 +130,7 @@ import {
 } from "./ConstellationNodes";
 import "@xyflow/react/dist/style.css";
 import "./ConstellationStudio.css";
+import "./CreationModeSwitch.css";
 
 interface ConstellationStudioProps {
   active: boolean;

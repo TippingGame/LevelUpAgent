@@ -35,28 +35,42 @@ async fn execute_inner(request: &ToolExecutionRequest) -> Result<String, String>
         .map_err(|error| format!("Workspace is unavailable: {error}"))?;
     let allow_outside = request.allow_outside_workspace;
     match request.name.as_str() {
-        "list_files" => list_files_scoped(
-            &root,
-            string_arg(&request.arguments, "path").unwrap_or("."),
-            allow_outside,
-        ),
+        "list_files" => {
+            let path = string_arg(&request.arguments, "path")
+                .unwrap_or(".")
+                .to_owned();
+            tokio::task::spawn_blocking(move || list_files_scoped(&root, &path, allow_outside))
+                .await
+                .map_err(|error| format!("File listing failed: {error}"))?
+        }
         "read_file" => {
-            read_file_scoped(
+            let content = read_file_scoped(
                 &root,
                 required_arg(&request.arguments, "path")?,
                 optional_encoding(&request.arguments)?,
                 allow_outside,
             )
-            .await
+            .await?;
+            file_excerpt(&content, &request.arguments)
         }
-        "search_files" => search_files_scoped(
-            &root,
-            required_arg(&request.arguments, "query")?,
-            string_arg(&request.arguments, "glob"),
-            optional_encoding(&request.arguments)?,
-            allow_outside,
-            string_arg(&request.arguments, "path"),
-        ),
+        "search_files" => {
+            let query = required_arg(&request.arguments, "query")?.to_owned();
+            let pattern = string_arg(&request.arguments, "glob").map(str::to_owned);
+            let path = string_arg(&request.arguments, "path").map(str::to_owned);
+            let encoding = optional_encoding(&request.arguments)?;
+            tokio::task::spawn_blocking(move || {
+                search_files_scoped(
+                    &root,
+                    &query,
+                    pattern.as_deref(),
+                    encoding,
+                    allow_outside,
+                    path.as_deref(),
+                )
+            })
+            .await
+            .map_err(|error| format!("File search failed: {error}"))?
+        }
         "write_file" => {
             write_file_scoped(
                 &root,
@@ -137,6 +151,102 @@ fn list_files_scoped(root: &Path, relative: &str, allow_outside: bool) -> Result
         });
     }
     Ok(entries.join("\n"))
+}
+
+fn file_excerpt(content: &str, arguments: &Value) -> Result<String, String> {
+    let positive_integer = |key: &str| -> Result<Option<usize>, String> {
+        arguments
+            .get(key)
+            .map(|value| {
+                value
+                    .as_u64()
+                    .and_then(|number| usize::try_from(number).ok())
+                    .filter(|number| *number > 0)
+                    .ok_or_else(|| format!("{key} must be a positive integer"))
+            })
+            .transpose()
+    };
+    let start = positive_integer("start_line")?;
+    let end = positive_integer("end_line")?;
+    let max_lines = positive_integer("max_lines")?;
+    if start.is_none()
+        && end.is_none()
+        && max_lines.is_none()
+        && arguments.get("line_numbers").and_then(Value::as_bool) != Some(true)
+    {
+        return Ok(content.to_owned());
+    }
+    let start = start.unwrap_or(1);
+    let count = max_lines.unwrap_or(200);
+    if count > 2_000 {
+        return Err("max_lines may not exceed 2000".into());
+    }
+    if end.is_some_and(|end| end < start) {
+        return Err("end_line must not precede start_line".into());
+    }
+    let total = content.lines().count();
+    if total == 0 {
+        return Ok("File is empty (0 lines).".into());
+    }
+    if start > total {
+        return Err(format!(
+            "start_line {start} exceeds the file length ({total} lines)"
+        ));
+    }
+    let end = end
+        .unwrap_or_else(|| start.saturating_add(count - 1))
+        .min(start.saturating_add(max_lines.unwrap_or(2_000) - 1))
+        .min(total);
+    let numbered = arguments
+        .get("line_numbers")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    // Reserve room for the range and continuation so the outer output limit
+    // cannot remove the information needed to read the next excerpt.
+    let mut remaining = MAX_OUTPUT_CHARS - 512;
+    let mut body = String::new();
+    let mut included_end = start;
+    let mut partial = false;
+    for (index, line) in content
+        .lines()
+        .enumerate()
+        .skip(start - 1)
+        .take(end - start + 1)
+    {
+        let prefix = if numbered {
+            format!("{}: ", index + 1)
+        } else {
+            String::new()
+        };
+        let chars = line.chars().take(remaining + 1).count() + prefix.len() + 1;
+        if chars > remaining {
+            if body.is_empty() {
+                body.push_str(&prefix);
+                body.extend(
+                    line.chars()
+                        .take(remaining.saturating_sub(prefix.len() + 1)),
+                );
+                body.push('\n');
+                partial = true;
+            }
+            break;
+        }
+        body.push_str(&prefix);
+        body.push_str(line);
+        body.push('\n');
+        remaining -= chars;
+        included_end = index + 1;
+    }
+    let mut output = format!("Lines {start}-{included_end} of {total}:\n{body}");
+    if partial {
+        output.push_str(&format!("[Line {start} is truncated by the character limit. Its remaining characters have NOT been read; inspect this line with a bounded command before continuing.]"));
+    } else if included_end < total {
+        output.push_str(&format!(
+            "[More lines available; continue with start_line {}.]",
+            included_end + 1
+        ));
+    }
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -868,6 +978,67 @@ fn truncate(value: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_excerpts_preserve_default_reads_and_number_requested_lines() {
+        let content = "first\n中文行\nthird\nfourth\n";
+        assert_eq!(
+            file_excerpt(content, &serde_json::json!({})).unwrap(),
+            content
+        );
+        assert_eq!(
+            file_excerpt(
+                content,
+                &serde_json::json!({"start_line": 2, "max_lines": 2})
+            )
+            .unwrap(),
+            "Lines 2-3 of 4:\n2: 中文行\n3: third\n[More lines available; continue with start_line 4.]"
+        );
+        assert_eq!(
+            file_excerpt(
+                content,
+                &serde_json::json!({"start_line": 3, "end_line": 4, "line_numbers": false})
+            )
+            .unwrap(),
+            "Lines 3-4 of 4:\nthird\nfourth\n"
+        );
+        for arguments in [
+            serde_json::json!({"start_line": 0}),
+            serde_json::json!({"start_line": -1}),
+            serde_json::json!({"start_line": 1.5}),
+            serde_json::json!({"start_line": 9}),
+            serde_json::json!({"max_lines": 2001}),
+            serde_json::json!({"start_line": 3, "end_line": 2}),
+        ] {
+            assert!(file_excerpt(content, &arguments).is_err(), "{arguments}");
+        }
+        assert!(
+            file_excerpt("", &serde_json::json!({"start_line": 1}))
+                .unwrap()
+                .contains("0 lines")
+        );
+    }
+
+    #[test]
+    fn excerpts_report_actual_ranges_when_the_character_budget_is_reached() {
+        let content = format!("{}\n{}\nlast", "x".repeat(70_000), "y".repeat(70_000));
+        let excerpt = file_excerpt(&content, &serde_json::json!({"start_line": 1})).unwrap();
+        assert!(excerpt.starts_with("Lines 1-1 of 3:"));
+        assert!(excerpt.ends_with("continue with start_line 2.]"));
+        assert!(excerpt.chars().count() <= MAX_OUTPUT_CHARS);
+        let content = format!("{}\nlast", "文".repeat(MAX_OUTPUT_CHARS));
+        let excerpt = file_excerpt(&content, &serde_json::json!({"start_line": 1})).unwrap();
+        assert!(excerpt.contains("Line 1 is truncated"));
+        assert!(excerpt.contains("NOT been read"));
+        assert!(!excerpt.contains("continue with start_line 2"));
+        assert!(excerpt.chars().count() <= MAX_OUTPUT_CHARS);
+        let excerpt = file_excerpt(
+            "one\ntwo\nthree",
+            &serde_json::json!({"end_line": 3, "max_lines": 1}),
+        )
+        .unwrap();
+        assert!(excerpt.starts_with("Lines 1-1 of 3:"));
+    }
 
     #[test]
     fn rejects_parent_directory_components() {

@@ -1,6 +1,4 @@
-import { Children, Fragment, isValidElement, memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type CSSProperties, type DragEvent as ReactDragEvent, type HTMLAttributes, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from "react";
-import ReactMarkdown, { type Components } from "react-markdown";
-import remarkGfmCompatible from "./lib/remarkGfmCompatible";
+import { Fragment, lazy, Suspense, memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type CSSProperties, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -69,13 +67,11 @@ import {
   X,
 } from "lucide-react";
 import { IconButton } from "./components/IconButton";
+import { CommandPalette } from "./components/CommandPalette";
 import { AgentBrowserPanel } from "./components/AgentBrowserPanel";
 import { AttachmentChip } from "./components/AttachmentChip";
-import { MediaAssetCard, MediaStudio } from "./components/MediaStudio";
-import { WritingStudio } from "./components/WritingStudio";
-import { ConstellationStudio } from "./components/ConstellationStudio";
-import { ArmorStudio } from "./components/ArmorStudio";
-import { PetStudio, type PetGenerationRequest } from "./components/PetStudio";
+import { DeferredWorkspace, WorkspaceLoading } from "./components/DeferredWorkspace";
+import type { PetGenerationRequest } from "./components/PetStudio";
 import type { PetLifeView } from "./components/PetLifeWorkspace";
 import { PetAvatar } from "./components/PetSprite";
 import { DeclarativeLayout, type LayoutActions, type LayoutData } from "./components/DeclarativeLayout";
@@ -145,7 +141,8 @@ import {
   previewExternalConfigWrite,
   previewExternalPromptWrite,
   previewGitRollback,
-  listPersistedThreads,
+  listThreadSummaries,
+  getPersistedThread,
   saveApiKey,
   saveCustomInstructions,
   savePersistedThread,
@@ -205,6 +202,7 @@ import {
   loadArmorModeSkills,
   loadArmorWritingIntensity,
   loadActiveThreadId,
+  loadLastActiveThreadId,
   loadComposerHeight,
   loadInspectorWidth,
   loadHiddenProjectKeys,
@@ -376,6 +374,17 @@ import type {
 } from "./lib/types";
 import "./App.css";
 import "./ArmorStudio.css";
+import { mergeThreadCatalog, threadMatchesQuery } from "./lib/conversationCatalog";
+import { useComposerDraft } from "./lib/useComposerDraft";
+import type { ThreadCursor } from "./lib/types";
+
+const MediaStudio = lazy(() => import("./components/MediaStudio").then((module) => ({ default: module.MediaStudio })));
+const MediaAssetCard = lazy(() => import("./components/MediaStudio").then((module) => ({ default: module.MediaAssetCard })));
+const WritingStudio = lazy(() => import("./components/WritingStudio").then((module) => ({ default: module.WritingStudio })));
+const ConstellationStudio = lazy(() => import("./components/ConstellationStudio").then((module) => ({ default: module.ConstellationStudio })));
+const ArmorStudio = lazy(() => import("./components/ArmorStudio").then((module) => ({ default: module.ArmorStudio })));
+const PetStudio = lazy(() => import("./components/PetStudio").then((module) => ({ default: module.PetStudio })));
+const MarkdownRenderer = lazy(() => import("./components/MarkdownRenderer"));
 
 const READ_ONLY_TOOLS = new Set(["list_files", "read_file", "search_files", "read_skill", "get_goal", "update_goal", "check_media_jobs"]);
 const RISKY_COMMAND_PATTERNS = [
@@ -745,9 +754,27 @@ function App() {
   const [pinnedThreadIds, setPinnedThreadIds] = useState<Set<string>>(loadPinnedThreadIds);
   const [projectMenuKey, setProjectMenuKey] = useState<string | null>(null);
   const [sidebarSearchOpen, setSidebarSearchOpen] = useState(false);
+  const [commandMenuOpen, setCommandMenuOpen] = useState(false);
   const [sidebarQuery, setSidebarQuery] = useState("");
+  const [catalogCursor, setCatalogCursor] = useState<ThreadCursor | null>(null);
+  const [searchCursor, setSearchCursor] = useState<ThreadCursor | null>(null);
+  const [catalogBusy, setCatalogBusy] = useState(false);
+  const [searchMatches, setSearchMatches] = useState<{ query: string; ids: Set<string> }>({ query: "", ids: new Set() });
+  const [historyLoadError, setHistoryLoadError] = useState<string | null>(null);
+  const historyLoadsRef = useRef(new Map<string, Promise<AgentThread>>());
+  const catalogRequestRef = useRef(0);
   const [mode, setMode] = useState<AgentMode>("agent");
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("chat");
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "k" && workspaceView === "chat") {
+        event.preventDefault();
+        setCommandMenuOpen((open) => !open);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [workspaceView]);
   const [mediaStudioPendingCount, setMediaStudioPendingCount] = useState(0);
   const [constellationPendingCount, setConstellationPendingCount] = useState(0);
   const mediaPendingCount = mediaStudioPendingCount + constellationPendingCount;
@@ -766,8 +793,9 @@ function App() {
   const [armorModeSkills, setArmorModeSkills] = useState<ArmorSkillState>(loadArmorModeSkills);
   const [armorWritingIntensity, setArmorWritingIntensity] = useState<ArmorWritingIntensity>(loadArmorWritingIntensity);
   const [armorStudioOpen, setArmorStudioOpen] = useState(false);
-  const [draft, setDraft] = useState("");
-  const [draftAttachments, setDraftAttachments] = useState<ImageAttachment[]>([]);
+  const { snapshot: composerDraft, error: draftError, setContent: setDraft, store: draftStore } = useComposerDraft(activeThreadId);
+  const draft = composerDraft.content;
+  const draftAttachments = composerDraft.attachments;
   const [attachmentPasteBusy, setAttachmentPasteBusy] = useState(false);
   const [fileDragActive, setFileDragActive] = useState(false);
   const [runningThreadIds, setRunningThreadIds] = useState<Set<string>>(() => new Set());
@@ -857,7 +885,6 @@ function App() {
   const workspaceViewRef = useRef(workspaceView);
   const activePetIdRef = useRef(activePetId);
   const themesOpenRef = useRef(themesOpen);
-  const draftAttachmentsRef = useRef(draftAttachments);
   const databaseReadyRef = useRef(false);
   const databasePersistenceFailedRef = useRef(false);
   const persistenceQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -1011,7 +1038,81 @@ function App() {
     && (keyConfigured || activeProfile.allowUnauthenticated)
     && profileHasTextModel(activeProfile);
   const connectionNeedsSetup = keyStatusLoaded && !connectionReady;
-  const normalizedSidebarQuery = sidebarQuery.trim().toLocaleLowerCase(locale);
+  const normalizedSidebarQuery = sidebarSearchOpen || commandMenuOpen ? sidebarQuery.trim().toLocaleLowerCase(locale) : "";
+  const ensureThreadLoaded = useCallback((threadId: string): Promise<AgentThread> => {
+    const current = threadsRef.current.find((thread) => thread.id === threadId);
+    if (!current) return Promise.reject(new Error("Conversation no longer exists"));
+    if (current.historyLoaded !== false) return Promise.resolve(current);
+    const pendingLoad = historyLoadsRef.current.get(threadId);
+    if (pendingLoad) return pendingLoad;
+    const task = getPersistedThread(threadId).then(async (stored) => {
+      if (!stored) throw new Error("Conversation no longer exists");
+      const recovered = normalizeReconnectHistory({ ...stored, workspace: stored.workspace || current.workspace, historyLoaded: true });
+      if (!deletingThreadIdsRef.current.has(threadId) && (recovered.changed || recovered.thread.workspace !== stored.workspace)) await savePersistedThread(recovered.thread);
+      if (!deletingThreadIdsRef.current.has(threadId)) {
+        const next = threadsRef.current.map((thread) => thread.id === threadId && thread.historyLoaded === false ? recovered.thread : thread);
+        threadsRef.current = next;
+        setThreads(next);
+      }
+      return recovered.thread;
+    }).finally(() => historyLoadsRef.current.delete(threadId));
+    historyLoadsRef.current.set(threadId, task);
+    return task;
+  }, []);
+
+  useEffect(() => {
+    setHistoryLoadError(null);
+    if (activeThread.historyLoaded !== false) return;
+    let disposed = false;
+    void ensureThreadLoaded(activeThread.id).catch((error) => {
+      if (!disposed) setHistoryLoadError(errorText(error));
+    });
+    return () => { disposed = true; };
+  }, [activeThread.id, activeThread.historyLoaded, ensureThreadLoaded]);
+
+  useEffect(() => {
+    const requestId = ++catalogRequestRef.current;
+    if (!isDesktop() || !normalizedSidebarQuery) {
+      setCatalogBusy(false);
+      setSearchCursor(null);
+      return;
+    }
+    let disposed = false;
+    setCatalogBusy(true);
+    const timer = window.setTimeout(() => {
+      void listThreadSummaries(normalizedSidebarQuery).then((page) => {
+        if (disposed || requestId !== catalogRequestRef.current) return;
+        const next = mergeThreadCatalog(threadsRef.current, page.threads.filter((thread) => !deletingThreadIdsRef.current.has(thread.id)));
+        threadsRef.current = next;
+        setThreads(next);
+        setSearchMatches({ query: normalizedSidebarQuery, ids: new Set(page.threads.map((thread) => thread.id)) });
+        setSearchCursor(page.nextCursor);
+      }).catch((error) => { if (!disposed) setNotice(errorText(error)); })
+        .finally(() => { if (!disposed && requestId === catalogRequestRef.current) setCatalogBusy(false); });
+    }, 250);
+    return () => { disposed = true; window.clearTimeout(timer); };
+  }, [normalizedSidebarQuery]);
+
+  const loadMoreThreads = async () => {
+    const cursor = normalizedSidebarQuery ? searchCursor : catalogCursor;
+    if (!cursor || catalogBusy) return;
+    const query = normalizedSidebarQuery;
+    const requestId = ++catalogRequestRef.current;
+    setCatalogBusy(true);
+    try {
+      const page = await listThreadSummaries(query, cursor);
+      if (requestId !== catalogRequestRef.current) return;
+      const next = mergeThreadCatalog(threadsRef.current, page.threads.filter((thread) => !deletingThreadIdsRef.current.has(thread.id)));
+      threadsRef.current = next;
+      setThreads(next);
+      if (query) {
+        setSearchMatches((current) => current.query === query
+          ? { query, ids: new Set([...current.ids, ...page.threads.map((thread) => thread.id)]) } : current);
+        setSearchCursor(page.nextCursor);
+      } else setCatalogCursor(page.nextCursor);
+    } catch (error) { setNotice(errorText(error)); }
+    finally { if (requestId === catalogRequestRef.current) setCatalogBusy(false); }
+  };
   const visibleProjectGroups = useMemo(() => {
     if (!normalizedSidebarQuery) return displayedProjectGroups;
     return displayedProjectGroups
@@ -1019,11 +1120,12 @@ function App() {
         if (project.name.toLocaleLowerCase(locale).includes(normalizedSidebarQuery)) return project;
         return {
           ...project,
-          threads: project.threads.filter((thread) => localizedThreadTitle(thread.title).toLocaleLowerCase(locale).includes(normalizedSidebarQuery)),
+          threads: project.threads.filter((thread) => threadMatchesQuery(thread, normalizedSidebarQuery, locale)
+            || (searchMatches.query === normalizedSidebarQuery && searchMatches.ids.has(thread.id))),
         };
       })
       .filter((project) => project.threads.length > 0);
-  }, [displayedProjectGroups, normalizedSidebarQuery, locale]);
+  }, [displayedProjectGroups, normalizedSidebarQuery, locale, searchMatches]);
   const activePetProfile = useMemo(
     () => petProfiles.find((profile) => profile.id === activeThread.petId),
     [petProfiles, activeThread.petId],
@@ -1804,12 +1906,8 @@ function App() {
   }, [flushBrowserThreads]);
 
   useEffect(() => {
-    draftAttachmentsRef.current = draftAttachments;
-  }, [draftAttachments]);
-
-  useEffect(() => {
     const selected = threadsRef.current.find((thread) => thread.id === activeThreadId);
-    if (activeThreadId && selected && !isDesktop()) saveActiveThreadId(activeThreadId);
+    if (activeThreadId && selected && (!isDesktop() || databaseReadyRef.current)) saveActiveThreadId(activeThreadId);
   }, [activeThreadId]);
 
   useEffect(() => {
@@ -1825,13 +1923,29 @@ function App() {
     let disposed = false;
     const initializeDatabase = async () => {
       try {
-        const [resolvedDefaultWorkspace, persisted] = await Promise.all([
+        const [resolvedDefaultWorkspace, page] = await Promise.all([
           getDefaultWorkspace(),
-          listPersistedThreads(),
+          listThreadSummaries(),
         ]);
         if (disposed) return;
         if (!resolvedDefaultWorkspace) throw new Error("The temporary workspace is unavailable");
         setDefaultWorkspace(resolvedDefaultWorkspace);
+        setCatalogCursor(page.nextCursor);
+        const persisted = page.threads;
+        const savedActiveId = loadLastActiveThreadId();
+        const selectedId = savedActiveId ?? persisted[0]?.id;
+        if (persisted.length > 0 && selectedId) {
+          const selected = await getPersistedThread(selectedId);
+          if (selected) {
+            const index = persisted.findIndex((thread) => thread.id === selectedId);
+            if (index >= 0) persisted[index] = selected;
+            else persisted.unshift(selected);
+          } else if (persisted[0]) {
+            const first = await getPersistedThread(persisted[0].id);
+            if (first) persisted[0] = first;
+          }
+        }
+        if (disposed) return;
         const sourceThreads = persisted.length > 0 ? persisted : threadsRef.current;
         const migratedThreadIds = new Set(
           sourceThreads.filter((thread) => !thread.workspace?.trim()).map((thread) => thread.id),
@@ -1847,16 +1961,11 @@ function App() {
         });
         threadsRef.current = hydratedThreads;
         setThreads(hydratedThreads);
-        const hydratedThreadIds = new Set(hydratedThreads.map((thread) => thread.id));
-        const validTaskCompletions = taskCompletionNoticesRef.current.filter((notice) => hydratedThreadIds.has(notice.threadId));
-        if (validTaskCompletions.length !== taskCompletionNoticesRef.current.length) {
-          commitTaskCompletionNotices(validTaskCompletions);
-        }
         setActiveThreadId((current) =>
           hydratedThreads.some((thread) => thread.id === current) ? current : loadActiveThreadId(hydratedThreads),
         );
         const threadsToPersist = persisted.length > 0
-          ? hydratedThreads.filter((thread) => migratedThreadIds.has(thread.id) || recoveredThreadIds.has(thread.id))
+          ? hydratedThreads.filter((thread) => thread.historyLoaded !== false && (migratedThreadIds.has(thread.id) || recoveredThreadIds.has(thread.id)))
           : hydratedThreads;
         for (const thread of threadsToPersist) await savePersistedThread(thread);
         const providerSettings = await getProviderSettings();
@@ -1898,8 +2007,13 @@ function App() {
         const pendingAfterRestart = await harnessListPendingApprovals().catch(() => [] as HarnessPendingApproval[]);
         if (!disposed) {
           for (const approval of pendingAfterRestart) {
-            const thread = hydratedThreads.find((candidate) => candidate.id === approval.threadId);
+            const existing = threadsRef.current.find((candidate) => candidate.id === approval.threadId);
+            const thread = existing ? await ensureThreadLoaded(existing.id) : await getPersistedThread(approval.threadId);
             if (!thread) continue;
+            if (!existing) {
+              threadsRef.current = [...threadsRef.current, thread];
+              setThreads(threadsRef.current);
+            }
             setThreadPending(approval.threadId, {
               calls: [{ id: approval.callId, name: approval.toolName, arguments: approval.arguments }],
               history: thread.messages,
@@ -1916,25 +2030,11 @@ function App() {
             runModesRef.current.set(approval.threadId, approval.mode);
           }
         }
-        // No in-memory agent operation survives a process restart. Mark any
-        // durable Goal as paused during hydration so an old crash cannot leave
-        // a permanent global lock; the user can explicitly resume it, which
-        // creates a fresh operation and snapshot.
-        const hatchGoals = await Promise.all(
-          hydratedThreads.map(async (thread) => ({
-            threadId: thread.id,
-            goal: await getGoal(thread.id).catch(() => null),
-          })),
-        );
+        // Restart recovery pauses all Goals in one host transaction, including
+        // conversations outside the first catalog page.
+        const selectedGoal = await getGoal(activeThreadIdRef.current).catch(() => null);
         if (disposed) return;
-        for (const snapshot of hatchGoals) {
-          if (snapshot.goal
-            && (snapshot.goal.status === "active" || snapshot.goal.status === "auditing")) {
-            snapshot.goal = await changeGoalStatus(snapshot.threadId, "pause").catch(() => snapshot.goal);
-          }
-        }
-        const selectedGoal = hatchGoals.find(({ threadId }) => threadId === activeThreadIdRef.current)?.goal;
-        if (selectedGoal) setGoalState(selectedGoal);
+        setGoalState(selectedGoal);
         setPetHatchJob(null);
         setMediaCatalogRevision((current) => current + 1);
       } catch (error) {
@@ -2187,11 +2287,24 @@ function App() {
     if (!isDesktop()) return;
     const flushBeforeClose = () => flushThreadPersistenceRef.current();
     window.addEventListener("pagehide", flushBeforeClose);
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void getCurrentWindow().onCloseRequested(async (event) => {
+      try {
+        await draftStore.flush();
+        flushThreadPersistenceRef.current();
+        await persistenceQueueRef.current;
+      } catch {
+        event.preventDefault();
+      }
+    }).then((stop) => { if (disposed) stop(); else unlisten = stop; }).catch(() => undefined);
     return () => {
+      disposed = true;
+      unlisten?.();
       window.removeEventListener("pagehide", flushBeforeClose);
       flushBeforeClose();
     };
-  }, []);
+  }, [draftStore]);
 
   const enqueueThreadPersistence = (thread: AgentThread) => {
     pendingThreadPersistenceRef.current.set(thread.id, thread);
@@ -2211,6 +2324,10 @@ function App() {
   };
 
   const commitThread = (next: AgentThread, persist = true) => {
+    if (persist && next.historyLoaded === false) {
+      setNotice(tr("会话历史尚未加载完成", "Conversation history is still loading"));
+      return;
+    }
     if (persist && isDesktop() && !databaseReadyRef.current) {
       setNotice(databasePersistenceFailedRef.current
         ? tr(
@@ -2976,7 +3093,7 @@ function App() {
   };
 
   const forkActiveThread = async () => {
-    if (running || pending) {
+    if (running || pending || activeThread.historyLoaded === false) {
       setNotice(tr("请先完成当前运行再创建分支", "Finish the active run before creating a fork"));
       return;
     }
@@ -3047,7 +3164,18 @@ function App() {
 
   const activateThread = (threadId: string) => {
     const thread = threadsRef.current.find((item) => item.id === threadId);
-    if (!thread) return;
+    if (!thread) {
+      if (isDesktop()) void getPersistedThread(threadId).then((stored) => {
+        if (!stored) return;
+        const next = mergeThreadCatalog(threadsRef.current, [stored]);
+        threadsRef.current = next;
+        setThreads(next);
+        setActiveThreadId(stored.id);
+        setWorkspaceView("chat");
+        acknowledgeTaskCompletion(stored.id);
+      }).catch((error) => setNotice(errorText(error)));
+      return;
+    }
     acknowledgeTaskCompletion(threadId);
     setActiveThreadId(threadId);
     expandProject(workspaceKey(thread.workspace));
@@ -3062,10 +3190,6 @@ function App() {
     commitThread(next);
     setActiveThreadId(next.id);
     expandProject(workspaceKey(workspace));
-    setDraft("");
-    for (const attachment of draftAttachmentsRef.current) void deleteImageAttachment(attachment.id).catch(() => undefined);
-    draftAttachmentsRef.current = [];
-    setDraftAttachments([]);
     setWorkspaceView("chat");
   };
 
@@ -3083,7 +3207,8 @@ function App() {
       const profile = dashboard.pets.find((pet) => pet.id === petId);
       if (!profile) throw new Error(tr("摇光残影未安装", "Starlight Echo is not installed"));
       const prompt = petConversationPrompt(profile, dashboard.memories, locale, dashboard.life);
-      const existing = threadsRef.current.find((thread) => thread.kind === "pet" && thread.petId === petId);
+      const candidate = threadsRef.current.find((thread) => thread.kind === "pet" && thread.petId === petId);
+      const existing = candidate ? await ensureThreadLoaded(candidate.id) : undefined;
       let next: AgentThread;
       if (existing) {
         let replaced = false;
@@ -3125,8 +3250,6 @@ function App() {
       // echo workspace; the in-workspace chat button keeps the modal closed.
       if (options.openPetInterface === true) openPetManager("life");
       else setPetOpen(false);
-      setDraft("");
-      setDraftAttachments([]);
     } catch (error) {
       setNotice(`${tr("无法打开残影会话", "Could not open echo conversation")}: ${errorText(error)}`);
     }
@@ -3788,6 +3911,7 @@ function App() {
   };
 
   const send = async () => {
+    if (activeThread.historyLoaded === false || !composerDraft.ready) return;
     const rawValue = draft;
     const value = draft.trim();
     const thread = activeThread;
@@ -3821,7 +3945,7 @@ function App() {
         attemptedOperationIds.add(queueOperationId);
         try {
           await enqueueCurrentRunMessage(thread.id, queueOperationId, queuedKind, queuedBody);
-          setDraft("");
+          draftStore.consume(thread.id, { content: rawValue, attachments: [] });
           return;
         } catch (error) {
           const reason = errorText(error);
@@ -3866,8 +3990,7 @@ function App() {
           return;
         }
         attachments = [...attachments, ...imported];
-        draftAttachmentsRef.current = attachments;
-        setDraftAttachments(attachments);
+        draftStore.appendAttachments(thread.id, imported);
       } catch (error) {
         setNotice(`${tr("无法读取消息中的文件", "Could not read a file from the message")}: ${errorText(error)}`);
         return;
@@ -3891,9 +4014,7 @@ function App() {
           ? (value || attachments[0]?.name || tr("附件任务", "Attachment task")).slice(0, 42)
           : thread.title;
         const reason = `${tr("无法启动 Goal", "Could not start Goal")}: ${errorText(error)}`;
-        setDraft("");
-        draftAttachmentsRef.current = [];
-        setDraftAttachments([]);
+        draftStore.consume(thread.id, { content: rawValue, attachments });
         commitThread({
           ...thread,
           title: failedTitle,
@@ -3947,9 +4068,7 @@ function App() {
     const runFallbackProfiles = profiles.filter((profile) => profile.id !== runProfile.id && profileHasTextModel(profile));
     const runMode = thread.kind === "pet" ? "chat" : mode;
     const commitSubmissionError = (reason: string) => {
-      setDraft("");
-      draftAttachmentsRef.current = [];
-      setDraftAttachments([]);
+      draftStore.consume(thread.id, { content: rawValue, attachments });
       commitThread({
         ...next,
         messages: [
@@ -3995,9 +4114,7 @@ function App() {
         if (submission.disposition === "queued") {
           const queued = submission.value;
           recordHarnessQueueItem(thread.id, queued);
-          setDraft("");
-          draftAttachmentsRef.current = [];
-          setDraftAttachments([]);
+          draftStore.consume(thread.id, { content: rawValue, attachments });
           setNotice(tr("已加入当前运行队列", "Added to the active run queue"));
           return;
         }
@@ -4013,9 +4130,7 @@ function App() {
         return;
       }
     }
-    setDraft("");
-    draftAttachmentsRef.current = [];
-    setDraftAttachments([]);
+    draftStore.consume(thread.id, { content: rawValue, attachments });
     commitThread(next);
     if (useHarness && harnessOperationId) {
       await runHarnessAgent(
@@ -4065,12 +4180,13 @@ function App() {
   };
 
   const addDroppedAttachments = async (paths: string[]) => {
+    const threadId = activeThreadIdRef.current;
     setFileDragActive(false);
-    if (running || pending) {
+    if (runningThreadIdsRef.current.has(threadId) || pendingApprovalsRef.current[threadId] || !draftStore.get(threadId).ready) {
       setNotice(tr("当前任务运行中，暂时不能添加附件", "Attachments cannot be added while the task is running"));
       return;
     }
-    const remaining = Math.max(0, 12 - draftAttachmentsRef.current.length);
+    const remaining = Math.max(0, 12 - draftStore.get(threadId).attachments.length);
     if (remaining === 0) {
       setNotice(tr("每条消息最多添加 12 个附件", "Each message supports up to 12 attachments"));
       return;
@@ -4083,13 +4199,7 @@ function App() {
     setAttachmentPasteBusy(true);
     try {
       const selected = await importAttachments(paths.slice(0, remaining));
-      const current = draftAttachmentsRef.current;
-      const available = Math.max(0, 12 - current.length);
-      const accepted = selected.slice(0, available);
-      const discarded = selected.slice(available);
-      const next = [...current, ...accepted];
-      draftAttachmentsRef.current = next;
-      setDraftAttachments(next);
+      const discarded = deletingThreadIdsRef.current.has(threadId) ? selected : draftStore.appendAttachments(threadId, selected);
       await Promise.all(discarded.map((item) => deleteImageAttachment(item.id).catch(() => false)));
     } catch (error) {
       setNotice(`${tr("无法添加附件", "Could not add attachment")}: ${error instanceof Error ? error.message : String(error)}`);
@@ -4100,12 +4210,13 @@ function App() {
   };
 
   const addPastedAttachments = async (files: File[]) => {
+    const threadId = activeThreadIdRef.current;
     if (files.length === 0) return;
     if (!isDesktop()) {
       setNotice(tr("文件粘贴需要桌面应用", "Pasting files requires the desktop app"));
       return;
     }
-    if (running || pending) {
+    if (runningThreadIdsRef.current.has(threadId) || pendingApprovalsRef.current[threadId] || !draftStore.get(threadId).ready) {
       setNotice(tr("当前任务运行中，暂时不能添加附件", "Attachments cannot be added while the task is running"));
       return;
     }
@@ -4113,7 +4224,7 @@ function App() {
       setNotice(tr("正在处理上一批粘贴文件", "The previous pasted files are still being processed"));
       return;
     }
-    const remaining = Math.max(0, 12 - draftAttachmentsRef.current.length);
+    const remaining = Math.max(0, 12 - draftStore.get(threadId).attachments.length);
     if (remaining === 0) {
       setNotice(tr("每条消息最多添加 12 个附件", "Each message supports up to 12 attachments"));
       return;
@@ -4123,13 +4234,7 @@ function App() {
     setAttachmentPasteBusy(true);
     try {
       const imported = await importClipboardAttachments(selected);
-      const current = draftAttachmentsRef.current;
-      const available = Math.max(0, 12 - current.length);
-      const accepted = imported.slice(0, available);
-      const discarded = imported.slice(available);
-      const next = [...current, ...accepted];
-      draftAttachmentsRef.current = next;
-      setDraftAttachments(next);
+      const discarded = deletingThreadIdsRef.current.has(threadId) ? imported : draftStore.appendAttachments(threadId, imported);
       await Promise.all(discarded.map((item) => deleteImageAttachment(item.id).catch(() => false)));
       if (selected.length < files.length) {
         setNotice(tr("每条消息最多添加 12 个附件，超出的文件未粘贴", "Each message supports up to 12 attachments; extra files were not pasted"));
@@ -4191,9 +4296,7 @@ function App() {
   }, [running, pending]);
 
   const removeDraftImage = async (attachment: ImageAttachment) => {
-    const next = draftAttachmentsRef.current.filter((item) => item.id !== attachment.id);
-    draftAttachmentsRef.current = next;
-    setDraftAttachments(next);
+    draftStore.update(activeThread.id, (current) => ({ ...current, attachments: current.attachments.filter((item) => item.id !== attachment.id) }));
     await deleteImageAttachment(attachment.id).catch(() => undefined);
   };
 
@@ -4426,6 +4529,9 @@ function App() {
       // the serialized operation order remains deterministic.
       flushThreadPersistence();
       const persistence = persistenceQueueRef.current.then(async () => {
+        await historyLoadsRef.current.get(threadId)?.catch(() => undefined);
+        draftStore.clear(threadId);
+        await draftStore.flush();
         await deletePersistedThread(threadId);
         if (remaining.length === 0) await savePersistedThread(nextThreads[0]);
       });
@@ -4440,6 +4546,7 @@ function App() {
     }
     threadsRef.current = nextThreads;
     setThreads(nextThreads);
+    draftStore.clear(threadId);
     acknowledgeTaskCompletion(threadId);
     setThreadPendingDelete(null);
     setPinnedThreadIds((current) => {
@@ -4456,7 +4563,8 @@ function App() {
         : undefined;
       setActiveThreadId((sameProject ?? [...nextThreads].sort((left, right) => right.updatedAt - left.updatedAt)[0]).id);
     }
-    deletingThreadIdsRef.current.delete(threadId);
+    // Keep the tombstone so late catalog and attachment responses cannot
+    // recreate a deleted conversation during this application session.
   };
 
   const saveProfile = async (profile: ProviderProfile, apiKey: string) => {
@@ -4780,8 +4888,10 @@ function App() {
             <input
               autoFocus
               value={sidebarQuery}
+              maxLength={256}
+              aria-label={tr("搜索会话与消息", "Search conversations and messages")}
               onChange={(event) => setSidebarQuery(event.target.value)}
-              placeholder={tr("搜索项目或会话", "Search projects or conversations")}
+              placeholder={tr("搜索会话与消息", "Search conversations and messages")}
             />
             {sidebarQuery && <button aria-label={tr("清除搜索", "Clear search")} onClick={() => setSidebarQuery("")}><X size={13} /></button>}
           </div>
@@ -4890,6 +5000,12 @@ function App() {
         {visibleProjectGroups.length === 0 && (
           <div className="sidebar-empty-search">{tr("没有匹配的项目或会话", "No matching projects or conversations")}</div>
         )}
+        {catalogBusy && <div className="sidebar-empty-search" role="status"><LoaderCircle size={14} className="spin" /></div>}
+        {(normalizedSidebarQuery ? searchCursor : catalogCursor) && (
+          <button className="catalog-load-more" onClick={() => void loadMoreThreads()} disabled={catalogBusy}>
+            <ChevronDown size={14} /> {tr("加载更多会话", "Load more conversations")}
+          </button>
+        )}
       </nav>
 
         <div className="project-footer">
@@ -4941,6 +5057,7 @@ function App() {
 
   const mediaStudioSlot = (
     <>
+      <DeferredWorkspace active={workspaceView === "media"}>
       <MediaStudio
         active={workspaceView === "media"}
         locale={locale}
@@ -4956,6 +5073,8 @@ function App() {
         onWriting={() => setWorkspaceView("writing")}
         onConstellation={() => setWorkspaceView("constellation")}
       />
+      </DeferredWorkspace>
+      <DeferredWorkspace active={workspaceView === "writing"}>
       <WritingStudio
         active={workspaceView === "writing"}
         locale={locale}
@@ -4973,6 +5092,8 @@ function App() {
         onMedia={() => setWorkspaceView("media")}
         onConstellation={() => setWorkspaceView("constellation")}
       />
+      </DeferredWorkspace>
+      <DeferredWorkspace active={workspaceView === "constellation"}>
       <ConstellationStudio
         active={workspaceView === "constellation"}
         locale={locale}
@@ -4990,6 +5111,7 @@ function App() {
         onWriting={() => setWorkspaceView("writing")}
         onPendingCountChange={setConstellationPendingCount}
       />
+      </DeferredWorkspace>
     </>
   );
 
@@ -5075,6 +5197,9 @@ function App() {
               : activeThread.workspace ? shortPath(activeThread.workspace) : tr("无项目", "No project")}</span>
           </div>
           <div className="topbar-actions">
+            <IconButton label={tr("搜索与命令", "Search and commands")} onClick={() => setCommandMenuOpen(true)}>
+              <Search size={17} />
+            </IconButton>
             {latestUnreadTaskCompletion && (
               <IconButton
                 className="task-completion-button"
@@ -5131,7 +5256,15 @@ function App() {
 
         <div className="conversation-stage">
           <section className="conversation" ref={conversationRef} onScroll={handleConversationScroll}>
-            {activeThread.messages.length === 0 ? (
+            {activeThread.historyLoaded === false ? (
+              historyLoadError ? <div className="conversation-load-error" role="alert">
+                <span>{historyLoadError}</span>
+                <button className="secondary-button" onClick={() => {
+                  setHistoryLoadError(null);
+                  void ensureThreadLoaded(activeThread.id).catch((error) => setHistoryLoadError(errorText(error)));
+                }}><RefreshCw size={14} />{tr("重试", "Retry")}</button>
+              </div> : <WorkspaceLoading />
+            ) : activeThread.messages.length === 0 ? (
               <EmptyState
                 workspace={activeThread.workspace}
                 temporaryWorkspace={activeUsesDefaultWorkspace}
@@ -5142,7 +5275,7 @@ function App() {
             ) : (
               <div className="message-stream">
                 <ConversationMessageList
-                  key={locale}
+                  key={`${locale}:${activeThread.id}`}
                   blocks={conversationBlocks}
                   pending={pending}
                   activeReconnectMessageId={activeReconnectMessageId}
@@ -5150,6 +5283,7 @@ function App() {
                   running={running}
                   pet={activePetProfile}
                   endRef={endRef}
+                  scrollRef={conversationRef}
                   onReviewChanges={reviewChangeSet}
                   onReviewFile={reviewChangedFile}
                   onEdit={editConversationMessage}
@@ -5212,6 +5346,13 @@ function App() {
           </div>
         )}
 
+        {draftError && <div className="composer-draft-error" role="alert">
+          <span>{tr("草稿尚未保存", "Draft is not saved")}: {draftError}</span>
+          <IconButton label={tr("重试保存草稿", "Retry draft persistence")} onClick={() => {
+            void draftStore.retry().catch(() => undefined);
+          }}><RefreshCw size={14} /></IconButton>
+          <IconButton label={tr("清空当前草稿", "Clear current draft")} onClick={() => draftStore.clear(activeThreadId)}><Trash2 size={14} /></IconButton>
+        </div>}
         <Composer
           inputRef={composerInputRef}
           draft={draft}
@@ -5221,7 +5362,7 @@ function App() {
           armorMode={armorMode}
           armorModeLevel={armorModeLevel}
           running={running}
-          disabled={Boolean(pending) || attachmentPasteBusy}
+          disabled={Boolean(pending) || attachmentPasteBusy || activeThread.historyLoaded === false || !composerDraft.ready}
           modelMenuOpen={profileMenuOpen}
           thinkingControl={(
             <ReasoningPicker
@@ -5492,6 +5633,21 @@ function App() {
 
   const overlays = (
     <>
+      {commandMenuOpen && <CommandPalette
+        query={sidebarQuery} onQuery={setSidebarQuery}
+        threads={visibleProjectGroups.flatMap((project) => project.threads)}
+        busy={catalogBusy} hasMore={Boolean(normalizedSidebarQuery ? searchCursor : catalogCursor)}
+        onMore={() => void loadMoreThreads()} onOpen={activateThread} onClose={() => setCommandMenuOpen(false)}
+        commands={[
+          { id: "command.new", label: tr("新会话", "New conversation"), icon: <Plus size={16} />, run: () => newThread() },
+          { id: "command.project", label: tr("打开项目", "Open project"), icon: <FolderOpen size={16} />, run: () => { void openProject(); } },
+          { id: "command.connections", label: tr("模型连接", "Model connections"), icon: <Cpu size={16} />, run: () => setSettingsOpen(true) },
+          { id: "command.skills", label: "Skills", icon: <Sparkles size={16} />, run: () => setSkillsOpen(true) },
+          { id: "command.mcp", label: "MCP", icon: <Network size={16} />, run: () => setMcpOpen(true) },
+          { id: "command.media", label: tr("创作空间", "Creative Studio"), icon: <ImagePlus size={16} />, run: () => setWorkspaceView("media") },
+          { id: "command.logs", label: tr("请求日志", "Request logs"), icon: <Activity size={16} />, run: () => setLogsOpen(true) },
+        ]}
+      />}
       {settingsOpen && (
         <ConnectionDialog
           profiles={profiles}
@@ -5539,6 +5695,7 @@ function App() {
       )}
 
       {armorStudioOpen && (
+        <Suspense fallback={<WorkspaceLoading />}>
         <ArmorStudio
           armorMode={armorMode}
           armorModeLevel={armorModeLevel}
@@ -5552,6 +5709,7 @@ function App() {
           onArmorWritingIntensityChange={setArmorWritingIntensity}
           onClose={() => setArmorStudioOpen(false)}
         />
+        </Suspense>
       )}
 
       {petOpen && (
@@ -5986,6 +6144,7 @@ function PetDialog({
         <IconButton className="pet-dialog-close" label={tr("关闭摇光残影", "Close Starlight Echoes")} onClick={onClose}>
           <X size={18} />
         </IconButton>
+        <Suspense fallback={<WorkspaceLoading />}>
         <PetStudio
           active
           locale={locale}
@@ -5998,6 +6157,7 @@ function PetDialog({
           onGenerate={onGenerate}
           onNotice={onNotice}
         />
+        </Suspense>
       </div>
     </div>
   );
@@ -6094,9 +6254,7 @@ function PlainTextMarkdown({ content }: { content: string }) {
 
 function RenderedMarkdown({ content }: { content: string }) {
   return (
-    <ReactMarkdown remarkPlugins={MARKDOWN_PLUGINS} components={MARKDOWN_COMPONENTS}>
-      {content}
-    </ReactMarkdown>
+    <Suspense fallback={<PlainTextMarkdown content={content} />}><MarkdownRenderer content={content} /></Suspense>
   );
 }
 
@@ -6161,47 +6319,6 @@ function diffFontStack(fontFamily: DiffFontFamily): string {
   if (fontFamily === "consolas") return 'Consolas, ui-monospace, "Cascadia Mono", monospace';
   return "var(--font-mono)";
 }
-
-function MarkdownCodeBlock({ children, ...props }: HTMLAttributes<HTMLPreElement>) {
-  const [copied, setCopied] = useState(false);
-  const firstChild = Children.toArray(children)[0];
-  const codeProps = isValidElement(firstChild)
-    ? firstChild.props as { children?: ReactNode; className?: string }
-    : undefined;
-  const source = String(codeProps?.children ?? "").replace(/\n$/, "");
-  const language = codeProps?.className?.match(/language-([\w-]+)/)?.[1] ?? "";
-
-  const copy = async () => {
-    try {
-      await copyText(source);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1_500);
-    } catch {
-      setCopied(false);
-    }
-  };
-
-  return (
-    <div className="markdown-code-block">
-      <div className="markdown-code-toolbar">
-        <span>{language || tr("代码", "Code")}</span>
-        <button type="button" onClick={() => void copy()} title={tr("复制代码", "Copy code")}>
-          {copied ? <Check size={13} /> : <Copy size={13} />}
-          <span>{copied ? tr("已复制", "Copied") : tr("复制", "Copy")}</span>
-        </button>
-      </div>
-      <pre {...props}>{children}</pre>
-    </div>
-  );
-}
-
-const MARKDOWN_COMPONENTS: Components = {
-  pre: MarkdownCodeBlock,
-  a: ({ href, children, ...props }) => (
-    <a href={href} target="_blank" rel="noreferrer" {...props}>{children}</a>
-  ),
-};
-const MARKDOWN_PLUGINS = [remarkGfmCompatible];
 
 function groupConversationMessages(
   messages: AgentMessage[],
@@ -6696,7 +6813,7 @@ function ToolResultItem({ item }: { item: AgentMessage }) {
           {item.isError ? <CircleAlert size={14} /> : <Check size={14} />}
           <strong>{mediaAssets.length > 0 ? tr(`${mediaAssets.length} 个媒体结果`, `${mediaAssets.length} media results`) : tr("媒体任务已检查", "Media jobs checked")}</strong>
         </div>
-        {mediaAssets.length > 0 && <div className="tool-media-grid">{mediaAssets.map((asset) => <MediaAssetCard asset={asset} locale={getAppLocale()} key={asset.id} />)}</div>}
+        {mediaAssets.length > 0 && <Suspense fallback={<WorkspaceLoading />}><div className="tool-media-grid">{mediaAssets.map((asset) => <MediaAssetCard asset={asset} locale={getAppLocale()} key={asset.id} />)}</div></Suspense>}
       </div>
     );
   }
@@ -6831,6 +6948,7 @@ const ConversationMessageList = memo(({
   running,
   pet,
   endRef,
+  scrollRef,
   onReviewChanges,
   onReviewFile,
   onEdit,
@@ -6842,10 +6960,25 @@ const ConversationMessageList = memo(({
   running: boolean;
   pet?: PetProfile;
   endRef: RefObject<HTMLDivElement | null>;
+  scrollRef: RefObject<HTMLElement | null>;
   onReviewChanges: (changeSet: ConversationChangeSet) => void;
   onReviewFile: (changeSet: ConversationChangeSet, file: ConversationFileChange) => void;
   onEdit: (content: string) => void;
 }) => {
+  const blockId = (block: ConversationBlock | undefined) => {
+    if (!block) return undefined;
+    return block.kind === "user" ? block.item.id : block.items[0]?.id;
+  };
+  const [firstVisibleId, setFirstVisibleId] = useState(() => blockId(blocks[Math.max(0, blocks.length - 40)]));
+  const firstVisibleIndex = Math.max(0, blocks.findIndex((block) => blockId(block) === firstVisibleId));
+  const scrollAnchorRef = useRef<{ height: number; top: number } | null>(null);
+  useLayoutEffect(() => {
+    const previous = scrollAnchorRef.current;
+    const element = scrollRef.current;
+    if (!previous || !element) return;
+    element.scrollTop = previous.top + element.scrollHeight - previous.height;
+    scrollAnchorRef.current = null;
+  }, [firstVisibleId, scrollRef]);
   const latestAssistantBlockIndex = useMemo(() => {
     for (let index = blocks.length - 1; index >= 0; index -= 1) {
       if (blocks[index].kind === "assistant") return index;
@@ -6874,7 +7007,12 @@ const ConversationMessageList = memo(({
   }, [blocks, running]);
   return (
     <>
-      {blocks.map((block, blockIndex) => block.kind === "user" ? (
+      {firstVisibleIndex > 0 && <button className="catalog-load-more" onClick={() => {
+        const element = scrollRef.current;
+        if (element) scrollAnchorRef.current = { height: element.scrollHeight, top: element.scrollTop };
+        setFirstVisibleId(blockId(blocks[Math.max(0, firstVisibleIndex - 40)]));
+      }}><ChevronDown size={14} />{tr("加载更早的消息", "Load earlier messages")}</button>}
+      {blocks.slice(firstVisibleIndex).map((block, blockIndex) => block.kind === "user" ? (
         <MemoizedMessageRow key={block.item.id} item={block.item} onEdit={onEdit} />
       ) : (
         <MemoizedAssistantMessageGroup
@@ -6886,7 +7024,7 @@ const ConversationMessageList = memo(({
             ? streamingMessageId
             : undefined}
           collapsible={!streamingMessageId || !block.items.some((item) => item.id === streamingMessageId)}
-          defaultOpen={!running && blockIndex === latestAssistantBlockIndex}
+          defaultOpen={!running && blockIndex + firstVisibleIndex === latestAssistantBlockIndex}
           pet={pet}
           onReviewChanges={onReviewChanges}
           onReviewFile={onReviewFile}

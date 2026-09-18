@@ -162,6 +162,7 @@ import {
 } from "./WritingMissionControl";
 import "@xyflow/react/dist/style.css";
 import "./WritingStudio.css";
+import "./CreationModeSwitch.css";
 
 type StudioSection = "write" | "entities" | "story" | "references" | "goal";
 type StoryInspectorTab = "node" | "variables" | "issues";

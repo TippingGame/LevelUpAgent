@@ -1335,7 +1335,22 @@ export async function listPersistedThreads(): Promise<AgentThread[]> {
   return invoke<AgentThread[]>("list_threads");
 }
 
+export async function listThreadSummaries(
+  query = "",
+  before?: import("./types").ThreadCursor | null,
+): Promise<import("./types").ThreadPage> {
+  const page = await invoke<import("./types").ThreadPage>("list_thread_summaries", {
+    request: { query, before: before ?? null, limit: 100 },
+  });
+  return { ...page, threads: page.threads.map((thread) => ({ ...thread, messages: [], historyLoaded: false })) };
+}
+
+export async function getPersistedThread(threadId: string): Promise<AgentThread | null> {
+  return invoke<AgentThread | null>("get_thread", { threadId });
+}
+
 export async function savePersistedThread(thread: AgentThread): Promise<void> {
+  if (thread.historyLoaded === false) throw new Error("Load conversation history before saving it");
   await invoke("save_thread", { thread });
 }
 
@@ -1391,9 +1406,13 @@ export async function applyGitRollback(
 }
 
 export function onMediaAssetUpdate(callback: (asset: MediaAsset) => void): () => void {
+  if (!isDesktop()) return () => {};
   let stopped = false;
   const subscription = listen<MediaAsset>("media-asset-updated", ({ payload }) => {
     if (!stopped) callback(payload);
+  }).catch((error: unknown) => {
+    console.warn("Media update subscription failed", error);
+    return () => {};
   });
   return () => { stopped = true; void subscription.then(unlisten => unlisten()); };
 }

@@ -27,6 +27,11 @@ A model-callable capability is complete only when all of the following exist:
 
 ## Reversible client actions
 
+Conversation search, the command palette, draft editing, and history pagination
+are user-only controls. They are not model-callable: an Agent must not rewrite
+unsent user input or switch to unrelated private conversations. The new host
+catalog/draft commands are UI persistence APIs, not additions to the tool catalog.
+
 The shared registry is [`capabilities/client-actions.json`](../capabilities/client-actions.json). Rust validates it, builds the `client_action` tool Schema, enforces the allowlist, and emits a versioned event. React imports the same registry and rejects unknown actions before changing UI state.
 
 `client_action` is limited to reversible navigation: switching workspaces, opening or closing the details panel, and opening or closing application dialogs. File changes, settings writes, provider calls, process control, browser control, purchases, credentials, and destructive actions require dedicated tools with their own policy classification.

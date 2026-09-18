@@ -1,5 +1,7 @@
 # 架构与安全边界
 
+当前实现核对：2026-09-18，发布基线 `1.0.56`，数据库 schema 19。功能入口见 [功能总览](FEATURES.md)。
+
 ## 运行结构
 
 ```text
@@ -10,6 +12,8 @@ React workbench
   `-- Tauri invoke boundary
           |
 Rust host |-- OS credential vault
+          |-- durable Harness runtime / approvals / queue / recovery
+          |-- paginated conversation catalog / independent drafts
           |-- protocol adapters
           |     |-- OpenAI Responses
           |     |-- OpenAI Chat Completions
@@ -65,8 +69,9 @@ Rust 适配器负责把通用历史转换为各协议格式，并把响应重新
 模型路由（Model Route）是一次实际调用的地址：`profile ID + model ID + protocol`。因此同一连接可提供多个模型，
 同一模型也可同时提供 Responses 与 Gemini GenerateContent 等不同路由，而不需要复制或替换 API Key。
 
-模型发现属于控制面，不属于任何生成协议。Rust 会为每个可用连接并行检查标准 `/v1/models` 与 Gemini
-`/v1beta/models`；Base URL 已带 `/v1` 或 `/v1beta` 时，两个目录按同级版本路径构造，避免折叠成同一 URL。
+模型发现属于控制面，不属于任何生成协议。Rust 先检查标准 `/v1/models`，仅在配置为原生 Gemini、
+Base URL 或标准目录返回的模型表明支持 Gemini 时，再检查 `/v1beta/models`，避免向无该能力的平台发送无效请求。
+Base URL 已带 `/v1` 或 `/v1beta` 时，两个目录按同级版本路径构造，避免折叠成同一 URL。
 结果按大小写不敏感的模型 ID 合并，并保留 `supportedGenerationMethods`、输入/输出模态和全部已确认协议。
 连接当前配置的协议仍是文字模型的默认路由；只有原生目录独占的模型才自动切换为 GenerateContent。
 执行原生 Gemini 路由时同样会把以 `/v1` 结尾的 Base URL 切换到同级 `/v1beta`，避免发现地址与生成地址不一致。
@@ -109,10 +114,12 @@ AI 写作使用写作空间独立选择的文字模型路由，并复用既有�
 
 ## 审批模型
 
+下表“默认策略”按 `request` 权限描述。新安装实际默认是 `agent`：允许工作区写入/编辑、委派及通过启发式检查的命令自动执行；`full` 自动放行已分类工具并允许工作区外访问。已有选择保留。Chat/Plan 的模式限制总是先于自动批准策略。
+
 | 工具 | 默认策略 | 限制 |
 | --- | --- | --- |
 | `list_files` | 自动 | 忽略依赖、构建和 Git 目录，最多 400 项 |
-| `read_file` | 自动 | 自动识别 UTF-8/UTF-16/GBK/GB18030/Big5/Shift-JIS/Windows-1252；模型侧统一 LF；单文件最多 128 MiB |
+| `read_file` | 自动 | 同一编码边界，模型侧统一 LF；最多 128 MiB；可按行区间读取和编号，最多 2,000 行，字符截断明确续读位置 |
 | `search_files` | 自动 | 使用同一编码边界搜索；短旧编码可传 `encoding`；最多 100 条结果 |
 | `write_file` | 询问 | 新文件默认为无 BOM UTF-8/LF；已有文本文件保留检测到的编码、BOM 和主导换行风格；写入最多 1 MiB |
 | `edit_file` | 询问 | 精确 `old_string` → `new_string` 替换；默认只接受唯一匹配，保留编码、BOM 和主导换行风格；同目录原子替换 |
@@ -202,18 +209,20 @@ MCP 服务器的公开配置保存在 SQLite。敏感环境变量和 HTTP 请求
 
 ## 数据边界
 
-`0.12.0` 使用应用数据目录中的 SQLite 保存 Thread、Message、Provider 元数据与当前选择、MCP Server、Goal、Provider 健康状态、Instructions 与请求元数据，启用 WAL、外键和事务。旧版 WebView Provider localStorage 在首次成功写入 SQLite 后清除；API Key 不进入 SQLite。
-旧版 WebView 会话会在数据库为空时导入一次，随后清除旧数据。Schema v2 还保存每轮网关
-`request-id`，Schema v3 增加 MCP 配置，Schema v4 增加 Skill 启用偏好；用于关联 LevelUpAPI
-请求日志。Schema v5 增加 Goal 和隐藏内部消息，Schema v6 增加 Provider 连续失败、冷却期限、
-请求/接管计数与滚动延迟。Schema v7 增加 Instructions，Schema v8 增加附件元数据，Schema v9
-增加不含正文的 Provider 请求日志；当前 Schema v12 增加独立的写作项目表与更新时间索引。
-Skill 正文与图片二进制不进入数据库。持久化遵循以下原则：
+应用数据目录中的 SQLite 启用 WAL、外键和事务。Schema 19 保存 Thread/Message、Provider、MCP、Goal、健康与请求记录、Instructions、媒体、写作项目、Harness 账本及新增的 `composer_drafts`。旧 WebView 数据仅在首次成功导入后清除；API Key 不进入 SQLite。
+
+`database/conversations.rs` 提供 `(updated_at, id)` 稳定游标目录，默认 100 条摘要，不读取整段历史；`get_thread` 按需加载单个会话。搜索返回标题、工作区与可见用户/助手正文中的字面匹配；目前仍扫描正文，没有 FTS。前端禁止把 `historyLoaded: false` 摘要保存为空会话。
+
+`save_thread` 事务只更新变化字段，保留相同 ID/位置的消息；重排或截断时重建变化后缀。写入数量下降，但仍需比较完整会话，不能视为 O(1) 协议。目录、单会话加载和保存入口使用阻塞池隔离同步 SQLite 工作。
+
+`composer_drafts` 保存未提交文本和附件引用，与 Harness 已提交原文分离。前端按会话合并保存、串行刷新、保留失败数据；删除会话清除草稿。媒体、写作和星图首次使用后保持挂载，Markdown 单独加载，历史初始挂载最近 40 块。
+
+图片二进制留在托管目录。会话和 Harness 工具账本可能包含完整任务数据；不能把“Provider 请求日志不保存正文”外推为数据库无敏感信息。当前没有通用日志/工具结果保留期限设置。持久化遵循以下原则：
 
 - Thread 与 Message 分表并有稳定 ID；工具调用作为 Message 的结构化字段保存。
-- 工具输入和输出可单独设置保留期限。
+- 内容限制与工具结果截断在写入边界执行。
 - 删除任务必须删除关联工具结果。
-- 导出默认移除密钥、环境变量和已识别凭据。
+- 配置导出提供脱敏预览；会话导出不是通用秘密扫描器，分享前须检查内容。
 
 ## 配置迁移边界
 
@@ -276,12 +285,14 @@ API Key。连接尝试、配置错误、失败、取消和成功均留下独立�
 本地构建默认不注册 updater 插件并关闭 updater artifacts，因此不会因缺少发布公钥而崩溃，也不会
 把未签名包冒充正式更新。正式 tag workflow 设置编译期开关并使用
 release-only Tauri overlay 注入 HTTPS endpoint、updater 公钥和 `createUpdaterArtifacts`；私钥只从
-GitHub Secret 进入构建进程。当前 tag workflow 只构建 Windows，缺少 updater 公钥、endpoint、
+GitHub Secret 进入构建进程。当前 tag workflow 构建 Windows、macOS 和 Linux，缺少 updater 公钥、endpoint、
 加密私钥或密码时在打包前失败。运行时只通过 Tauri updater 验证签名、下载并被用户显式点击后
 重启，不实现任意 URL 下载或跳过签名校验。此签名不等同于 Windows Authenticode；安装包仍可能
 触发 SmartScreen。
 
 ## Skill 边界
+
+项目约定与 Skill 是独立层。Agent/Plan/Goal 每轮载入选定根目录的 `AGENTS.override.md`，为空或不存在时回退到 `AGENTS.md`，最大 32 KiB UTF-8。拒绝符号链接、非普通文件和不可读内容，不自动向上或向子目录扫描。来源、非安全用途的内容指纹与字节数记入事件，内容参与现有上下文预算；当前用户请求与主机权限优先。具体行为见 [Agent 工作流](AGENT_WORKFLOWS.md)。
 
 扫描器识别 LevelUpAgent、Codex、Claude、Agents 与当前工作区的兼容 Skill 目录，不跟随目录
 链接，最多返回 300 个 `SKILL.md`。发现阶段只解析受限 frontmatter；无效 Skill 不能启用。

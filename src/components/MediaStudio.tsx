@@ -9,6 +9,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import "./MediaStudio.css";
+import "./CreationModeSwitch.css";
 import {
   AudioLines,
   ArrowLeft,

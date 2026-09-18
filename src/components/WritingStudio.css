@@ -27,7 +27,7 @@
   backdrop-filter: blur(18px);
 }
 
-.writing-brand, .writing-brand > div, .writing-topbar-actions, .creation-mode-switch,
+.writing-brand, .writing-brand > div, .writing-topbar-actions,
 .writing-project-picker > div, .writing-nav-heading, .writing-nav-heading > span,
 .writing-ai-toolbar, .writing-ai-instruction, .document-heading > div,
 .entity-editor > header, .entity-editor > header > div, .entity-editor > header > div:first-child,
@@ -57,30 +57,6 @@
 .writing-brand strong { font-size: var(--font-control); }
 .writing-brand small { color: var(--muted); font-size: var(--font-compact); }
 .writing-navigator-toggle, .writing-navigator-backdrop { display: none; }
-
-.creation-mode-switch {
-  height: 36px;
-  gap: 3px;
-  padding: 3px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: #edf1f4;
-}
-.creation-mode-switch button {
-  height: 28px;
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--muted);
-  font-size: var(--font-caption);
-  cursor: pointer;
-}
-.creation-mode-switch button:hover { color: var(--text); }
-.creation-mode-switch button.active { background: #fff; color: #047857; box-shadow: 0 1px 4px rgba(15, 23, 42, .08); }
 
 .writing-topbar-actions { min-width: 0; justify-content: flex-end; gap: 5px; }
 .writing-topbar-actions > button, .writing-menu-wrap > button, .writing-model-wrap > button {
@@ -150,8 +126,8 @@
 .writing-project-picker button:hover:not(:disabled), .writing-nav-heading button:hover { color: #047857; border-color: rgba(5, 150, 105, .26); }
 .writing-project-picker button:disabled { opacity: .38; }
 
-.writing-section-tabs { height: 42px; display: grid; grid-template-columns: repeat(5, 1fr); gap: 2px; padding: 5px 7px; border-bottom: 1px solid var(--line); }
-.writing-section-tabs button { min-width: 0; display: flex; align-items: center; justify-content: center; gap: 2px; padding: 0 2px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: 9px; cursor: pointer; }
+.writing-section-tabs { height: 90px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: repeat(3, 1fr); gap: 2px; padding: 5px 7px; border-bottom: 1px solid var(--line); }
+.writing-section-tabs button { min-width: 0; display: flex; align-items: center; justify-content: flex-start; gap: 5px; padding: 0 5px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: 11px; cursor: pointer; }
 .writing-section-tabs button svg { width: 13px; flex: 0 0 13px; }
 .writing-section-tabs button:hover { color: var(--text); }
 .writing-section-tabs button.active { background: #e8f5ef; color: #047857; font-weight: 700; }
@@ -678,9 +654,6 @@
   .writing-layout.context-open, .writing-layout { grid-template-columns: 205px minmax(0, 1fr); }
   .writing-context-panel { position: absolute; top: 0; right: 0; bottom: 0; width: 270px; box-shadow: -12px 0 28px rgba(15, 23, 42, .12); }
   .writing-topbar { grid-template-columns: minmax(135px, 1fr) auto auto; gap: 8px; }
-  .creation-mode-switch { height: 34px; padding: 2px; }
-  .creation-mode-switch button { width: 32px; padding: 0; justify-content: center; font-size: 0; }
-  .creation-mode-switch button svg { flex: 0 0 auto; }
   .writing-topbar-actions { grid-column: auto; }
   .writing-ai-toolbar > button:nth-of-type(n+6) { display: none; }
   .story-main { grid-template-columns: minmax(0, 1fr) 270px; }
@@ -699,7 +672,8 @@
   .writing-brand > div { display: none; }
   .writing-brand small, .writing-topbar-actions > button:nth-child(-n+4), .writing-menu-wrap { display: none; }
   .writing-layout.context-open, .writing-layout { grid-template-columns: 165px minmax(0, 1fr); }
-  .writing-section-tabs button { font-size: 0; }
+  .writing-section-tabs { height: 42px; grid-template-columns: repeat(5, 1fr); grid-template-rows: 1fr; }
+  .writing-section-tabs button { font-size: 0; justify-content: center; }
   .writing-section-tabs button svg { width: 15px; }
   .writing-project-picker { padding-inline: 6px; }
   .writing-nav-content { padding-inline: 4px; }
@@ -763,8 +737,8 @@
   .story-node-list button.active, .story-node-list button:hover, .goal-nav-list > button.active, .goal-nav-list > button:hover,
   .reference-nav-list > button.active, .reference-nav-list > button:hover, .context-entities > label.included, .context-references > label.included,
   .story-inspector > nav button.active, .set-start.active { background: rgba(16, 185, 129, .13); color: #6ee7b7; }
-  .creation-mode-switch, .writing-ai-toolbar, .manuscript-status { background: #111827; }
-  .creation-mode-switch button.active, .writing-topbar-actions > button, .writing-menu-wrap > button, .writing-model-wrap > button,
+  .writing-ai-toolbar, .manuscript-status { background: #111827; }
+  .writing-topbar-actions > button, .writing-menu-wrap > button, .writing-model-wrap > button,
   .writing-project-picker > select, .writing-project-picker select, .writing-project-picker input, .writing-project-picker button,
   .writing-nav-heading button, .writing-nav-search, .entity-nav > select, .writing-nav-add select,
   .document-heading select, .writing-ai-instruction, .entity-form input, .entity-form select,
@@ -777,7 +751,7 @@
   .goal-brief-card input, .goal-brief-card select, .goal-brief-card textarea, .goal-card-heading > div button,
   .goal-step-copy details, .goal-step-copy footer button, .goal-step-index,
   .writing-popover, .snapshot-list article button, .playtest-choices button, .writing-toast { background: #111827; color: #e2e8f0; border-color: rgba(226, 232, 240, .12); }
-  .writing-section-tabs button.active, .creation-mode-switch button.active { box-shadow: none; }
+  .writing-section-tabs button.active { box-shadow: none; }
   .writing-ai-toolbar > span, .writing-topbar-actions > button:hover, .writing-menu-wrap > button:hover,
   .entity-editor > header .entity-ai-button, .writing-context-panel > header > span { color: #6ee7b7; }
   .writing-model-menu > button:hover, .writing-model-menu > button.active { background: rgba(16, 185, 129, .13); color: #6ee7b7; }

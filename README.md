@@ -1,166 +1,63 @@
-<div align="center">
-  <p><strong>简体中文</strong> · <a href="README_EN.md">English</a></p>
-  <a href="https://levelup.mom/"><img src="public/logo.png" width="96" height="96" alt="LevelUpAgent Logo" /></a>
-  <h1>LevelUpAgent</h1>
-  <p><strong>一个工作区，连接每一种模型，也把灵感变成作品。</strong></p>
-  <p>本地优先的桌面 AI 工作台：用 Agent 处理复杂任务，用创作空间生成媒体，用星图蓝图把流程保存下来反复复用。</p>
-  <p>
-    <a href="#快速开始">快速开始</a> ·
-    <a href="#先看它在做什么">产品一览</a> ·
-    <a href="#安全与隐私">安全与隐私</a> ·
-    <a href="#文档">文档</a> ·
-    <a href="https://levelup.mom/">LevelUpAPI</a>
-  </p>
-  <p>
-    <img alt="Version" src="https://img.shields.io/badge/version-1.0.56-ff5a4f?style=flat-square" />
-    <img alt="Status" src="https://img.shields.io/badge/status-可用预览-35a36f?style=flat-square" />
-    <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-232f3e?style=flat-square" />
-    <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-LGPL--3.0--only-2f80ed?style=flat-square" /></a>
-  </p>
-</div>
+<img src="public/logo.png" width="64" height="64" alt="LevelUpAgent" />
 
----
+# LevelUpAgent
 
-## 先看它在做什么
+本地优先的桌面 Agent。连接自己的模型，在同一个工作区完成开发、研究与创作。
 
-### Agent 工作台
+**简体中文** · [English](README_EN.md) · [文档](docs/README.md) · [LevelUpAPI](https://levelup.mom/)
 
-把项目文件、参考资料、命令、MCP、Skills、本地变更审查、可选的 Git 审查和长任务放在一个可追踪的会话里。每个有副作用的动作都经过权限和审批边界。
+## 工作台
 
-### 创作空间
+| 入口 | 能力 |
+| --- | --- |
+| Agent | 流式会话、项目文件、命令、审批、Goal、Skills、MCP、浏览器验证与变更审阅 |
+| 会话 | 全历史检索、快捷切换、独立草稿、运行中追加、分支、导入与导出 |
+| 创作 | 图片、视频、语音、参考素材、蒙版编辑与本地历史 |
+| 写作 | 文稿、设定集、参考库、目标执行、快照与剧情试玩 |
+| 星图 | 类型化节点、并行分支、画板与可复用蓝图 |
 
-图片、视频、语音和写作拥有独立的参数与历史。支持参考图、多提示词并行、扩图、局部重绘、透明 PNG 蒙版和结果复用。
+![星图工作台](docs/images/constellation-workflow.png)
 
-### 星图蓝图
+还包含主题与声明式布局、摇光残影桌面陪伴、连接迁移和 CLI 配置同步。
+完整范围、限制及验证记录见 [功能总览](docs/FEATURES.md)。
 
-把四项标准能力（写作、图像、视频、语音）连接成类型安全的 DAG。框选节点即可保存为自己的蓝图，插入后仍能自由拆解、重排和重连。
+## 开始使用
 
-![星图蓝图工作流：节点、端口与蓝图库](docs/images/constellation-workflow.png)
+从仓库 **Releases** 安装对应平台的版本，添加模型连接，填写 Base URL、API Key 和模型，然后选择项目。
 
-![创作空间：图片参数、参考图与本地历史](docs/images/creative-studio.png)
+支持 OpenAI Responses、Chat Completions、Anthropic Messages、Gemini GenerateContent 和 OpenCode Go 自动路由。多个连接可配置故障转移；模型发现与思考档位以连接实际返回和模型能力为准。
 
-更多设计取舍和 Image Studio 对照见 [创作空间能力审计](docs/CREATIVE_STUDIO_AUDIT.md)，MiniMax / Seedance 的模型、素材上传和接口说明见 [媒体平台接入](docs/MEDIA_PLATFORMS.md)，星图协议和交互细节见 [星图文档](docs/CONSTELLATION.md)。
+聊天工作台按 `Ctrl/Cmd + K` 搜索会话和命令。Agent 执行任务，Plan 只做只读规划，Chat 不调用工具，Goal 持续推进并审计完成结果。[使用与恢复](docs/AGENT_WORKFLOWS.md)
 
-## 快速开始
+## 权限与数据
 
-### 安装
+API Key 保存在系统凭据库，会话和草稿保存在本机。配置的模型服务会收到发送的上下文；本地存储不代表离线推理。
 
-从 GitHub Releases 下载对应平台的安装包。`v*` tag 会由 GitHub Actions 原生构建 Windows、macOS
-和 Linux 资产；Windows updater 产物通过 Tauri 签名。macOS 应用在资源写入完成后执行
-ad-hoc 签名，并在 DMG 内及模拟安装后复验。当前未配置 Apple 公证和 Windows Authenticode，
-macOS 首次打开或 Windows SmartScreen 可能提示额外确认。
+新安装默认使用 `agent` 权限：工作区文件编辑和部分命令可以自动执行。`request` 对副作用逐项询问；`full` 允许自动执行及工作区外访问。已有权限选择保留。Shell 与 stdio MCP 使用当前系统账户权限。[安全边界](docs/SECURITY_AUDIT.md)
 
-| 平台 | 包格式 | 状态 |
-| --- | --- | --- |
-| Windows x64 | NSIS `.exe` / MSI | 已构建、已冒烟验证 |
-| Linux x64 | AppImage / DEB / RPM | GitHub Actions 原生构建 |
-| macOS Intel / Apple Silicon | DMG / App Bundle | ad-hoc 签名并校验；未公证 |
+## 开发
 
-### 连接模型
+需要 Node.js 22.18+、pnpm 11+、稳定版 Rust 及 [Tauri 平台依赖](https://v2.tauri.app/start/prerequisites/)。
 
-1. 打开左下角 **新增模型连接**。
-2. 为每个连接配置 Base URL、API Key、默认文字模型和生成协议；可信的本机/局域网服务可以显式允许无 Key。
-3. 点击 **检测** 或直接输入模型 ID。标准 `/v1/models` 与 Gemini `/v1beta/models` 会独立发现。
-4. 可添加多个连接并设置优先级；请求失败时会按健康记录和冷却策略自动故障转移。
-5. 主输入框左侧的思考强度会随当前模型变化，只显示该模型已知支持的档位；`Auto` 不覆写服务端默认值，未公布可调档位的模型保持 `Auto`。
-
-LevelUpAgent 支持 LevelUpAPI，以及 OpenAI Responses、Chat Completions、Anthropic Messages 和 Gemini GenerateContent 兼容服务。OpenCode Go 连接提供自动技术接口路由：Grok 4.5、Luna 与 Muse Spark 使用 Responses，GLM、Kimi、DeepSeek、MiMo 与 HY 使用 Chat Completions，MiniMax 与 Qwen3 使用 Messages；模型目录仍从 `/v1/models` 统一发现。API Key 只保存在系统凭据库，不写入网页存储。
-
-### 第一次创作
-
-1. 点击 **打开创作空间**，选择图片、视频、语音或写作。
-2. 输入提示词并选择比例、质量、格式和参考图。
-3. 需要组合流程时切换到 **星图**：从节点库添加能力，点击或拖动端口连线，运行后在作品预览节点查看结果。
-4. 框选一组节点，点击 **存为蓝图**；以后从蓝图库插入即可复用。
-
-## 能力地图
-
-| 入口 | 适合的问题 | 关键能力 |
-| --- | --- | --- |
-| Agent 工作台 | “帮我完成一个需要文件、工具和判断的任务” | 项目上下文、审批、MCP、Skills、Goal、本轮变更审查、可选 Git 审查 |
-| 创作空间 | “我想快速生成、修改并管理媒体” | 图片/视频/语音、参考图、并行提示词、历史与预览 |
-| 星图蓝图 | “我想把步骤连接起来，以后重复使用” | 类型化端口、DAG 执行、框选、批移、自动整理、蓝图导入导出 |
-| 写作工作台 | “我想持续写完一本书、剧本或叙事项目” | 设定集、参考库、目标模式、版本快照、Yarn 导出 |
-
-### 星图内置节点
-
-- **提示词**：一次编写，连接到任意创作能力。
-- **灵感写作**：续写、改写、脚本和提示词增强。
-- **图像生成**：文生图、图生图、扩图和蒙版重绘。
-- **视频生成 / 语音生成**：从文本或图像继续扩展作品。
-- **画板与蒙版**：标注图片、绘制局部重绘区域并输出真实 PNG mask。
-- **作品预览 / 便签**：集中查看结果，为流程留下说明。
-
-常用快捷键：`Ctrl/Cmd + K` 搜索并添加节点，`Ctrl/Cmd + Enter` 运行，`Ctrl/Cmd + Z` 撤销，`Ctrl/Cmd + D` 复制选中节点，`F` 适应画布，`Esc` 停止运行。
-
-## 安全与隐私
-
-- API Key 使用 Windows Credential Manager、macOS Keychain 或 Linux Secret Service 保存。
-- 写入、删除、命令、MCP 调用和补丁应用不会静默执行，均需要明确批准。
-- 文件工具限制在工作区内，拒绝父目录穿越、危险符号链接和路径前缀逃逸。
-- 请求日志不保存消息正文、附件、工具参数或 API Key。
-- 只有你配置并选择的 Provider 会收到准备发送的消息和附件。
-
-Shell 命令和本地 stdio MCP 进程仍拥有当前操作系统用户权限；LevelUpAgent 不把它们描述成系统级沙箱。完整边界见 [安全审计](docs/SECURITY_AUDIT.md)。
-
-## 从源码运行
-
-需要 Node.js 22+、pnpm 11+、Rust 1.85+ 和平台对应的 [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)。
-
-```bash
+```sh
 pnpm install
 pnpm tauri dev
 ```
 
-只预览前端可运行 `pnpm dev`；Web 预览无法访问系统凭据库、目录选择器和本地工具。
+`pnpm dev` 只预览界面，不具备桌面凭据、文件工具或真实 Agent 执行能力。
 
-### 中文代码与旧编码文件
-
-工作区 `read_file`、`search_files` 会自动处理 UTF-8、UTF-16、GBK（GB2312）、GB18030、Big5、Shift-JIS、Windows-1252
-等常见文本编码；编辑已有文件时，优先让 Agent 使用 `edit_file` 的精确替换。主机将保留原文件的
-编码、BOM 和主导换行风格，并在目标编码无法表示新字符或文件疑似二进制时拒绝写入。新文件默认
-使用 UTF-8；无 BOM 的旧编码（包括混合中日文代码页和缺少 NUL 特征的 UTF-16）无法唯一判断时，可给工具传
-`encoding` 明确指定；已知采用旧代码页的工程中，纯 ASCII 文件也应在首次加入中文时显式指定。ASCII 在这些
-编码中的原始字节相同，因此该提示不会重解释已有字符；含非 ASCII 字符且有效的 UTF-8 文件仍不能被提示改判。这个边界借鉴了
-[Codex apply-patch](https://github.com/openai/codex/tree/main/codex-rs/apply-patch)、
-[Claude Text Editor](https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/text-editor-tool)
-、Mozilla [`encoding_rs`](https://github.com/hsivonen/encoding_rs) 以及
-[`chardetng`](https://github.com/hsivonen/chardetng) 的公开设计；实现与许可证说明见
-[参考项目研究](docs/REFERENCE_RESEARCH.md) 和 [`THIRD_PARTY_NOTICES.md`](src-tauri/THIRD_PARTY_NOTICES.md)。
-在 `agent` 自动权限下，明显会通过 shell 重定向（包括嵌套 shell）、`Set-Content`/`sc`/`ac`/`tee`、`git apply` 或格式化器改写文件的命令会先要求批准；
-显式批准的命令仍由用户自行承担其工具默认编码。
-
-### 验证与构建
-
-```bash
+```sh
 pnpm check
 pnpm build
-cargo fmt --check
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 cargo test --manifest-path src-tauri/Cargo.toml
 pnpm tauri build
 ```
 
-macOS 安装包使用 `pnpm build:macos`。脚本会在资源写入完成后签名并校验 App 和 DMG；没有
-Developer ID 证书时使用 ad-hoc 签名，面向普通用户免确认分发仍需配置 Apple 公证。
+[架构](docs/ARCHITECTURE.md) · [性能](docs/PERFORMANCE.md) · [Codex 工作流对照](docs/REPLACEMENT_AUDIT.md) · [路线图](docs/ROADMAP.md) · [发布](docs/RELEASE.md)
 
-## 文档
+当前发布基线为 `1.0.56`；本轮改进尚未发布。Windows 未配置 Authenticode，macOS 使用 ad-hoc 签名、尚未公证。跨平台发布与实体机验证边界见发布文档。
 
-- [星图协议与交互](docs/CONSTELLATION.md)
-- [创作空间能力审计](docs/CREATIVE_STUDIO_AUDIT.md)
-- [架构与安全边界](docs/ARCHITECTURE.md)
-- [Skills、MCP、联网与浏览器工具](docs/SKILLS_AND_TOOLS.md)
-- [安全审计](docs/SECURITY_AUDIT.md)
-- [LevelUpAPI 兼容性证据](docs/LEVELUPAPI_COMPATIBILITY.md)
-- [功能路线图](docs/ROADMAP.md)
-- [发布与自动更新](docs/RELEASE.md)
-- [参考项目研究](docs/REFERENCE_RESEARCH.md)
+## 许可
 
-## 当前状态
-
-`1.0.56` 是当前发布里程碑。视频任务独立轮询，并对下载去重；保留已生成的视频输出，显示下载进度，并支持恢复下载。模型发现优先读取标准目录，仅在配置或返回模型表明支持 Gemini 时探测原生 Gemini 目录，避免向其他平台密钥组发送无效请求。模型连接显示服务返回的全部模型，并在底部提供“打开日志目录”。消息中的本地文件路径与选择、拖入附件共用导入流程，支持任意扩展名、无扩展名和空文件；常见图片、文本及 PDF/Office 自动读取，其他格式保留原文件供本地工具处理。完全访问模式允许文件、命令和浏览器访问工作区外路径，受限模式仍保留范围校验。后台进程结束后保留有界的输出与状态记录，失效进程 ID 不再中断整个任务；上游流读取错误增加重连识别和清晰提示。Windows 安装包仍未配置 Authenticode，macOS 安装包仍未公证。提交 Issue 时请附上复现步骤、应用日志和平台信息。
-
-## 许可证
-
-LevelUpAgent 以 [GNU Lesser General Public License v3.0 only](LICENSE) 发布；引用的 GPL v3 正文收录于 [LICENSE.GPL](LICENSE.GPL)。
-
-Copyright © 2026 LevelUpAgent contributors.
+[LGPL-3.0-only](LICENSE)。第三方归属见 [THIRD_PARTY_NOTICES](src-tauri/THIRD_PARTY_NOTICES.md)。

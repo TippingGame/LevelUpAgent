@@ -1,30 +1,46 @@
-# 替代能力审计（0.12.0）
+# Codex 核心工作流对照
 
-本审计区分“已经由 LevelUpAgent 原生承担”和“仍需保留其他工具”。结论以当前代码、自动化测试
-和可构建安装包为准，不以路线图意图代替交付。
+2026-09-18，针对本地日常 Agent 工作，不涵盖模型智能、云端产品、账户生态或 Codex 完整功能。
+对照依据为 [Codex 官方功能](https://developers.openai.com/codex/app/features)、[工作树](https://developers.openai.com/codex/app/worktrees)、[审阅](https://developers.openai.com/codex/app/review)、[持续任务](https://developers.openai.com/codex/long-running-work)、[自动化](https://developers.openai.com/codex/automations)，以及用户提供安装包的只读结构研究。
 
-| 能力 | 0.12.0 状态 | 证据/边界 |
-| --- | --- | --- |
-| 多 Provider 与四协议 | 已完成 | Responses、Chat、Messages、Gemini 均支持工具调用和 SSE |
-| LevelUpAPI 日常使用 | 已完成 | 模型列表、四线协议、`/health`、`/v1/usage`、request-id |
-| CCSwitch 风格余额读取 | 原生替代 | 首页钱包/订阅/Key 额度兼容胶囊，自动/手动刷新，密钥不进入前端 |
-| Provider 健康与接管 | 已完成 | SQLite 连接元数据/当前选择、优先级、指数冷却、持久统计、流式输出后禁止切换 |
-| cc-switch 配置迁移 | 核心完成 | 可读 cc-switch/Codex/Claude/Gemini/OpenCode |
-| 外部 CLI 配置写回 | 核心完成 | Codex/Claude/Gemini/OpenCode 有脱敏预览、备份、原子替换、回滚 |
-| MCP 与 Skill | 已完成 | stdio/HTTP MCP、凭据隔离；多目录 Skill 发现与按需读取 |
-| Agent 执行与长期 Goal | 已完成 | 工具审批、持久 Goal、两阶段完成/阻塞审计；长历史按上下文上限压缩且保持工具调用配对 |
-| CodexPlusPlus 会话增强 | 原生替代 | LevelUpAgent 自己持有会话，不依赖 CDP 注入第三方 UI |
-| 图片输入 | 已完成 | 托管存储、四协议编码、格式/大小/数量边界 |
-| 文本/代码上下文附件 | 已完成 | 托管文件、内容与编码探测、二进制/大小边界、四协议 user context |
-| PDF/Office 文档提取 | 已完成 | 本地解析 PDF、DOCX、XLSX、PPTX；OOXML 防展开炸弹；确定性摘录 |
-| Prompt/Instructions 控制面 | 已完成 | 内部注入及 Codex/Claude/Gemini/OpenCode 安全同步 |
-| 子 Agent / 隔离工作树 | 已完成 | 受限子模型循环、detached worktree、完整补丁、二次批准与冲突拒绝 |
-| 本地请求日志浏览器 | 已完成 | 模型筛选、成功率、延迟、Token、接管、request-id 与错误 |
-| Git 变更审查与回滚 | 已完成 | 逐文件 diff、两阶段确认、快照复核、tracked restore 与 untracked delete |
-| 本地安全边界 | 已审计 | 路径/symlink、凭据、MCP TLS、配置导出、附件、子 Agent 与 updater |
-| 签名与自动更新 | 代码完成/凭据待验收 | Windows updater 运行时、Tauri 签名产物与 CI 门禁已接入；待实体机验收 |
-| 中英文完整本地化 | 已完成 | 系统语言检测、持久切换、全部静态 UI/ARIA/状态文案与 locale 时间 |
-| Windows/Linux 可运行包 | 已完成 | Windows MSI/NSIS；Linux DEB/RPM/AppImage，含实际启动和 DEB 安装验收 |
+## 80% 的口径
 
-因此，`0.12.0` 已可在日常多模型开发工作流中停止依赖 cc-switch/CodexPlusPlus。全量卸载的最终
-1.0 验收仍需仓库所有者提供 updater URL 与签名密钥，并在 Windows 实体机验证安装、升级和回滚。
+以下 20 项是本项目选择的工作流清单，每项等权。16 项有可使用的基础实现，即 **16/20 的功能覆盖目标**；4 项明确未实现。
+这不是独立产品评测，不能解释成体验、模型质量、吞吐或全产品达到 Codex 的 80%。每项的限制仍是验收结果的一部分；真实 Provider 和跨平台未验证范围单列。
+
+| # | 工作流与最低验收 | 当前覆盖 | 边界与证据 |
+| --- | --- | --- | --- |
+| 1 | 按项目组织会话，能新建/选择/置顶/删除 | 有 | 项目分组、临时目录；`App.tsx` 与数据库 |
+| 2 | 搜索旧任务并快速跳转，不限首屏记录 | 有 | 正文检索、100 条游标页、命令面板；205 会话测试和浏览器交互 |
+| 3 | 切换/重启后保留任务草稿与附件引用 | 有 | 独立持久草稿、失败重试、异步隔离；单元测试和 UI 刷新 |
+| 4 | 流式回复、停止、模型配置与错误反馈 | 有 | 四协议、本地 HTTP fixtures、重连/故障转移；未评测真实模型质量 |
+| 5 | 规划、问答和执行模式具有明确权限 | 有 | 主机模式优先、新安装 agent；跨权限回归 |
+| 6 | 读取、搜索和精确编辑项目文件 | 有 | 编码保留、原子替换、行区间；Rust 临时目录测试 |
+| 7 | 执行命令并保留开发服务及输出 | 有 | 命令与受管进程；不是交互式终端或系统安全容器 |
+| 8 | 用网页与隔离浏览器取证/验证本地应用 | 有 | 公共 web、Chromium/CDP、快照/操作/截图/断言；原生浏览器测试 |
+| 9 | 读取项目约定并使用可复用 Skills | 有 | 根 AGENTS 与 Skills 注册表；未实现嵌套 AGENTS 继承 |
+| 10 | 连接外部工具及保护其密钥 | 有 | stdio/HTTP MCP、凭据库、动态目录；协议和进程测试 |
+| 11 | 长任务暂停、恢复与完成核验 | 有 | Goal 与两阶段审计；模型是否正确判断完成取决于任务和模型 |
+| 12 | 运行时追加请求或调整方向 | 有 | follow-up/next-turn/steer；事务队列与中断回归 |
+| 13 | 重启保留审批，避免重复未知副作用 | 有 | awaiting approval 与 unknown 对账；未注入队列仍会取消 |
+| 14 | 长上下文有界且工具结果完整配对 | 有 | Token 估算、checkpoint、可见截断；非精确模型 tokenizer |
+| 15 | 查看任务文件变更和可核验回滚 | 有 | 非 Git 快照、Git diff/rollback；无完整 commit/PR 界面 |
+| 16 | 从会话分支，委派隔离子任务并审阅补丁 | 有 | 新消息 ID、session lineage、子 Agent 临时 worktree；受限工具、补丁内存保留 |
+| 17 | 给主任务创建/管理长期 Git worktree、迁入迁出 | 未实现 | 子 Agent 的临时 worktree 不能代替 |
+| 18 | 完整 PTY：交互 stdin、终端尺寸和持续会话 | 未实现 | 后台进程工具只提供命令与有界输出 |
+| 19 | 持久定时任务、唤醒、通知和运行收件箱 | 未实现 | Goal 依赖应用运行，不是 scheduler |
+| 20 | SSH、云任务和本地/远端工作交接 | 未实现 | 当前为本机工作区 |
+
+## 本轮优先改造
+
+从安装包结构和官方工作流中借鉴模块分工、持久化状态、按需加载、快捷导航及审阅流程。
+落实为分页会话目录、按需正文、增量保存、独立草稿、命令面板、渐进历史、延迟加载工作区、行区间文件工具、项目指令以及模式权限修复。
+没有复制 Codex 打包代码、视觉资产、内部提示词或服务实现。
+
+原先 cc-switch/CodexPlusPlus 的配置迁移、连接管理与本地会话功能仍由 LevelUpAgent 原生实现。CLI 配置写回有预览、备份和确认；无需注入第三方 UI。
+
+## 剩余验收
+
+优先补齐重启队列恢复、嵌套项目指令、主任务 worktree，再考虑 PTY、scheduler 和远程工作。
+不同 Provider 的真实成功率、端到端延迟、长任务恢复质量、正式升级及 macOS/Linux 实体机体验尚不能用本轮 Windows 自动化结果代替。
+性能数据与方法见 [性能记录](PERFORMANCE.md)，完整执行证据见 [审阅记录](AGENT_REVIEW_2026-09.md)。

@@ -5,13 +5,15 @@
 | 项目 | 内容 |
 | --- | --- |
 | 状态 | Harness runtime、持久化恢复和事件驱动桌面链路已落地 |
-| 更新日期 | 2026-07-26 |
-| 适用分支 | `feature/harness` |
-| 当前应用版本 | `1.0.14` |
+| 更新日期 | 2026-09-18；原设计与验收记录为 2026-07-26 |
+| 适用范围 | 当前工作树；历史设计中的未来条目不代表实现 |
+| 当前应用版本 | `1.0.56` + 未发布改进，数据库 schema 19 |
 | 目标版本 | 1.x 后续迭代 |
 | 关联基线 | [`PROMPT_PIPELINE_BASELINE.md`](./PROMPT_PIPELINE_BASELINE.md) |
 
-本文定义 LevelUpAgent 下一代 agent harness 的权威设计。Harness 统一管理草稿预检、任务编译、上下文选择、Provider 调用、工具策略、审批、恢复、会话持久化和运行观测。
+本文保留 Harness 的设计过程与实现映射。当前行为以 [架构](ARCHITECTURE.md)、[Agent 工作流](AGENT_WORKFLOWS.md)和代码为准；下文的 hooks、嵌套项目指令、模型精确预算、语义 memory 以及更完整 session tree 仍含设计目标。
+
+本轮新增独立 `composer_drafts`、增量会话保存、分页目录、根目录项目指令；修复命令自动批准绕过模式限制。默认权限为 `agent`，不是历史方案中的 `request`。主工具循环仍串行；只有媒体和星图的独立任务具备现成并发。队列重启与分支边界见当前工作流文档。
 
 本文讨论运行时契约，不讨论用户提示词的文案润色。实现必须保留用户原文，并让派生内容、权限决策、Provider 请求和工具副作用可追溯、可测试、可恢复。
 
@@ -19,12 +21,12 @@
 
 ## 1. 结论摘要
 
-LevelUpAgent 当前已经具备四种 Provider 协议、工具循环、Skills、MCP、Goal、附件和 Provider failover，但 agent orchestration 分布在 React 递归流程与 Rust command 之间。下一代 harness 采用以下确定方案：
+原设计面向从 React 递归与 Rust command 混合运行迁移到单一 Rust Harness；该核心迁移已经完成。设计原则如下，尚未实现部分以文首说明为准：
 
 1. **Rust 拥有唯一运行循环**：React 只提交意图、展示事件和收集审批，不再决定最终权限或递归执行 agent turn。
 2. **发送前先预检**：Provider、模型、凭据、工作区、权限和能力不满足时，不创建 Provider 请求；草稿原文保留并可继续发送。
 3. **快照不可变且可版本化**：一个 operation 可以在 save point 产生多个 `TurnSnapshot`，每次 Provider 调用固定引用其中一个版本。
-4. **权限在 Rust 最终裁决**：沿用现有 `request / agent / full` 名称，缺省值从 `full` 改为 `request`；任何级别都不能绕过路径、凭据和 schema 安全边界。
+4. **权限在 Rust 最终裁决**：沿用 `request / agent / full`，当前新安装缺省为 `agent`；Full 可扩大文件范围，但不绕过模式、凭据和 schema 边界。
 5. **上下文按 Token 预算治理**：system、instructions、tools、messages、attachments 和 memory 全部计入；当前用户输入不能被静默截断。
 6. **副作用执行采用持久化账本**：审批、调用参数 hash、执行状态和结果先后可复盘；崩溃后结果不明的副作用工具不得自动重放。
 7. **Memory 最后实现且默认关闭**：先完成安全、恢复、进程控制和上下文边界，再引入长期记忆或第二次 LLM 编译。
@@ -72,7 +74,7 @@ flowchart LR
 当前实现事实：
 
 - [`src/App.tsx`](../src/App.tsx) 中的桌面 `send()` 先调用 Harness 预检和启动，再由 `harnessRun()` 订阅 Rust 事件；旧的 React 递归 loop 仅作为无 Rust runtime 的浏览器预览实现。
-- [`src/lib/storage.ts`](../src/lib/storage.ts) 的新用户权限缺省回退为 `request`；Rust `execute_tool` 会再次按 mode/permission 做最终裁决。
+- [`src/lib/storage.ts`](../src/lib/storage.ts) 新用户权限回退为 `agent`；Rust 对缺失/非法 IPC 权限仍保守回退，`execute_tool` 按 mode/permission 做最终裁决。
 - [`src-tauri/src/agent.rs`](../src-tauri/src/agent.rs) 在协议适配前调用共享 Context Manager 按 Token 预算筛选原子消息单元，再使用 240,000 字符、160 条消息及单字段上限做 UTF-8 安全裁剪，并保护 tool call/result 配对。
 - [`src-tauri/src/lib.rs`](../src-tauri/src/lib.rs) 负责请求入口、failover、工具 command 和凭据读取；`execute_tool` 已接收 mode、permission、operation/call ID，并在 Rust 侧执行最终策略裁决；协议适配实现在 `agent.rs`。
 - [`src-tauri/src/database.rs`](../src-tauri/src/database.rs) 继续持久化 thread、message、Goal、Provider 和工具相关配置；Harness schema 同时保存 draft、operation、snapshot、event、context manifest、provider attempt、approval、queue、session node 和 tool execution 账本。
@@ -845,7 +847,7 @@ pnpm verify:levelupapi
 | Rust 工具策略 | `src-tauri/src/harness/policy.rs` | 风险分类与 `request / agent / full` 决策矩阵 |
 | Runtime 状态机 | `src-tauri/src/harness/runtime.rs` | save point、审批、取消、崩溃和恢复边界 |
 | 中断信号 | `src-tauri/src/harness/interrupt.rs` | epoch 防止 stop/resume 竞态 |
-| Draft/operation/event 持久化 | `src-tauri/src/harness/persistence.rs`、`database.rs` | schema version 13，`harness_start` 写入 draft、compiling operation、初始 snapshot 和首个 event；终态由 `harness_update_state` 写回 |
+| Draft/operation/event 持久化 | `src-tauri/src/harness/persistence.rs`、`database.rs` | 原 Harness 表由 schema 13 引入，当前数据库为 schema 19；`harness_start` 写入 draft、compiling operation、初始 snapshot 和首个 event；终态由 `harness_update_state` 写回 |
 | Rust agent loop 与事件驱动 UI | `src-tauri/src/lib.rs`、`src/App.tsx`、`src/lib/bridge.ts` | `harness_run` 负责 provider/tool/approval loop；UI 通过 `Channel<HarnessRuntimeEvent>` 投影 assistant、tool、approval 和终态 |
 | Approval token 与 AwaitingApproval 恢复 | `database.rs`、`lib.rs`、`App.tsx` | token hash、15 分钟有效期、operation 绑定和 consumed_at；重启保留 awaiting approval |
 | Provider attempts/context manifests | `database.rs`、`harness/persistence.rs` | 每轮 provider 调用固定关联 snapshot/context manifest，并记录 token、request ID 和错误分类 |

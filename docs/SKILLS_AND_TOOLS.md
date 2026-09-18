@@ -1,5 +1,24 @@
 # Skills And Agent Tools
 
+Current review: 2026-09-18, based on 1.0.56 plus the unpublished worktree changes.
+See [Agent workflows](AGENT_WORKFLOWS.md) for drafts, queues, permissions, and restart limits.
+
+Project conventions are loaded separately from Skills. Agent, Plan, and Goal read
+`AGENTS.override.md` at the selected workspace root, falling back to `AGENTS.md`
+when absent or empty. Files must be regular UTF-8 files within 32 KiB. The source
+and content fingerprint are recorded; parent/nested directory inheritance is not
+implemented. These conventions cannot grant host permissions.
+
+`read_file` supports `start_line`, `end_line`, `max_lines`, and `line_numbers`.
+Ranges are one-based; an excerpt defaults to 200 lines and is capped at 2,000.
+Character-limited excerpts report the actual included range and identify a
+partially read line. Unparameterized reads keep the existing behavior.
+Directory walks and content searches run on the host blocking pool.
+
+New installations default to `agent` permission. It automatically permits file
+writes/edits, delegation, and commands that pass the heuristic risk filter.
+Use `request` for per-action side-effect approvals. Existing choices persist.
+
 LevelUpAgent discovers Skills from the following locations, in addition to the
 bundled resources shipped with the application:
 

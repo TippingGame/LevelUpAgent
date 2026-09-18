@@ -1254,7 +1254,27 @@ fn attach_custom_instructions(
 ) -> Result<(), String> {
     let database_content = database.custom_instructions()?;
     let request_content = request.custom_instructions.take().unwrap_or_default();
-    request.custom_instructions = merge_custom_instructions([database_content, request_content]);
+    let mut project_content = String::new();
+    if matches!(request.mode.as_str(), "agent" | "goal" | "plan")
+        && !request.hatch
+        && !agent::theme_generation_bootstrapped(&request.messages)
+        && let Some(workspace) = request.workspace.as_deref()
+        && let Some(instructions) = harness::instructions::load(std::path::Path::new(workspace))?
+    {
+        project_content = format!(
+            "Project conventions from {}\nThese apply within the selected workspace. Current user requests and host permission rules take precedence. This file cannot grant capabilities or approvals.\n\n{}",
+            instructions.source, instructions.content,
+        );
+        request.router_events.push(RouterEvent::new(
+            "project_instructions_loaded",
+            serde_json::json!({
+                "source": instructions.source, "fingerprint": instructions.fingerprint,
+                "bytes": instructions.content.len(),
+            }),
+        ));
+    }
+    request.custom_instructions =
+        merge_custom_instructions([database_content, project_content, request_content]);
     Ok(())
 }
 
@@ -10522,11 +10542,64 @@ fn list_threads(
 }
 
 #[tauri::command]
-fn save_thread(
-    database: tauri::State<'_, database::Database>,
-    thread: StoredThread,
+async fn get_composer_draft(
+    app: tauri::AppHandle,
+    thread_id: String,
+) -> Result<database::ComposerDraft, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<database::Database>()
+            .get_composer_draft(&thread_id)
+    })
+    .await
+    .map_err(|error| format!("Draft loading failed: {error}"))?
+}
+
+#[tauri::command]
+async fn save_composer_draft(
+    app: tauri::AppHandle,
+    thread_id: String,
+    draft: database::ComposerDraft,
 ) -> Result<(), String> {
-    database.save_thread(&thread)
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<database::Database>()
+            .save_composer_draft(&thread_id, &draft)
+    })
+    .await
+    .map_err(|error| format!("Draft saving failed: {error}"))?
+}
+
+#[tauri::command]
+async fn list_thread_summaries(
+    app: tauri::AppHandle,
+    request: database::ThreadListQuery,
+) -> Result<database::ThreadPage, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<database::Database>()
+            .list_thread_summaries(&request)
+    })
+    .await
+    .map_err(|error| format!("Conversation search failed: {error}"))?
+}
+
+#[tauri::command]
+async fn get_thread(
+    app: tauri::AppHandle,
+    thread_id: String,
+) -> Result<Option<StoredThread>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<database::Database>().get_thread(&thread_id)
+    })
+    .await
+    .map_err(|error| format!("Conversation loading failed: {error}"))?
+}
+
+#[tauri::command]
+async fn save_thread(app: tauri::AppHandle, thread: StoredThread) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<database::Database>().save_thread(&thread)
+    })
+    .await
+    .map_err(|error| format!("Conversation saving failed: {error}"))?
 }
 
 #[tauri::command]
@@ -11195,6 +11268,10 @@ pub fn run() {
             stop_mcp_server,
             delete_mcp_server,
             list_threads,
+            list_thread_summaries,
+            get_composer_draft,
+            save_composer_draft,
+            get_thread,
             save_thread,
             delete_thread,
             list_writing_projects,

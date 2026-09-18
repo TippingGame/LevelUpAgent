@@ -794,9 +794,21 @@ export interface AgentThread {
   kind?: "standard" | "pet";
   petId?: string;
   messages: AgentMessage[];
+  /** False only for a catalog entry; never persist or execute unloaded history. */
+  historyLoaded?: boolean;
   updatedAt: number;
   inputTokens: number;
   outputTokens: number;
+}
+
+export interface ThreadCursor {
+  updatedAt: number;
+  id: string;
+}
+
+export interface ThreadPage {
+  threads: AgentThread[];
+  nextCursor: ThreadCursor | null;
 }
 
 export interface PendingApproval {
