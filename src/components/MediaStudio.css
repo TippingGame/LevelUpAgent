@@ -69,3 +69,5 @@
   font-size: var(--font-caption);
   line-height: 1.5;
 }
+
+.media-image-edit-hint { margin: 0; padding: 0 10px 10px; }

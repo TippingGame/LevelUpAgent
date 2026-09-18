@@ -1,0 +1,53 @@
+/* Reading preferences must win over fixed typography in installed themes. */
+html[data-levelup-theme="default"] .workspace-shell:not(.armor-mode) { background: var(--surface); }
+.conversation .assistant-turn-summary { min-height: 34px; border: 0; background: transparent; padding-block: 3px; }
+.conversation .assistant-turn-details[open] > .assistant-turn-summary .assistant-turn-summary-copy small { display: none; }
+.conversation .markdown-body, .chat-appearance-preview .markdown-body {
+  font-size: var(--chat-font-size, 15px) !important;
+  line-height: var(--chat-line-height, 1.55) !important;
+  letter-spacing: 0;
+}
+.conversation .markdown-body p, .chat-appearance-preview .markdown-body p { margin: 0 0 var(--chat-paragraph-spacing, 8px) !important; }
+.conversation .markdown-body ul, .conversation .markdown-body ol { margin-block: 0 var(--chat-paragraph-spacing, 8px) !important; }
+.conversation .markdown-body li > p:last-child, .conversation .markdown-body > :last-child, .chat-appearance-preview .markdown-body > :last-child { margin-bottom: 0 !important; }
+.conversation .markdown-body li + li { margin-top: min(4px, var(--chat-paragraph-spacing, 8px)); }
+.conversation .markdown-body h1, .conversation .markdown-body h2, .conversation .markdown-body h3, .conversation .markdown-body h4 { margin-block: calc(var(--chat-paragraph-spacing, 8px) + 8px) var(--chat-paragraph-spacing, 8px); }
+.conversation .markdown-body h1 { font-size: 1.4em !important; }
+.conversation .markdown-body h2 { font-size: 1.2em !important; }
+.conversation .markdown-body h3 { font-size: 1.1em !important; }
+.conversation .markdown-body h4 { font-size: 1em !important; }
+.conversation .markdown-body > :first-child { margin-top: 0 !important; }
+.conversation .markdown-code-block { margin-block: var(--chat-paragraph-spacing, 8px); }
+.conversation .markdown-code-block pre { font-size: .9em !important; line-height: var(--chat-line-height, 1.55) !important; }
+.composer .composer-input textarea { font-size: var(--chat-font-size, 15px) !important; line-height: var(--chat-line-height, 1.55) !important; }
+.composer:has(.composer-reference-menu) { z-index: 12; overflow: visible; }
+.composer-input { position: relative; min-width: 0; }
+.composer-reference-menu { position: absolute; bottom: calc(100% + 12px); left: 0; z-index: 30; width: min(100%, 640px); max-height: min(360px, 48vh); display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); color: var(--text); box-shadow: 0 8px 28px rgba(0,0,0,.15); }
+.composer-reference-heading { min-height: 36px; display: flex; align-items: center; justify-content: space-between; padding: 4px 10px 4px 14px; border-bottom: 1px solid var(--line); font-size: var(--font-small); }
+.composer-reference-heading button { width: 26px; height: 26px; display: grid; place-items: center; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; }
+.composer-reference-list { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 4px; }
+.composer-reference-list > button { width: 100%; min-height: 52px; display: flex; align-items: center; gap: 10px; padding: 7px 10px; border: 0; border-radius: 5px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.composer-reference-list > button[aria-selected="true"], .composer-reference-heading button:hover { background: color-mix(in srgb, var(--accent) 10%, var(--surface)); }
+.composer-reference-list svg { flex: 0 0 auto; color: var(--muted); }
+.composer-reference-list > button > span { min-width: 0; display: grid; gap: 3px; }
+.composer-reference-list strong { font-size: var(--font-small); font-weight: 600; }
+.composer-reference-list small { color: var(--muted); font-size: var(--font-caption); }
+.composer-reference-list strong, .composer-reference-list small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-reference-empty { min-height: 45px; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 14px; color: var(--muted); font-size: var(--font-small); overflow-wrap: anywhere; }
+.composer-reference-label { color: var(--accent-hover); font-weight: 600; overflow-wrap: anywhere; }
+.chat-appearance-presets { display: flex; gap: 8px; flex-wrap: wrap; }
+.general-settings-section.chat-reading-settings { grid-column: 1 / -1; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 0 0 18px; background: transparent; }
+.connection-dialog:has(.general-settings-body) { display: flex; flex-direction: column; overflow: hidden; }
+.connection-dialog:has(.general-settings-body) > .dialog-header,
+.connection-dialog:has(.general-settings-body) > .settings-nav,
+.connection-dialog:has(.general-settings-body) > .dialog-footer { flex: 0 0 auto; position: static; }
+.connection-dialog .general-settings-body { min-height: 0; flex: 1 1 auto; overflow-y: auto; }
+.chat-appearance-controls { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.chat-appearance-controls .field > span { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px; }
+.chat-appearance-controls output { color: var(--muted); font-variant-numeric: tabular-nums; }
+.chat-appearance-controls input[type="range"] { min-width: 0; width: 100%; height: 26px; padding: 0; accent-color: var(--accent); box-shadow: none; }
+.chat-appearance-preview { padding: 14px 0 0; border-top: 1px solid var(--line); }
+.chat-appearance-preview .markdown-body { color: var(--text); }
+@media (max-width: 760px) {
+  .chat-appearance-controls { grid-template-columns: 1fr; gap: 8px; }
+}

@@ -698,6 +698,8 @@ export interface MediaGenerationRequest {
   videoResolution?: string;
   videoAspectRatio?: string;
   referenceAttachmentIds: string[];
+  /** UI source number; attachment 1 is this source, followed by shared references. */
+  editSourceImageNumber?: number;
   referenceUrls?: string[];
   maskAttachmentId?: string;
 }

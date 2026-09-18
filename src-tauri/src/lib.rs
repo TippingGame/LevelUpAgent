@@ -2,6 +2,7 @@ mod agent;
 mod attachment;
 mod browser;
 mod capability;
+mod composer;
 mod config_writeback;
 mod database;
 mod filesystem;
@@ -68,7 +69,6 @@ const LONG_PROVIDER_ROUND_TIMEOUT: Duration = Duration::from_secs(360);
 // upstream error instead of being cancelled at the same deadline.
 const REASONING_PROVIDER_ROUND_TIMEOUT: Duration = Duration::from_secs(1_860);
 const PROVIDER_ROUND_TIMEOUT_PREFIX: &str = "Provider round timed out";
-const NON_GOAL_HARNESS_MAX_ROUNDS: usize = 64;
 const EMPTY_POST_TOOL_RESPONSE_RETRIES: usize = 2;
 // Low/medium-effort models sometimes advance the browser workflow one tool per
 // round. Four bounded nudges cover browser_list, server startup, browser startup,
@@ -817,15 +817,18 @@ fn attach_skills(
         return Ok(());
     }
     let discovered = discover_skills(app, database, request.workspace.as_deref())?;
-    let enabled: Vec<_> = discovered
+    let referenced_ids = composer::skill_ids(&request.messages);
+    let mut enabled: Vec<_> = discovered
         .iter()
         .filter(|skill| skill.enabled && skill.valid)
         .filter(|skill| {
             !request.hatch || skill.source == "LevelUpAgent built-in" && skill.name == "hatch-pet"
         })
-        .take(64)
         .cloned()
         .collect();
+    // Explicit selections remain available even in a large installed catalog.
+    enabled.sort_by_key(|skill| !referenced_ids.contains(&skill.id));
+    enabled.truncate(64);
 
     // Mirror Codex's UserPromptSubmit contract for every normal user turn:
     // run the installed LevelUpAxion router before provider execution and
@@ -838,8 +841,10 @@ fn attach_skills(
     // the router Skill's instructions so a plain prompt follows the same
     // LevelUpAxion dispatch path as Agent/Goal/Plan modes.
     if !matches!(request.mode.as_str(), "agent" | "goal" | "plan") {
+        let mut loaded = Vec::new();
         if !request.hatch {
             let preloaded = preload_router_skill(request, &enabled)?;
+            loaded.extend(preloaded.iter().cloned());
             logging::write(
                 if preloaded.is_some() { "info" } else { "warn" },
                 "router",
@@ -851,6 +856,7 @@ fn attach_skills(
                 }),
             );
         }
+        composer::preload_skills(request, &enabled, &loaded)?;
         return Ok(());
     }
 
@@ -866,6 +872,12 @@ fn attach_skills(
         }),
     );
     let browser_qa_skill_id = preload_browser_qa_skill(request, &enabled)?;
+    let loaded: Vec<_> = router_skill_id
+        .iter()
+        .chain(browser_qa_skill_id.iter())
+        .cloned()
+        .collect();
+    let explicit_skill_ids = composer::preload_skills(request, &enabled, &loaded)?;
     request.available_skills = enabled
         .iter()
         .map(|skill| AgentSkillSummary {
@@ -873,7 +885,8 @@ fn attach_skills(
             name: skill.name.clone(),
             description: skill.description.chars().take(500).collect(),
             preloaded: router_skill_id.as_deref() == Some(skill.id.as_str())
-                || browser_qa_skill_id.as_deref() == Some(skill.id.as_str()),
+                || browser_qa_skill_id.as_deref() == Some(skill.id.as_str())
+                || explicit_skill_ids.contains(&skill.id),
         })
         .collect();
     // Keep this phase explicit as well as history-derived. The frontend sends
@@ -1303,8 +1316,7 @@ fn attach_subagent_tools(request: &mut AgentTurnRequest) {
                 "type": "object",
                 "properties": {
                     "task": { "type": "string", "description": "Concrete implementation task with acceptance criteria" },
-                    "scope": { "type": "string", "description": "Optional files or subsystem the child should stay within" },
-                    "maxTurns": { "type": "integer", "minimum": 1, "maximum": 8, "default": 6 }
+                    "scope": { "type": "string", "description": "Optional files or subsystem the child should stay within" }
                 },
                 "required": ["task"]
             }),
@@ -5325,6 +5337,42 @@ fn get_default_workspace(app: tauri::AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
+async fn search_workspace_files(
+    workspace: String,
+    query: String,
+) -> Result<composer::FileSearch, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        composer::search_files(Path::new(&workspace), &query)
+    })
+    .await
+    .map_err(|error| format!("Could not search project files: {error}"))?
+}
+
+#[tauri::command]
+async fn import_workspace_file(
+    app: tauri::AppHandle,
+    workspace: String,
+    path: String,
+    existing_attachments: Vec<ImageAttachment>,
+) -> Result<Vec<ImageAttachment>, String> {
+    let storage = attachment_storage(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let resolved = composer::resolve_file(Path::new(&workspace), &path)?;
+        attachment::import_message_paths(
+            &storage,
+            &[attachment::MessagePath {
+                path: resolved.to_string_lossy().into_owned(),
+                exact: true,
+            }],
+            &existing_attachments,
+            Some(Path::new(&workspace)),
+        )
+    })
+    .await
+    .map_err(|error| format!("Could not reference project file: {error}"))?
+}
+
+#[tauri::command]
 fn preview_attachment(
     app: tauri::AppHandle,
     attachment_id: String,
@@ -6033,11 +6081,6 @@ async fn harness_run_inner(
     result
 }
 
-fn harness_round_limit(mode: crate::harness::types::HarnessMode) -> Option<usize> {
-    (!matches!(mode, crate::harness::types::HarnessMode::Goal))
-        .then_some(NON_GOAL_HARNESS_MAX_ROUNDS)
-}
-
 fn goal_completion_ends_harness(
     mode: crate::harness::types::HarnessMode,
     status: &models::GoalStatus,
@@ -6127,15 +6170,6 @@ async fn harness_run_loop(
     let mut hatch_status_requires_action =
         request.hatch && database.harness_hatch_status_requires_action(&operation_id)?;
     loop {
-        if let Some(limit) = harness_round_limit(request.mode)
-            && round >= limit
-        {
-            database.update_harness_operation_state(
-                &operation_id,
-                &crate::harness::types::RuntimeState::Failed,
-            )?;
-            return Err(format!("Harness tool loop exceeded {limit} rounds"));
-        }
         round = round.saturating_add(1);
         let round_started = Instant::now();
         if cancellation.is_cancelled() {
@@ -7747,7 +7781,6 @@ fn harness_fork_session(
 struct IsolatedSubagentTask<'a> {
     task: &'a str,
     scope: Option<&'a str>,
-    max_turns: usize,
 }
 
 async fn run_isolated_subagent<F>(
@@ -7786,7 +7819,7 @@ where
         request.thread_id.as_deref().unwrap_or("standalone"),
         worktree.run_id
     );
-    for _ in 0..delegated.max_turns {
+    loop {
         let turn = AgentTurnRequest {
             profile: profile.clone(),
             messages: history.clone(),
@@ -7880,15 +7913,6 @@ where
             });
         }
     }
-    Ok(format!(
-        "{}\n\nChild Agent reached its {}-turn limit; review the patch carefully.",
-        if last_summary.is_empty() {
-            "No final summary was produced."
-        } else {
-            &last_summary
-        },
-        delegated.max_turns,
-    ))
 }
 
 async fn delegate_task(
@@ -7917,15 +7941,6 @@ async fn delegate_task(
     if scope.is_some_and(|value| value.chars().count() > 4_000) {
         return Err("Sub-Agent scope is longer than 4,000 characters".to_owned());
     }
-    let max_turns = request
-        .arguments
-        .get("maxTurns")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(6);
-    if !(1..=8).contains(&max_turns) {
-        return Err("Sub-Agent maxTurns must be between 1 and 8".to_owned());
-    }
-
     let worktree = subagent::create_worktree(
         &subagent_storage(app)?,
         std::path::Path::new(&request.workspace),
@@ -7936,11 +7951,7 @@ async fn delegate_task(
         database,
         request,
         &worktree,
-        IsolatedSubagentTask {
-            task,
-            scope,
-            max_turns: max_turns as usize,
-        },
+        IsolatedSubagentTask { task, scope },
         load_api_key,
     )
     .await;
@@ -11215,6 +11226,8 @@ pub fn run() {
             import_clipboard_attachments,
             delete_image_attachment,
             get_default_workspace,
+            search_workspace_files,
+            import_workspace_file,
             preview_attachment,
             list_provider_health,
             list_provider_requests,
@@ -11630,21 +11643,6 @@ mod tests {
         assert!(!is_context_limit_error(
             "Provider returned 413 Request Too Large"
         ));
-    }
-
-    #[test]
-    fn goal_harness_has_no_round_limit() {
-        assert_eq!(
-            harness_round_limit(crate::harness::types::HarnessMode::Goal),
-            None
-        );
-        for mode in [
-            crate::harness::types::HarnessMode::Chat,
-            crate::harness::types::HarnessMode::Plan,
-            crate::harness::types::HarnessMode::Agent,
-        ] {
-            assert_eq!(harness_round_limit(mode), Some(NON_GOAL_HARNESS_MAX_ROUNDS));
-        }
     }
 
     #[test]
@@ -14028,6 +14026,7 @@ mod tests {
             video_resolution: None,
             video_aspect_ratio: None,
             reference_attachment_ids: Vec::new(),
+            edit_source_image_number: None,
             reference_urls: Vec::new(),
             mask_attachment_id: None,
         };
@@ -14072,7 +14071,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn isolated_subagent_runs_a_real_provider_tool_loop_without_shell_access() {
+    async fn isolated_subagent_continues_past_eight_tool_rounds_until_completion() {
         let suite =
             std::env::temp_dir().join(format!("levelup-subagent-loop-{}", uuid::Uuid::new_v4()));
         let repository = suite.join("repository");
@@ -14101,10 +14100,15 @@ mod tests {
             .unwrap();
         let database = database::Database::open(&suite.join("requests.sqlite3")).unwrap();
         let mut child_profile = profile("child-provider", 10, true);
-        child_profile.base_url = mock_responses_sequence_server(vec![
+        let mut responses = vec![
+            r#"{"output":[{"type":"function_call","call_id":"read-one","name":"read_file","arguments":"{\"path\":\"README.md\"}"}],"usage":{"input_tokens":8,"output_tokens":4}}"#;
+            8
+        ];
+        responses.extend([
             r#"{"output":[{"type":"function_call","call_id":"write-one","name":"write_file","arguments":"{\"path\":\"child.txt\",\"content\":\"hello from child\\n\"}"}],"usage":{"input_tokens":8,"output_tokens":4}}"#,
             r#"{"output":[{"type":"message","content":[{"type":"output_text","text":"Created child.txt in the isolated worktree."}]}],"usage":{"input_tokens":12,"output_tokens":5}}"#,
         ]);
+        child_profile.base_url = mock_responses_sequence_server(responses);
         let request = ToolExecutionRequest {
             call_id: Some("delegate-test".to_owned()),
             operation_id: None,
@@ -14131,7 +14135,6 @@ mod tests {
             IsolatedSubagentTask {
                 task: "Create child.txt",
                 scope: Some("child.txt"),
-                max_turns: 4,
             },
             |_| Ok("test-key".to_owned()),
         )

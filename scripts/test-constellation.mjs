@@ -229,8 +229,11 @@ test("creative-space image editing submits a distinct source and PNG mask", () =
   assert.match(mediaSource, /STUDIO_IMAGE_MODES/);
   assert.match(mediaSource, /selectImageReferences/);
   assert.match(mediaSource, /ConstellationCanvasEditor/);
-  assert.match(mediaSource, /maskAttachmentId: kind === "image" && imageMode !== "generate" \? task\.entry\?\.mask\?\.id : undefined/);
-  assert.match(mediaSource, /task\.entry \? \[task\.entry\.source\.id\] : \[\]/);
+  assert.match(mediaSource, /maskAttachmentId: task\.editInput\?\.maskAttachmentId/);
+  assert.match(mediaSource, /task\.editInput\?\.referenceAttachmentIds \?\? \[\]/);
+  assert.match(mediaSource, /editSourceImageNumber: task\.editInput\?\.editSourceImageNumber/);
+  assert.match(mediaSource, /source=\{activeImageEditEntry\.originalSource \?\? activeImageEditEntry\.source\}/);
+  assert.match(mediaSource, /initialState=\{activeImageEditEntry\.meta\?\.editorState\}/);
   assert.match(mediaSource, /size !== "auto" \? size : undefined/);
   assert.match(mediaSource, /onEdit=.*editImageAsset/);
   assert.match(mediaSource, /media-image-lightbox-edit/);

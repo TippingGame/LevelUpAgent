@@ -70,6 +70,9 @@ import { IconButton } from "./components/IconButton";
 import { CommandPalette } from "./components/CommandPalette";
 import { AgentBrowserPanel } from "./components/AgentBrowserPanel";
 import { AttachmentChip } from "./components/AttachmentChip";
+import { ComposerInput } from "./components/ComposerInput";
+import { ChatAppearanceSettings } from "./components/ChatAppearanceSettings";
+import { chatAppearanceStyle, loadChatAppearance, normalizeChatAppearance, saveChatAppearance, type ChatAppearance } from "./lib/chatAppearance";
 import { DeferredWorkspace, WorkspaceLoading } from "./components/DeferredWorkspace";
 import type { PetGenerationRequest } from "./components/PetStudio";
 import type { PetLifeView } from "./components/PetLifeWorkspace";
@@ -125,6 +128,7 @@ import {
   importExternalConfig,
   importAttachments,
   importMessagePathAttachments,
+  importWorkspaceFile,
   importClipboardAttachments,
   importHatchedPets,
   installAppUpdate,
@@ -374,6 +378,7 @@ import type {
 } from "./lib/types";
 import "./App.css";
 import "./ArmorStudio.css";
+import "./components/ChatControls.css";
 import { mergeThreadCatalog, threadMatchesQuery } from "./lib/conversationCatalog";
 import { useComposerDraft } from "./lib/useComposerDraft";
 import type { ThreadCursor } from "./lib/types";
@@ -837,6 +842,7 @@ function App() {
   const [inspectorWidth, setInspectorWidth] = useState(loadInspectorWidth);
   const [layoutViewportWidth, setLayoutViewportWidth] = useState(() => window.innerWidth);
   const [diffViewSettings, setDiffViewSettings] = useState<DiffViewSettings>(loadDiffViewSettings);
+  const [chatAppearance, setChatAppearance] = useState(loadChatAppearance);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("details");
   const [browserSyncSignal, setBrowserSyncSignal] = useState<BrowserSyncSignal | null>(null);
   const [reviewedChangeSet, setReviewedChangeSet] = useState<ConversationChangeSet | null>(null);
@@ -4179,6 +4185,25 @@ function App() {
     }
   };
 
+  const addReferencedFile = async (path: string): Promise<boolean> => {
+    const threadId = activeThreadIdRef.current;
+    const workspace = activeThread.workspace;
+    const snapshot = draftStore.get(threadId);
+    if (!workspace || attachmentPasteRef.current || !snapshot.ready || runningThreadIdsRef.current.has(threadId) || pendingApprovalsRef.current[threadId]) return false;
+    attachmentPasteRef.current = true;
+    setAttachmentPasteBusy(true);
+    try {
+      const imported = await importWorkspaceFile(workspace, path, snapshot.attachments);
+      const discarded = deletingThreadIdsRef.current.has(threadId) ? imported : draftStore.appendAttachments(threadId, imported);
+      await Promise.all(discarded.map((item) => deleteImageAttachment(item.id).catch(() => false)));
+      if (discarded.length) throw new Error(tr("每条消息最多添加 12 个附件", "Each message supports up to 12 attachments"));
+      return activeThreadIdRef.current === threadId;
+    } finally {
+      attachmentPasteRef.current = false;
+      setAttachmentPasteBusy(false);
+    }
+  };
+
   const addDroppedAttachments = async (paths: string[]) => {
     const threadId = activeThreadIdRef.current;
     setFileDragActive(false);
@@ -5354,6 +5379,8 @@ function App() {
           <IconButton label={tr("清空当前草稿", "Clear current draft")} onClick={() => draftStore.clear(activeThreadId)}><Trash2 size={14} /></IconButton>
         </div>}
         <Composer
+          key={activeThreadId}
+          workspace={activeThread.workspace}
           inputRef={composerInputRef}
           draft={draft}
           attachments={draftAttachments}
@@ -5403,6 +5430,7 @@ function App() {
           )}
           onDraftChange={setDraft}
           onPasteFiles={(files) => void addPastedAttachments(files)}
+          onPickFile={addReferencedFile}
           onRemoveAttachment={removeDraftImage}
           onModeChange={activeThread.kind === "pet" ? () => undefined : setMode}
           onPermissionChange={setPermissionLevel}
@@ -5588,6 +5616,13 @@ function App() {
     saveDiffViewSettings(normalized);
   };
 
+  const updateChatAppearance = (next: ChatAppearance) => {
+    const normalized = normalizeChatAppearance(next);
+    setChatAppearance(normalized);
+    try { saveChatAppearance(normalized); }
+    catch { setNotice(tr("阅读设置已应用，但暂时无法保存到本地", "Reading settings applied, but could not be saved locally")); }
+  };
+
   const inspectorResizeMaxWidth = inspectorMaxWidth(layoutViewportWidth);
   const inspectorSlot = workspaceView === "chat" && rightPanelOpen ? (
     <Inspector
@@ -5656,6 +5691,8 @@ function App() {
           keyConfigured={keyConfigured}
           diffViewSettings={diffViewSettings}
           onDiffViewSettingsChange={updateDiffViewSettings}
+          chatAppearance={chatAppearance}
+          onChatAppearanceChange={updateChatAppearance}
           onClose={() => setSettingsOpen(false)}
           onOpenMcp={() => {
             setSettingsOpen(false);
@@ -5895,6 +5932,7 @@ function App() {
         armorMode ? `armor-mode armor-level-${armorModeLevel}` : undefined,
       ].filter(Boolean).join(" ")}
       shellStyle={{
+        ...chatAppearanceStyle(chatAppearance),
         "--sidebar-width": sidebarWidth == null ? undefined : `${sidebarWidth}px`,
         "--inspector-width": `${inspectorWidth}px`,
         "--diff-font-family": diffFontStack(diffViewSettings.fontFamily),
@@ -7145,6 +7183,7 @@ function ReasoningPicker({
 
 function Composer({
   inputRef,
+  workspace,
   draft,
   attachments,
   mode,
@@ -7158,6 +7197,7 @@ function Composer({
   modelControl,
   onDraftChange,
   onPasteFiles,
+  onPickFile,
   onRemoveAttachment,
   onModeChange,
   onPermissionChange,
@@ -7168,6 +7208,7 @@ function Composer({
   onStop,
 }: {
   inputRef: RefObject<HTMLTextAreaElement | null>;
+  workspace?: string;
   draft: string;
   attachments: ImageAttachment[];
   mode: AgentMode;
@@ -7181,6 +7222,7 @@ function Composer({
   modelControl: ReactNode;
   onDraftChange: (value: string) => void;
   onPasteFiles: (files: File[]) => void;
+  onPickFile: (path: string) => Promise<boolean>;
   onRemoveAttachment: (attachment: ImageAttachment) => void;
   onModeChange: (value: AgentMode) => void;
   onPermissionChange: (value: PermissionLevel) => void;
@@ -7308,28 +7350,24 @@ function Composer({
             ))}
           </div>
         )}
-        <textarea
-          ref={inputRef}
-          value={draft}
+        <ComposerInput
+          inputRef={inputRef}
+          draft={draft}
+          workspace={workspace}
+          running={running}
+          onPickFile={onPickFile}
+          onSend={onSend}
           style={composerHeight === DEFAULT_COMPOSER_HEIGHT ? undefined : {
             height: `${composerHeight}px`,
             minHeight: `${MIN_COMPOSER_HEIGHT}px`,
           }}
-          onChange={(event) => onDraftChange(event.target.value)}
+          onDraftChange={onDraftChange}
           onPaste={(event) => {
             const files = clipboardFiles(event.clipboardData);
             if (files.length === 0) return;
             event.preventDefault();
             onPasteFiles(files);
           }}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
-              event.preventDefault();
-              onSend();
-            }
-          }}
-          placeholder={tr("交给 LevelUpAgent，或按 Ctrl+V 粘贴文件…", "Ask LevelUpAgent, or press Ctrl+V to paste files…")}
-          rows={2}
           disabled={disabled}
         />
         <div className="composer-toolbar">
@@ -8786,6 +8824,8 @@ function ConnectionDialog({
   keyConfigured,
   diffViewSettings,
   onDiffViewSettingsChange,
+  chatAppearance,
+  onChatAppearanceChange,
   onClose,
   onOpenMcp,
   onOpenSkills,
@@ -8803,6 +8843,8 @@ function ConnectionDialog({
   keyConfigured: boolean;
   diffViewSettings: DiffViewSettings;
   onDiffViewSettingsChange: (settings: DiffViewSettings) => void;
+  chatAppearance: ChatAppearance;
+  onChatAppearanceChange: (settings: ChatAppearance) => void;
   onClose: () => void;
   onOpenMcp: () => void;
   onOpenSkills: () => void;
@@ -9005,6 +9047,7 @@ function ConnectionDialog({
         </div>
         {settingsTab === "general" ? (
           <div className="dialog-body general-settings-body">
+            <ChatAppearanceSettings value={chatAppearance} onChange={onChatAppearanceChange} />
             <section className="general-settings-section wide">
               <div className="general-settings-heading">
                 <span><Code2 size={16} /><span><strong>{tr("侧栏 Diff 显示", "Side panel Diff display")}</strong><small>{tr("控制右侧变更校对和代码预览的字体", "Controls the font used by change review and code previews")}</small></span></span>

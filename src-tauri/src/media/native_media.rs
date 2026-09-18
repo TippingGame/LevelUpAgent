@@ -409,8 +409,7 @@ fn minimax_image_body(
             "MiniMax images support character references, not explicit edit masks".to_owned(),
         );
     }
-    let prompt =
-        numbered_reference_prompt(&effective_image_prompt(request), references.len(), false);
+    let prompt = image_reference_prompt(request, references.len());
     if prompt.chars().count() > 1500 {
         return Err("MiniMax image prompts must contain at most 1,500 characters".to_owned());
     }

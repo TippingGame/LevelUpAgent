@@ -750,6 +750,14 @@ fn validate_request(
     if request.count == 0 || request.count > maximum {
         return Err(format!("This media request supports 1-{maximum} outputs"));
     }
+    if let Some(target) = request.edit_source_image_number
+        && (request.kind != MediaKind::Image || target == 0 || references.is_empty())
+    {
+        return Err(
+            "Image edit target requires a positive source number and a source attachment"
+                .to_owned(),
+        );
+    }
     match request.kind {
         MediaKind::Image => {
             if references
@@ -1055,8 +1063,7 @@ async fn call_openai_images(
     references: &[ManagedReference],
     mask: Option<&ManagedReference>,
 ) -> Result<Vec<GeneratedBlob>, String> {
-    let prompt =
-        numbered_reference_prompt(&effective_image_prompt(request), references.len(), false);
+    let prompt = image_reference_prompt(request, references.len());
     let grok = is_grok_image_model(model);
     let result = if references.is_empty() {
         let url = agent::endpoint(&provider.profile.base_url, "/v1/images/generations")?;
@@ -1195,11 +1202,9 @@ async fn call_gemini_image(
         &provider.profile.base_url,
         &format!("/v1beta/models/{model}:generateContent"),
     )?;
-    let mut parts = vec![
-        json!({ "text": numbered_reference_prompt(&effective_image_prompt(request), references.len(), false) }),
-    ];
+    let mut parts = vec![json!({ "text": image_reference_prompt(request, references.len()) })];
     for (index, image) in references.iter().enumerate() {
-        parts.push(json!({ "text": format!("Image {} / 图 {}:", index + 1, index + 1) }));
+        parts.push(json!({ "text": format!("{}:", image_reference_label(request, index)) }));
         parts.push(json!({
             "inlineData": {
                 "mimeType": image.mime_type,
@@ -2888,6 +2893,36 @@ fn numbered_reference_prompt(prompt: &str, count: usize, first_last: bool) -> St
     )
 }
 
+fn image_reference_label(request: &MediaGenerationRequest, index: usize) -> String {
+    if let Some(source) = request.edit_source_image_number {
+        if index == 0 {
+            return format!("Source Image {source} / 源图 {source} / 图 {source}");
+        }
+        return format!("Reference Image {index} / 参考图 {index}");
+    }
+    format!("Image {} / 图 {}", index + 1, index + 1)
+}
+
+fn image_reference_prompt(request: &MediaGenerationRequest, count: usize) -> String {
+    let prompt = effective_image_prompt(request);
+    let Some(target) = request.edit_source_image_number else {
+        return numbered_reference_prompt(&prompt, count, false);
+    };
+    let mapping = (0..count)
+        .map(|index| {
+            format!(
+                "attachment {} = {}",
+                index + 1,
+                image_reference_label(request, index)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        "{prompt}\n\n[Image edit inputs: {mapping}. Edit only Source Image {target} / 源图 {target} / 图 {target}, supplied as the first attachment. Source Image N / 源图 N / 图 N refer to source numbers in the UI; Reference Image N / 参考图 N refer to the separate reference list. Other source images are processed in separate requests and are not attached here; apply only instructions for this source or for all sources. All later attachments are shared references only, not additional edit targets. Any supplied mask, expansion and colored editing labels belong only to this source. Preserve areas outside its mask. Do not render image numbers or combine images into a collage unless requested.]"
+    )
+}
+
 fn effective_image_prompt(request: &MediaGenerationRequest) -> String {
     let prompt = request.prompt.trim();
     let Some(requirement) = request.size.as_deref().and_then(image_output_requirement) else {
@@ -3084,6 +3119,7 @@ mod tests {
             video_resolution: None,
             video_aspect_ratio: None,
             reference_attachment_ids: Vec::new(),
+            edit_source_image_number: None,
             reference_urls: Vec::new(),
             mask_attachment_id: None,
         }
@@ -3280,6 +3316,7 @@ mod tests {
             video_resolution: None,
             video_aspect_ratio: None,
             reference_attachment_ids: Vec::new(),
+            edit_source_image_number: None,
             reference_urls: Vec::new(),
             mask_attachment_id: None,
         };
@@ -3759,7 +3796,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sends_explicit_png_masks_as_a_distinct_edit_part() {
+    async fn sends_each_edit_target_first_with_its_mask_and_original_ui_numbers() {
         let encoded =
             base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\nmock-masked-edit");
         let (base_url, server) = mock_sequence_inspecting(
@@ -3778,6 +3815,14 @@ mod tests {
                 assert!(request.contains("name=\"mask\""));
                 assert!(request.contains("filename=\"mask.png\""));
                 assert!(request.contains("Content-Type: image/png"));
+                assert!(request.contains("attachment 1 = Source Image 2 / 源图 2 / 图 2; attachment 2 = Reference Image 1 / 参考图 1"));
+                assert!(request.contains("Edit only Source Image 2 / 源图 2"));
+                assert!(
+                    request.find("filename=\"target-two.png\"").unwrap()
+                        < request.find("filename=\"reference.png\"").unwrap()
+                );
+                assert_eq!(request.matches("name=\"mask\"").count(), 1);
+                assert!(request.contains("mock-target-two-mask"));
             },
         );
         let mut provider = provider("primary", "gpt-image-1.5");
@@ -3796,18 +3841,26 @@ mod tests {
         let mask = ManagedReference {
             file_name: "mask.png".to_owned(),
             mime_type: "image/png".to_owned(),
-            bytes: b"\x89PNG\r\n\x1a\nmock-mask".to_vec(),
+            bytes: b"\x89PNG\r\n\x1a\nmock-target-two-mask".to_vec(),
             kind: AttachmentKind::Image,
         };
+        let target = ManagedReference {
+            file_name: "target-two.png".to_owned(),
+            mime_type: "image/png".to_owned(),
+            bytes: b"\x89PNG\r\n\x1a\nmock-target-two".to_vec(),
+            kind: AttachmentKind::Image,
+        };
+        let mut edit_request = request(MediaKind::Image, 1);
+        edit_request.edit_source_image_number = Some(2);
         let (root, database) = temp_storage("openai-masked-edit");
         let result = generate_batch_with_mask(
             &Client::new(),
             &root.join("media"),
             &database,
             &selection,
-            &request(MediaKind::Image, 1),
+            &edit_request,
             None,
-            &[reference],
+            &[target, reference],
             Some(&mask),
         )
         .await
@@ -3854,6 +3907,92 @@ mod tests {
             .unwrap_err()
             .contains("PNG")
         );
+    }
+
+    #[test]
+    fn rejects_invalid_edit_target_numbers_and_non_image_targets() {
+        let reference = ManagedReference {
+            file_name: "one.png".to_owned(),
+            mime_type: "image/png".to_owned(),
+            bytes: vec![0; 8],
+            kind: AttachmentKind::Image,
+        };
+        let mut edit_request = request(MediaKind::Image, 1);
+        edit_request.edit_source_image_number = Some(0);
+        assert!(
+            validate_request(&edit_request, std::slice::from_ref(&reference), None)
+                .unwrap_err()
+                .contains("target")
+        );
+        edit_request.edit_source_image_number = Some(1);
+        assert!(validate_request(&edit_request, std::slice::from_ref(&reference), None).is_ok());
+        edit_request.edit_source_image_number = Some(20);
+        assert!(validate_request(&edit_request, std::slice::from_ref(&reference), None).is_ok());
+        assert!(validate_request(&edit_request, &[], None).is_err());
+        edit_request.kind = MediaKind::Video;
+        assert!(
+            validate_request(&edit_request, &[reference], None)
+                .unwrap_err()
+                .contains("target")
+        );
+    }
+
+    #[tokio::test]
+    async fn gemini_edit_keeps_source_number_separate_from_shared_reference_numbers() {
+        let (base_url, server) = mock_sequence_inspecting(
+            vec![MockResponse {
+                method: "POST",
+                path: "/v1beta/models/gemini-3.1-flash-image:generateContent",
+                status: 200,
+                content_type: "application/json",
+                body: json!({"candidates": [{"content": {"parts": [{"inlineData": {
+                    "mimeType": "image/png", "data": base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\nresult")
+                }}]}}]}).to_string().into_bytes(),
+            }],
+            |_, request| {
+                let text = String::from_utf8_lossy(request);
+                let body: Value = serde_json::from_str(text.split_once("\r\n\r\n").unwrap().1).unwrap();
+                let parts = body["contents"][0]["parts"].as_array().unwrap();
+                let prompt = parts[0]["text"].as_str().unwrap();
+                assert!(prompt.contains("attachment 1 = Source Image 2 / 源图 2 / 图 2; attachment 2 = Reference Image 1 / 参考图 1"));
+                assert!(!prompt.contains("numbered 1 through"));
+                assert_eq!(parts[1]["text"], "Source Image 2 / 源图 2 / 图 2:");
+                assert_eq!(parts[2]["inlineData"]["data"], "Yg==");
+                assert_eq!(parts[3]["text"], "Reference Image 1 / 参考图 1:");
+                assert_eq!(parts[4]["inlineData"]["data"], "YQ==");
+            },
+        );
+        let mut provider = provider("gemini", "gemini-3.1-flash-image");
+        provider.profile.base_url = base_url;
+        let selection = MediaSelection {
+            provider,
+            model: "gemini-3.1-flash-image".to_owned(),
+            protocol: ProviderProtocol::GeminiGenerateContent,
+        };
+        let mut edit_request = request(MediaKind::Image, 1);
+        edit_request.edit_source_image_number = Some(2);
+        let references = ["b", "a"].map(|name| ManagedReference {
+            file_name: format!("{name}.png"),
+            mime_type: "image/png".to_owned(),
+            bytes: name.as_bytes().to_vec(),
+            kind: AttachmentKind::Image,
+        });
+        let (root, database) = temp_storage("gemini-edit-target");
+        let result = generate_batch(
+            &Client::new(),
+            &root.join("media"),
+            &database,
+            &selection,
+            &edit_request,
+            None,
+            &references,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.assets.len(), 1);
+        server.join().unwrap();
+        drop(database);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

@@ -20,3 +20,15 @@ export function moveMediaReference<T>(items: T[], index: number, direction: -1 |
 export function orderedMediaReferenceUrls(items: MediaReferenceUrl[]): string[] {
   return items.map((item) => item.url.trim());
 }
+
+/** Snapshot UI order while keeping each edit target paired with its own mask. */
+export function imageEditInputs<T extends { id: string; source: { id: string }; mask?: { id: string } }>(
+  entries: T[], references: { id: string }[],
+) {
+  return entries.map((entry, index) => ({
+    entry,
+    referenceAttachmentIds: [entry.source.id, ...references.map((item) => item.id)],
+    editSourceImageNumber: index + 1,
+    maskAttachmentId: entry.mask?.id,
+  }));
+}

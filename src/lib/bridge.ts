@@ -2,6 +2,7 @@ import { listen } from "@tauri-apps/api/event";
 import { Channel, convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import type { LocalAttachmentPath } from "./localAttachments";
+import type { WorkspaceFileSearch } from "./composerReferences";
 import { deduplicateMediaRefresh } from "./mediaPolling";
 import type {
   AgentMessage,
@@ -1333,6 +1334,14 @@ export async function installSkill(input: {
 
 export async function listPersistedThreads(): Promise<AgentThread[]> {
   return invoke<AgentThread[]>("list_threads");
+}
+
+export async function searchWorkspaceFiles(workspace: string, query: string): Promise<WorkspaceFileSearch> {
+  return invoke<WorkspaceFileSearch>("search_workspace_files", { workspace, query });
+}
+
+export async function importWorkspaceFile(workspace: string, path: string, existingAttachments: ImageAttachment[]): Promise<ImageAttachment[]> {
+  return invoke<ImageAttachment[]>("import_workspace_file", { workspace, path, existingAttachments });
 }
 
 export async function listThreadSummaries(

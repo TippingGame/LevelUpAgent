@@ -686,6 +686,10 @@ pub struct MediaGenerationRequest {
     pub video_aspect_ratio: Option<String>,
     #[serde(default)]
     pub reference_attachment_ids: Vec<String>,
+    /// One-based UI source number. Attachment 1 is this source, followed by
+    /// shared reference images; an optional mask applies only to the source.
+    #[serde(default)]
+    pub edit_source_image_number: Option<usize>,
     /// Public HTTPS image references, ordered first frame then last frame in
     /// first_last mode. Compatible video relays cannot fetch local files.
     #[serde(default)]

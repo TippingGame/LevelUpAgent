@@ -64,7 +64,7 @@ import {
 } from "../lib/armorMode";
 import { copyText } from "../lib/clipboard";
 import { isMiniMaxImageModel, mediaModelSupportsExplicitImageMask, selectStudioMediaModel, videoModelCapabilities } from "../lib/mediaCapabilities";
-import { createMediaReferenceUrl, moveMediaReference, orderedMediaReferenceUrls, type MediaReferenceUrl } from "../lib/mediaReferences";
+import { createMediaReferenceUrl, imageEditInputs, moveMediaReference, orderedMediaReferenceUrls, type MediaReferenceUrl } from "../lib/mediaReferences";
 import { createMediaPoller } from "../lib/mediaPolling";
 import type {
   ImageAttachment,
@@ -101,6 +101,7 @@ type StudioImageMode = "generate" | "edit" | "outpaint" | "inpaint";
 interface ImageEditEntry {
   id: string;
   source: ImageAttachment;
+  originalSource?: ImageAttachment;
   mask?: ImageAttachment;
   meta?: CanvasEditorSaveMeta;
 }
@@ -215,7 +216,8 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
     () => (catalog?.models ?? []).filter((model) => model.kind === kind),
     [catalog, kind],
   );
-  const requiresImageMask = kind === "image" && imageMode !== "generate" && imageEditEntries.some((entry) => Boolean(entry.mask));
+  const editInputs = imageEditInputs(imageEditEntries, imageReferences);
+  const requiresImageMask = kind === "image" && imageMode !== "generate" && editInputs.some((input) => Boolean(input.maskAttachmentId));
   const eligibleModels = useMemo(
     () => requiresImageMask ? models.filter(mediaModelSupportsExplicitImageMask) : models,
     [models, requiresImageMask],
@@ -251,6 +253,7 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
   const visiblePendingAssets = pendingAssets.filter((asset) => asset.kind === kind);
   const displayedAssets: StudioMediaAsset[] = [...visiblePendingAssets, ...visibleAssets];
   const activeImageEditEntry = imageEditEntries.find((entry) => entry.id === imageEditSelectionId) ?? imageEditEntries[0];
+  const activeImageEditNumber = imageEditEntries.findIndex((entry) => entry.id === activeImageEditEntry?.id) + 1;
   const currentHistoryState = historyState[kind];
   const previewableAssets = displayedAssets.filter(
     (asset) => asset.kind === "image" && asset.status === "completed" && Boolean(mediaAssetUrl(asset)),
@@ -446,24 +449,25 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
 
   const acceptImageReferences = async (incoming: ImageAttachment[]) => {
     const ids = new Set(imageReferences.map((item) => item.id));
-    const available = Math.max(0, 8 - imageReferences.length);
+    const maximum = imageMode === "generate" ? 8 : 7;
+    const available = Math.max(0, maximum - imageReferences.length);
     const accepted = incoming
       .filter((item) => item.kind === "image" && !ids.has(item.id))
       .slice(0, available);
     const acceptedIds = new Set(accepted.map((item) => item.id));
     const discarded = incoming.filter((item) => !acceptedIds.has(item.id));
-    setImageReferences((current) => [...current, ...accepted].slice(0, 8));
+    setImageReferences((current) => [...current, ...accepted]);
     await Promise.all(discarded.map((item) => deleteImageAttachment(item.id).catch(() => false)));
     if (incoming.some((item) => item.kind !== "image")) {
       setError(tr("创作空间的拖拽区域只接受图片参考", "The Media Studio drop zone accepts image references only"));
     } else if (accepted.length < incoming.length) {
-      setError(tr("最多添加 8 张参考图", "You can add up to 8 reference images"));
+      setError(tr(`最多添加 ${maximum} 张参考图`, `You can add up to ${maximum} reference images`));
     }
   };
 
   const replaceImageEditEntries = async (entries: ImageEditEntry[]) => {
-    const retainedIds = new Set(entries.flatMap((entry) => [entry.source.id, entry.mask?.id].filter((id): id is string => Boolean(id))));
-    const discarded = imageEditEntries.flatMap((entry) => [entry.source, entry.mask].filter((item): item is ImageAttachment => item !== undefined))
+    const retainedIds = new Set(entries.flatMap((entry) => [entry.source.id, entry.originalSource?.id, entry.mask?.id].filter((id): id is string => Boolean(id))));
+    const discarded = imageEditEntries.flatMap((entry) => [entry.source, entry.originalSource, entry.mask].filter((item): item is ImageAttachment => item !== undefined))
       .filter((item) => !retainedIds.has(item.id));
     setImageEditEntries(entries);
     setImageEditSelectionId((current) => entries.some((entry) => entry.id === current) ? current : entries[0]?.id ?? null);
@@ -543,10 +547,8 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
     mask: ImageAttachment | undefined,
     meta: CanvasEditorSaveMeta,
   ) => {
-    const labels = [...new Set([...(activeImageEditEntry?.meta?.labels ?? []), ...meta.labels])];
-    const nextMeta = { ...meta, hasLabels: labels.length > 0, labels };
     const nextEntries = imageEditEntries.map((entry) => entry.id === activeImageEditEntry?.id
-      ? { ...entry, source: image, mask, meta: nextMeta }
+      ? { ...entry, originalSource: entry.originalSource ?? entry.source, source: image, mask, meta }
       : entry);
     await replaceImageEditEntries(nextEntries);
     setImageMode(meta.expanded ? "outpaint" : mask ? "inpaint" : "edit");
@@ -646,7 +648,7 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
       ? isGrokVideo15 || !matchesImageVideoMode(activeVideoMode) ? "image" : activeVideoMode
       : null;
     const targetImageEdit = kind === "image" && imageMode !== "generate";
-    const maximum = targetVideoMode ? videoModelCapabilities(selectedModelId, targetVideoMode).referenceLimit : targetImageEdit ? 1 : 8;
+    const maximum = targetVideoMode ? videoModelCapabilities(selectedModelId, targetVideoMode).referenceLimit : 8;
     const existing = targetVideoMode ? videoReferences.length : targetImageEdit ? 0 : imageReferences.length;
     const available = Math.max(0, maximum - existing);
     if (available === 0) {
@@ -740,12 +742,16 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
       setError(tr("请先选择至少一张编辑源图", "Choose at least one edit source image first"));
       return;
     }
-    if (kind === "image" && imageMode === "inpaint" && imageEditEntries.some((entry) => !entry.mask)) {
-      setError(tr("局部重绘需要先在画板为每张图涂抹蒙版", "Inpainting needs a painted mask for each image"));
+    if (kind === "image" && imageMode !== "generate" && imageReferences.length > 7) {
+      setError(tr("每张源图最多搭配 7 张参考图，请移除多余参考图", "Each source supports up to 7 reference images. Remove extra references."));
       return;
     }
-    if (kind === "image" && imageMode === "outpaint" && imageEditEntries.some((entry) => !entry.mask || !entry.meta?.expanded)) {
-      setError(tr("扩图需要先在画板为每张图设置扩边范围", "Outpainting needs an expanded canvas area for each image"));
+    if (kind === "image" && imageMode === "inpaint" && !editInputs.some(({ entry }) => entry.mask)) {
+      setError(tr("请先为需要局部重绘的源图涂抹蒙版，其他源图按各自设置处理", "Paint a mask on a source to inpaint; other sources use their own settings"));
+      return;
+    }
+    if (kind === "image" && imageMode === "outpaint" && !editInputs.some(({ entry }) => entry.mask && entry.meta?.expanded)) {
+      setError(tr("请先为需要扩图的源图设置扩边范围，其他源图按各自设置处理", "Expand a source canvas to outpaint; other sources use their own settings"));
       return;
     }
     if (!selected) {
@@ -787,9 +793,9 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
     };
     const tasks = kind === "image"
       ? (imageMode === "generate"
-        ? activePrompts.map((prompt) => ({ prompt, entry: null as ImageEditEntry | null }))
-        : activePrompts.flatMap((prompt) => imageEditEntries.map((entry) => ({ prompt: studioImagePrompt(prompt, imageMode, entry.meta), entry }))))
-      : activePrompts.map((prompt) => ({ prompt, entry: null as ImageEditEntry | null }));
+        ? activePrompts.map((prompt) => ({ prompt, editInput: null }))
+        : activePrompts.flatMap((prompt) => editInputs.map((editInput) => ({ prompt: studioImagePrompt(prompt, editInput.entry.meta?.expanded ? "outpaint" : editInput.entry.mask ? "inpaint" : "edit", editInput.entry.meta), editInput }))))
+      : activePrompts.map((prompt) => ({ prompt, editInput: null }));
     const taskRequests = tasks.map((task) => {
       const pendingBatchId = `pending-${crypto.randomUUID()}`;
       const createdAt = Date.now();
@@ -834,11 +840,12 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
           referenceAttachmentIds: kind === "image"
             ? imageMode === "generate"
               ? imageReferences.map((item) => item.id)
-              : task.entry ? [task.entry.source.id] : []
+              : task.editInput?.referenceAttachmentIds ?? []
             : kind === "video" && hasVideoControls && !useReferenceUrls && activeVideoMode !== "text"
               ? videoReferences.map((item) => item.id)
               : [],
-          maskAttachmentId: kind === "image" && imageMode !== "generate" ? task.entry?.mask?.id : undefined,
+          editSourceImageNumber: task.editInput?.editSourceImageNumber,
+          maskAttachmentId: task.editInput?.maskAttachmentId,
         });
         setAssets((current) => mergeAssets(current, result.assets));
         return result;
@@ -980,9 +987,10 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
             {imageEditEntries.length > 0 ? <>
               <div className="media-image-edit-source">
                 <div className="media-image-edit-source-list">
-                  {imageEditEntries.map((entry) => (
+                  {imageEditEntries.map((entry, index) => (
                     <MediaImageEditSource
                       attachment={entry.source}
+                      index={index}
                       active={entry.id === activeImageEditEntry?.id}
                       onOpen={() => selectImageEditEntry(entry)}
                       onRemove={() => void removeImageEditEntry(entry)}
@@ -996,11 +1004,12 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
                 </div>
               </div>
               <div className="media-image-edit-status">
-                <span className="ready">{tr("当前选中", "Selected")} {imageEditEntries.findIndex((entry) => entry.id === activeImageEditEntry?.id) + 1}/{imageEditEntries.length}</span>
+                <span className="ready">{tr(`当前选中：源图 ${activeImageEditNumber}`, `Selected: Source Image ${activeImageEditNumber}`)} / {imageEditEntries.length}</span>
                 {activeImageEditEntry?.meta?.hasLabels && <span className="ready">{tr("标签已合成", "Labels applied")}</span>}
                 <span className={activeImageEditEntry?.mask ? "ready" : ""}>{activeImageEditEntry?.mask ? tr("PNG 蒙版已就绪", "PNG mask ready") : tr("尚无蒙版", "No mask")}</span>
                 {activeImageEditEntry?.meta?.expanded && <span className="ready">{tr("扩边已设置", "Expansion set")}</span>}
               </div>
+              <p className="media-reference-order-hint media-image-edit-hint">{tr("每张源图独立提交，使用自己的蒙版、扩边和标签，并带上全部参考图。用“源图 1”“参考图 1”区分编辑目标和参考素材。", "Each source is submitted separately with its own mask, expansion and labels, plus all reference images. Use “Source Image 1” and “Reference Image 1” to distinguish them.")}</p>
             </> : <button type="button" className="media-image-edit-empty" onClick={() => void chooseImageEditSource()}><ImagePlus size={21} /><span><strong>{tr("选择图片开始编辑", "Choose images to edit")}</strong><small>{tr("支持多张源图、标签、涂抹蒙版和向外扩图", "Supports multiple source images, labels, masks, and outpainting")}</small></span></button>}
             {requiresImageMask && eligibleModels.length === 0 && <p className="media-image-mask-warning"><CircleAlert size={13} />{tr("已生成 PNG 蒙版，但当前连接里没有兼容模型；请配置支持 OpenAI Images Edit 的模型", "A PNG mask is ready, but no compatible model is configured. Add a model with OpenAI Images Edit support")}</p>}
           </section>}
@@ -1082,14 +1091,14 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
 
           {kind === "audio" && <label className="media-wide-field"><span>{tr("演绎要求", "Delivery instructions")}</span><input value={instructions} placeholder={tr("例如：温暖、自然、稍慢", "For example: warm, natural, slightly slower")} onChange={(event) => setInstructions(event.target.value)} /></label>}
 
-          {kind === "image" && imageMode === "generate" && (
+          {kind === "image" && (
             <div className="media-reference-row">
               <div className="media-reference-heading">
-                <span>{tr("参考图", "References")}<small>{pastingReferences ? tr("正在粘贴图片…", "Pasting images…") : tr("可拖拽、选择，或按 Ctrl+V 粘贴外部图片", "Drop, choose, or press Ctrl+V to paste images")}</small></span>
-                <button disabled={pastingReferences || imageReferences.length >= 8} onClick={() => void addImageReferences()}>{pastingReferences ? <LoaderCircle className="spin" size={14} /> : <ImagePlus size={14} />}{tr("选择图片", "Choose images")}</button>
+                <span>{tr("参考图", "References")}<small>{imageMode !== "generate" ? tr("全部参考图会随每张源图一起发送", "All references accompany each source image") : pastingReferences ? tr("正在粘贴图片…", "Pasting images…") : tr("可拖拽、选择，或按 Ctrl+V 粘贴外部图片", "Drop, choose, or press Ctrl+V to paste images")}</small></span>
+                <button disabled={pastingReferences || imageReferences.length >= (imageMode === "generate" ? 8 : 7)} onClick={() => void addImageReferences()}>{pastingReferences ? <LoaderCircle className="spin" size={14} /> : <ImagePlus size={14} />}{tr("选择图片", "Choose images")}</button>
               </div>
-              <MediaReferenceOrderHint />
-              <MediaReferenceList attachments={imageReferences} onMove={(id, direction) => setImageReferences((current) => moveMediaReference(current, current.findIndex((item) => item.id === id), direction))} onRemove={(attachment) => void removeImageReference(attachment)} />
+              {imageMode === "generate" ? <MediaReferenceOrderHint /> : <p className="media-reference-order-hint">{tr("可写“源图 2 参考参考图 1 的风格”；移动或移除后，参考图编号自动更新。", "For example: apply Reference Image 1’s style to Source Image 2. Reference numbers update when moved or removed.")}</p>}
+              <MediaReferenceList referenceImages={imageMode !== "generate"} attachments={imageReferences} onMove={(id, direction) => setImageReferences((current) => moveMediaReference(current, current.findIndex((item) => item.id === id), direction))} onRemove={(attachment) => void removeImageReference(attachment)} />
             </div>
           )}
 
@@ -1173,17 +1182,19 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
         onClose={() => setPreviewAsset(null)}
       />}
       {active && imageEditorOpen && activeImageEditEntry && <ConstellationCanvasEditor
-        source={activeImageEditEntry.source}
-        title={tr("图片编辑画板", "Image editing canvas")}
+        key={activeImageEditEntry.id}
+        source={activeImageEditEntry.originalSource ?? activeImageEditEntry.source}
+        initialState={activeImageEditEntry.meta?.editorState}
+        title={tr(`图片编辑画板 · 源图 ${activeImageEditNumber}`, `Image editing canvas · Source Image ${activeImageEditNumber}`)}
         saveLabel={tr("应用到图片编辑", "Apply to image edit")}
         onClose={() => setImageEditorOpen(false)}
-        onSave={(image, mask, meta) => void applyCanvasEdit(image, mask, meta)}
+        onSave={applyCanvasEdit}
       />}
     </main>
   );
 }
 
-function MediaImageEditSource({ attachment, active, onOpen, onRemove }: { attachment: ImageAttachment; active?: boolean; onOpen: () => void; onRemove: () => void }) {
+function MediaImageEditSource({ attachment, index, active, onOpen, onRemove }: { attachment: ImageAttachment; index: number; active?: boolean; onOpen: () => void; onRemove: () => void }) {
   const [url, setUrl] = useState<string>();
   const [loading, setLoading] = useState(true);
   useEffect(() => {
@@ -1200,12 +1211,13 @@ function MediaImageEditSource({ attachment, active, onOpen, onRemove }: { attach
     return () => { disposed = true; };
   }, [attachment.id]);
   return <div className={`media-image-edit-source-card${active ? " active" : ""}`}>
-    <button type="button" className="media-image-edit-thumbnail" onClick={onOpen} title={tr("打开标注画板", "Open annotation canvas")}>
+    <span className="media-reference-label"><strong>{tr(`源图 ${index + 1}`, `Source Image ${index + 1}`)}</strong></span>
+    <button type="button" className="media-image-edit-thumbnail" onClick={onOpen} aria-label={tr(`编辑图 ${index + 1}：${attachment.name}`, `Edit Image ${index + 1}: ${attachment.name}`)} title={tr(`打开图 ${index + 1} 标注画板`, `Open annotation canvas for Image ${index + 1}`)}>
       {url ? <img src={url} alt={attachment.name} /> : loading ? <LoaderCircle className="spin" size={18} /> : <Image size={19} />}
       <span><Brush size={11} />{tr("编辑", "Edit")}</span>
     </button>
     <div><strong title={attachment.name}>{attachment.name}</strong><small>{attachment.mimeType.replace("image/", "").toUpperCase()} · {formatAttachmentBytes(attachment.sizeBytes)}</small></div>
-    <button type="button" onClick={onRemove} aria-label={tr("移除编辑源图", "Remove edit source")} title={tr("移除编辑源图", "Remove edit source")}><X size={13} /></button>
+    <button type="button" onClick={onRemove} aria-label={tr(`移除图 ${index + 1}`, `Remove Image ${index + 1}`)} title={tr(`移除图 ${index + 1}`, `Remove Image ${index + 1}`)}><X size={13} /></button>
   </div>;
 }
 

@@ -1,5 +1,5 @@
 import { Children, isValidElement, useEffect, useRef, useState, type HTMLAttributes, type ReactNode } from "react";
-import ReactMarkdown, { type Components } from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown";
 import { Check, Copy } from "lucide-react";
 import remarkGfmCompatible from "../lib/remarkGfmCompatible";
 import { copyText } from "../lib/clipboard";
@@ -37,10 +37,12 @@ function MarkdownCodeBlock({ children, ...props }: HTMLAttributes<HTMLPreElement
 
 const COMPONENTS: Components = {
   pre: MarkdownCodeBlock,
-  a: ({ href, children, ...props }) => <a href={href} target="_blank" rel="noreferrer" {...props}>{children}</a>,
+  a: ({ href, children, ...props }) => href?.startsWith("levelup-skill:") || href?.startsWith("levelup-file:")
+    ? <span className="composer-reference-label">{children}</span>
+    : <a href={href} target="_blank" rel="noreferrer" {...props}>{children}</a>,
 };
 const PLUGINS = [remarkGfmCompatible];
 
 export default function MarkdownRenderer({ content }: { content: string }) {
-  return <ReactMarkdown remarkPlugins={PLUGINS} components={COMPONENTS}>{content}</ReactMarkdown>;
+  return <ReactMarkdown remarkPlugins={PLUGINS} components={COMPONENTS} urlTransform={(url) => /^levelup-(skill|file):/.test(url) ? url : defaultUrlTransform(url)}>{content}</ReactMarkdown>;
 }

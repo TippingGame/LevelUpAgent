@@ -23,35 +23,10 @@ import {
 import { importClipboardImages, previewAttachment } from "../lib/bridge";
 import { tr } from "../lib/i18n";
 import type { ImageAttachment } from "../lib/types";
+import { restoreCanvasEditorState, type CanvasEditorState, type CanvasPoint, type MaskStroke, type CanvasLabel, type EditorSnapshot } from "../lib/canvasEditorState";
 import "./ConstellationStudio.css";
 
 type CanvasTool = "mask" | "erase" | "label" | "pan";
-
-interface CanvasPoint {
-  x: number;
-  y: number;
-}
-
-interface MaskStroke {
-  id: string;
-  tool: "mask" | "erase";
-  width: number;
-  points: CanvasPoint[];
-}
-
-interface CanvasLabel {
-  id: string;
-  x: number;
-  y: number;
-  text: string;
-  color: string;
-}
-
-interface EditorSnapshot {
-  strokes: MaskStroke[];
-  labels: CanvasLabel[];
-  padding: number;
-}
 
 interface CanvasPointerMapping {
   left: number;
@@ -89,20 +64,23 @@ export interface CanvasEditorSaveMeta {
   expanded: boolean;
   hasLabels: boolean;
   labels: string[];
+  editorState: CanvasEditorState;
 }
 
 export function ConstellationCanvasEditor({
   source,
+  initialState,
   title,
   saveLabel,
   onClose,
   onSave,
 }: {
   source: ImageAttachment;
+  initialState?: CanvasEditorState;
   title?: string;
   saveLabel?: string;
   onClose: () => void;
-  onSave: (image: ImageAttachment, mask: ImageAttachment | undefined, meta: CanvasEditorSaveMeta) => void;
+  onSave: (image: ImageAttachment, mask: ImageAttachment | undefined, meta: CanvasEditorSaveMeta) => void | Promise<void>;
 }) {
   const imageCanvasRef = useRef<HTMLCanvasElement>(null);
   const maskCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -156,9 +134,10 @@ export function ConstellationCanvasEditor({
     if (panFrameRef.current !== null) window.cancelAnimationFrame(panFrameRef.current);
     panFrameRef.current = null;
     setImageSize({ width: 0, height: 0 });
-    setPadding(0);
-    setStrokes([]);
-    setLabels([]);
+    const restored = restoreCanvasEditorState(source.id, initialState);
+    setPadding(restored.padding);
+    setStrokes(restored.strokes);
+    setLabels(restored.labels);
     setUndoStack([]);
     setRedoStack([]);
     setError(undefined);
@@ -172,7 +151,7 @@ export function ConstellationCanvasEditor({
       if (!disposed) setError(errorText(reason));
     });
     return () => { disposed = true; };
-  }, [source.id]);
+  }, [source.id, initialState]);
 
   useEffect(() => {
     if (!sourceUrl) return;
@@ -502,11 +481,12 @@ export function ConstellationCanvasEditor({
       }
       const imported = await importClipboardImages(files);
       if (!imported[0]) throw new Error(tr("画板结果未能保存到素材库", "The canvas result could not be saved"));
-      onSave(imported[0], imported[1], {
+      await onSave(imported[0], imported[1], {
         hasMask: Boolean(imported[1]),
         expanded: padding > 0,
         hasLabels: labels.length > 0,
         labels: labels.map((label) => label.text),
+        editorState: { sourceId: source.id, ...snapshot() },
       });
     } catch (reason) {
       setError(errorText(reason));
