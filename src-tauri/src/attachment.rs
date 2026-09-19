@@ -14,9 +14,6 @@ const MAX_NON_IMAGE_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_MEDIA_REFERENCE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_PREVIEW_CHARS: usize = 4_000;
 const MAX_TEXT_BYTES: u64 = MAX_NON_IMAGE_ATTACHMENT_BYTES;
-const MAX_IMAGES_PER_MESSAGE: usize = 8;
-const MAX_DOCUMENTS_PER_MESSAGE: usize = 8;
-const MAX_ATTACHMENTS_PER_MESSAGE: usize = 12;
 const MAX_REQUEST_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_REQUEST_TEXT_BYTES: u64 = 48 * 1024 * 1024;
 const MAX_REQUEST_DOCUMENT_BYTES: u64 = 48 * 1024 * 1024;
@@ -87,16 +84,14 @@ pub fn import_media_reference(storage: &Path, source: &Path) -> Result<ImageAtta
     import_path(storage, source, true)
 }
 
-/// Explicit paths from the user's composer use the same import path as selected files.
+/// Legacy import behavior retained for compatibility regression coverage.
+#[cfg(test)]
 pub fn import_message_paths(
     storage: &Path,
     source_paths: &[MessagePath],
     existing: &[ImageAttachment],
     workspace: Option<&Path>,
 ) -> Result<Vec<ImageAttachment>, String> {
-    if source_paths.len() > 64 || existing.len() > MAX_ATTACHMENTS_PER_MESSAGE {
-        return Err("A message may contain at most 12 attachments".to_owned());
-    }
     let mut imported = Vec::new();
     let result = (|| {
         let mut seen = HashSet::new();
@@ -104,6 +99,9 @@ pub fn import_message_paths(
             let Some(path) = resolve_message_path(source, workspace)? else {
                 continue;
             };
+            if !path.is_file() {
+                continue;
+            }
             let key = path.to_string_lossy().into_owned();
             let key = if cfg!(windows) {
                 key.to_lowercase()
@@ -141,17 +139,6 @@ pub fn import_message_paths(
                 delete(storage, &item.id)?;
                 continue;
             }
-            if existing.len() + imported.len() > MAX_ATTACHMENTS_PER_MESSAGE {
-                return Err("A message may contain at most 12 attachments".to_owned());
-            }
-            let images = existing
-                .iter()
-                .chain(&imported)
-                .filter(|item| item.kind == AttachmentKind::Image)
-                .count();
-            if images > MAX_IMAGES_PER_MESSAGE {
-                return Err("A message may contain at most 8 images".to_owned());
-            }
         }
         Ok(())
     })();
@@ -164,7 +151,7 @@ pub fn import_message_paths(
     Ok(imported)
 }
 
-fn resolve_message_path(
+pub(crate) fn resolve_message_path(
     source: &MessagePath,
     workspace: Option<&Path>,
 ) -> Result<Option<std::path::PathBuf>, String> {
@@ -205,7 +192,7 @@ fn resolve_message_path(
             continue;
         };
         match path.canonicalize() {
-            Ok(path) => return Ok(path.is_file().then_some(path)),
+            Ok(path) => return Ok((path.is_file() || path.is_dir()).then_some(path)),
             Err(error)
                 if matches!(
                     error.kind(),
@@ -428,6 +415,9 @@ pub fn preview(
     attachment_id: &str,
     name: &str,
 ) -> Result<AttachmentPreview, String> {
+    if let Some(preview) = crate::local_resources::preview(storage, attachment_id)? {
+        return Ok(preview);
+    }
     validate_id(attachment_id)?;
     let path = storage.join(format!("{attachment_id}.bin"));
     let metadata = std::fs::metadata(&path)
@@ -444,7 +434,7 @@ pub fn preview(
             None,
         ),
         AttachmentKind::Video => (None, None),
-        AttachmentKind::File => (None, None),
+        AttachmentKind::File | AttachmentKind::Folder => (None, None),
         AttachmentKind::Text => {
             let decoded = decode_attachment_text(&bytes).map_err(|error| {
                 format!("Could not safely decode the selected text attachment: {error}")
@@ -497,17 +487,15 @@ pub fn resolve_with_workspace(
     let mut context_chars_remaining = MAX_CONTEXT_CHARS_PER_REQUEST;
 
     for (message_index, message) in messages.iter_mut().enumerate() {
-        if message.attachments.len() > MAX_ATTACHMENTS_PER_MESSAGE {
-            return Err("A message may contain at most 12 attachments".to_owned());
-        }
         if message.role != "user" && !message.attachments.is_empty() {
             return Err("Only user messages may contain attachments".to_owned());
         }
         let is_active_user = active_user_index == Some(message_index);
-        let mut image_count = 0_usize;
-        let mut document_count = 0_usize;
 
         for attachment in &mut message.attachments {
+            if crate::local_resources::resolve(storage, attachment, is_active_user)? {
+                continue;
+            }
             validate_id(&attachment.id)?;
             let path = storage.join(format!("{}.bin", attachment.id));
             let metadata = std::fs::metadata(&path)
@@ -555,10 +543,6 @@ pub fn resolve_with_workspace(
 
             match attachment.kind {
                 AttachmentKind::Image => {
-                    image_count += 1;
-                    if image_count > MAX_IMAGES_PER_MESSAGE {
-                        return Err("A message may contain at most 8 images".to_owned());
-                    }
                     image_total = image_total.saturating_add(bytes.len() as u64);
                     if image_total > MAX_REQUEST_IMAGE_BYTES {
                         return Err("Images in one request may total at most 64 MiB".to_owned());
@@ -566,7 +550,7 @@ pub fn resolve_with_workspace(
                     attachment.data_base64 =
                         Some(base64::engine::general_purpose::STANDARD.encode(&bytes));
                 }
-                AttachmentKind::Video | AttachmentKind::File => {
+                AttachmentKind::Video | AttachmentKind::File | AttachmentKind::Folder => {
                     resolve_file_reference(attachment, &bytes, workspace, &mut file_total, None)?;
                 }
                 AttachmentKind::Text => {
@@ -591,12 +575,6 @@ pub fn resolve_with_workspace(
                     ));
                 }
                 AttachmentKind::Document => {
-                    document_count += 1;
-                    if document_count > MAX_DOCUMENTS_PER_MESSAGE {
-                        return Err(
-                            "A message may contain at most 8 PDF or Office documents".to_owned()
-                        );
-                    }
                     document_total = document_total.saturating_add(bytes.len() as u64);
                     if document_total > MAX_REQUEST_DOCUMENT_BYTES {
                         return Err(
@@ -655,6 +633,9 @@ pub fn resolve_with_workspace(
 }
 
 pub fn delete(storage: &Path, id: &str) -> Result<bool, String> {
+    if crate::local_resources::delete(storage, id)? {
+        return Ok(true);
+    }
     validate_id(id)?;
     match std::fs::remove_file(storage.join(format!("{id}.bin"))) {
         Ok(()) => Ok(true),
@@ -877,14 +858,14 @@ fn stage_file_in_workspace(
     Ok(relative)
 }
 
-fn validate_id(id: &str) -> Result<(), String> {
+pub(crate) fn validate_id(id: &str) -> Result<(), String> {
     if id.len() != 32 || !id.chars().all(|character| character.is_ascii_hexdigit()) {
         return Err("Attachment ID is invalid".to_owned());
     }
     Ok(())
 }
 
-fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
+pub(crate) fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some("image/png")
     } else if bytes.starts_with(b"\xff\xd8\xff") {
@@ -1771,6 +1752,7 @@ fn attachment_kind_label(kind: &AttachmentKind) -> &'static str {
         AttachmentKind::Text => "text",
         AttachmentKind::Document => "document",
         AttachmentKind::File => "file",
+        AttachmentKind::Folder => "folder",
     }
 }
 
@@ -1864,7 +1846,7 @@ mod tests {
     }
 
     #[test]
-    fn message_path_import_rolls_back_on_error_and_respects_attachment_capacity() {
+    fn message_path_import_rolls_back_on_error_without_a_count_cap() {
         let root = root("message-path-errors");
         let storage = root.join("managed");
         let source = root.join("reference.txt");
@@ -1881,18 +1863,14 @@ mod tests {
         assert!(import_message_paths(&storage, &paths, &[], Some(&root)).is_err());
         assert_eq!(std::fs::read_dir(&storage).unwrap().count(), 0);
         let mut existing = Vec::new();
-        for index in 0..MAX_ATTACHMENTS_PER_MESSAGE {
+        for index in 0..13 {
             let source = root.join(format!("existing-{index}.txt"));
             std::fs::write(&source, format!("existing {index}")).unwrap();
             existing.push(import(&storage, &source).unwrap());
         }
-        let error =
-            import_message_paths(&storage, &paths[..1], &existing, Some(&root)).unwrap_err();
-        assert!(error.contains("at most 12"));
-        assert_eq!(
-            std::fs::read_dir(&storage).unwrap().count(),
-            MAX_ATTACHMENTS_PER_MESSAGE
-        );
+        let imported = import_message_paths(&storage, &paths[..1], &existing, Some(&root)).unwrap();
+        assert_eq!(imported.len(), 1);
+        assert_eq!(std::fs::read_dir(&storage).unwrap().count(), 14);
         std::fs::remove_dir_all(root).unwrap();
     }
 

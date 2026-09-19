@@ -1,7 +1,7 @@
 import type { SkillInfo } from "./types";
 
 export interface ComposerTrigger { kind: "skill" | "file"; start: number; end: number; query: string }
-export interface WorkspaceFileMatch { path: string; name: string }
+export interface WorkspaceFileMatch { path: string; name: string; kind: "file" | "folder" }
 export interface WorkspaceFileSearch { files: WorkspaceFileMatch[]; truncated: boolean }
 
 // Only a new token opens the picker; emails, URLs and existing paths stay text.

@@ -48,6 +48,26 @@ pub struct ThreadPage {
 }
 
 impl Database {
+    pub fn thread_attachment_ids(&self, thread_id: &str) -> Result<Vec<String>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let mut statement = connection.prepare("SELECT attachments_json FROM messages WHERE thread_id = ?1 AND role = 'user' AND attachments_json != '[]'")
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([thread_id], |row| row.get::<_, String>(0))
+            .map_err(database_error)?;
+        let mut ids = std::collections::BTreeSet::new();
+        for row in rows {
+            let attachments: Vec<ImageAttachment> =
+                serde_json::from_str(&row.map_err(database_error)?)
+                    .map_err(|error| error.to_string())?;
+            ids.extend(attachments.into_iter().map(|item| item.id));
+        }
+        Ok(ids.into_iter().collect())
+    }
+
     pub fn get_composer_draft(&self, thread_id: &str) -> Result<ComposerDraft, String> {
         let connection = self
             .connection
@@ -76,19 +96,15 @@ impl Database {
         thread_id: &str,
         draft: &ComposerDraft,
     ) -> Result<(), String> {
-        if thread_id.is_empty()
-            || thread_id.len() > 256
-            || draft.content.len() > 1024 * 1024
-            || draft.attachments.len() > 12
-        {
+        if thread_id.is_empty() || thread_id.len() > 256 || draft.content.len() > 1024 * 1024 {
             return Err(
-                "Invalid conversation draft: maximum 1 MiB of text and 12 attachments".into(),
+                "Invalid conversation draft: invalid thread ID or text exceeds 1 MiB".into(),
             );
         }
         let attachments =
             serde_json::to_string(&draft.attachments).map_err(|error| error.to_string())?;
-        if attachments.len() > 64 * 1024 {
-            return Err("Draft attachment metadata exceeds 64 KiB".into());
+        if attachments.len() > 1024 * 1024 {
+            return Err("Draft attachment metadata exceeds 1 MiB".into());
         }
         let connection = self
             .connection
@@ -184,13 +200,74 @@ mod tests {
     use rusqlite::Connection;
 
     #[test]
+    fn resource_read_grants_come_only_from_user_messages_in_the_requested_thread() {
+        let database = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        let mut thread = sample_thread();
+        let item = ImageAttachment {
+            id: "selected-resource".into(),
+            name: "folder".into(),
+            mime_type: "inode/directory".into(),
+            size_bytes: 0,
+            kind: crate::models::AttachmentKind::Folder,
+            data_base64: None,
+            text_content: None,
+        };
+        thread.messages[0].role = "user".into();
+        thread.messages[0].attachments = vec![item.clone(), item.clone()];
+        database.save_thread(&thread).unwrap();
+        database
+            .save_composer_draft(
+                "draft-only",
+                &ComposerDraft {
+                    content: String::new(),
+                    attachments: vec![item.clone()],
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            database.thread_attachment_ids(&thread.id).unwrap(),
+            [item.id]
+        );
+        assert!(
+            database
+                .thread_attachment_ids("draft-only")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            database
+                .thread_attachment_ids("other-thread")
+                .unwrap()
+                .is_empty()
+        );
+        thread.messages[0].role = "assistant".into();
+        database.save_thread(&thread).unwrap();
+        assert!(
+            database
+                .thread_attachment_ids(&thread.id)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn composer_drafts_survive_reopen_and_clear_without_changing_messages() {
         let directory =
             std::env::temp_dir().join(format!("levelup-draft-test-{}", uuid::Uuid::new_v4()));
         let path = directory.join("drafts.sqlite");
         let draft = ComposerDraft {
             content: "  未发送的草稿\n".into(),
-            attachments: Vec::new(),
+            attachments: (0..70)
+                .map(|index| ImageAttachment {
+                    id: format!("resource-{index}"),
+                    name: format!("file-{index}.custom"),
+                    mime_type: "application/octet-stream".into(),
+                    size_bytes: 0,
+                    kind: crate::models::AttachmentKind::File,
+                    data_base64: None,
+                    text_content: None,
+                })
+                .collect(),
         };
         {
             let database = Database::open(&path).unwrap();

@@ -9,6 +9,7 @@ use walkdir::WalkDir;
 pub struct FileMatch {
     path: String,
     name: String,
+    kind: &'static str,
 }
 
 #[derive(Serialize)]
@@ -69,7 +70,7 @@ pub fn search_files(workspace: &Path, query: &str) -> Result<FileSearch, String>
             truncated = true;
             continue;
         };
-        if !entry.file_type().is_file() {
+        if entry.depth() == 0 || (!entry.file_type().is_file() && !entry.file_type().is_dir()) {
             continue;
         }
         let relative = entry
@@ -94,6 +95,11 @@ pub fn search_files(workspace: &Path, query: &str) -> Result<FileSearch, String>
             FileMatch {
                 path: relative,
                 name,
+                kind: if entry.file_type().is_dir() {
+                    "folder"
+                } else {
+                    "file"
+                },
             },
         ));
     }
@@ -116,7 +122,7 @@ pub fn resolve_file(workspace: &Path, relative: &str) -> Result<PathBuf, String>
             .components()
             .any(|part| !matches!(part, Component::Normal(_) | Component::CurDir))
     {
-        return Err("Choose a file inside the current project".to_owned());
+        return Err("Choose a file or folder inside the current project".to_owned());
     }
     let root = workspace
         .canonicalize()
@@ -125,8 +131,8 @@ pub fn resolve_file(workspace: &Path, relative: &str) -> Result<PathBuf, String>
         .join(path)
         .canonicalize()
         .map_err(|error| format!("Project file is unavailable: {error}"))?;
-    if !resolved.starts_with(&root) || !resolved.is_file() {
-        return Err("The referenced file must be inside the current project".to_owned());
+    if !resolved.starts_with(&root) || (!resolved.is_file() && !resolved.is_dir()) {
+        return Err("The referenced file or folder must be inside the current project".to_owned());
     }
     Ok(resolved)
 }
@@ -204,7 +210,14 @@ mod tests {
                 .is_file()
         );
         assert!(resolve_file(&root, "../outside.txt").is_err());
-        assert!(resolve_file(&root, "src").is_err());
+        assert!(resolve_file(&root, "src").unwrap().is_dir());
+        let folders = search_files(&root, "说明 文档").unwrap();
+        assert!(
+            folders
+                .files
+                .iter()
+                .any(|item| item.kind == "folder" && item.path == "src/说明 文档")
+        );
         assert!(resolve_file(&root, &root.to_string_lossy()).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }

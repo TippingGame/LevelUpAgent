@@ -17,13 +17,13 @@ export interface DraftPersistence {
 
 export function parseComposerDraft(value: unknown): ComposerDraft {
   if (!value || typeof value !== "object" || !("content" in value) || typeof value.content !== "string"
-    || !("attachments" in value) || !Array.isArray(value.attachments) || value.attachments.length > 12
+    || !("attachments" in value) || !Array.isArray(value.attachments)
     || !value.attachments.every((item: unknown) => item && typeof item === "object"
       && "id" in item && typeof item.id === "string" && item.id.length > 0
       && "name" in item && typeof item.name === "string"
       && "mimeType" in item && typeof item.mimeType === "string"
       && "sizeBytes" in item && Number.isSafeInteger(item.sizeBytes) && Number(item.sizeBytes) >= 0
-      && "kind" in item && typeof item.kind === "string" && ["image", "video", "text", "document", "file"].includes(item.kind))) {
+      && "kind" in item && typeof item.kind === "string" && ["image", "video", "text", "document", "file", "folder"].includes(item.kind))) {
     throw new Error("Invalid saved draft");
   }
   return { content: value.content, attachments: value.attachments };
@@ -87,9 +87,8 @@ export class ComposerDraftStore {
   }
 
   appendAttachments(threadId: string, attachments: ImageAttachment[]): ImageAttachment[] {
-    const available = Math.max(0, 12 - this.get(threadId).attachments.length);
-    this.update(threadId, (current) => ({ ...current, attachments: [...current.attachments, ...attachments.slice(0, available)] }));
-    return attachments.slice(available);
+    this.update(threadId, (current) => ({ ...current, attachments: [...current.attachments, ...attachments] }));
+    return [];
   }
 
   async retry() {

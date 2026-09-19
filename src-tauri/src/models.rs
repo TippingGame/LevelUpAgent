@@ -114,6 +114,7 @@ pub enum AttachmentKind {
     Text,
     Document,
     File,
+    Folder,
 }
 
 #[derive(Debug, Clone, Deserialize)]

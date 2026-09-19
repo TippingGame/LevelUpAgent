@@ -11,7 +11,7 @@
 | 历史目录 | 桌面首次取 100 条摘要，游标加载更早记录；选中会话才加载正文 | `database/conversations.rs`；205 会话分页回归 |
 | 搜索 | 搜索标题、工作区和非内部的用户/助手正文；中文、字面 `%`/`_` 均支持 | SQLite 查询、目录合并测试；尚无 FTS 索引 |
 | 快捷导航 | 聊天 `Ctrl/Cmd+K`、搜索按钮，方向键/Enter/Escape，命令和会话入口 | `CommandPalette.tsx`；浏览器验收 |
-| 独立草稿 | 文本与最多 12 个附件引用按会话保存；切换、重启恢复，失败可重试 | `composerDrafts.ts`、SQLite `composer_drafts`；存储失败与竞态测试 |
+| 独立草稿 | 文本与附件引用按会话保存，不设附件数量上限；切换、重启恢复，失败可重试 | `composerDrafts.ts`、SQLite `composer_drafts`；存储失败与竞态测试；文本与附件元数据各最多 1 MiB |
 | 长会话 | Markdown、代码复制、工具组折叠；初始展示最近 40 个块，逐批加载早期消息 | `MarkdownRenderer.tsx`、会话滚动测试 |
 | 流式输出 | SSE、停止、重连状态、失败保留部分输出；不在已输出后静默换模型 | 四协议 HTTP fixtures、`threadExecution.ts` |
 | 模式与权限 | Agent / Plan / Chat / Goal；request / agent / full；主机重复校验 | `harness/policy.rs`、模式越权回归 |
@@ -34,7 +34,7 @@
 | 故障转移 | 首选连接、最多 7 个备用连接、冷却、延迟和健康统计 | 400/422、用户取消或已经输出的请求不切换 |
 | Instructions | 应用自定义指令；Agent/Plan/Goal 自动读工作区根 `AGENTS.override.md` 或 `AGENTS.md` | 最大 32 KiB UTF-8，拒绝 symlink；只读选定根目录，未实现嵌套目录继承 |
 | 上下文治理 | Token 估算、工具调用/结果原子组、确定性 checkpoint、可见省略信息 | 固定预算是估算，不是每个模型精确 tokenizer；完整历史仍在 SQLite |
-| 附件 | 选择、拖入、粘贴和消息中的本地路径；图片、文本、PDF、Office 提取和原文件引用 | 任意格式可保存，但未解码格式不会冒充已理解；复制到托管目录与工作区 |
+| 附件 | 任意后缀、无后缀文件和文件夹；文件/目录选择、拖入、粘贴路径、Windows 资源管理器复制粘贴和 `@` 引用 | 普通文件与目录保留原路径，按需读取，不按格式解析或复制目录；本地路径无 64 MiB 导入限制，聊天附件不设固定数量上限。图片继续直接提供视觉上下文，保留请求总大小与上下文容量检查；无源路径的剪贴板数据托管保存，单项最多 64 MiB。历史附件兼容保留 |
 | 诊断 | 余额/用量、模型请求日志、延迟、Token、request-id、日志目录 | Provider 请求日志不保存正文；会话和 Harness 账本包含任务内容 |
 
 ## 工具与扩展

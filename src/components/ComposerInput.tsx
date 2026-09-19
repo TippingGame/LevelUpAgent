@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
-import { BookOpen, FileText, LoaderCircle, X } from "lucide-react";
+import { BookOpen, FileText, Folder, LoaderCircle, X } from "lucide-react";
 import { isDesktop, scanSkills, searchWorkspaceFiles } from "../lib/bridge";
 import { composerTrigger, fileReference, matchingSkills, replaceComposerTrigger, skillReference, type ComposerTrigger } from "../lib/composerReferences";
 import { tr } from "../lib/i18n";
 
-interface Choice { id: string; title: string; description: string; reference: string; path?: string }
+interface Choice { id: string; title: string; description: string; reference: string; path?: string; kind?: "file" | "folder" }
 
-export function ComposerInput({ inputRef, draft, workspace, disabled, running, style, onDraftChange, onPaste, onSend, onPickFile }: {
+export function ComposerInput({ inputRef, draft, workspace, disabled, running, style, onDraftChange, onPaste, onPasteShortcut, onSend, onPickFile }: {
   inputRef: RefObject<HTMLTextAreaElement | null>;
   draft: string;
   workspace?: string;
@@ -15,6 +15,7 @@ export function ComposerInput({ inputRef, draft, workspace, disabled, running, s
   style?: CSSProperties;
   onDraftChange: (value: string) => void;
   onPaste: React.ClipboardEventHandler<HTMLTextAreaElement>;
+  onPasteShortcut?: () => void;
   onSend: () => void;
   onPickFile: (path: string) => Promise<boolean>;
 }) {
@@ -60,7 +61,7 @@ export function ComposerInput({ inputRef, draft, workspace, disabled, running, s
           if (running) throw new Error(tr("任务完成后可添加文件引用", "Add file references after the running task finishes"));
           const result = await searchWorkspaceFiles(workspace, trigger.query);
           if (!cancelled) {
-            setChoices(result.files.map((file) => ({ id: file.path, title: file.name, description: file.path, reference: fileReference(file.path), path: file.path })));
+            setChoices(result.files.map((file) => ({ id: file.path, title: file.name, description: file.path, reference: fileReference(file.path), path: file.path, kind: file.kind })));
             setTruncated(result.truncated);
           }
         }
@@ -102,13 +103,13 @@ export function ComposerInput({ inputRef, draft, workspace, disabled, running, s
 
   return <div className="composer-input" ref={container}>
     {trigger && <div className="composer-reference-menu">
-      <div className="composer-reference-heading"><strong>{trigger.kind === "skill" ? tr("选择 Skill", "Choose a Skill") : tr("引用项目文件", "Reference a project file")}</strong><button type="button" aria-label={tr("关闭引用列表", "Close references")} onClick={close}><X size={14} /></button></div>
-      <div id="composer-reference-list" className="composer-reference-list" role="listbox" aria-label={trigger.kind === "skill" ? tr("Skills", "Skills") : tr("项目文件", "Project files")} ref={list}>
+      <div className="composer-reference-heading"><strong>{trigger.kind === "skill" ? tr("选择 Skill", "Choose a Skill") : tr("引用文件或文件夹", "Reference a file or folder")}</strong><button type="button" aria-label={tr("关闭引用列表", "Close references")} onClick={close}><X size={14} /></button></div>
+      <div id="composer-reference-list" className="composer-reference-list" role="listbox" aria-label={trigger.kind === "skill" ? tr("Skills", "Skills") : tr("项目文件和文件夹", "Project files and folders")} ref={list}>
         {busy || picking ? <div className="composer-reference-empty" role="status"><LoaderCircle size={15} className="spin" />{tr("正在读取…", "Loading…")}</div>
           : error ? <div className="composer-reference-empty" role="status">{error}</div>
           : !choices.length ? <div className="composer-reference-empty" role="status">{trigger.kind === "skill" ? tr("没有匹配的已启用 Skill，可在设置 → Skills 中管理", "No matching enabled Skills. Manage them in Settings → Skills.") : tr("没有匹配的项目文件", "No matching project files")}</div>
           : choices.map((choice, index) => <button type="button" role="option" id={`composer-reference-${index}`} aria-selected={index === selected} key={choice.id} onMouseDown={(event) => event.preventDefault()} onClick={() => void pick(choice)} onMouseEnter={() => setSelected(index)}>
-            {trigger.kind === "skill" ? <BookOpen size={16} /> : <FileText size={16} />}<span><strong>{choice.title}</strong><small>{choice.description}</small></span>
+            {trigger.kind === "skill" ? <BookOpen size={16} /> : choice.kind === "folder" ? <Folder size={16} /> : <FileText size={16} />}<span><strong>{choice.title}</strong><small>{choice.description}</small></span>
           </button>)}
       </div>
       {truncated && <div className="composer-reference-empty">{tr("仅显示部分匹配文件", "Showing a subset of matching files")}</div>}
@@ -117,7 +118,7 @@ export function ComposerInput({ inputRef, draft, workspace, disabled, running, s
       aria-label={tr("消息输入框", "Message input")}
       aria-autocomplete="list" aria-controls={trigger ? "composer-reference-list" : undefined}
       aria-expanded={Boolean(trigger)} aria-activedescendant={trigger && !busy && !picking && choices[selected] ? `composer-reference-${selected}` : undefined}
-      placeholder={tr("输入消息，Ctrl+V 粘贴文件，/ 选择 Skill，@ 引用项目文件…", "Message, Ctrl+V to paste files, / for Skills, @ for project files…")}
+      placeholder={tr("输入消息，添加文件或文件夹，/ 选择 Skill，@ 引用项目文件…", "Message, add any file or folder, / for Skills, @ for project files…")}
       onChange={(event) => { dismissed.current = null; onDraftChange(event.target.value); detect(event.target.value, event.target.selectionStart); }}
       onSelect={(event) => detect(event.currentTarget.value, event.currentTarget.selectionStart)}
       onCompositionStart={() => { composing.current = true; }}
@@ -125,6 +126,10 @@ export function ComposerInput({ inputRef, draft, workspace, disabled, running, s
       onPaste={onPaste}
       onKeyDown={(event) => {
         if (composing.current || event.nativeEvent.isComposing || event.keyCode === 229) return;
+        if (((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "v") || (event.shiftKey && event.key === "Insert")) {
+          if (!event.repeat) onPasteShortcut?.();
+          return;
+        }
         if (trigger && event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); return; }
         if (trigger && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
           event.preventDefault();

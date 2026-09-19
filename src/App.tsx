@@ -127,9 +127,13 @@ import {
   hasApiKey,
   importExternalConfig,
   importAttachments,
+  importLocalResources,
   importMessagePathAttachments,
   importWorkspaceFile,
   importClipboardAttachments,
+  importClipboardResources,
+  readClipboardResourcePaths,
+  selectLocalResourcePaths,
   importHatchedPets,
   installAppUpdate,
   installSkill,
@@ -2462,7 +2466,7 @@ function App() {
       input.focus();
       input.setSelectionRange(input.value.length, input.value.length);
     });
-  }, []);
+  }, [setDraft]);
 
   const reviewChangedFile = useCallback(async (changeSet: ConversationChangeSet, file: ConversationFileChange) => {
     const reviewedPath = reviewedFile?.path ?? null;
@@ -4196,24 +4200,29 @@ function App() {
       const imported = await importWorkspaceFile(workspace, path, snapshot.attachments);
       const discarded = deletingThreadIdsRef.current.has(threadId) ? imported : draftStore.appendAttachments(threadId, imported);
       await Promise.all(discarded.map((item) => deleteImageAttachment(item.id).catch(() => false)));
-      if (discarded.length) throw new Error(tr("每条消息最多添加 12 个附件", "Each message supports up to 12 attachments"));
-      return activeThreadIdRef.current === threadId;
+      return !deletingThreadIdsRef.current.has(threadId) && activeThreadIdRef.current === threadId;
     } finally {
       attachmentPasteRef.current = false;
       setAttachmentPasteBusy(false);
     }
   };
 
-  const addDroppedAttachments = async (paths: string[]) => {
-    const threadId = activeThreadIdRef.current;
+  const focusAfterAttachment = (threadId: string) => {
+    requestAnimationFrame(() => {
+      const input = composerInputRef.current;
+      const focused = document.activeElement;
+      if (activeThreadIdRef.current === threadId && input && !input.disabled
+        && (focused === document.body || focused === input || focused?.closest(".composer-resource-actions"))) {
+        input.focus();
+      }
+    });
+  };
+
+  const addDroppedAttachments = async (paths: string[], threadId = activeThreadIdRef.current) => {
     setFileDragActive(false);
+    if (!paths.length || deletingThreadIdsRef.current.has(threadId)) return;
     if (runningThreadIdsRef.current.has(threadId) || pendingApprovalsRef.current[threadId] || !draftStore.get(threadId).ready) {
       setNotice(tr("当前任务运行中，暂时不能添加附件", "Attachments cannot be added while the task is running"));
-      return;
-    }
-    const remaining = Math.max(0, 12 - draftStore.get(threadId).attachments.length);
-    if (remaining === 0) {
-      setNotice(tr("每条消息最多添加 12 个附件", "Each message supports up to 12 attachments"));
       return;
     }
     if (attachmentPasteRef.current) {
@@ -4223,7 +4232,7 @@ function App() {
     attachmentPasteRef.current = true;
     setAttachmentPasteBusy(true);
     try {
-      const selected = await importAttachments(paths.slice(0, remaining));
+      const selected = await importLocalResources(paths, draftStore.get(threadId).attachments);
       const discarded = deletingThreadIdsRef.current.has(threadId) ? selected : draftStore.appendAttachments(threadId, selected);
       await Promise.all(discarded.map((item) => deleteImageAttachment(item.id).catch(() => false)));
     } catch (error) {
@@ -4231,12 +4240,53 @@ function App() {
     } finally {
       attachmentPasteRef.current = false;
       setAttachmentPasteBusy(false);
+      focusAfterAttachment(threadId);
     }
   };
 
-  const addPastedAttachments = async (files: File[]) => {
+  const addSelectedResources = async (directory: boolean) => {
     const threadId = activeThreadIdRef.current;
+    const snapshot = draftStore.get(threadId);
+    if (runningThreadIdsRef.current.has(threadId) || pendingApprovalsRef.current[threadId] || !snapshot.ready) {
+      setNotice(tr("当前任务运行中，暂时不能添加附件", "Attachments cannot be added while the task is running"));
+      return;
+    }
+    if (attachmentPasteRef.current) {
+      setNotice(tr("正在处理上一批附件", "The previous attachments are still being processed"));
+      return;
+    }
+    attachmentPasteRef.current = true;
+    setAttachmentPasteBusy(true);
+    try {
+      const paths = await selectLocalResourcePaths(directory);
+      const imported = await importLocalResources(paths, snapshot.attachments);
+      const discarded = deletingThreadIdsRef.current.has(threadId) ? imported : draftStore.appendAttachments(threadId, imported);
+      await Promise.all(discarded.map((item) => deleteImageAttachment(item.id).catch(() => false)));
+    } catch (error) {
+      setNotice(`${tr("无法添加附件", "Could not add attachment")}: ${errorText(error)}`);
+    } finally {
+      attachmentPasteRef.current = false;
+      setAttachmentPasteBusy(false);
+      focusAfterAttachment(threadId);
+    }
+  };
+
+  const addClipboardResourcePaths = async (): Promise<boolean> => {
+    const threadId = activeThreadIdRef.current;
+    try {
+      const paths = await readClipboardResourcePaths();
+      if (!paths.length) return false;
+      await addDroppedAttachments(paths, threadId);
+      return true;
+    } catch (error) {
+      setNotice(`${tr("无法粘贴附件", "Could not paste attachments")}: ${errorText(error)}`);
+      return true;
+    }
+  };
+
+  const addPastedAttachments = async (files: File[], threadId: string) => {
     if (files.length === 0) return;
+    if (deletingThreadIdsRef.current.has(threadId)) return;
     if (!isDesktop()) {
       setNotice(tr("文件粘贴需要桌面应用", "Pasting files requires the desktop app"));
       return;
@@ -4249,26 +4299,18 @@ function App() {
       setNotice(tr("正在处理上一批粘贴文件", "The previous pasted files are still being processed"));
       return;
     }
-    const remaining = Math.max(0, 12 - draftStore.get(threadId).attachments.length);
-    if (remaining === 0) {
-      setNotice(tr("每条消息最多添加 12 个附件", "Each message supports up to 12 attachments"));
-      return;
-    }
-    const selected = files.slice(0, remaining);
     attachmentPasteRef.current = true;
     setAttachmentPasteBusy(true);
     try {
-      const imported = await importClipboardAttachments(selected);
+      const imported = await importClipboardResources(files, draftStore.get(threadId).attachments);
       const discarded = deletingThreadIdsRef.current.has(threadId) ? imported : draftStore.appendAttachments(threadId, imported);
       await Promise.all(discarded.map((item) => deleteImageAttachment(item.id).catch(() => false)));
-      if (selected.length < files.length) {
-        setNotice(tr("每条消息最多添加 12 个附件，超出的文件未粘贴", "Each message supports up to 12 attachments; extra files were not pasted"));
-      }
     } catch (error) {
       setNotice(`${tr("无法粘贴附件", "Could not paste attachments")}: ${errorText(error)}`);
     } finally {
       attachmentPasteRef.current = false;
       setAttachmentPasteBusy(false);
+      focusAfterAttachment(threadId);
     }
   };
 
@@ -5161,7 +5203,7 @@ function App() {
           <div className="file-drop-overlay" role="status" aria-live="polite">
             <span><FileInput size={28} /></span>
             <strong>{tr("松手即可添加", "Drop to add")}</strong>
-            <small>{tr("支持图片、PDF、Office 和可识别文本", "Images, PDF, Office, and recognizable text are supported")}</small>
+            <small>{tr("支持任意类型文件和文件夹", "All file types and folders are supported")}</small>
           </div>
         )}
         <header className="topbar" data-tauri-drag-region>
@@ -5429,7 +5471,10 @@ function App() {
             </div>
           )}
           onDraftChange={setDraft}
-          onPasteFiles={(files) => void addPastedAttachments(files)}
+          onPasteFiles={(files) => void addPastedAttachments(files, activeThreadId)}
+          onPastePaths={addClipboardResourcePaths}
+          onSelectFiles={() => void addSelectedResources(false)}
+          onSelectFolder={() => void addSelectedResources(true)}
           onPickFile={addReferencedFile}
           onRemoveAttachment={removeDraftImage}
           onModeChange={activeThread.kind === "pet" ? () => undefined : setMode}
@@ -7197,6 +7242,9 @@ function Composer({
   modelControl,
   onDraftChange,
   onPasteFiles,
+  onPastePaths,
+  onSelectFiles,
+  onSelectFolder,
   onPickFile,
   onRemoveAttachment,
   onModeChange,
@@ -7222,6 +7270,9 @@ function Composer({
   modelControl: ReactNode;
   onDraftChange: (value: string) => void;
   onPasteFiles: (files: File[]) => void;
+  onPastePaths: () => Promise<boolean>;
+  onSelectFiles: () => void;
+  onSelectFolder: () => void;
   onPickFile: (path: string) => Promise<boolean>;
   onRemoveAttachment: (attachment: ImageAttachment) => void;
   onModeChange: (value: AgentMode) => void;
@@ -7239,6 +7290,7 @@ function Composer({
   const armorLevelMenuRef = useRef<HTMLDivElement>(null);
   const composerHeightRef = useRef(composerHeight);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
+  const nativePasteRef = useRef<{ at: number; promise: Promise<boolean> } | null>(null);
 
   const clampComposerHeight = (value: number) => Math.min(
     MAX_COMPOSER_HEIGHT,
@@ -7362,16 +7414,31 @@ function Composer({
             minHeight: `${MIN_COMPOSER_HEIGHT}px`,
           }}
           onDraftChange={onDraftChange}
+          onPasteShortcut={() => {
+            nativePasteRef.current = { at: performance.now(), promise: onPastePaths() };
+          }}
           onPaste={(event) => {
             const files = clipboardFiles(event.clipboardData);
-            if (files.length === 0) return;
+            const pendingPaste = nativePasteRef.current;
+            nativePasteRef.current = null;
+            if (!files.length && !event.clipboardData.types.includes("Files")) return;
             event.preventDefault();
-            onPasteFiles(files);
+            const nativePaste = pendingPaste && performance.now() - pendingPaste.at < 1000
+              ? pendingPaste.promise : onPastePaths();
+            void nativePaste.then((handled) => { if (!handled && files.length) onPasteFiles(files); });
           }}
           disabled={disabled}
         />
         <div className="composer-toolbar">
           <div className="composer-toolbar-options">
+            <div className="composer-resource-actions" aria-label={tr("添加文件或文件夹", "Add a file or folder")}>
+              <IconButton label={tr("添加文件", "Add files")} disabled={disabled || running} onClick={onSelectFiles}>
+                <FileInput size={15} />
+              </IconButton>
+              <IconButton label={tr("添加文件夹", "Add folder")} disabled={disabled || running} onClick={onSelectFolder}>
+                <FolderOpen size={15} />
+              </IconButton>
+            </div>
             <div className="mode-switch" aria-label={tr("运行模式", "Run mode")}>
               {(["agent", "plan", "goal", "chat"] as AgentMode[]).map((value) => (
                 <button

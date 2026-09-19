@@ -9,6 +9,7 @@ mod filesystem;
 mod git;
 mod harness;
 mod layout;
+mod local_resources;
 mod logging;
 mod mcp;
 mod media;
@@ -5176,21 +5177,72 @@ fn delete_media_asset(
 }
 
 #[tauri::command]
-fn import_message_path_attachments(
+async fn import_message_path_attachments(
     app: tauri::AppHandle,
     source_paths: Vec<attachment::MessagePath>,
     existing_attachments: Vec<ImageAttachment>,
     workspace: Option<String>,
 ) -> Result<Vec<ImageAttachment>, String> {
-    attachment::import_message_paths(
-        &attachment_storage(&app)?,
-        &source_paths,
-        &existing_attachments,
-        workspace
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .map(Path::new),
-    )
+    let storage = attachment_storage(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        local_resources::import_paths(
+            &storage,
+            &source_paths,
+            &existing_attachments,
+            workspace
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .map(Path::new),
+        )
+    })
+    .await
+    .map_err(|error| format!("Could not add message resources: {error}"))?
+}
+
+#[tauri::command]
+async fn import_local_resources(
+    app: tauri::AppHandle,
+    source_paths: Vec<String>,
+    existing_attachments: Vec<ImageAttachment>,
+) -> Result<Vec<ImageAttachment>, String> {
+    let storage = attachment_storage(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        local_resources::import_selected_paths(&storage, &source_paths, &existing_attachments)
+    })
+    .await
+    .map_err(|error| format!("Could not add local resources: {error}"))?
+}
+
+#[tauri::command]
+async fn read_clipboard_resource_paths() -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(local_resources::clipboard_paths)
+        .await
+        .map_err(|error| format!("Could not read clipboard resources: {error}"))?
+}
+
+#[tauri::command]
+async fn import_clipboard_resources(
+    app: tauri::AppHandle,
+    attachments: Vec<ClipboardAttachmentPayload>,
+) -> Result<Vec<ImageAttachment>, String> {
+    let storage = attachment_storage(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut imported = Vec::new();
+        for payload in attachments {
+            match local_resources::import_base64(&storage, &payload.name, &payload.data_base64) {
+                Ok(item) => imported.push(item),
+                Err(error) => {
+                    for item in imported {
+                        let _ = attachment::delete(&storage, &item.id);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(imported)
+    })
+    .await
+    .map_err(|error| format!("Could not paste local resources: {error}"))?
 }
 
 #[tauri::command]
@@ -5358,7 +5410,7 @@ async fn import_workspace_file(
     let storage = attachment_storage(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         let resolved = composer::resolve_file(Path::new(&workspace), &path)?;
-        attachment::import_message_paths(
+        local_resources::import_paths(
             &storage,
             &[attachment::MessagePath {
                 path: resolved.to_string_lossy().into_owned(),
@@ -5373,12 +5425,17 @@ async fn import_workspace_file(
 }
 
 #[tauri::command]
-fn preview_attachment(
+async fn preview_attachment(
     app: tauri::AppHandle,
     attachment_id: String,
     name: String,
 ) -> Result<AttachmentPreview, String> {
-    attachment::preview(&attachment_storage(&app)?, &attachment_id, &name)
+    let storage = attachment_storage(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        attachment::preview(&storage, &attachment_id, &name)
+    })
+    .await
+    .map_err(|error| format!("Could not load attachment preview: {error}"))?
 }
 
 #[tauri::command]
@@ -10105,7 +10162,26 @@ async fn execute_tool_inner(
     } else if request.name.starts_with("mcp_") {
         manager.execute(&request.name, request.arguments).await
     } else {
-        tools::execute(request).await
+        let scope = (|| {
+            if !request.allow_outside_workspace
+                && matches!(
+                    request.name.as_str(),
+                    "read_file" | "list_files" | "search_files"
+                )
+                && let Some(thread_id) = request.thread_id.as_deref()
+            {
+                let ids = database.thread_attachment_ids(thread_id)?;
+                local_resources::scope_read(&attachment_storage(app)?, &ids, &mut request)?;
+            }
+            Ok::<(), String>(())
+        })();
+        match scope {
+            Ok(()) => tools::execute(request).await,
+            Err(output) => ToolExecutionResponse {
+                output,
+                is_error: true,
+            },
+        }
     };
     if let Some((operation_id, call_id)) = ledger_key.as_ref() {
         database.finish_harness_tool_execution(operation_id, call_id, &response)?;
@@ -11224,6 +11300,9 @@ pub fn run() {
             import_media_references,
             import_clipboard_images,
             import_clipboard_attachments,
+            import_local_resources,
+            read_clipboard_resource_paths,
+            import_clipboard_resources,
             delete_image_attachment,
             get_default_workspace,
             search_workspace_files,

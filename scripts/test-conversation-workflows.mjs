@@ -30,13 +30,14 @@ test("drafts keep text and attachments isolated across conversations and reloads
   await store.load("one");
   await store.load("two");
   const attachment = { id: "managed-file", name: "notes.txt", kind: "text", mimeType: "text/plain", sizeBytes: 4 };
-  store.update("one", () => ({ content: "  first\n", attachments: [attachment] }));
+  const folder = { id: "referenced-folder", name: "资料", kind: "folder", mimeType: "inode/directory", sizeBytes: 0 };
+  store.update("one", () => ({ content: "  first\n", attachments: [attachment, folder] }));
   store.update("two", () => ({ content: "second", attachments: [] }));
   await store.flush();
   const restored = new ComposerDraftStore(persistence);
   await restored.load("one");
   assert.equal(restored.get("one").content, "  first\n");
-  assert.deepEqual(restored.get("one").attachments, [attachment]);
+  assert.deepEqual(restored.get("one").attachments, [attachment, folder]);
   store.clear("two");
   await store.flush();
   assert.equal(rows.get("one").content, "  first\n");
@@ -103,9 +104,10 @@ test("late imports and send completion stay with their originating draft", async
   assert.deepEqual(store.get("one").attachments.map((item) => item.id), ["late-import"]);
   assert.deepEqual(store.get("two").attachments, []);
   assert.equal(store.get("two").content, "different task");
-  const excess = store.appendAttachments("one", Array.from({ length: 13 }, (_, index) => ({ ...file, id: `file-${index}` })));
-  assert.equal(excess.length, 2);
-  assert.equal(store.get("one").attachments.length, 12);
+  const excess = store.appendAttachments("one", Array.from({ length: 70 }, (_, index) => ({ ...file, id: `file-${index}` })));
+  assert.equal(excess.length, 0);
+  assert.equal(store.get("one").attachments.length, 71);
+  assert.equal(parseComposerDraft(JSON.parse(JSON.stringify(store.get("one")))).attachments.length, 71);
   await store.flush();
 });
 

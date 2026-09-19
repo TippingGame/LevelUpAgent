@@ -1510,6 +1510,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .composer-toolbar-options, .composer-toolbar-actions { min-width: 0; display: flex; align-items: center; gap: 5px; }
 .composer-toolbar-options { overflow: visible; }
 .composer-toolbar-options > * { flex: 0 0 auto; }
+.composer-resource-actions { display: flex; align-items: center; gap: 2px; }
+.composer-resource-actions .icon-button { width: 28px; height: 28px; }
 .mode-switch { flex: 0 0 auto; width: max-content; max-width: 100%; }
 .mode-switch button { flex: 0 0 auto; width: max-content; }
 .composer-toolbar-actions { justify-content: flex-end; margin-inline-start: auto; }
@@ -1530,13 +1532,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .send-button { color: #fff; background: #292b28; }
 .send-button:hover:not(:disabled) { color: #fff; background: #10110f; }
 
-@container composer (max-width: 760px) {
+@container composer (max-width: 820px) {
   .composer:has(.armor-level-picker) .composer-toolbar { grid-template-columns: minmax(0, 1fr); align-items: stretch; row-gap: 4px; }
   .composer:has(.armor-level-picker) .composer-toolbar-options { flex-wrap: wrap; overflow: visible; }
   .composer:has(.armor-level-picker) .composer-toolbar-actions { width: 100%; justify-content: flex-end; }
 }
 
-@container composer (max-width: 640px) {
+@container composer (max-width: 700px) {
   .composer:not(:has(.armor-level-picker)) .composer-toolbar { grid-template-columns: minmax(0, 1fr); align-items: stretch; row-gap: 4px; }
   .composer:not(:has(.armor-level-picker)) .composer-toolbar-options { flex-wrap: wrap; overflow: visible; }
   .composer:not(:has(.armor-level-picker)) .composer-toolbar-actions { width: 100%; justify-content: flex-end; }

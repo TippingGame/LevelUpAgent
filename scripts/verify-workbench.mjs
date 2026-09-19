@@ -52,7 +52,7 @@ try {
   await page.goto(url);
   const composer = page.locator(".composer textarea");
   await composer.waitFor();
-  await page.getByText("Verified result 239.", { exact: false }).first().waitFor();
+  await page.locator(".assistant-message-content").getByText("Verified result 239.", { exact: false }).waitFor();
   await page.locator(".assistant-message-content pre").last().waitFor();
   const initialMs = performance.now() - started;
   const initialUserMessages = await page.locator(".message.user").count();
@@ -64,6 +64,16 @@ try {
 
   await composer.fill("Draft A survives switches");
   await switchTo("searchable-history-token");
+  const editedText = threads[1].messages[0].content;
+  await page.locator(".message.user .message-body").hover();
+  await page.getByTitle("Edit this message", { exact: true }).click();
+  assert.equal(await composer.inputValue(), editedText);
+  await page.waitForFunction(() => document.activeElement === document.querySelector(".composer textarea"));
+  assert.deepEqual(await composer.evaluate((element) => [element.selectionStart, element.selectionEnd]), [editedText.length, editedText.length]);
+  await switchTo("Long conversation");
+  assert.equal(await composer.inputValue(), "Draft A survives switches");
+  await switchTo("Independent draft");
+  assert.equal(await composer.inputValue(), "searchable-history-token");
   await composer.fill("Draft B survives restart");
   await switchTo("Long conversation");
   assert.equal(await composer.inputValue(), "Draft A survives switches");
@@ -125,7 +135,7 @@ try {
   assert.ok(requests.some((item) => /WritingStudio/.test(item)));
   assert.ok(requests.some((item) => /ConstellationStudio/.test(item)));
   assert.deepEqual(errors, []);
-  const result = { url, initialMs: Math.round(initialMs), initialUserMessages, passed: ["progressive history", "lazy workspaces", "history search", "independent persistent drafts", "palette keyboard", "desktop and narrow layouts", "media/writing/constellation retain workspace state"], initialResources, resourcesAfterWorkspaces: await resources(), errors };
+  const result = { url, initialMs: Math.round(initialMs), initialUserMessages, passed: ["progressive history", "lazy workspaces", "history search", "edit targets the selected conversation and focuses the draft", "independent persistent drafts", "palette keyboard", "desktop and narrow layouts", "media/writing/constellation retain workspace state"], initialResources, resourcesAfterWorkspaces: await resources(), errors };
   await writeFile(resolve(output, "result.json"), JSON.stringify(result, null, 2));
   console.log(JSON.stringify(result, null, 2));
 } catch (error) {

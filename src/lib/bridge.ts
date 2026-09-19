@@ -4,6 +4,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import type { LocalAttachmentPath } from "./localAttachments";
 import type { WorkspaceFileSearch } from "./composerReferences";
 import { deduplicateMediaRefresh } from "./mediaPolling";
+import { tr } from "./i18n";
 import type {
   AgentMessage,
   AgentMode,
@@ -1334,6 +1335,38 @@ export async function installSkill(input: {
 
 export async function listPersistedThreads(): Promise<AgentThread[]> {
   return invoke<AgentThread[]>("list_threads");
+}
+
+export async function selectLocalResourcePaths(directory: boolean): Promise<string[]> {
+  if (!isDesktop()) throw new Error("Selecting files and folders requires the desktop app");
+  // No extension filter: the native file dialog accepts every file type.
+  const selected = await open({ multiple: true, directory });
+  return typeof selected === "string" ? [selected] : selected ?? [];
+}
+
+export async function importLocalResources(sourcePaths: string[], existingAttachments: ImageAttachment[]): Promise<ImageAttachment[]> {
+  if (!isDesktop() || sourcePaths.length === 0) return [];
+  return invoke<ImageAttachment[]>("import_local_resources", { sourcePaths, existingAttachments });
+}
+
+export async function readClipboardResourcePaths(): Promise<string[]> {
+  if (!isDesktop()) return [];
+  return invoke<string[]>("read_clipboard_resource_paths");
+}
+
+export async function importClipboardResources(files: File[], existingAttachments: ImageAttachment[]): Promise<ImageAttachment[]> {
+  if (!isDesktop() || files.length === 0) return [];
+  const paths = files.map((file) => (file as File & { path?: string }).path?.trim() ?? "");
+  if (paths.every(Boolean)) return importLocalResources(paths, existingAttachments);
+  if (files.some((file) => file.size > 64 * 1024 * 1024)) {
+    throw new Error(tr("粘贴的文件数据不能超过 64 MiB；大文件请通过选择或拖入添加", "Pasted file data cannot exceed 64 MiB; select or drop larger local files"));
+  }
+  const timestamp = new Date().toISOString().replace(/[-:.TZ]/g, "");
+  const attachments = await Promise.all(files.map(async (file, index) => ({
+    name: clipboardAttachmentName(file, timestamp, index),
+    dataBase64: await readFileAsBase64(file),
+  })));
+  return invoke<ImageAttachment[]>("import_clipboard_resources", { attachments });
 }
 
 export async function searchWorkspaceFiles(workspace: string, query: string): Promise<WorkspaceFileSearch> {

@@ -289,7 +289,7 @@ export interface ImageAttachment {
   name: string;
   mimeType: string;
   sizeBytes: number;
-  kind: "image" | "video" | "text" | "document" | "file";
+  kind: "image" | "video" | "text" | "document" | "file" | "folder";
 }
 
 export interface AttachmentPreview {

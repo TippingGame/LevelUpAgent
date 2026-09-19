@@ -1064,6 +1064,7 @@ where
                     completed_result =
                         Some(parse_openai_responses_value(response, request_id.clone())?);
                 }
+                break;
             }
             _ => {}
         }
@@ -1387,6 +1388,11 @@ where
                 .get("candidatesTokenCount")
                 .and_then(Value::as_u64)
                 .or(output_tokens);
+        }
+        // The final candidate can carry content, tool calls, and usage. Consume
+        // them before finishing, without waiting for the server to close SSE.
+        if completed {
+            break;
         }
     }
     if !completed {
@@ -2717,7 +2723,7 @@ fn system_prompt_with_omission(request: &AgentTurnRequest, omission: &ContextOmi
         prompt.push_str(if request.allow_outside_workspace {
             "\n\nHost filesystem access: Full. The selected workspace is the default working directory, not a filesystem boundary. You may use absolute paths outside it with the available file tools and use workdir with run_command/start_process to run in another directory. Tools and executables do not need to be copied into the workspace. Work within the user's task; operating-system permissions and tool-specific checks still apply."
         } else {
-            "\n\nHost filesystem access: Workspace. File paths and explicit command workdir values must resolve inside the selected workspace. Full access has not been granted for this operation."
+            "\n\nHost filesystem access: Workspace. File paths and explicit command workdir values must resolve inside the selected workspace. Exception: read_file, list_files and search_files may read user-selected local resource references from this conversation using their absolute paths, including descendants of explicitly attached folders. This grants no write or execute access outside the workspace. Full access has not been granted for this operation."
         });
     }
     if let Some(instructions) = request
@@ -6590,6 +6596,47 @@ mod tests {
         assert_eq!(result.tool_calls[0].name, "search_files");
         assert_eq!(result.tool_calls[0].arguments["query"], "TODO");
         assert_eq!(result.output_tokens, Some(11));
+    }
+
+    #[tokio::test]
+    async fn terminal_stream_events_finish_before_connection_close() {
+        let cases = [
+            (
+                ProviderProtocol::OpenaiResponses,
+                "/v1/responses",
+                concat!(
+                    "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"complete\"}\n\n",
+                    "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"function_call\",\"call_id\":\"call-final\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\"}],\"usage\":{\"input_tokens\":21,\"output_tokens\":8}}}\n\n"
+                ),
+            ),
+            (
+                ProviderProtocol::GeminiGenerateContent,
+                "/v1beta/models/test-model:streamGenerateContent?alt=sse",
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"complete\"},{\"functionCall\":{\"name\":\"read_file\",\"args\":{\"path\":\"README.md\"}}}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":21,\"candidatesTokenCount\":8}}\n\n",
+            ),
+        ];
+        for (protocol, path, events) in cases {
+            let request = test_request(
+                mock_timed_sse_server(
+                    path,
+                    Duration::ZERO,
+                    vec![(Duration::ZERO, events)],
+                    PROVIDER_STREAM_IDLE_TIMEOUT + Duration::from_secs(1),
+                ),
+                protocol,
+            );
+            let (result, emitted) =
+                tokio::time::timeout(PROVIDER_STREAM_IDLE_TIMEOUT, collect_stream(request))
+                    .await
+                    .expect("a terminal event must finish without waiting for HTTP EOF");
+            assert_eq!(result.content, "complete");
+            assert_eq!(emitted, result.content);
+            assert_eq!(result.tool_calls.len(), 1);
+            assert_eq!(result.tool_calls[0].name, "read_file");
+            assert_eq!(result.tool_calls[0].arguments["path"], "README.md");
+            assert_eq!(result.input_tokens, Some(21));
+            assert_eq!(result.output_tokens, Some(8));
+        }
     }
 
     #[tokio::test]
