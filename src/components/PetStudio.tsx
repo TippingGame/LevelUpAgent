@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   ArchiveRestore,
   BrainCircuit,
@@ -174,7 +175,10 @@ export function PetStudio({
     ...(environment?.missing ?? []),
     ...(!connectionReady ? [{ id: "connection", detail: text("模型连接", "Model connection") }] : []),
   ];
-  const canGenerate = Boolean(environment?.configured && connectionReady && description.trim());
+  const needsDependencies = Boolean(environment?.missing.some((item) => item.id === "pillow"));
+  const canPrepare = Boolean(environment?.pythonCommand
+    && environment.missing.every((item) => item.id === "pillow"));
+  const canGenerate = Boolean((environment?.configured || canPrepare) && connectionReady && description.trim());
 
   const activate = async (pet: PetProfile) => {
     setBusy(`select:${pet.id}`);
@@ -284,11 +288,24 @@ export function PetStudio({
     await deleteImageAttachment(attachment.id).catch(() => undefined);
   };
 
+  const downloadPython = async () => {
+    const url = "https://www.python.org/downloads/";
+    try {
+      if (isDesktop()) {
+        await openUrl(url);
+      } else {
+        window.open(url, "_blank", "noopener,noreferrer");
+      }
+    } catch (error) {
+      onNotice(`${text("无法打开 Python 下载页面", "Could not open the Python download page")}: ${formatError(error)}`);
+    }
+  };
+
   const generate = async () => {
     if (!environment || !canGenerate) return;
     setBusy("generate");
     try {
-      const configuredEnvironment = await configurePetHatch();
+      const configuredEnvironment = await configurePetHatch(true);
       setEnvironment(configuredEnvironment);
       if (!configuredEnvironment.configured) {
         throw new Error(text("孵化环境仍有缺项", "The hatch setup still has missing requirements"));
@@ -456,9 +473,23 @@ export function PetStudio({
               </div>
               {missing.length > 0 && (
                 <div className="pet-hatch-missing">
-                  {missing.map((item) => <p key={item.id}><CircleAlert size={13} /><span><strong>{requirementLabel(item.id, locale)}</strong><small>{item.detail}</small></span></p>)}
+                  {missing.map((item) => (
+                    <p key={item.id}>
+                      <CircleAlert size={13} />
+                      <span>
+                        <strong>{requirementLabel(item.id, locale)}</strong>
+                        <small>{item.detail}</small>
+                        {item.id === "python" && (
+                          <button className="secondary-button pet-python-download" type="button" onClick={() => void downloadPython()}>
+                            <Download size={14} />{text("下载 Python", "Download Python")}
+                          </button>
+                        )}
+                      </span>
+                    </p>
+                  ))}
                 </div>
               )}
+              {needsDependencies && <small>{text("首次孵化会自动安装图像处理组件，需要联网。", "The first hatch will download and install image processing components.")}</small>}
               <label className="pet-field"><span>{text("名字", "Name")} <small>{text("可选", "Optional")}</small></span><input value={petName} maxLength={80} placeholder={text("留空自动命名", "Infer from the concept")} onChange={(event) => setPetName(event.target.value)} /></label>
               <label className="pet-field pet-brief"><span>{text("残影设定", "Echo concept")}</span><textarea value={description} maxLength={1_200} placeholder={text("外观、性格、配色和标志性细节", "Appearance, personality, palette, and signature details")} onChange={(event) => setDescription(event.target.value)} /></label>
               <div className="pet-reference-field">
@@ -468,7 +499,7 @@ export function PetStudio({
                 ) : <small>{text("文本设定也可以直接生成", "A text-only concept works too")}</small>}
               </div>
               <button className="primary-button pet-generate-button" type="button" disabled={!canGenerate || busy === "generate"} onClick={() => void generate()}>
-                {busy === "generate" ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />}{text("孵化并自动导入", "Hatch and auto-import")}
+                {busy === "generate" ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />}{busy === "generate" ? text("正在准备孵化…", "Preparing hatch…") : needsDependencies ? text("安装组件并孵化", "Set up and hatch") : text("孵化并自动导入", "Hatch and auto-import")}
               </button>
             </div>
           ) : panel === "memory" ? (
@@ -518,7 +549,8 @@ function requirementLabel(id: string, locale: AppLocale) {
   const labels: Record<string, [string, string]> = {
     hatch_skill: ["Hatch Pet Skill", "Hatch Pet skill"],
     imagegen_skill: ["图像生成 Skill", "Image generation skill"],
-    python: ["Python 3", "Python 3"],
+    python: ["Python 3.10 或更新版本", "Python 3.10 or newer"],
+    pillow: ["图像处理组件", "Image processing components"],
     connection: ["模型连接", "Model connection"],
     desktop: ["桌面应用", "Desktop app"],
   };

@@ -313,6 +313,7 @@ import {
   createHatchExecutionState,
   gateHatchToolCall,
   hatchPrepareCommandFromHistory,
+  hatchPythonInvocation,
   hatchPetId,
   hatchRunDirectoryFromHistory,
   hatchStatusCommand,
@@ -4725,7 +4726,7 @@ function App() {
         let resumeWorkspace = activeThread.workspace;
         let hatchRunDir: string | undefined;
         if (hatchThread) {
-          const environment = await configurePetHatch();
+          const environment = await configurePetHatch(true);
           resumeWorkspace ||= environment.workDirectory;
           hatchRunDir = hatchRunDirectoryFromHistory(activeThread.messages)
             ?? await harnessLatestHatchRunDir(activeThread.id)
@@ -10892,9 +10893,7 @@ function petHatchGenerationPrompt(
   const petId = hatchPetId(request.name || request.description);
   const referenceIds = request.references.map((reference) => reference.id);
   const pythonCommand = request.environment.pythonCommand?.trim() || "python";
-  const pythonInvocation = /^[A-Za-z0-9_.-]+$/.test(pythonCommand)
-    ? pythonCommand
-    : `& ${powershellLiteral(pythonCommand)}`;
+  const pythonInvocation = hatchPythonInvocation(pythonCommand);
   const skillDirectory = hatchPathForCommand(request.environment.hatchSkillPath || "");
   const prepareCommand = [
     pythonInvocation,

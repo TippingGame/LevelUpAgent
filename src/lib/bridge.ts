@@ -213,9 +213,9 @@ export async function getPetHatchEnvironment(): Promise<HatchEnvironment> {
   return invoke<HatchEnvironment>("get_pet_hatch_environment");
 }
 
-export async function configurePetHatch(): Promise<HatchEnvironment> {
+export async function configurePetHatch(prepareRuntime = false): Promise<HatchEnvironment> {
   if (!isDesktop()) return getPetHatchEnvironment();
-  return invoke<HatchEnvironment>("configure_pet_hatch");
+  return invoke<HatchEnvironment>("configure_pet_hatch", { prepareRuntime });
 }
 
 export async function importHatchedPets(afterMs = 0): Promise<PetProfile[]> {

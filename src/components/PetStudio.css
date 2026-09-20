@@ -104,6 +104,7 @@
 .pet-hatch-missing strong, .pet-hatch-missing small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pet-hatch-missing strong { font-size: var(--font-caption); }
 .pet-hatch-missing small { color: #92400e; font-size: var(--font-compact); }
+.pet-python-download { align-self: flex-start; max-width: 100%; min-height: 28px; height: auto; margin-top: 5px; padding: 5px 8px; font-size: var(--font-caption); }
 .pet-field { min-width: 0; display: flex; flex-direction: column; gap: 5px; }
 .pet-field > span, .pet-reference-field > div:first-child > span { color: var(--text); font-size: var(--font-caption); font-weight: 700; }
 .pet-field > span small { color: var(--muted); font-weight: 500; }

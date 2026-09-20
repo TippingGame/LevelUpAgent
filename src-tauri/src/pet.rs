@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 use std::sync::{
     Mutex,
     atomic::{AtomicBool, AtomicU32, Ordering},
@@ -246,6 +245,7 @@ pub struct PetManager {
     codex_home: PathBuf,
     built_in_skills: Option<PathBuf>,
     work_directory: PathBuf,
+    hatch_python: crate::pet_python::HatchPythonRuntime,
     state: Mutex<StoredPetState>,
 }
 
@@ -279,6 +279,7 @@ impl PetManager {
             codex_home,
             built_in_skills: built_in_skills.map(Path::to_path_buf),
             work_directory,
+            hatch_python: crate::pet_python::HatchPythonRuntime::new(app_data.join("pet-python")),
             state: Mutex::new(state),
         })
     }
@@ -1008,7 +1009,10 @@ impl PetManager {
             .as_ref()
             .map(|root| root.join("imagegen"))
             .filter(|path| path.join("SKILL.md").is_file());
-        let python_command = detect_python();
+        let python = self.hatch_python.inspect();
+        let python_command = python
+            .as_ref()
+            .map(|probe| probe.executable.display().to_string());
         let mut missing = Vec::new();
         if hatch_skill_path.is_none() {
             missing.push(HatchRequirement {
@@ -1039,6 +1043,14 @@ impl PetManager {
                 id: "python".to_owned(),
                 detail: "Python 3.10 or newer".to_owned(),
             });
+        } else if let Some(probe) = python.filter(|probe| !probe.ready) {
+            missing.push(HatchRequirement {
+                id: "pillow".to_owned(),
+                detail: format!(
+                    "Pillow with WebP support: {}",
+                    probe.error.as_deref().unwrap_or("unavailable")
+                ),
+            });
         }
         HatchEnvironment {
             configured: missing.is_empty(),
@@ -1054,6 +1066,10 @@ impl PetManager {
             package_directory: self.codex_home.join("pets").display().to_string(),
             missing,
         }
+    }
+
+    pub async fn prepare_hatch_runtime(&self) -> Result<(), String> {
+        self.hatch_python.prepare().await
     }
 
     pub fn configure_hatch(&self) -> Result<HatchEnvironment, String> {
@@ -1831,37 +1847,6 @@ fn normalize_activity(activity: PetActivity) -> Option<PetActivity> {
         completed_at: activity.completed_at.filter(|value| *value >= 0),
         unread: activity.unread,
     })
-}
-
-fn detect_python() -> Option<String> {
-    for (command, arguments) in [
-        ("python", vec!["--version"]),
-        ("py", vec!["-3", "--version"]),
-    ] {
-        let mut process = Command::new(command);
-        process.args(arguments);
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            process.creation_flags(0x0800_0000);
-        }
-        let Ok(output) = process.output() else {
-            continue;
-        };
-        let version = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        if output.status.success() && version.to_ascii_lowercase().contains("python 3") {
-            return Some(if command == "py" {
-                "py -3".to_owned()
-            } else {
-                command.to_owned()
-            });
-        }
-    }
-    None
 }
 
 fn package_modified_ms(manifest: &Path, spritesheet: &Path) -> i64 {

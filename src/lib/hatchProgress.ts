@@ -230,6 +230,13 @@ function powershellLiteral(value: string) {
   return `'${hatchPowerShellPath(value)}'`;
 }
 
+export function hatchPythonInvocation(command: string) {
+  const python = command.trim() || "python";
+  // Legacy runs may store the Windows launcher including its argument.
+  if (/^py(?:\.exe)?\s+-3$/i.test(python)) return python;
+  return /^[A-Za-z0-9_.-]+$/.test(python) ? python : `& ${powershellLiteral(python)}`;
+}
+
 function hatchSkillDirectoryFromHistory(history: AgentMessage[]) {
   return hatchToolOutputValue(history, "Skill root")
     || hatchPromptValue(history, "Bundled Hatch Pet skill directory");
@@ -251,9 +258,7 @@ export function hatchPrepareCommandFromHistory(history: AgentMessage[]) {
   const name = hatchPromptValue(history, "Pet name") || "Starlight Echo";
   const petId = hatchPromptValue(history, "Pet ID") || hatchPetId(name);
   const description = hatchPromptValue(history, "Pet concept") || "a compact digital pet";
-  const pythonInvocation = /^[A-Za-z0-9_.-]+$/.test(python)
-    ? python
-    : `& ${powershellLiteral(python)}`;
+  const pythonInvocation = hatchPythonInvocation(python);
   return [
     pythonInvocation,
     powershellLiteral(`${skillDirectory}\\scripts\\prepare_pet_run.py`),
@@ -386,9 +391,7 @@ export function hatchStatusCommand(history: AgentMessage[]) {
   const runDirectory = hatchRunDirectoryFromHistory(history);
   if (!skillDirectory || !runDirectory) return null;
   const python = hatchPromptValue(history, "Python command") || "python";
-  const pythonInvocation = /^[A-Za-z0-9_.-]+$/.test(python)
-    ? python
-    : `& ${powershellLiteral(python)}`;
+  const pythonInvocation = hatchPythonInvocation(python);
   return `${pythonInvocation} ${powershellLiteral(`${skillDirectory}\\scripts\\pet_job_status.py`)} --run-dir ${powershellLiteral(runDirectory)}`;
 }
 

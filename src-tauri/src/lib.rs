@@ -18,6 +18,7 @@ mod models;
 mod network;
 mod pet;
 mod pet_life;
+mod pet_python;
 mod process;
 mod sandbox;
 mod skill;
@@ -3557,13 +3558,22 @@ fn enable_default_built_in_skills(
 }
 
 #[tauri::command]
-fn configure_pet_hatch(
-    manager: tauri::State<'_, pet::PetManager>,
-    database: tauri::State<'_, database::Database>,
+async fn configure_pet_hatch(
+    app: tauri::AppHandle,
+    prepare_runtime: Option<bool>,
 ) -> Result<pet::HatchEnvironment, String> {
-    let environment = manager.configure_hatch()?;
-    enable_pet_hatch_skills(&database, &environment)?;
-    Ok(environment)
+    if prepare_runtime.unwrap_or(false) {
+        app.state::<pet::PetManager>()
+            .prepare_hatch_runtime()
+            .await?;
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let environment = app.state::<pet::PetManager>().configure_hatch()?;
+        enable_pet_hatch_skills(&app.state::<database::Database>(), &environment)?;
+        Ok(environment)
+    })
+    .await
+    .map_err(|error| format!("Could not configure pet hatching: {error}"))?
 }
 
 #[tauri::command]
@@ -8775,6 +8785,7 @@ fn decode_powershell_literal(value: &str) -> String {
 struct BootstrapPythonInvocation<'a> {
     script: &'a str,
     arguments: Vec<&'a str>,
+    argument_values: Vec<String>,
 }
 
 fn bootstrap_python_invocation(command: &str) -> Option<BootstrapPythonInvocation<'_>> {
@@ -8803,10 +8814,15 @@ fn bootstrap_python_invocation(command: &str) -> Option<BootstrapPythonInvocatio
         .file_name()?
         .to_string_lossy()
         .to_ascii_lowercase();
-    let (script, next_cursor) = if matches!(
-        executable.as_str(),
-        "python" | "python.exe" | "python3" | "python3.exe"
-    ) {
+    let versioned_python = executable.strip_prefix("python3.").is_some_and(|minor| {
+        let minor = minor.strip_suffix(".exe").unwrap_or(minor);
+        !minor.is_empty() && minor.bytes().all(|byte| byte.is_ascii_digit())
+    });
+    let (script, next_cursor) = if versioned_python
+        || matches!(
+            executable.as_str(),
+            "python" | "python.exe" | "python3" | "python3.exe"
+        ) {
         command_token_at(command, cursor)?
     } else if matches!(executable.as_str(), "py" | "py.exe") {
         let (next_token, next_cursor) = command_token_at(command, cursor)?;
@@ -8820,11 +8836,23 @@ fn bootstrap_python_invocation(command: &str) -> Option<BootstrapPythonInvocatio
     };
     cursor = next_cursor;
     let mut arguments = Vec::new();
-    while let Some((argument, next_cursor)) = command_token_at(command, cursor) {
+    let mut argument_values = Vec::new();
+    while !command[cursor..].trim().is_empty() {
+        let (argument, next_cursor) = command_token_at(command, cursor)?;
+        let value = match command[cursor..].trim_start().as_bytes().first() {
+            Some(b'\'') => argument.replace("''", "'"),
+            Some(b'"') => argument.replace("\"\"", "\""),
+            _ => argument.to_owned(),
+        };
         arguments.push(argument);
+        argument_values.push(value);
         cursor = next_cursor;
     }
-    Some(BootstrapPythonInvocation { script, arguments })
+    Some(BootstrapPythonInvocation {
+        script,
+        arguments,
+        argument_values,
+    })
 }
 
 fn canonical_inside(root: &Path, raw: &str, must_exist: bool) -> bool {
@@ -9129,6 +9157,58 @@ fn hatch_bootstrap_boundary_error(
     (request.hatch_bootstrap && !bundled_hatch_bootstrap_call_allowed(request, manager)).then_some(
         "The requested hatch bootstrap tool is outside the bundled application startup boundary.",
     )
+}
+
+async fn execute_hatch_command(
+    request: &ToolExecutionRequest,
+    manager: &pet::PetManager,
+) -> Result<ToolExecutionResponse, String> {
+    let command = required_tool_string(&request.arguments, "command")?;
+    let invocation = bootstrap_python_invocation(&command)
+        .ok_or_else(|| "Invalid bundled pet script invocation".to_owned())?;
+    let root = std::fs::canonicalize(&request.workspace)
+        .map_err(|error| format!("Hatch workspace is unavailable: {error}"))?;
+    let workdir = tools::resolve_workdir(
+        &root,
+        request
+            .arguments
+            .get("workdir")
+            .and_then(serde_json::Value::as_str),
+        request.allow_outside_workspace,
+    )?;
+    if workdir != root {
+        return Err("Hatch commands must run in their prepared workspace".to_owned());
+    }
+    let environment = manager.hatch_environment();
+    if !environment.configured {
+        return Err(
+            "Pet runtime is not ready. Retry hatching to prepare Python and Pillow.".to_owned(),
+        );
+    }
+    let python = environment
+        .python_command
+        .ok_or_else(|| "Pet Python interpreter is unavailable".to_owned())?;
+    // Script/argument validation above remains authoritative. Use the checked
+    // interpreter even when a provider or an older run spells it as `python`.
+    let output = pet_python::run_script(
+        Path::new(&python),
+        Path::new(&decode_powershell_literal(invocation.script)),
+        &invocation.argument_values,
+        &workdir,
+    )
+    .await?;
+    Ok(ToolExecutionResponse {
+        is_error: !output.status.success(),
+        output: format!(
+            "exit code: {}\nstdout:\n{}\nstderr:\n{}",
+            output.status.code().unwrap_or(-1),
+            text_encoding::decode_command_output(&output.stdout),
+            text_encoding::decode_command_output(&output.stderr),
+        )
+        .chars()
+        .take(120_000)
+        .collect(),
+    })
 }
 
 fn hatch_tool_policy_error(request: &ToolExecutionRequest) -> Option<&'static str> {
@@ -10154,6 +10234,14 @@ async fn execute_tool_inner(
                 output,
                 is_error: false,
             },
+            Err(output) => ToolExecutionResponse {
+                output,
+                is_error: true,
+            },
+        }
+    } else if request.hatch && request.name == "run_command" {
+        match execute_hatch_command(&request, pet_manager).await {
+            Ok(response) => response,
             Err(output) => ToolExecutionResponse {
                 output,
                 is_error: true,
@@ -12616,6 +12704,41 @@ mod tests {
         request.hatch = false;
         request.name = "get_goal".to_owned();
         assert!(hatch_tool_policy_error(&request).is_none());
+    }
+
+    #[test]
+    fn hatch_python_arguments_preserve_literal_text_for_direct_execution() {
+        for python in [
+            "python",
+            "py -3",
+            "& '/path with spaces/python.exe'",
+            "/usr/bin/python3.12",
+        ] {
+            let command = format!(
+                r#"{python} 'prepare_pet_run.py' --pet-name 'O''Brien' --description 'a ""quoted"" $pet' --pet-notes ''"#
+            );
+            let invocation = bootstrap_python_invocation(&command).unwrap();
+            assert_eq!(
+                invocation.argument_values,
+                [
+                    "--pet-name",
+                    "O'Brien",
+                    "--description",
+                    r#"a ""quoted"" $pet"#,
+                    "--pet-notes",
+                    "",
+                ]
+            );
+        }
+        assert!(
+            bootstrap_python_invocation("python 'prepare_pet_run.py' --pet-name 'unterminated")
+                .is_none()
+        );
+        assert!(
+            bootstrap_python_invocation("python 'prepare_pet_run.py'; Write-Output injected")
+                .is_none()
+        );
+        assert!(bootstrap_python_invocation("python3.bad 'prepare_pet_run.py'").is_none());
     }
 
     #[test]

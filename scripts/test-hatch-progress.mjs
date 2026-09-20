@@ -11,6 +11,8 @@ import {
   hatchSkillManifestWasRead,
   hatchBootstrapMetadata,
   hatchPrepareCommandFromHistory,
+  hatchPythonInvocation,
+  hatchStatusCommand,
   hatchRunDirectoryFromHistory,
   normalizeHatchPrepareCall,
   hatchCommandIsObservation,
@@ -30,6 +32,23 @@ import { createHatchBootstrapToolRequest } from "../src/lib/toolExecutionRequest
 const call = (id, name, args = {}) => ({ id, name, arguments: args });
 const state = () => ({ count: 0, fingerprints: new Map() });
 const assistant = (toolCalls) => ({ role: "assistant", toolCalls });
+
+test("hatch Python invocations preserve launcher arguments and quote executable paths", () => {
+  assert.equal(hatchPythonInvocation("python"), "python");
+  assert.equal(hatchPythonInvocation("py -3"), "py -3");
+  assert.equal(hatchPythonInvocation("C:\\Users\\Test User\\pet-python\\Scripts\\python.exe"),
+    "& 'C:\\Users\\Test User\\pet-python\\Scripts\\python.exe'");
+  assert.equal(hatchPythonInvocation("C:\\Users\\O'Brien\\python.exe"),
+    "& 'C:\\Users\\O''Brien\\python.exe'");
+  for (const python of ["py -3", "C:\\Users\\Test User\\pet-python\\Scripts\\python.exe"]) {
+    const history = [{
+      role: "user", internal: true, toolCalls: [],
+      content: `Bundled Hatch Pet skill directory: C:/skill\nPython command: ${python}\nUse this unique hatch run directory: C:/run`,
+    }];
+    assert.ok(hatchPrepareCommandFromHistory(history).startsWith(`${hatchPythonInvocation(python)} `));
+    assert.ok(hatchStatusCommand(history).startsWith(`${hatchPythonInvocation(python)} `));
+  }
+});
 
 test("hatch pet IDs remain package-safe for localized display names", () => {
   assert.match(hatchPetId("Noct Prime"), /^[a-z0-9_-]+$/);
