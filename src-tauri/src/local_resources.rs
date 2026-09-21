@@ -386,7 +386,7 @@ pub fn scope_read(
     if request.allow_outside_workspace
         || !matches!(
             request.name.as_str(),
-            "read_file" | "list_files" | "search_files"
+            "read_file" | "list_files" | "search_files" | "view_image"
         )
     {
         return Ok(());

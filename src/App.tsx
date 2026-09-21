@@ -1798,11 +1798,14 @@ function App() {
     petHatchImportingRef.current = jobKey;
     void getGoal(job.threadId)
       .then(async (goal) => {
-        if (goal?.status === "active" || goal?.status === "auditing" || goal?.status === "paused") return false;
+        if (!goal || goal.status === "active" || goal.status === "auditing" || goal.status === "paused") return false;
         if (goal?.status === "blocked" || goal?.status === "cancelled") {
-          setNotice(tr("残影孵化任务未完成，请打开会话查看原因", "Echo hatching did not complete; open the conversation for details"));
+          setNotice(goal.status === "blocked"
+            ? tr("孵化验收待继续，已有产物已保留；请查看会话中的阻塞原因", "Hatch review needs attention; existing outputs are preserved. See the blocker in the conversation.")
+            : tr("孵化已取消，已有产物已保留", "Hatching cancelled; existing outputs are preserved"));
           return true;
         }
+        if (goal.status !== "completed") return false;
         const imported = await importHatchedPets(job.startedAt);
         if (imported.length === 0) {
           setNotice(tr("孵化任务没有产生可导入的残影包", "The hatch task did not produce an importable echo package"));
@@ -2639,6 +2642,7 @@ function App() {
     let maxReconnectAttempts = 5;
     let reconnectStatusMessageId: string | undefined;
     let reconnectStartedAt = 0;
+    const goalStop: { current: GoalState | null } = { current: null };
     let reconnectProgressTimer: number | undefined;
     const projectedThread = (messages: AgentMessage[]): AgentThread => ({
       ...thread,
@@ -2945,6 +2949,10 @@ function App() {
             window.setTimeout(() => injectedQueueIdsRef.current.delete(queueId), 60_000);
             removeHarnessQueueItem(thread.id, queueId);
           }
+        } else if (event.kind === "goal_stopped") {
+          const payload = event.payload as { goal: GoalState };
+          goalStop.current = payload.goal;
+          if (activeThreadIdRef.current === thread.id) setGoalState(payload.goal);
         } else if (event.kind === "operation_completed") {
           const payload = event.payload as { reason?: string };
           if (payload.reason === "theme_package_validated") {
@@ -2984,6 +2992,16 @@ function App() {
         settleStreamingAssistant(true);
         commitThread(projectedThread(projected));
         finishThreadRun(thread.id, operationId, "completed");
+      } else if (goalStop.current) {
+        settleStreamingAssistant(true);
+        const goal = goalStop.current;
+        const reason = goal.status === "blocked"
+          ? `${tr("目标暂时阻塞，已有产物已保留。解决原因后可继续：", "Goal is blocked; existing outputs are preserved. Resolve the blocker and resume:")} ${goal.lastBlocker ?? ""}`
+          : goal.status === "paused"
+            ? tr("目标已暂停，已有产物已保留，可继续执行。", "Goal paused; existing outputs are preserved and can be resumed.")
+            : tr("目标已取消，已有产物已保留。", "Goal cancelled; existing outputs are preserved.");
+        commitThread(projectedThread([...projected, message("assistant", reason, assistantMessageIdentity(runProfile))]));
+        finishThreadRun(thread.id, operationId, outcome.state);
       } else {
         settleStreamingAssistant(true);
         const reason = tr("Harness 运行未完成", "Harness run did not complete");
@@ -10406,6 +10424,7 @@ function toolLabel(call: ToolCall) {
     client_action: tr("操控 LevelUpAgent", "Control LevelUpAgent"),
     list_files: tr("浏览文件", "Browse files"),
     read_file: tr("读取文件", "Read file"),
+    view_image: tr("查看图片", "View image"),
     search_files: tr("搜索项目", "Search project"),
     write_file: tr("写入文件", "Write file"),
     edit_file: tr("编辑文件（保留编码）", "Edit file (preserve encoding)"),

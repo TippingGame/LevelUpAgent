@@ -1419,7 +1419,11 @@ fn chat_body(request: &AgentTurnRequest, stream: bool) -> Value {
     if let Some(router_context) = router_context_text(request) {
         messages.push(json!({ "role": "developer", "content": router_context }));
     }
-    messages.extend(context.messages.iter().map(chat_message));
+    messages.extend(
+        crate::visual_evidence::expand(&context.messages)
+            .iter()
+            .map(chat_message),
+    );
     let mut body = json!({
         "model": provider_model_id(request),
         "messages": messages,
@@ -1469,7 +1473,9 @@ fn responses_body(request: &AgentTurnRequest, stream: bool) -> Value {
             "content": [{ "type": "input_text", "text": router_context }]
         }));
     }
-    input.extend(responses_input(&context.messages));
+    input.extend(responses_input(&crate::visual_evidence::expand(
+        &context.messages,
+    )));
     let mut body = json!({
         "model": provider_model_id(request),
         "instructions": system_prompt_with_omission(request, &context.omission),
@@ -1510,7 +1516,7 @@ fn anthropic_body(request: &AgentTurnRequest, stream: bool) -> Value {
     let mut body = json!({
         "model": provider_model_id(request),
         "system": system,
-        "messages": anthropic_messages(&context.messages),
+        "messages": anthropic_messages(&crate::visual_evidence::expand(&context.messages)),
         "max_tokens": anthropic_max_tokens(request),
         "stream": stream
     });
@@ -1552,7 +1558,7 @@ fn gemini_body(request: &AgentTurnRequest) -> Value {
         "systemInstruction": {
             "parts": system_parts
         },
-        "contents": gemini_contents(&context.messages)
+        "contents": gemini_contents(&crate::visual_evidence::expand(&context.messages))
     });
     let tools = gemini_tools(request);
     if request.mode != "chat" && !tools.is_empty() {
@@ -2855,6 +2861,9 @@ fn system_prompt_with_omission(request: &AgentTurnRequest, omission: &ContextOmi
             );
         }
     }
+    if request.hatch {
+        prompt.push_str("\nVisual hatch verification: view_image is available in every hatch permission level. After finalization, call view_image on qa/contact-sheet.png in the canonical run directory, and inspect individual row images when needed. The tool supplies actual image pixels to the next model turn. Do not infer appearance from file paths, hashes, or structural QA alone. The application browser preview is not automatically visible to you. If an earlier attempt stopped because only paths were returned, reuse its existing files and call view_image; do not regenerate completed images or ask the user to upload an already accessible local image. Report any actual tool/provider failure truthfully. Full permission does not bypass visual or package acceptance.");
+    }
     prompt
 }
 
@@ -3249,6 +3258,11 @@ fn tool_specs() -> Vec<(&'static str, &'static str, Value)> {
                 }, "required": ["command"]
             }),
         ),
+        (
+            "view_image",
+            "View a local PNG, JPEG, WebP or GIF (up to 8 MiB). Returns actual image content to your vision context, not just its path. Use this for artwork and contact-sheet visual verification. Paths follow the selected filesystem permission; restricted hatch runs may view images only inside their canonical run directory. Only the four most recent image tool results are attached.",
+            json!({"type":"object", "properties":{"path":{"type":"string", "description":TOOL_PATH_DESCRIPTION}}, "required":["path"]}),
+        ),
     ]
 }
 
@@ -3262,11 +3276,14 @@ fn allowed_tool_specs(
         tool_specs()
             .into_iter()
             .filter(|(name, _, _)| {
-                if hatch && !matches!(*name, "run_command") {
+                if hatch && !matches!(*name, "run_command" | "view_image") {
                     return false;
                 }
                 if mode == "plan" {
-                    matches!(*name, "list_files" | "read_file" | "search_files")
+                    matches!(
+                        *name,
+                        "list_files" | "read_file" | "search_files" | "view_image"
+                    )
                 } else if mode == "subagent" {
                     matches!(
                         *name,
@@ -3901,10 +3918,86 @@ mod tests {
     #[test]
     fn plan_mode_only_exposes_read_tools() {
         let tools = allowed_tool_specs("plan", true, false, &[]);
-        assert_eq!(tools.len(), 3);
+        assert_eq!(tools.len(), 4);
         assert!(tools.iter().all(|(name, _, _)| {
             !matches!(name.as_str(), "write_file" | "edit_file" | "run_command")
         }));
+    }
+
+    #[test]
+    fn image_tool_pixels_reach_every_provider_after_the_tool_batch() {
+        let mut request = test_request(
+            "https://levelup.example".into(),
+            ProviderProtocol::OpenaiChat,
+        );
+        request.messages = serde_json::from_value(json!([
+            {"role":"user","content":"Review this contact sheet"},
+            {"role":"assistant","content":"", "toolCalls":[
+                {"id":"image","name":"view_image","arguments":{"path":"qa/contact-sheet.png"}},
+                {"id":"audit","name":"read_file","arguments":{"path":"audit.json"}}
+            ]},
+            {"role":"tool","content":"image stored","toolCallId":"image"},
+            {"role":"tool","content":"structure valid","toolCallId":"audit"}
+        ]))
+        .unwrap();
+        request.messages[2].attachments = vec![ImageAttachment {
+            id: "image-evidence".into(),
+            name: "contact-sheet.png".into(),
+            mime_type: "image/png".into(),
+            size_bytes: 4,
+            kind: crate::models::AttachmentKind::Image,
+            data_base64: Some("cGl4ZWxz".into()),
+            text_content: None,
+        }];
+        let chat = chat_body(&request, false);
+        let messages = chat["messages"].as_array().unwrap();
+        assert_eq!(messages[messages.len() - 2]["tool_call_id"], "audit");
+        assert_eq!(
+            messages.last().unwrap()["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["type"] == "image_url")
+                .unwrap()["image_url"]["url"],
+            "data:image/png;base64,cGl4ZWxz"
+        );
+        let responses = responses_body(&request, false);
+        assert_eq!(
+            responses["input"].as_array().unwrap().last().unwrap()["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["type"] == "input_image")
+                .unwrap()["image_url"],
+            "data:image/png;base64,cGl4ZWxz"
+        );
+        let anthropic = anthropic_body(&request, false);
+        assert_eq!(
+            anthropic["messages"].as_array().unwrap().last().unwrap()["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["type"] == "image")
+                .unwrap()["source"]["data"],
+            "cGl4ZWxz"
+        );
+        let gemini = gemini_body(&request);
+        assert_eq!(
+            gemini["contents"].as_array().unwrap().last().unwrap()["parts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p.get("inlineData").is_some())
+                .unwrap()["inlineData"]["data"],
+            "cGl4ZWxz"
+        );
+        request.hatch = true;
+        assert!(
+            request_tool_specs(&request)
+                .iter()
+                .any(|(name, _, _)| name == "view_image")
+        );
+        assert!(system_prompt(&request).contains("reuse its existing files"));
     }
 
     #[test]

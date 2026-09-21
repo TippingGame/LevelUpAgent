@@ -323,6 +323,8 @@ The secondary fallback requires `OPENAI_API_KEY`.
 
 ## Acceptance Criteria
 
+Inside LevelUpAgent, call `view_image` on the existing `qa/contact-sheet.png` (and individual row images as needed) for visual acceptance. This tool returns actual image pixels to the model, including in restricted hatch mode within the canonical run directory. A visible application preview, a returned filename, hashes, or a structural audit report do not replace viewing the image. If a previous run stopped because only paths were available, resume with these existing outputs instead of regenerating or asking the user to upload the same local file.
+
 - Final atlas is PNG or WebP, `1536x1872`, transparent-capable, and based on `192x208` cells.
 - Used cells are non-empty and unused cells are fully transparent.
 - Atlas follows the row/frame counts in `references/animation-rows.md`.

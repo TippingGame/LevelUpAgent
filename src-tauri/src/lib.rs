@@ -26,6 +26,7 @@ mod subagent;
 mod text_encoding;
 mod theme;
 mod tools;
+mod visual_evidence;
 mod web;
 mod workspace;
 
@@ -1699,7 +1700,7 @@ fn attach_extended_tools(request: &mut AgentTurnRequest) -> Result<(), String> {
             },
             AgentToolDefinition {
                 name: "browser_screenshot".to_owned(),
-                description: "Capture the current isolated browser viewport to an app-managed PNG path for visual QA.".to_owned(),
+                description: "Capture the current isolated browser viewport. Returns a managed PNG path and actual image pixels in the next model turn for visual QA.".to_owned(),
                 input_schema: serde_json::json!({
                     "type": "object", "properties": { "sessionId": { "type": "string" } }, "required": ["sessionId"]
                 }),
@@ -3739,11 +3740,14 @@ fn open_pet_workspace(
 }
 
 fn attach_images(app: &tauri::AppHandle, request: &mut AgentTurnRequest) -> Result<(), String> {
+    let storage = attachment_storage(app)?;
     attachment::resolve_with_workspace(
-        &attachment_storage(app)?,
+        &storage,
         &mut request.messages,
         request.workspace.as_deref().map(Path::new),
-    )
+    )?;
+    visual_evidence::resolve(&storage, &mut request.messages);
+    Ok(())
 }
 
 fn profile_supports_text(profile: &ProviderProfile) -> bool {
@@ -6312,6 +6316,42 @@ fn goal_completion_ends_harness(
         && matches!(status, models::GoalStatus::Completed)
 }
 
+/// A blocked/paused Goal is a normal stop, not a failed provider request.
+/// Check at every execution boundary, including approval resume and a batch
+/// where update_goal is followed by another tool call.
+fn stop_inactive_goal(
+    database: &database::Database,
+    on_event: &Channel<crate::harness::types::HarnessRuntimeEvent>,
+    operation_id: &str,
+    thread_id: &str,
+    mode: crate::harness::types::HarnessMode,
+) -> Result<Option<crate::harness::types::HarnessRunOutcome>, String> {
+    use crate::harness::types::{HarnessMode, HarnessRunOutcome, RuntimeState};
+    use models::GoalStatus;
+    if mode != HarnessMode::Goal {
+        return Ok(None);
+    }
+    let Some(goal) = database.get_goal(thread_id)? else {
+        return Ok(None);
+    };
+    let state = match goal.status {
+        GoalStatus::Blocked | GoalStatus::Paused => RuntimeState::Interrupted,
+        GoalStatus::Cancelled => RuntimeState::Cancelled,
+        GoalStatus::Completed => RuntimeState::Completed,
+        GoalStatus::Active | GoalStatus::Auditing => return Ok(None),
+    };
+    database.update_harness_operation_state(operation_id, &state)?;
+    let payload = serde_json::json!({"goal": goal, "state": state});
+    let sequence = database.append_harness_event(operation_id, "goal_stopped", &payload)?;
+    let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+        operation_id,
+        sequence,
+        "goal_stopped",
+        payload,
+    ));
+    Ok(Some(HarnessRunOutcome { state }))
+}
+
 fn is_empty_post_tool_response(
     awaiting_post_tool_answer: bool,
     response: &AgentTurnResponse,
@@ -6401,6 +6441,15 @@ async fn harness_run_loop(
                 &crate::harness::types::RuntimeState::Cancelled,
             )?;
             return Err("REQUEST_CANCELLED".to_owned());
+        }
+        if let Some(outcome) = stop_inactive_goal(
+            database,
+            &on_event,
+            &operation_id,
+            &request.thread_id,
+            request.mode,
+        )? {
+            return Ok(outcome);
         }
         // Approved tools execute outside this loop. Resume through the same
         // normalization/validation boundary before requesting another model
@@ -6505,7 +6554,19 @@ async fn harness_run_loop(
         attach_default_workspace(app, &mut turn_request)?;
         attach_images(app, &mut turn_request)?;
         attach_custom_instructions(database, &mut turn_request)?;
-        attach_goal(database, &mut turn_request)?;
+        if let Err(error) = attach_goal(database, &mut turn_request) {
+            // A pause/cancel can race with preparing this provider turn.
+            if let Some(outcome) = stop_inactive_goal(
+                database,
+                &on_event,
+                &operation_id,
+                &request.thread_id,
+                request.mode,
+            )? {
+                return Ok(outcome);
+            }
+            return Err(error);
+        }
         attach_subagent_tools(&mut turn_request);
         attach_media_tools(&mut turn_request);
         attach_skills(app, database, &mut turn_request)?;
@@ -6975,6 +7036,15 @@ async fn harness_run_loop(
                     attachments: Vec::new(),
                 });
                 if response.tool_calls.is_empty() {
+                    if let Some(outcome) = stop_inactive_goal(
+                        database,
+                        &on_event,
+                        &operation_id,
+                        &request.thread_id,
+                        request.mode,
+                    )? {
+                        return Ok(outcome);
+                    }
                     if theme_generation.is_some() {
                         let mut validation = ToolExecutionResponse {
                             output: "Theme generation ended without a validated package."
@@ -7169,6 +7239,15 @@ async fn harness_run_loop(
                     .map_err(|_| "Could not lock harness phase state".to_owned())?
                     .insert(operation_id.clone(), HarnessPhase::Tool);
                 for call in response.tool_calls {
+                    if let Some(outcome) = stop_inactive_goal(
+                        database,
+                        &on_event,
+                        &operation_id,
+                        &request.thread_id,
+                        request.mode,
+                    )? {
+                        return Ok(outcome);
+                    }
                     let mut call = call;
                     if request.hatch && call.name == "generate_images" {
                         let expected_run_dir = database
@@ -9630,6 +9709,7 @@ fn hatch_provider_preflight(
         Ok(()) if requires_action
             && name != "generate_images"
             && name != "update_goal"
+            && name != "view_image"
             && !(name == "run_command"
                 && hatch_provider_command_kind(arguments, manager, run_dir) == Some("action")) =>
         {
@@ -10174,7 +10254,33 @@ async fn execute_tool_inner(
             &request.arguments,
         )?;
     }
-    let response = if request.name == "client_action" {
+    let response = if request.name == "view_image" {
+        let result = (|| {
+            let storage = attachment_storage(app)?;
+            if request.hatch && !request.allow_outside_workspace {
+                request.workspace = durable_hatch_run_dir
+                    .clone()
+                    .ok_or("Hatch image viewing requires the durable run directory")?;
+            } else if !request.allow_outside_workspace
+                && let Some(thread_id) = request.thread_id.as_deref()
+            {
+                local_resources::scope_read(
+                    &storage,
+                    &database.thread_attachment_ids(thread_id)?,
+                    &mut request,
+                )?;
+            }
+            let root =
+                std::fs::canonicalize(&request.workspace).map_err(|error| error.to_string())?;
+            let path = tools::resolve_existing_scoped(
+                &root,
+                &required_tool_string(&request.arguments, "path")?,
+                request.allow_outside_workspace,
+            )?;
+            visual_evidence::capture(&storage, &path)
+        })();
+        tool_execution_result(result)
+    } else if request.name == "client_action" {
         let dispatch = capability::client_action_dispatch(&request.arguments)?;
         app.emit(&dispatch.event, &dispatch.payload)
             .map_err(|error| format!("Could not dispatch LevelUpAgent client action: {error}"))?;
@@ -10574,7 +10680,13 @@ async fn execute_tool_inner(
             "browser_screenshot" => {
                 let session_id = required_tool_string(&request.arguments, "sessionId")?;
                 let (app_data, _) = skill_storage_paths(app)?;
-                tool_execution_result(browser.screenshot(&app_data, &session_id).await)
+                let result = browser
+                    .screenshot(&app_data, &session_id)
+                    .await
+                    .and_then(|path| {
+                        visual_evidence::capture(&attachment_storage(app)?, Path::new(&path))
+                    });
+                tool_execution_result(result)
             }
             "browser_close" => {
                 let session_id = required_tool_string(&request.arguments, "sessionId")?;
@@ -12270,6 +12382,117 @@ mod tests {
     }
 
     #[test]
+    fn inactive_goals_stop_cleanly_and_blocked_goals_can_resume() {
+        use crate::harness::types::{HarnessMode, RuntimeState};
+        let root = std::env::temp_dir().join(format!("goal-stop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let database = database::Database::open(&root.join("db.sqlite")).unwrap();
+        let channel = Channel::new(|_| Ok(()));
+        for status in ["paused", "cancelled", "blocked", "completed"] {
+            let thread: StoredThread = serde_json::from_value(serde_json::json!({
+                "id":status,"title":"goal stop","workspace":root,"messages":[],
+                "updatedAt":1,"inputTokens":0,"outputTokens":0
+            }))
+            .unwrap();
+            database.save_thread(&thread).unwrap();
+            database
+                .create_goal(&GoalCreateRequest {
+                    thread_id: status.into(),
+                    objective: "Verify an existing package".into(),
+                })
+                .unwrap();
+            let draft = serde_json::from_value(serde_json::json!({
+                "threadId":status,"rawUserInput":"QA", "mode":"goal", "workspace":root,
+                "requestedProfileId":"test"
+            }))
+            .unwrap();
+            let started = database
+                .start_harness_operation(&draft, &root.to_string_lossy(), "test")
+                .unwrap()
+                .into_started()
+                .unwrap();
+            assert!(
+                stop_inactive_goal(
+                    &database,
+                    &channel,
+                    &started.operation_id,
+                    status,
+                    HarnessMode::Goal
+                )
+                .unwrap()
+                .is_none()
+            );
+            let evidence = "Existing package retained; unavailable reviewer prevents completion.";
+            match status {
+                "paused" => {
+                    database.set_goal_status(status, "pause").unwrap();
+                }
+                "cancelled" => {
+                    database.set_goal_status(status, "cancel").unwrap();
+                }
+                "blocked" => {
+                    for _ in 0..3 {
+                        database
+                            .update_goal_from_agent(status, "blocked", evidence)
+                            .unwrap();
+                    }
+                }
+                _ => {
+                    for _ in 0..2 {
+                        database
+                            .update_goal_from_agent(status, "complete", evidence)
+                            .unwrap();
+                    }
+                }
+            }
+            assert!(
+                stop_inactive_goal(
+                    &database,
+                    &channel,
+                    &started.operation_id,
+                    status,
+                    HarnessMode::Agent
+                )
+                .unwrap()
+                .is_none()
+            );
+            let stopped = stop_inactive_goal(
+                &database,
+                &channel,
+                &started.operation_id,
+                status,
+                HarnessMode::Goal,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                stopped.state,
+                match status {
+                    "completed" => RuntimeState::Completed,
+                    "cancelled" => RuntimeState::Cancelled,
+                    _ => RuntimeState::Interrupted,
+                }
+            );
+            if status == "blocked" {
+                database.set_goal_status(status, "resume").unwrap();
+                assert!(
+                    stop_inactive_goal(
+                        &database,
+                        &channel,
+                        &started.operation_id,
+                        status,
+                        HarnessMode::Goal
+                    )
+                    .unwrap()
+                    .is_none()
+                );
+            }
+        }
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn empty_post_tool_responses_are_only_retried_when_a_tool_is_pending() {
         let response = AgentTurnResponse {
             content: String::new(),
@@ -13587,6 +13810,7 @@ mod tests {
                 serde_json::json!({"command": format!("python '{}' --run-dir '{}' --skip-videos", scripts.join("finalize_pet_run.py").display(), run)}),
             ),
             ("generate_images", serde_json::json!({"hatchJobId":"idle"})),
+            ("view_image", serde_json::json!({"path":base})),
             ("update_goal", serde_json::json!({"action":"progress"})),
         ] {
             assert!(

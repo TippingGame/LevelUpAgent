@@ -8,7 +8,7 @@ use super::types::{HarnessMode, PermissionLevel, PolicyDecision, ToolRisk};
 
 pub fn classify_tool(name: &str) -> ToolRisk {
     match name {
-        "list_files" | "read_file" | "search_files" | "get_goal" | "read_skill"
+        "list_files" | "read_file" | "view_image" | "search_files" | "get_goal" | "read_skill"
         | "check_media_jobs" | "update_goal" | "skill_locations" | "scan_skills"
         | "inspect_skill" | "web_search" | "web_fetch" | "list_processes" | "process_output"
         | "browser_list" | "browser_snapshot" | "browser_assert" | "browser_screenshot"

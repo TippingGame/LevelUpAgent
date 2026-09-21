@@ -291,7 +291,14 @@ pub fn history_fingerprint(messages: &[AgentMessage]) -> String {
         for block in &message.provider_reasoning_blocks {
             update(&mut hash, &block.to_string());
         }
-        for attachment in &message.attachments {
+        // Tool images are derived from the durable result envelope (already
+        // hashed above), not persisted message attachments. Loading or evicting
+        // pixels must not invalidate a resume/compaction checkpoint.
+        for attachment in message
+            .attachments
+            .iter()
+            .filter(|_| message.role != "tool")
+        {
             update(&mut hash, &attachment.id);
             update(&mut hash, &attachment.name);
             update(&mut hash, &attachment.mime_type);
