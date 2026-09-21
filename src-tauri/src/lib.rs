@@ -293,7 +293,9 @@ async fn attach_mcp_tools(
     manager: &mcp::McpManager,
     request: &mut AgentTurnRequest,
 ) -> Result<(), String> {
-    if request.hatch || !matches!(request.mode.as_str(), "agent" | "goal") {
+    if (request.hatch && !request.allow_outside_workspace)
+        || !matches!(request.mode.as_str(), "agent" | "goal")
+    {
         return Ok(());
     }
     for server in database
@@ -815,7 +817,7 @@ fn attach_skills(
     // through an application-owned internal bootstrap message. Do not expose
     // the generic Skill catalog or read_skill tool afterward: some providers
     // otherwise keep rereading the same manifest instead of writing the theme.
-    if agent::theme_generation_bootstrapped(&request.messages) {
+    if agent::theme_generation_bootstrapped(&request.messages) && !request.allow_outside_workspace {
         request.available_skills.clear();
         request.available_tools.clear();
         return Ok(());
@@ -826,7 +828,9 @@ fn attach_skills(
         .iter()
         .filter(|skill| skill.enabled && skill.valid)
         .filter(|skill| {
-            !request.hatch || skill.source == "LevelUpAgent built-in" && skill.name == "hatch-pet"
+            !request.hatch
+                || request.allow_outside_workspace
+                || skill.source == "LevelUpAgent built-in" && skill.name == "hatch-pet"
         })
         .cloned()
         .collect();
@@ -907,7 +911,7 @@ fn attach_skills(
     // Hatch bootstrap is owned by the application. Never expose the generic
     // read_skill tool to a provider turn: models that see it can emit several
     // identical reads in one response and restart the workflow indefinitely.
-    if !enabled.is_empty() && !request.hatch {
+    if !enabled.is_empty() && (!request.hatch || request.allow_outside_workspace) {
         request.available_tools.push(AgentToolDefinition {
             name: "read_skill".to_owned(),
             description: "Read an enabled Skill's SKILL.md once, or read an explicitly referenced UTF-8 file inside that Skill directory. Never reread a manifest or reference that already has a successful result in the conversation.".to_owned(),
@@ -1230,7 +1234,7 @@ fn attach_goal(
         request.hatch = true;
     }
     request.goal = Some(goal);
-    if !request.hatch {
+    if !request.hatch || request.allow_outside_workspace {
         request.available_tools.push(AgentToolDefinition {
             name: "get_goal".to_owned(),
             description: "Read the current persistent Goal, status, usage, and audit state."
@@ -1306,7 +1310,7 @@ fn merge_custom_instructions<const N: usize>(parts: [String; N]) -> Option<Strin
 }
 
 fn attach_subagent_tools(request: &mut AgentTurnRequest) {
-    if request.hatch
+    if (request.hatch && !request.allow_outside_workspace)
         || !matches!(request.mode.as_str(), "agent" | "goal")
         || request.workspace.is_none()
     {
@@ -1377,10 +1381,10 @@ fn web_tool_definitions() -> Vec<AgentToolDefinition> {
 /// described in one place so every desktop turn (including resumed turns after
 /// compaction) receives the same capability catalog before the provider call.
 fn attach_extended_tools(request: &mut AgentTurnRequest) -> Result<(), String> {
-    if request.hatch {
+    if request.hatch && !request.allow_outside_workspace {
         return Ok(());
     }
-    if agent::theme_generation_bootstrapped(&request.messages) {
+    if agent::theme_generation_bootstrapped(&request.messages) && !request.allow_outside_workspace {
         return Ok(());
     }
     let mode = request.mode.as_str();
@@ -1800,7 +1804,7 @@ fn attach_media_tools(request: &mut AgentTurnRequest) {
             read_only: true,
         },
     ]);
-    if request.hatch {
+    if request.hatch && !request.allow_outside_workspace {
         request
             .available_tools
             .retain(|tool| matches!(tool.name.as_str(), "generate_images"));
@@ -1808,7 +1812,7 @@ fn attach_media_tools(request: &mut AgentTurnRequest) {
 }
 
 fn enforce_hatch_tool_catalog(request: &mut AgentTurnRequest) {
-    if !request.hatch {
+    if !request.hatch || request.allow_outside_workspace {
         return;
     }
     // The bundled hatch adapter has a deliberately narrow execution surface:
@@ -1821,7 +1825,7 @@ fn enforce_hatch_tool_catalog(request: &mut AgentTurnRequest) {
 }
 
 fn enforce_theme_generation_tool_catalog(request: &mut AgentTurnRequest) {
-    if !agent::theme_generation_bootstrapped(&request.messages) {
+    if !agent::theme_generation_bootstrapped(&request.messages) || request.allow_outside_workspace {
         return;
     }
     // Theme references are input evidence, not requests for new media. Keep
@@ -4827,6 +4831,8 @@ struct HatchJobManifest {
 struct HatchJobEntry {
     id: String,
     #[serde(default)]
+    prompt_file: Option<String>,
+    #[serde(default)]
     status: String,
     #[serde(default)]
     input_images: Vec<HatchJobInput>,
@@ -4887,12 +4893,9 @@ fn hatch_run_directory(request: &ToolExecutionRequest) -> Result<Option<PathBuf>
     }
 }
 
-fn read_hatch_job_references(
+fn read_pending_hatch_job(
     request: &ToolExecutionRequest,
-) -> Result<Option<Vec<attachment::ManagedReference>>, String> {
-    if !request.hatch {
-        return Ok(None);
-    }
+) -> Result<(PathBuf, HatchJobEntry), String> {
     let job_id = request
         .arguments
         .get("hatchJobId")
@@ -4920,7 +4923,7 @@ fn read_hatch_job_references(
     .map_err(|error| format!("imagegen-jobs.json is invalid: {error}"))?;
     let job = manifest
         .jobs
-        .iter()
+        .into_iter()
         .find(|job| job.id == job_id)
         .ok_or_else(|| format!("Hatch job {job_id} is not present in imagegen-jobs.json"))?;
     if job.status.eq_ignore_ascii_case("complete") {
@@ -4939,6 +4942,37 @@ fn read_hatch_job_references(
             "Hatch job {job_id} already has an output file; record it before generating again"
         ));
     }
+    Ok((run_dir, job))
+}
+
+fn read_hatch_job_prompt(request: &ToolExecutionRequest) -> Result<String, String> {
+    let (run_dir, job) = read_pending_hatch_job(request)?;
+    let relative = job
+        .prompt_file
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| format!("Hatch job {} has no prompt_file", job.id))?;
+    let prompt_path = std::fs::canonicalize(run_dir.join(relative))
+        .map_err(|error| format!("Hatch job prompt is unavailable: {error}"))?;
+    if !prompt_path.starts_with(&run_dir) {
+        return Err("Hatch job prompt escapes the run directory".to_owned());
+    }
+    let prompt = std::fs::read_to_string(&prompt_path)
+        .map_err(|error| format!("Could not read hatch job prompt: {error}"))?;
+    if prompt.trim().is_empty() {
+        return Err("Hatch job prompt is empty".to_owned());
+    }
+    Ok(prompt)
+}
+
+fn read_hatch_job_references(
+    request: &ToolExecutionRequest,
+) -> Result<Option<Vec<attachment::ManagedReference>>, String> {
+    if !request.hatch {
+        return Ok(None);
+    }
+    let (run_dir, job) = read_pending_hatch_job(request)?;
+    let job_id = &job.id;
     if job.input_images.is_empty() {
         // The hatch-pet skill permits the base job to be prompt-only when the
         // user supplied no references. Keep managed attachment IDs available
@@ -6101,6 +6135,30 @@ fn theme_generation_run(
     }))
 }
 
+fn theme_tool_can_produce_package(name: &str) -> bool {
+    !matches!(
+        crate::harness::policy::classify_tool(name),
+        crate::harness::types::ToolRisk::ReadOnly
+    )
+}
+
+fn validate_theme_generation_progress(
+    run: Option<&ThemeGenerationRun>,
+    name: &str,
+    result: &mut ToolExecutionResponse,
+) -> Result<Option<theme::ThemeManifest>, String> {
+    let Some(run) = run else {
+        return Ok(None);
+    };
+    if result.is_error
+        || !theme_tool_can_produce_package(name)
+        || !theme::generation_target_path(&run.workspace, &run.relative_path)?.exists()
+    {
+        return Ok(None);
+    }
+    validate_theme_generation_after_tool(Some(run), result)
+}
+
 fn validate_theme_generation_after_tool(
     run: Option<&ThemeGenerationRun>,
     result: &mut ToolExecutionResponse,
@@ -6175,10 +6233,11 @@ async fn harness_run_inner(
     database: tauri::State<'_, database::Database>,
     manager: tauri::State<'_, mcp::McpManager>,
     subagents: tauri::State<'_, subagent::SubagentManager>,
-    request: crate::harness::types::HarnessRunRequest,
+    mut request: crate::harness::types::HarnessRunRequest,
     on_event: Channel<crate::harness::types::HarnessRuntimeEvent>,
 ) -> Result<crate::harness::types::HarnessRunOutcome, String> {
     let operation_id = request.operation_id.clone();
+    request.permission_level = database.harness_operation_permission(&operation_id)?;
     let operation_hatch = database.harness_operation_hatch(&operation_id)?;
     if operation_hatch != request.hatch {
         return Err("Harness run hatch mode does not match its persisted snapshot".to_owned());
@@ -7023,7 +7082,9 @@ async fn harness_run_loop(
                         });
                         history.push(AgentMessage {
                             role: "user".to_owned(),
-                            content: if request.hatch {
+                            content: if request.hatch && matches!(request.permission_level, crate::harness::types::PermissionLevel::Full) {
+                                "Continue the active hatch Goal using the existing run outputs. Full permission remains in effect: use files, commands, or other available tools as needed to resolve the next step. Validate the final package and provide concrete Goal completion evidence."
+                            } else if request.hatch {
                                 if auditing {
                                     "Continue the hatch completion audit using the existing run outputs. Run the final validation or packaging command needed to prove completion, then update the Goal with concrete evidence. Do not reread the Skill manifest, Goal, or workspace metadata."
                                 } else {
@@ -7123,7 +7184,8 @@ async fn harness_run_loop(
                             serde_json::Value::String(expected_run_dir),
                         );
                     }
-                    let hatch_command_kind = if request.hatch && call.name == "run_command" {
+                    let mut hatch_tool_error = None;
+                    let hatch_command_kind = if request.hatch {
                         let expected_run_dir = database
                             .harness_operation_hatch_run_dir(&operation_id)?
                             .ok_or_else(|| {
@@ -7132,13 +7194,20 @@ async fn harness_run_loop(
                         let pet_manager = app
                             .try_state::<pet::PetManager>()
                             .ok_or_else(|| "Pet manager is unavailable".to_owned())?;
-                        normalize_hatch_record_command(
-                            &mut call.arguments,
-                            &pet_manager,
-                            database,
-                            &operation_id,
-                            &expected_run_dir,
-                        )?;
+                        if !matches!(
+                            request.permission_level,
+                            crate::harness::types::PermissionLevel::Full
+                        ) {
+                            hatch_tool_error = hatch_provider_preflight(
+                                &call.name,
+                                &mut call.arguments,
+                                &pet_manager,
+                                database,
+                                &operation_id,
+                                &expected_run_dir,
+                                hatch_status_requires_action,
+                            );
+                        }
                         hatch_provider_command_kind(
                             &call.arguments,
                             &pet_manager,
@@ -7147,9 +7216,17 @@ async fn harness_run_loop(
                     } else {
                         None
                     };
-                    let theme_tool_violation =
-                        theme_generation_mode && !agent::theme_generation_tool_allowed(&call.name);
-                    let repeated_skill_read = agent::skill_read_was_successful(&history, &call);
+                    let theme_tool_violation = theme_generation_mode
+                        && !matches!(
+                            request.permission_level,
+                            crate::harness::types::PermissionLevel::Full
+                        )
+                        && !agent::theme_generation_tool_allowed(&call.name);
+                    let repeated_skill_read =
+                        !matches!(
+                            request.permission_level,
+                            crate::harness::types::PermissionLevel::Full
+                        ) && agent::skill_read_was_successful(&history, &call);
                     let browser_qa_state = browser_qa_turn_state(
                         &browser_qa_mode,
                         browser_qa_workspace.as_deref(),
@@ -7162,35 +7239,31 @@ async fn harness_run_loop(
                             browser_qa_state,
                             browser_qa_completion_retries,
                         );
-                    if request.hatch && hatch_status_requires_action {
-                        let concrete = call.name == "generate_images"
-                            || hatch_command_kind == Some("action")
-                            || call.name == "update_goal";
-                        if !concrete {
-                            database.update_harness_operation_state(
-                                &operation_id,
-                                &crate::harness::types::RuntimeState::Failed,
-                            )?;
-                            if matches!(request.mode, crate::harness::types::HarnessMode::Goal) {
-                                let _ = database.set_goal_status(&request.thread_id, "pause");
-                            }
-                            let reason = if call.name == "run_command" {
-                                "The command must invoke one bundled hatch script with the current run directory and its required arguments."
-                            } else {
-                                "A status check must be followed by generation, recording, mirroring, finalization, repair, or a Goal update."
-                            };
-                            return Err(format!(
-                                "Pet hatching stopped: tool '{}' was not a valid next action after checking job status. {reason} Existing generated images have been preserved.",
-                                call.name
-                            ));
+                    if hatch_tool_error.is_some()
+                        && database.count_harness_events(&operation_id, HATCH_TOOL_REPAIR_EVENT)?
+                            >= HATCH_TOOL_REPAIR_LIMIT
+                    {
+                        database.update_harness_operation_state(
+                            &operation_id,
+                            &crate::harness::types::RuntimeState::Failed,
+                        )?;
+                        if matches!(request.mode, crate::harness::types::HarnessMode::Goal) {
+                            let _ = database.set_goal_status(&request.thread_id, "pause");
                         }
+                        return Err(format!(
+                            "Pet hatching paused after {HATCH_TOOL_REPAIR_LIMIT} command correction attempts. Existing generated images have been preserved. {}",
+                            hatch_tool_error.as_deref().unwrap_or_default()
+                        ));
                     }
                     let policy_call = ToolCall {
                         id: call.id.clone(),
                         name: call.name.clone(),
                         arguments: call.arguments.clone(),
                     };
-                    let decision = if theme_tool_violation || browser_goal_completion_blocked {
+                    let decision = if hatch_tool_error.is_some()
+                        || theme_tool_violation
+                        || browser_goal_completion_blocked
+                    {
                         // This call is never executed. Bypass approval so an
                         // application-blocked call cannot become a user-facing
                         // approval for an operation that will not run.
@@ -7335,7 +7408,34 @@ async fn harness_run_loop(
                     let sandbox = app
                         .try_state::<sandbox::ProcessManager>()
                         .ok_or_else(|| "Process sandbox is unavailable".to_owned())?;
-                    let tool_result = if theme_tool_violation {
+                    let hatch_tool_blocked = hatch_tool_error.is_some();
+                    let tool_result = if let Some(output) = hatch_tool_error {
+                        let payload = serde_json::json!({
+                            "operationId": &operation_id,
+                            "threadId": &request.thread_id,
+                            "callId": &call.id,
+                            "toolName": &call.name,
+                            "arguments": &call.arguments,
+                            "reason": &output,
+                            "round": round,
+                        });
+                        let sequence = database.append_harness_event(
+                            &operation_id,
+                            HATCH_TOOL_REPAIR_EVENT,
+                            &payload,
+                        )?;
+                        let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+                            &operation_id,
+                            sequence,
+                            HATCH_TOOL_REPAIR_EVENT,
+                            payload.clone(),
+                        ));
+                        logging::write("warn", "hatch", HATCH_TOOL_REPAIR_EVENT, payload);
+                        Ok(ToolExecutionResponse {
+                            output,
+                            is_error: true,
+                        })
+                    } else if theme_tool_violation {
                         Ok(ToolExecutionResponse {
                             output: format!(
                                 "Theme generation blocked tool '{}'. Reference images are visual input only and this task permits only write_file. Write the complete theme package to the exact application-provided target now; do not generate images or call another tool.",
@@ -7411,8 +7511,9 @@ async fn harness_run_loop(
                             }),
                         );
                     }
-                    let completed_theme = validate_theme_generation_after_tool(
+                    let completed_theme = validate_theme_generation_progress(
                         theme_generation.as_ref(),
+                        &call.name,
                         &mut tool_result,
                     )?;
                     let result_payload = serde_json::json!({
@@ -7522,7 +7623,7 @@ async fn harness_run_loop(
                         ready_for_follow_up = true;
                         continue;
                     }
-                    if request.hatch {
+                    if request.hatch && !hatch_tool_blocked {
                         hatch_status_requires_action =
                             hatch_command_kind == Some("status") && !tool_result.is_error;
                         if call.name == "generate_images"
@@ -8542,13 +8643,30 @@ fn media_request_from_tool(
         .map_err(|error| format!("Invalid media generation arguments: {error}"))
 }
 
+fn grounded_media_request_from_tool(
+    request: &ToolExecutionRequest,
+) -> Result<MediaGenerationRequest, String> {
+    let mut arguments = request.arguments.clone();
+    if request.hatch && request.name == "generate_images" {
+        // The model cannot read files during hatching. Load the authoritative
+        // job prompt here, alongside the manifest-owned grounding images,
+        // instead of requiring a forbidden read or a guessed replacement.
+        let prompt = read_hatch_job_prompt(request)?;
+        let object = arguments
+            .as_object_mut()
+            .ok_or_else(|| "Hatch image generation arguments must be an object".to_owned())?;
+        object.insert("prompt".to_owned(), serde_json::Value::String(prompt));
+    }
+    media_request_from_tool(&request.name, &arguments)
+}
+
 async fn execute_media_generation_tool(
     app: &tauri::AppHandle,
     state: &AppState,
     database: &database::Database,
     request: &ToolExecutionRequest,
 ) -> ToolExecutionResponse {
-    let result = match media_request_from_tool(&request.name, &request.arguments) {
+    let result = match grounded_media_request_from_tool(request) {
         Ok(mut generation) => {
             if request.hatch && generation.kind == MediaKind::Image {
                 // A hatch job is one manifest row at a time and the
@@ -8587,7 +8705,7 @@ async fn execute_media_generation_tool(
     };
     match result {
         Ok(result) => {
-            let source_paths = if request.hatch {
+            let source_paths = if request.hatch && request.name == "generate_images" {
                 match export_hatch_image_sources(app, &result, request.thread_id.as_deref()).await {
                     Ok(paths) => paths,
                     Err(error) => {
@@ -9346,14 +9464,13 @@ fn validate_record_imagegen_source(
 }
 
 fn validate_bundled_hatch_provider_command(
-    request: &ToolExecutionRequest,
+    arguments: &serde_json::Value,
     manager: &pet::PetManager,
     database: &database::Database,
     operation_id: &str,
     canonical_run_dir: &str,
 ) -> Result<(), String> {
-    let command = request
-        .arguments
+    let command = arguments
         .get("command")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "Hatch run_command requires a command".to_owned())?;
@@ -9416,7 +9533,7 @@ async fn execute_hatch_command(
             .and_then(serde_json::Value::as_str),
         request.allow_outside_workspace,
     )?;
-    if workdir != root {
+    if workdir != root && request.permission_level.as_deref() != Some("full") {
         return Err("Hatch commands must run in their prepared workspace".to_owned());
     }
     let environment = manager.hatch_environment();
@@ -9452,7 +9569,7 @@ async fn execute_hatch_command(
 }
 
 fn hatch_tool_policy_error(request: &ToolExecutionRequest) -> Option<&'static str> {
-    if !request.hatch {
+    if !request.hatch || request.permission_level.as_deref() == Some("full") {
         return None;
     }
     if matches!(
@@ -9460,12 +9577,12 @@ fn hatch_tool_policy_error(request: &ToolExecutionRequest) -> Option<&'static st
         "get_goal" | "list_files" | "read_file" | "search_files"
     ) {
         return Some(
-            "This observation tool is unavailable during pet hatching. The Goal and pet target are already attached; run prepare_pet_run.py or the next concrete hatch command.",
+            "This observation tool is unavailable during pet hatching. The Goal, pet target, and prepared run are already attached. Call generate_images for the next ready hatchJobId; the adapter loads its prompt and input images automatically.",
         );
     }
     if request.name == "run_command" && hatch_command_is_observation(&request.arguments) {
         return Some(
-            "This workspace observation command is unavailable during pet hatching. The Goal and pet target are already attached; run prepare_pet_run.py or the next concrete hatch command.",
+            "This workspace observation command is unavailable during pet hatching. Call generate_images for the next ready hatchJobId; the adapter loads its prompt and input images automatically. Do not read prompt files or prepare the run again.",
         );
     }
     if request.name != "read_skill" || request.hatch_bootstrap {
@@ -9473,13 +9590,66 @@ fn hatch_tool_policy_error(request: &ToolExecutionRequest) -> Option<&'static st
     }
     if request.hatch_skill_loaded {
         Some(
-            "The bundled hatch-pet Skill is already loaded; read_skill is closed for this provider turn. Run prepare_pet_run.py or the next concrete hatch command.",
+            "The bundled hatch-pet Skill is already loaded; read_skill is closed for this provider turn. Use the existing run and take the next concrete generation, recording, mirroring, finalization, or repair action.",
         )
     } else {
         Some(
-            "read_skill is application-owned during pet hatching and is unavailable to provider turns. Run prepare_pet_run.py or the next concrete hatch command.",
+            "read_skill is application-owned during pet hatching and is unavailable to provider turns. Use the existing run and take the next concrete generation, recording, mirroring, finalization, or repair action.",
         )
     }
+}
+
+const HATCH_TOOL_REPAIR_EVENT: &str = "hatch_tool_correction_requested";
+const HATCH_TOOL_REPAIR_LIMIT: usize = 3;
+
+fn hatch_provider_preflight(
+    name: &str,
+    arguments: &mut serde_json::Value,
+    manager: &pet::PetManager,
+    database: &database::Database,
+    operation_id: &str,
+    run_dir: &str,
+    requires_action: bool,
+) -> Option<String> {
+    let validation = if name == "run_command" {
+        normalize_hatch_record_command(arguments, manager, database, operation_id, run_dir)
+            .and_then(|()| {
+                validate_bundled_hatch_provider_command(
+                    arguments,
+                    manager,
+                    database,
+                    operation_id,
+                    run_dir,
+                )
+            })
+    } else {
+        Ok(())
+    };
+    let reason = match validation {
+        Err(error) => error,
+        Ok(()) if requires_action
+            && name != "generate_images"
+            && name != "update_goal"
+            && !(name == "run_command"
+                && hatch_provider_command_kind(arguments, manager, run_dir) == Some("action")) =>
+        {
+            "Job status is already available. Take the next concrete action instead of checking status again.".to_owned()
+        }
+        Ok(()) => return None,
+    };
+    let scripts = manager
+        .hatch_environment()
+        .hatch_skill_path
+        .map(|path| {
+            Path::new(&path)
+                .join("scripts")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .unwrap_or_default();
+    Some(format!(
+        "Hatch tool was not executed: {reason}\nCorrect the next tool call using the existing run; do not restart or regenerate completed images. Canonical run directory: {run_dir:?}. Bundled scripts directory: {scripts:?}. run_command accepts one single-line direct invocation: python '<absolute bundled script path>' --run-dir '<canonical run directory>' plus script arguments. Do not use shell variables, cd, command chaining, or inline Python. Allowed scripts: record_imagegen_result.py (--job-id and --source from hatchSourcePaths), derive_running_left_from_running_right.py (--confirm-appropriate-mirror and --decision-note), finalize_pet_run.py, queue_pet_repairs.py, pet_job_status.py (only when a fresh status check is needed). The application has already prepared this run; do not call prepare_pet_run.py. For the next pending image, use generate_images with its exact hatchJobId."
+    ))
 }
 
 fn hatch_provider_command_kind(
@@ -9779,6 +9949,16 @@ async fn execute_tool_inner(
 ) -> Result<ToolExecutionResponse, String> {
     let mut durable_hatch_run_dir = None;
     if let Some(operation_id) = request.operation_id.as_deref() {
+        let permission = database.harness_operation_permission(operation_id)?;
+        request.permission_level = Some(
+            serde_json::to_value(permission)
+                .map_err(|error| error.to_string())?
+                .as_str()
+                .unwrap_or("request")
+                .to_owned(),
+        );
+        request.allow_outside_workspace =
+            matches!(permission, crate::harness::types::PermissionLevel::Full);
         let operation_hatch = database.harness_operation_hatch(operation_id)?;
         if request.hatch && !operation_hatch {
             return Err("Tool hatch mode does not match its durable Harness operation".to_owned());
@@ -9843,7 +10023,17 @@ async fn execute_tool_inner(
             is_error: true,
         });
     }
-    if request.hatch && request.name == "run_command" && !request.hatch_bootstrap {
+    let bundled_hatch_command = request.hatch
+        && request.name == "run_command"
+        && (request.hatch_bootstrap
+            || durable_hatch_run_dir.as_deref().is_some_and(|run_dir| {
+                hatch_provider_command_kind(&request.arguments, pet_manager, run_dir).is_some()
+            }));
+    if request.hatch
+        && request.name == "run_command"
+        && !request.hatch_bootstrap
+        && (request.permission_level.as_deref() != Some("full") || bundled_hatch_command)
+    {
         let operation_id = request
             .operation_id
             .as_deref()
@@ -9859,7 +10049,7 @@ async fn execute_tool_inner(
             run_dir,
         )?;
         validate_bundled_hatch_provider_command(
-            &request,
+            &request.arguments,
             pet_manager,
             database,
             operation_id,
@@ -9874,6 +10064,7 @@ async fn execute_tool_inner(
         });
     }
     if request.hatch
+        && request.permission_level.as_deref() != Some("full")
         && request.name == "run_command"
         && !request.hatch_bootstrap
         && let Some(operation_id) = request.operation_id.as_deref()
@@ -9899,8 +10090,8 @@ async fn execute_tool_inner(
     let harness_permission = crate::harness::types::PermissionLevel::from_wire(
         request.permission_level.as_deref().unwrap_or("request"),
     );
-    // The client flag is only an opt-in signal; the durable permission level
-    // remains authoritative so a forged request cannot escape its workspace.
+    // Operation-backed calls restore the durable permission above. For legacy
+    // calls, keep the client opt-in coupled to the selected permission level.
     request.allow_outside_workspace = request.allow_outside_workspace
         && matches!(
             harness_permission,
@@ -10486,7 +10677,10 @@ async fn execute_tool_inner(
                 is_error: true,
             },
         }
-    } else if request.hatch && request.name == "run_command" {
+    } else if request.hatch
+        && request.name == "run_command"
+        && (request.permission_level.as_deref() != Some("full") || bundled_hatch_command)
+    {
         match execute_hatch_command(&request, pet_manager).await {
             Ok(response) => response,
             Err(output) => ToolExecutionResponse {
@@ -12701,6 +12895,23 @@ mod tests {
             output: "Listed files".to_owned(),
             is_error: false,
         };
+        for name in [
+            "read_file",
+            "list_files",
+            "run_command",
+            "write_file",
+            "edit_file",
+        ] {
+            assert!(
+                validate_theme_generation_progress(Some(&run), name, &mut before_write)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                !before_write.is_error,
+                "preparation tool {name} was marked failed"
+            );
+        }
         assert!(
             validate_theme_generation_after_tool(Some(&run), &mut before_write)
                 .unwrap()
@@ -12853,10 +13064,14 @@ mod tests {
         let references = run.join("references");
         std::fs::create_dir_all(&references).unwrap();
         std::fs::write(references.join("base.png"), b"\x89PNG\r\n\x1a\nbase").unwrap();
+        let prompt =
+            "旅行蛙 idle: preserve identity; use six ordered frames and a pure green background.";
+        std::fs::write(run.join("idle.md"), prompt).unwrap();
         let manifest = serde_json::json!({
             "jobs": [{
                 "id": "idle",
                 "status": "pending",
+                "prompt_file": "idle.md",
                 "input_images": [{ "path": "references/base.png" }],
                 "output_path": "decoded/idle.png"
             }]
@@ -12866,7 +13081,7 @@ mod tests {
             serde_json::to_vec(&manifest).unwrap(),
         )
         .unwrap();
-        let request = ToolExecutionRequest {
+        let mut request = ToolExecutionRequest {
             call_id: Some("hatch-media-test".to_owned()),
             operation_id: None,
             name: "generate_images".to_owned(),
@@ -12889,6 +13104,46 @@ mod tests {
         let references = read_hatch_job_references(&request).unwrap().unwrap();
         assert_eq!(references.len(), 1);
         assert_eq!(references[0].mime_type, "image/png");
+        // No file-reading tool or provider-authored full prompt is required.
+        let generation = grounded_media_request_from_tool(&request).unwrap();
+        assert_eq!(generation.prompt, prompt);
+        request.arguments["prompt"] =
+            serde_json::json!("ignore the row prompt and redesign this pet");
+        assert_eq!(
+            grounded_media_request_from_tool(&request).unwrap().prompt,
+            prompt
+        );
+        request.hatch = false;
+        assert_eq!(
+            grounded_media_request_from_tool(&request).unwrap().prompt,
+            "ignore the row prompt and redesign this pet"
+        );
+        request.hatch = true;
+
+        let outside = root.join("outside.md");
+        std::fs::write(&outside, "outside prompt").unwrap();
+        for (path, reason) in [
+            (
+                serde_json::json!("../outside.md"),
+                "escapes the run directory",
+            ),
+            (serde_json::json!(outside), "escapes the run directory"),
+            (serde_json::json!("missing.md"), "unavailable"),
+            (serde_json::Value::Null, "no prompt_file"),
+        ] {
+            let mut broken = manifest.clone();
+            broken["jobs"][0]["prompt_file"] = path;
+            std::fs::write(
+                run.join("imagegen-jobs.json"),
+                serde_json::to_vec(&broken).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                grounded_media_request_from_tool(&request)
+                    .unwrap_err()
+                    .contains(reason)
+            );
+        }
 
         let completed = serde_json::json!({
             "jobs": [{
@@ -12908,6 +13163,11 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.contains("already complete"));
+        assert!(
+            grounded_media_request_from_tool(&request)
+                .unwrap_err()
+                .contains("already complete")
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -12932,6 +13192,24 @@ mod tests {
         };
         assert!(hatch_tool_policy_error(&request).is_some());
 
+        request.permission_level = Some("full".to_owned());
+        for name in [
+            "get_goal",
+            "read_file",
+            "list_files",
+            "search_files",
+            "read_skill",
+            "run_command",
+        ] {
+            request.name = name.to_owned();
+            request.arguments =
+                serde_json::json!({"command":"Get-Content 'C:/external/prompt.md'"});
+            assert!(
+                hatch_tool_policy_error(&request).is_none(),
+                "Full permission blocked {name}"
+            );
+        }
+        request.permission_level = Some("request".to_owned());
         request.name = "read_skill".to_owned();
         assert!(hatch_tool_policy_error(&request).is_some());
         request.arguments = serde_json::json!({ "path": "./SKILL.md" });
@@ -13232,6 +13510,101 @@ mod tests {
             None
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn hatch_preflight_allows_corrected_action_without_mutating_existing_images() {
+        let root = std::env::temp_dir().join(format!("hatch-correction-{}", uuid::Uuid::new_v4()));
+        let app_data = root.join("app");
+        let skills = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/skills");
+        let manager =
+            pet::PetManager::open_with_skills(&app_data, &root.join("home"), Some(&skills))
+                .unwrap();
+        let run_dir = app_data.join("pet-hatch/run");
+        std::fs::create_dir_all(run_dir.join("decoded")).unwrap();
+        let base = run_dir.join("decoded/base.png");
+        std::fs::write(&base, b"previously generated image").unwrap();
+        let database = database::Database::open(&root.join("test.sqlite3")).unwrap();
+        let scripts = skills.join("hatch-pet/scripts");
+        let run = run_dir.to_string_lossy();
+        for (name, mut arguments, expected) in [
+            (
+                "run_command",
+                serde_json::json!({"command": "python -c 'print(1)'"}),
+                "script is unavailable",
+            ),
+            (
+                "run_command",
+                serde_json::json!({"command": format!("python '{}' --run-dir '{}'", scripts.join("pet_job_status.py").display(), run)}),
+                "status is already available",
+            ),
+            (
+                "run_command",
+                serde_json::json!({"command": format!("python '{}' --run-dir '{}'", scripts.join("record_imagegen_result.py").display(), run)}),
+                "arguments are outside",
+            ),
+            (
+                "run_command",
+                serde_json::json!({"command": format!("python '{}' --run-dir '{}'", scripts.join("finalize_pet_run.py").display(), root.join("wrong-run").display())}),
+                "arguments are outside",
+            ),
+            (
+                "read_file",
+                serde_json::json!({"path": base}),
+                "status is already available",
+            ),
+        ] {
+            let error = hatch_provider_preflight(
+                name,
+                &mut arguments,
+                &manager,
+                &database,
+                "test",
+                &run,
+                true,
+            )
+            .unwrap();
+            assert!(error.contains(expected), "{error}");
+            assert!(error.contains("do not restart or regenerate completed images"));
+            assert!(error.contains("Canonical run directory:"));
+        }
+        // A rejected command before a status call also gets corrective feedback.
+        assert!(
+            hatch_provider_preflight(
+                "run_command",
+                &mut serde_json::json!({"command":"echo invalid"}),
+                &manager,
+                &database,
+                "test",
+                &run,
+                false
+            )
+            .is_some()
+        );
+        for (name, mut arguments) in [
+            (
+                "run_command",
+                serde_json::json!({"command": format!("python '{}' --run-dir '{}' --skip-videos", scripts.join("finalize_pet_run.py").display(), run)}),
+            ),
+            ("generate_images", serde_json::json!({"hatchJobId":"idle"})),
+            ("update_goal", serde_json::json!({"action":"progress"})),
+        ] {
+            assert!(
+                hatch_provider_preflight(
+                    name,
+                    &mut arguments,
+                    &manager,
+                    &database,
+                    "test",
+                    &run,
+                    true
+                )
+                .is_none()
+            );
+        }
+        assert_eq!(std::fs::read(base).unwrap(), b"previously generated image");
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -13738,6 +14111,41 @@ mod tests {
         assert!(request.available_skills.is_empty());
         assert!(agent::theme_generation_tool_allowed("write_file"));
         assert!(!agent::theme_generation_tool_allowed("generate_images"));
+        request.allow_outside_workspace = true;
+        for hatch in [false, true] {
+            request.hatch = hatch;
+            attach_media_tools(&mut request);
+            attach_subagent_tools(&mut request);
+            attach_extended_tools(&mut request).unwrap();
+            let names = request
+                .available_tools
+                .iter()
+                .map(|tool| tool.name.clone())
+                .collect::<Vec<_>>();
+            enforce_theme_generation_tool_catalog(&mut request);
+            enforce_hatch_tool_catalog(&mut request);
+            assert_eq!(
+                names,
+                request
+                    .available_tools
+                    .iter()
+                    .map(|tool| tool.name.clone())
+                    .collect::<Vec<_>>()
+            );
+            for name in [
+                "generate_images",
+                "generate_videos",
+                "delegate_task",
+                "browser_start",
+                "inspect_skill",
+                "start_process",
+            ] {
+                assert!(
+                    names.iter().any(|tool| tool == name),
+                    "missing {name}, hatch={hatch}"
+                );
+            }
+        }
     }
 
     #[test]

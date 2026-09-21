@@ -49,6 +49,18 @@ const job = {
   phase: "running",
 };
 
+test("Full theme prompts permit preparatory tools while preserving package validation", () => {
+  for (const locale of ["zh-CN", "en-US"]) {
+    const prompt = themeGenerationPrompt(".levelup/generated-themes/test.levelup-theme", request, locale, true);
+    assert.match(prompt, locale === "zh-CN" ? /完全权限下可读取文件和文件夹/ : /Full permission permits reading files and directories/);
+    assert.doesNotMatch(prompt, /Do not list or read|不要先浏览或读取|不得调用图片、视频或音频生成工具/);
+    assert.match(prompt, /schemaVersion/);
+    assert.match(prompt, locale === "zh-CN" ? /第一次通过应用校验/ : /target passes application validation/);
+    const bootstrap = themeGenerationBootstrap("theme rules", "test.levelup-theme", locale, true);
+    assert.doesNotMatch(bootstrap, /Do not call any Skill-reading tool|不要调用任何 Skill 读取工具/);
+  }
+});
+
 test("theme generation waits for Harness ownership before importing", () => {
   assert.equal(themeGenerationReadyForImport(
     { ...job, sourcePath: "", phase: "preparing" },

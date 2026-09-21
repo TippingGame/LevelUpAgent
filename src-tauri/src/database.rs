@@ -1861,6 +1861,24 @@ impl Database {
         Ok(HarnessCompletionDecision::Completed(next_sequence as u64))
     }
 
+    pub fn harness_operation_permission(
+        &self,
+        operation_id: &str,
+    ) -> Result<PermissionLevel, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let permission = connection
+            .query_row(
+                "SELECT permission_level FROM harness_operations WHERE id = ?1",
+                [operation_id],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(database_error)?;
+        Ok(PermissionLevel::from_wire(&permission))
+    }
+
     pub fn harness_operation_hatch(&self, operation_id: &str) -> Result<bool, String> {
         let connection = self
             .connection

@@ -246,6 +246,10 @@ function hatchSkillDirectoryFromHistory(history: AgentMessage[]) {
 export function hatchPrepareCommandFromHistory(history: AgentMessage[]) {
   for (const item of history) {
     if (item.role !== "user" || !item.internal) continue;
+    const applicationCommand = item.content.match(
+      /Application-owned preparation command[^\r\n]*:\r?\n([^\r\n]+)/i,
+    );
+    if (applicationCommand?.[1]?.trim()) return applicationCommand[1].trim();
     const match = item.content.match(
       /exact PowerShell command[^\r\n]*:\r?\n([^\r\n]+)\r?\nDo not use/i,
     );

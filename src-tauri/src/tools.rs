@@ -112,7 +112,7 @@ async fn execute_inner(request: &ToolExecutionRequest) -> Result<String, String>
                 string_arg(&request.arguments, "workdir"),
                 allow_outside,
             )?;
-            if request.hatch && workdir != root {
+            if request.hatch && !allow_outside && workdir != root {
                 return Err("Hatch commands must run in their prepared workspace".to_owned());
             }
             run_command(&workdir, required_arg(&request.arguments, "command")?).await
@@ -1166,7 +1166,21 @@ mod tests {
         assert!(execute_inner(&request).await.is_err());
         request.allow_outside_workspace = true;
         request.hatch = true;
+        assert!(
+            execute_inner(&request)
+                .await
+                .unwrap()
+                .contains("external-workdir-fixture")
+        );
+        request.allow_outside_workspace = false;
         assert!(execute_inner(&request).await.is_err());
+        request.arguments["workdir"] = serde_json::json!("nested");
+        assert!(
+            execute_inner(&request)
+                .await
+                .unwrap_err()
+                .contains("prepared workspace")
+        );
         std::fs::remove_dir_all(suite).unwrap();
     }
 

@@ -33,6 +33,15 @@ const call = (id, name, args = {}) => ({ id, name, arguments: args });
 const state = () => ({ count: 0, fingerprints: new Map() });
 const assistant = (toolCalls) => ({ role: "assistant", toolCalls });
 
+test("application-owned hatch preparation remains exact without telling the provider to repeat it", () => {
+  const command = "python 'D:/软件/LevelUpAgent/scripts/prepare_pet_run.py' --pet-name '旅行蛙' --output-dir 'C:/runs/frog' --chroma-key '#00FF00' --force";
+  const history = [{
+    role: "user", internal: true, toolCalls: [],
+    content: `Application-owned preparation command, executed before the first provider turn (the provider must not repeat it):\n${command}\nThe run deliberately uses its configured chroma key.`,
+  }];
+  assert.equal(hatchPrepareCommandFromHistory(history), command);
+});
+
 test("hatch Python invocations preserve launcher arguments and quote executable paths", () => {
   assert.equal(hatchPythonInvocation("python"), "python");
   assert.equal(hatchPythonInvocation("py -3"), "py -3");

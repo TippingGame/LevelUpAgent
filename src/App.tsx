@@ -500,8 +500,8 @@ function hatchStatusContinuation(output: string) {
   if (!/"ready_jobs"\s*:/i.test(output) || !/"run_dir"\s*:/i.test(output)) return null;
   const readyJob = output.match(/"id"\s*:\s*"([^"]+)"/i)?.[1] ?? "the first ready job";
   return tr(
-    `canonical 状态结果已经返回。现在立即处理 ready job “${readyJob}”：读取它列出的 prompt/input，执行下一步具体孵化动作并调用 generate_images（或该 job 明确要求的确定性脚本）。不要再次调用 pet_job_status.py、Get-ChildItem、read_skill 或 get_goal；不要把状态查询当成进度。`,
-    `The canonical status result is authoritative. Immediately process ready job "${readyJob}": read its listed prompt and inputs, then take the next concrete hatch action and call generate_images (or the deterministic script explicitly required by that job). Do not call pet_job_status.py, Get-ChildItem, read_skill, or get_goal again; a status query is not progress.`,
+    `canonical 状态结果已经返回。现在立即处理 ready job “${readyJob}”：使用该任务 ID 调用 generate_images（或该 job 明确要求的确定性脚本）。应用会自动读取任务的提示词和参考图，无需读取文件。不要再次调用 pet_job_status.py、Get-Content、Get-ChildItem、read_skill 或 get_goal；不要把状态查询当成进度。`,
+    `The canonical status result is authoritative. Immediately process ready job "${readyJob}" by calling generate_images with that hatchJobId (or the deterministic script explicitly required by that job). The application loads its prompt and input images automatically; do not read files. Do not call pet_job_status.py, Get-Content, Get-ChildItem, read_skill, or get_goal again; a status query is not progress.`,
   );
 }
 
@@ -1518,9 +1518,9 @@ function App() {
       generatedBackground,
     };
     const relativePath = target.relativePath;
-    const prompt = themeGenerationPrompt(relativePath, effectiveRequest, locale);
-    const bootstrap = message("user", themeGenerationBootstrap(guidance, relativePath, locale), { internal: true });
-    const bootstrapAcknowledgement = message("assistant", themeGenerationBootstrapAcknowledgement(locale), { internal: true });
+    const prompt = themeGenerationPrompt(relativePath, effectiveRequest, locale, permissionLevel === "full");
+    const bootstrap = message("user", themeGenerationBootstrap(guidance, relativePath, locale, permissionLevel === "full"), { internal: true });
+    const bootstrapAcknowledgement = message("assistant", themeGenerationBootstrapAcknowledgement(locale, permissionLevel === "full"), { internal: true });
     const user = message("user", prompt, { attachments: themeGenerationAttachments(effectiveRequest) });
     const nextThread: AgentThread = {
       ...created,
@@ -1667,7 +1667,7 @@ function App() {
     const titleName = request.name || request.description.slice(0, 18);
     const created = createThread(request.environment.workDirectory);
     const hatchRunDirectory = hatchRunDirectoryFor(request);
-    const instructions = petHatchGenerationPrompt(request, locale, hatchRunDirectory);
+    const instructions = petHatchGenerationPrompt(request, locale, hatchRunDirectory, permissionLevel === "full");
     const summary = locale === "zh-CN"
       ? `孵化摇光残影${request.name ? `“${request.name}”` : ""}：${request.description}`
       : `Hatch ${request.name ? `the Starlight Echo “${request.name}”` : "a Starlight Echo"}: ${request.description}`;
@@ -3662,7 +3662,7 @@ function App() {
       const assistant: AgentMessage = {
         ...streamingAssistant,
         content: result.content || currentStreamContent(),
-        toolCalls: hatchRun
+        toolCalls: hatchRun && runPermission !== "full"
           ? normalizeHatchProviderToolCalls(result.toolCalls, history)
           : result.toolCalls,
         requestId: result.requestId,
@@ -3718,7 +3718,7 @@ function App() {
       const automatic = providerToolCalls.filter((call) => !toolNeedsApproval(call, runPermission));
       const approvalRequired = providerToolCalls.filter((call) => toolNeedsApproval(call, runPermission));
 
-      const hatchExecution = hatchRun ? createHatchExecutionState(history, hatchSkillLoaded) : null;
+      const hatchExecution = hatchRun && runPermission !== "full" ? createHatchExecutionState(history, hatchSkillLoaded) : null;
       let hatchGuardReason: string | null = null;
       const automaticResults = await executeCallsWithParallelMedia(automatic, async (call) => {
         if (hatchGuardReason) return { output: hatchGuardReason, isError: true };
@@ -3790,7 +3790,7 @@ function App() {
         finishThreadRun(threadId, operationId, "awaiting_approval");
         return;
       }
-      const hatchContinuationText = hatchRun
+      const hatchContinuationText = hatchRun && runPermission !== "full"
         ? automaticResults
             .map(({ result }) => !result.isError ? hatchStatusContinuation(result.output) : null)
             .find((text): text is string => Boolean(text))
@@ -4484,7 +4484,7 @@ function App() {
     try {
       let history = approval.history;
       const hatchSkillLoaded = hatchRun && hatchSkillManifestWasRead(history);
-      const hatchExecution = hatchRun ? createHatchExecutionState(history, hatchSkillLoaded) : null;
+      const hatchExecution = hatchRun && approval.permissionLevel !== "full" ? createHatchExecutionState(history, hatchSkillLoaded) : null;
       let hatchGuardReason: string | null = null;
       const resolved = approved
         ? await executeCallsWithParallelMedia(approval.calls, async (call) => {
@@ -10892,6 +10892,7 @@ function petHatchGenerationPrompt(
   request: PetGenerationRequest,
   locale: AppLocale,
   hatchRunDirectory: string,
+  fullAccess = false,
 ) {
   const name = request.name || "Infer a short friendly name from the concept";
   const petId = hatchPetId(request.name || request.description);
@@ -10912,6 +10913,21 @@ function petHatchGenerationPrompt(
     "--force",
   ].join(" ");
   const statusCommand = `${pythonInvocation} ${powershellLiteral(`${skillDirectory}\\scripts\\pet_job_status.py`)} --run-dir ${powershellLiteral(hatchRunDirectory)}`;
+  if (fullAccess) return [
+    "Complete a hatch-pet Goal for a LevelUpAgent Starlight Echo using the bundled workflow. Full permission applies to files, directories, shell commands, Skills, and all normally available tools. Workflow suggestions do not override this permission.",
+    `Pet name: ${name}`,
+    `Pet ID: ${petId}`,
+    `Pet concept: ${request.description}`,
+    `Bundled Hatch Pet skill directory: ${request.environment.hatchSkillPath}`,
+    `Python command: ${request.environment.pythonCommand}`,
+    `Use this working directory for run artifacts: ${request.environment.workDirectory}`,
+    `Use this unique hatch run directory: ${hatchRunDirectory}`,
+    `Application-owned preparation command, executed before the first provider turn (the provider must not repeat it):\n${prepareCommand}`,
+    `Status command, available when needed:\n${statusCommand}`,
+    `Managed reference attachment IDs: ${referenceIds.join(", ") || "none"}. Pass all listed IDs to the base generate_images call. The chroma key is ${HATCH_DEFAULT_CHROMA_KEY}.`,
+    "The application loads the bundled Skill and prepares the run before your first turn. Prefer continuing existing outputs. Select a pending hatchJobId and call generate_images with hatchRunDir; the adapter loads the job prompt and reference images automatically. Record hatchSourcePaths through record_imagegen_result.py. Use the approved mirror script when appropriate, finalize_pet_run.py for validation and packaging, and queue_pet_repairs.py for repairs. Auxiliary reads, diagnostics, and other tool calls are allowed when needed. Never fabricate generated source provenance or claim unvalidated outputs are complete.",
+    `Keep a visible progress checklist. The final package belongs under ${request.environment.packageDirectory}/<pet-slug>/pet.json and spritesheet.webp. Verify the package before completing the Goal. ${locale === "zh-CN" ? "最终摘要使用中文。" : "Write the final summary in English."} End with PET_PACKAGE_DIR=<absolute package directory>.`,
+  ].join("\n\n");
   return [
     "Run a complete hatch-pet Goal for a LevelUpAgent Starlight Echo using the bundled toolchain. Do not stop at a plan or a prompt draft.",
     `Pet name: ${name}`,
@@ -10925,9 +10941,9 @@ function petHatchGenerationPrompt(
     `Use this unique hatch run directory: ${hatchRunDirectory}`,
     `The final package must be written under: ${request.environment.packageDirectory}/<pet-slug>/pet.json and spritesheet.webp`,
     "Skill bootstrap is application-owned: before the first provider turn, LevelUpAgent loads the bundled legacy hatch-pet SKILL.md and its directly required references. The provider must never call read_skill (for the manifest or references), and must keep the loaded old Skill's atlas geometry, nine animation rows, grounding-image, transparency, provenance, QA, repair, and packaging rules authoritative. Do not read any system Codex Skill.",
-    `After the application bootstrap completes, immediately call run_command with this exact PowerShell command (copy it verbatim; do not shorten it to python prepare_pet_run.py):\n${prepareCommand}\nThe run deliberately uses the exact chroma key ${HATCH_DEFAULT_CHROMA_KEY}; every generated base/row image must use that same flat pure green background, never magenta or an unspecified substitute. Do not use Get-ChildItem, ls, or a relative script path to inspect the workspace. Do not call read_skill, get_goal, list_files, read_file, or search_files: the Skill, Goal, and this exact pet target are already attached, and levelup-pet-hatch.json is runtime metadata rather than a plan. Managed LevelUpAgent reference attachments do not expose arbitrary filesystem paths to the model, so prepare the run without --reference and use the listed attachment IDs on the base generate_images call; the recorded canonical base then grounds every row. If the exact command returns a real blocker, report that exact stderr through update_goal instead of trying alternate browsing commands.`,
+    `Application-owned preparation command, executed before the first provider turn (the provider must not repeat it):\n${prepareCommand}\nThe run deliberately uses the exact chroma key ${HATCH_DEFAULT_CHROMA_KEY}; every generated base/row image must use that same flat pure green background, never magenta or an unspecified substitute. Do not use Get-Content, Get-ChildItem, ls, or a relative script path to inspect the workspace. Do not call read_skill, get_goal, list_files, read_file, or search_files: the Skill, Goal, and this exact pet target are already attached, and levelup-pet-hatch.json is runtime metadata rather than a plan. Managed LevelUpAgent reference attachments do not expose arbitrary filesystem paths to the model; use the listed attachment IDs on the base generate_images call. The adapter loads the job's prompt_file and input_images automatically. You do not need to read prompt files with any tool or command. If a tool returns a real blocker, use its correction guidance or report that exact error through update_goal.`,
     `After prepare_pet_run.py succeeds, use this exact PowerShell command for every manifest status check (copy it verbatim):\n${statusCommand}\nNever reconstruct the path from APPDATA, the current directory, or a guessed Skill installation.`,
-    "Use LevelUpAgent's generate_images tool as the visual generation layer for the base and every non-derived row. No external Codex installation is required: the LevelUpAgent adapter exports each completed hatch image unchanged to a standard generated_images/ig_* source and returns it in hatchSourcePaths. Pass that exact returned hatchSourcePaths path to record_imagegen_result.py; never pass the media/*.png path, manually copy or rename a source, or edit imagegen-jobs.json. After prepare_pet_run.py reports the concrete run directory, every generation call must include hatchRunDir=<that directory> and hatchJobId=<the exact pending manifest job id>; the adapter then loads that job's input_images (including canonical-base and layout guides) as provider references. Do not submit a job whose manifest status is already complete. Never draw, tile, mirror, or synthesize missing visual rows with local scripts, except the hatch-pet skill's explicitly approved running-left mirror path. Use the skill's deterministic Python scripts only for prompts, recording selected generated outputs, extraction, atlas assembly, validation, previews, repair queues, and packaging. Generate exactly one visual job at a time and inspect pet_job_status.py before the next job. Use image-capable subagents for row jobs when the runtime exposes them. If delegated agents cannot access generate_images, this one-click workflow explicitly authorizes the LevelUpAgent adapter to issue the grounded row calls from the parent; disclose that adapter path in the checklist and final summary.",
+    "Use LevelUpAgent's generate_images tool as the visual generation layer for the base and every non-derived row. No external Codex installation is required: the LevelUpAgent adapter exports each completed hatch image unchanged to a standard generated_images/ig_* source and returns it in hatchSourcePaths. Pass that exact returned hatchSourcePaths path to record_imagegen_result.py; never pass the media/*.png path, manually copy or rename a source, or edit imagegen-jobs.json. Every generation call must include hatchRunDir=<the prepared directory> and hatchJobId=<the exact pending manifest job id>. The adapter automatically loads that job's prompt_file as the authoritative generation prompt and input_images (including canonical-base and layout guides) as provider references. The tool's prompt argument can be a short description of the selected job; do not read or reconstruct the prompt file. Do not submit a job whose manifest status is already complete. Never draw, tile, mirror, or synthesize missing visual rows with local scripts, except the hatch-pet skill's explicitly approved running-left mirror path. Use record_imagegen_result.py for ingestion, derive_running_left_from_running_right.py for approved mirroring, finalize_pet_run.py for extraction, atlas assembly, validation, previews and packaging, and queue_pet_repairs.py for repairs. Generate exactly one visual job at a time. A successful status result already contains the ready jobs: act on it, and only refresh status after a generation, recording, mirroring, finalization, or repair action. Use the LevelUpAgent adapter for grounded row calls from the parent.",
     "Keep a visible progress checklist in the conversation. Run final validation and inspect the contact sheet before completing the Goal. If a real prerequisite is unavailable, report the precise missing item through the Goal workflow; do not fabricate images or completion records.",
     `Write pet.json metadata using the final pet name and description. ${locale === "zh-CN" ? "最终摘要使用中文。" : "Write the final summary in English."} End the final summary with PET_PACKAGE_DIR=<absolute package directory>. LevelUpAgent will import the package automatically after the Goal completes.`,
   ].join("\n\n");
@@ -11166,7 +11182,7 @@ async function bootstrapHatchHistory(
     ...nextHistory,
     message(
       "user",
-      `${HATCH_BOOTSTRAP_MARKER}\nApplication bootstrap completed successfully. Start with the first ready job in the status result and perform one concrete hatch action now. Do not call read_skill, get_goal, list_files, read_file, search_files, or pet_job_status.py again until a concrete generation or recording action has completed.`,
+      `${HATCH_BOOTSTRAP_MARKER}\nApplication bootstrap completed successfully. Prefer continuing the first ready job using the existing run. The adapter automatically loads job prompts and references. Tool and filesystem access follow the operation's selected permission level; bootstrap does not reduce Full permission.`,
       { internal: true },
     ),
   ];

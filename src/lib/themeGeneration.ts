@@ -91,19 +91,24 @@ export function themeGenerationAttachments(request: ThemeGenerationRequest) {
   }).slice(0, 7);
 }
 
-export function themeGenerationBootstrap(guidance: string, relativePath: string, locale: AppLocale) {
+export function themeGenerationBootstrap(guidance: string, relativePath: string, locale: AppLocale, fullAccess = false) {
   const instructions = guidance.trim();
   return [
     THEME_GENERATION_BOOTSTRAP_MARKER,
     `${THEME_GENERATION_TARGET_MARKER} ${relativePath}`,
-    locale === "zh-CN"
+    fullAccess ? (locale === "zh-CN"
+      ? "应用已附加主题规范和布局参考。完全权限下可按任务需要读取文件、使用工具和执行命令；规范中的直接写入建议不限制这些权限。最终主题包仍必须通过应用校验。"
+      : "The application attached theme instructions and layout references. Full permission permits task-relevant file access, tools, and commands. Direct-write recommendations do not restrict these permissions. The final package must still pass application validation.") : locale === "zh-CN"
       ? "这是 LevelUpAgent 为本次主题生成一次性加载的内置规范及其布局参考。后续轮次直接使用这些内容，不要调用任何 Skill 读取工具，不要在临时工作区查找 Skill 文件，也不要执行规范中提到的源码仓库验证脚本；应用会在自动导入时执行最终校验。"
       : "LevelUpAgent has loaded the packaged theme instructions and layout reference exactly once for this generation task. Use this attached content in later turns. Do not call any Skill-reading tool, search the temporary workspace for Skill files, or run source-repository validator scripts mentioned by the generic workflow; the app performs final validation during automatic import.",
     instructions,
   ].filter(Boolean).join("\n\n");
 }
 
-export function themeGenerationBootstrapAcknowledgement(locale: AppLocale) {
+export function themeGenerationBootstrapAcknowledgement(locale: AppLocale, fullAccess = false) {
+  if (fullAccess) return locale === "zh-CN"
+    ? "规范已加载。我会按任务需要使用完全权限下的工具，复用已有素材，并交付通过校验的主题包。"
+    : "Instructions loaded. I will use the tools available under Full permission as needed, reuse prepared assets, and deliver a validated theme package.";
   return locale === "zh-CN"
     ? "主题生成规范和布局参考已经加载。应用需要的图片素材也会预先准备好；我只会直接写入目标主题包，不再读取 Skill，也不会生成新的图片。"
     : "The theme instructions and layout reference are loaded. The app will also prepare any requested image asset in advance. I will only write the target theme package, without rereading the Skill or generating new images.";
@@ -115,7 +120,7 @@ export function themeGenerationThreadTitle(request: ThemeGenerationRequest, loca
   return detail ? `${base} · ${detail}` : base;
 }
 
-export function themeGenerationPrompt(relativePath: string, options: ThemeGenerationRequest, locale: AppLocale) {
+export function themeGenerationPrompt(relativePath: string, options: ThemeGenerationRequest, locale: AppLocale, fullAccess = false) {
   const request = options.brief.trim().slice(0, 2_000) || (locale === "zh-CN"
     ? "请基于当前 LevelUpAgent 界面生成一套精致、易读、适合长时间工作的标准视觉主题。"
     : "Create a polished, readable standard visual theme for the current LevelUpAgent interface, optimized for long work sessions.");
@@ -146,10 +151,10 @@ export function themeGenerationPrompt(relativePath: string, options: ThemeGenera
       "用户选择的视觉参数：" + preferences,
       referenceGuidance,
       backgroundGuidance,
-      "所有图片附件都只是已经准备好的视觉输入。不得调用图片、视频或音频生成工具，不得重新生成附件；除宿主准备的会话背景外，优先使用颜色、渐变、阴影、边框、排版和安全内嵌 SVG 表达主题。",
+      fullAccess ? "图片附件是已经准备好的视觉输入，优先复用。完全权限下可按用户任务需要使用媒体及其他工具，避免无必要地重新生成已有素材。" : "所有图片附件都只是已经准备好的视觉输入。不得调用图片、视频或音频生成工具，不得重新生成附件；除宿主准备的会话背景外，优先使用颜色、渐变、阴影、边框、排版和安全内嵌 SVG 表达主题。",
       controlCoverage,
-      "主题规范和布局参考已由应用在本会话启动时一次性附加，直接使用已经提供的内容，不要再次读取 Skill，也不要尝试从临时工作区查找额外的源码规范文档。只创建本任务的目标文件，不要修改 LevelUpAgent 源码、Provider 设置、API Key、会话数据库或其他无关文件。",
-      "输出目录已由应用安全创建。不要先浏览或读取目标目录和目标文件，必须直接使用 write_file 写出一个 UTF-8 JSON 主题包到：" + relativePath,
+      fullAccess ? "主题规范已附加。完全权限下可读取文件和文件夹、检查 Skill、运行命令及使用其他已配置工具来完成任务。保持修改与当前主题任务相关。" : "主题规范和布局参考已由应用在本会话启动时一次性附加，直接使用已经提供的内容，不要再次读取 Skill，也不要尝试从临时工作区查找额外的源码规范文档。只创建本任务的目标文件，不要修改 LevelUpAgent 源码、Provider 设置、API Key、会话数据库或其他无关文件。",
+      (fullAccess ? "输出目录已创建，可按需要检查、写入和修改文件。推荐使用 write_file；最终 UTF-8 JSON 主题包必须位于：" : "输出目录已由应用安全创建。不要先浏览或读取目标目录和目标文件，必须直接使用 write_file 写出一个 UTF-8 JSON 主题包到：") + relativePath,
       "主题包必须是一个扁平的顶层 JSON 对象，不能把字段嵌套在 manifest 中。以下 7 个字段全部必填，字段名和类型必须完全一致：\n{\n  \"schemaVersion\": 1,\n  \"id\": \"theme-id\",\n  \"name\": \"Theme Name\",\n  \"version\": \"1.0.0\",\n  \"author\": \"LevelUpAgent\",\n  \"description\": \"Theme description\",\n  \"css\": \"html[data-levelup-theme=\\\"theme-id\\\"] { /* scoped theme CSS */ }\"\n}",
       "css 必须是合法的 JSON 字符串。最稳妥的方式是输出单行 CSS；如果需要多行，字符串内部的换行、回车和制表符必须分别写成 JSON 转义 \\n、\\r 和 \\t，绝不能在开始和结束双引号之间直接插入物理换行。",
       "本任务固定使用 schemaVersion 1 和标准布局，不要添加 layout 或 layoutFile。schemaVersion 1 仍允许通过 CSS 深度定制全部现有控件，只是不重排 DOM。主题必须满足现有校验器：CSS 全部使用 html[data-levelup-theme=\"主题ID\"] 作用域，不得包含 JavaScript、@import、远程资源或未内嵌的图片；素材必须使用 data URL；SVG data URL 的标准命名空间必须写成 xmlns='http%3A//www.w3.org/2000/svg'（xlink 同样编码冒号），CSS 中不能出现字面量 http: 或 https:；不能引入可执行代码、凭据或远程网络依赖。",
@@ -162,10 +167,10 @@ export function themeGenerationPrompt(relativePath: string, options: ThemeGenera
     "Selected visual parameters: " + preferences,
     referenceGuidance,
     backgroundGuidance,
-    "Every image attachment is already-prepared visual input. Do not call image, video, or audio generation tools and do not regenerate an attachment. Apart from the host-prepared conversation background, express the theme with CSS colors, gradients, shadows, borders, typography, spacing, and safe embedded SVG.",
+    fullAccess ? "Reuse prepared image attachments. Full permission permits media and other tools when required for the user's task; avoid unnecessarily regenerating existing assets." : "Every image attachment is already-prepared visual input. Do not call image, video, or audio generation tools and do not regenerate an attachment. Apart from the host-prepared conversation background, express the theme with CSS colors, gradients, shadows, borders, typography, spacing, and safe embedded SVG.",
     controlCoverage,
-    "The app attached the authoritative theme instructions and layout reference once when this conversation started. Use that attached content directly; do not read the Skill again or search the temporary workspace for source-repository documentation. Create only the target file for this task. Do not modify LevelUpAgent source code, provider settings, API keys, conversation databases, or unrelated files.",
-    "The app has safely created the output directory. Do not list or read the target directory or target file first. Use write_file directly to create a UTF-8 JSON theme package at: " + relativePath,
+    fullAccess ? "The theme instructions are attached. Full permission permits reading files and directories, inspecting Skills, running commands, and other configured tools needed for this task. Keep changes relevant to this theme task." : "The app attached the authoritative theme instructions and layout reference once when this conversation started. Use that attached content directly; do not read the Skill again or search the temporary workspace for source-repository documentation. Create only the target file for this task. Do not modify LevelUpAgent source code, provider settings, API keys, conversation databases, or unrelated files.",
+    (fullAccess ? "The output directory exists. Inspect, write, or edit files as needed; write_file is recommended. The final UTF-8 JSON theme package must be at: " : "The app has safely created the output directory. Do not list or read the target directory or target file first. Use write_file directly to create a UTF-8 JSON theme package at: ") + relativePath,
     "The package must be one flat top-level JSON object; do not nest these fields under manifest. All seven fields below are required, with these exact names and types:\n{\n  \"schemaVersion\": 1,\n  \"id\": \"theme-id\",\n  \"name\": \"Theme Name\",\n  \"version\": \"1.0.0\",\n  \"author\": \"LevelUpAgent\",\n  \"description\": \"Theme description\",\n  \"css\": \"html[data-levelup-theme=\\\"theme-id\\\"] { /* scoped theme CSS */ }\"\n}",
     "The css value must be a valid JSON string. A single-line CSS value is safest. If it must span lines, represent newline, carriage return, and tab inside the string with the JSON escapes \\n, \\r, and \\t; never place a physical line break between the opening and closing JSON quotes.",
     "This task must use schemaVersion 1 with the standard layout; do not add layout or layoutFile. Schema version 1 still permits deep CSS customization of every existing control—it only keeps the DOM arrangement unchanged. Follow the existing validator: scope every CSS rule under html[data-levelup-theme=\"THEME_ID\"], and do not use JavaScript, @import, remote resources, or unresolved image URLs. Embed assets as data URLs. In SVG data URLs, write the standard namespace as xmlns='http%3A//www.w3.org/2000/svg' (and percent-encode the xlink namespace colon too), so literal http: or https: never appears in CSS. Do not add executable code, credentials, or network dependencies.",

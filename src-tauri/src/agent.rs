@@ -2715,11 +2715,7 @@ fn system_prompt_with_omission(request: &AgentTurnRequest, omission: &ContextOmi
             "{SYSTEM_PROMPT}\nNo project workspace is selected. Do not claim workspace file or shell access; use the non-workspace tools provided for this turn."
         ),
     };
-    if request_has_workspace(request)
-        && !request.hatch
-        && request.mode != "subagent"
-        && !theme_generation_bootstrapped(&request.messages)
-    {
+    if request_has_workspace(request) && request.mode != "subagent" {
         prompt.push_str(if request.allow_outside_workspace {
             "\n\nHost filesystem access: Full. The selected workspace is the default working directory, not a filesystem boundary. You may use absolute paths outside it with the available file tools and use workdir with run_command/start_process to run in another directory. Tools and executables do not need to be copied into the workspace. Work within the user's task; operating-system permissions and tool-specific checks still apply."
         } else {
@@ -2746,7 +2742,9 @@ fn system_prompt_with_omission(request: &AgentTurnRequest, omission: &ContextOmi
         );
     }
     let theme_generation = theme_generation_bootstrapped(&request.messages);
-    if theme_generation {
+    if theme_generation && request.allow_outside_workspace {
+        prompt.push_str("\n\nTheme generation mode (Full permission)\nUse the normal tool catalog and host permission policy, including file reads/edits, shell commands, browser, Skills, and configured external tools when needed for this task. Older workflow text recommending direct write_file or avoiding reads is workflow advice, not a permission restriction. The final package must still use the exact application target and pass CSS/layout/package validation before import. Reuse prepared reference assets; generate additional media only if needed by the user's request. Auxiliary tool calls do not imply the package is complete.");
+    } else if theme_generation {
         prompt.push_str("\n\nTheme generation mode\nLevelUpAgent already attached the packaged customize-levelup-layout instructions and layout reference once. This task exposes only write_file: Skill, media generation, delegation, shell, browsing, and other tools are intentionally unavailable. Attached reference images are visual evidence only; analyze them directly and express the result with scoped CSS. Never generate replacement images or raster assets. Write the requested theme package directly to the exact application-provided target.");
     }
     if request
@@ -2770,10 +2768,12 @@ fn system_prompt_with_omission(request: &AgentTurnRequest, omission: &ContextOmi
     }
     let hatch_skill_read =
         request.hatch && (request.hatch_skill_loaded || hatch_skill_was_read(&request.messages));
-    if !request.available_skills.is_empty() && !theme_generation {
-        if request.hatch && hatch_skill_read {
+    if !request.available_skills.is_empty()
+        && (!theme_generation || request.allow_outside_workspace)
+    {
+        if request.hatch && hatch_skill_read && !request.allow_outside_workspace {
             prompt.push_str("\n\nEnabled Skills are listed below. The bundled legacy hatch-pet SKILL.md has already been read successfully in this run. Its one-time bootstrap is closed: do not call read_skill again. Take the next concrete hatch action now.\n");
-        } else if request.hatch {
+        } else if request.hatch && !request.allow_outside_workspace {
             prompt.push_str("\n\nEnabled Skills are listed below. The application has not completed the bundled legacy hatch-pet bootstrap, so this provider turn must not proceed. The client must load the manifest and prepare the run before asking the model for a concrete action.\n");
         } else {
             let loaded = request
@@ -2841,11 +2841,14 @@ fn system_prompt_with_omission(request: &AgentTurnRequest, omission: &ContextOmi
             prompt.push_str("\nContinue until the objective is genuinely achieved. Before claiming completion, call update_goal with complete and concrete evidence; this starts a separate completion audit. Report blocked only after exhausting safe in-scope alternatives.");
         }
     }
-    if request.hatch {
+    if request.hatch && request.allow_outside_workspace {
+        prompt.push_str("\n\nHatch execution mode (Full permission)\nThe application has prepared the canonical run and attached the bundled workflow. Use all normally available tools, files, directories, and shell commands as needed. Earlier workflow restrictions on reading files, Skills, or running auxiliary commands do not override Full permission. Prefer the existing run and avoid unnecessary repeated status checks or preparation. generate_images automatically loads the pending job's prompt and references. Record generated sources using record_imagegen_result.py; source provenance, manifest job identity, and final package validation still apply. File reads and diagnostic commands are legitimate intermediate steps, not hatch completion.");
+    } else if request.hatch {
         if hatch_skill_read {
             prompt.push_str(
-                "\n\nHatch execution mode\nThe active Goal state and the user's requested pet target are already attached above. The bundled legacy hatch-pet Skill is loaded and its read_skill bootstrap is closed. Do not call read_skill, get_goal, list_files, read_file, or search_files; those observation tools are intentionally unavailable. Run prepare_pet_run.py if no run exists, or run pet_job_status.py and perform the next pending script, image generation, ingest, QA, or packaging action now.",
+                "\n\nHatch execution mode\nThe active Goal state, canonical run directory, and the user's requested pet target are already attached above. The application has already prepared the run and loaded the bundled hatch-pet Skill; do not call prepare_pet_run.py again. Do not call read_skill, get_goal, list_files, read_file, or search_files. After a status result, perform the next pending image generation, ingest, mirroring, finalization, or repair action instead of checking status again. run_command accepts one single-line direct Python invocation of a bundled script at its absolute path, with --run-dir matching the canonical run directory. Shell variables, cd, chained commands, inline Python, and shell wrappers are unavailable. Use generate_images for pending jobs, record_imagegen_result.py with --job-id and --source from hatchSourcePaths for ingestion, derive_running_left_from_running_right.py for approved mirroring, finalize_pet_run.py for QA and packaging, and queue_pet_repairs.py for repair. If a tool is rejected, correct the reported issue using the existing run outputs; do not restart or regenerate completed images.",
             );
+            prompt.push_str("\nFor generate_images, pass the exact pending hatchJobId and canonical hatchRunDir. The application automatically loads the job's prompt_file and input_images. A short job description is sufficient for the prompt argument; the manifest prompt remains authoritative. Never use Get-Content, cat, inline Python, or read_file to read prompt files. This application adapter rule also applies to older task text or Skill examples that ask you to read a prompt file.");
         } else {
             prompt.push_str(
                 "\n\nHatch execution mode\nThe application has not completed the bundled legacy hatch-pet bootstrap, so this provider turn must not proceed. The client must load the manifest and prepare the run before asking the model for a concrete action.",
@@ -3311,10 +3314,10 @@ fn request_tool_specs(request: &AgentTurnRequest) -> Vec<(String, String, Value)
     let mut tools = allowed_tool_specs(
         &request.mode,
         request_has_workspace(request),
-        request.hatch,
+        request.hatch && !request.allow_outside_workspace,
         &request.available_tools,
     );
-    if theme_generation_bootstrapped(&request.messages) {
+    if theme_generation_bootstrapped(&request.messages) && !request.allow_outside_workspace {
         tools.retain(|(name, _, _)| theme_generation_tool_allowed(name));
     }
     tools
@@ -4335,8 +4338,10 @@ mod tests {
         ];
         let prompt = system_prompt(&request);
         assert!(prompt.contains("already been read successfully"));
-        assert!(prompt.contains("read_skill bootstrap is closed"));
-        assert!(prompt.contains("Run prepare_pet_run.py"));
+        assert!(prompt.contains("application has already prepared the run"));
+        assert!(prompt.contains("do not call prepare_pet_run.py again"));
+        assert!(prompt.contains("Do not call read_skill"));
+        assert!(prompt.contains("one single-line direct Python invocation"));
         assert!(!prompt.contains("call read_skill before acting"));
     }
 
@@ -4358,7 +4363,8 @@ mod tests {
             });
         let prompt = system_prompt(&request);
         assert!(prompt.contains("already been read successfully"));
-        assert!(prompt.contains("Run prepare_pet_run.py"));
+        assert!(prompt.contains("do not call prepare_pet_run.py again"));
+        assert!(prompt.contains("correct the reported issue using the existing run outputs"));
         assert!(!prompt.contains("call read_skill before acting"));
     }
 
@@ -4772,7 +4778,77 @@ mod tests {
         assert!(!system_prompt(&request).contains("Host filesystem access: Full."));
         request.mode = "agent".to_owned();
         request.hatch = true;
-        assert!(!system_prompt(&request).contains("Host filesystem access: Full."));
+        assert!(system_prompt(&request).contains("Host filesystem access: Full."));
+    }
+
+    #[test]
+    fn full_workflows_keep_normal_tool_catalogs_and_permission_prompts() {
+        for hatch in [false, true] {
+            let mut request = test_request(
+                "https://levelup.example".to_owned(),
+                ProviderProtocol::OpenaiResponses,
+            );
+            request.hatch = hatch;
+            request.hatch_skill_loaded = hatch;
+            if !hatch {
+                request.messages.push(AgentMessage {
+                    role: "user".to_owned(),
+                    content: THEME_GENERATION_BOOTSTRAP_MARKER.to_owned(),
+                    internal: true,
+                    tool_calls: Vec::new(),
+                    tool_call_id: None,
+                    provider_reasoning_blocks: Vec::new(),
+                    attachments: Vec::new(),
+                });
+            }
+            for name in [
+                "read_skill",
+                "get_goal",
+                "generate_images",
+                "browser_start",
+                "mcp_test",
+            ] {
+                request.available_tools.push(AgentToolDefinition {
+                    name: name.to_owned(),
+                    description: "test".to_owned(),
+                    input_schema: json!({"type":"object"}),
+                    read_only: false,
+                });
+            }
+            request.allow_outside_workspace = true;
+            let names = request_tool_specs(&request)
+                .into_iter()
+                .map(|(name, _, _)| name)
+                .collect::<Vec<_>>();
+            for name in [
+                "read_file",
+                "list_files",
+                "search_files",
+                "write_file",
+                "edit_file",
+                "run_command",
+                "read_skill",
+                "get_goal",
+                "generate_images",
+                "browser_start",
+                "mcp_test",
+            ] {
+                assert!(
+                    names.iter().any(|tool| tool == name),
+                    "hatch={hatch}, missing={name}"
+                );
+            }
+            let prompt = system_prompt(&request);
+            assert!(prompt.contains("Host filesystem access: Full."));
+            assert!(!prompt.contains("tools are intentionally unavailable"));
+            assert!(!prompt.contains("Do not call read_skill, get_goal"));
+            request.allow_outside_workspace = false;
+            assert!(
+                !request_tool_specs(&request)
+                    .iter()
+                    .any(|(name, _, _)| name == "read_file")
+            );
+        }
     }
 
     #[test]
