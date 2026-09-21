@@ -69,7 +69,15 @@ test("theme generation waits for Harness ownership before importing", () => {
   assert.equal(themeGenerationReadyForImport(
     job,
     { running: false, pendingApproval: false, ownsOperation: false },
+  ), false);
+  assert.equal(themeGenerationReadyForImport(
+    { ...job, phase: "validated" },
+    { running: false, pendingApproval: false, ownsOperation: false },
   ), true);
+  assert.equal(themeGenerationReadyForImport(
+    { ...job, phase: "validated" },
+    { running: true, pendingApproval: false, ownsOperation: true },
+  ), false);
 });
 
 test("theme prompts use the application-owned bootstrap and write directly to the prepared target", () => {

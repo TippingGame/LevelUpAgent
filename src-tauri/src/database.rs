@@ -20,17 +20,6 @@ use crate::models::{
 
 const SCHEMA_VERSION: i64 = 19;
 
-fn paths_equal(left: &str, right: &str) -> bool {
-    #[cfg(windows)]
-    {
-        left.eq_ignore_ascii_case(right)
-    }
-    #[cfg(not(windows))]
-    {
-        left == right
-    }
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HarnessRecoverySummary {
     pub interrupted_operations: usize,
@@ -2147,53 +2136,90 @@ impl Database {
         Ok(kinds)
     }
 
-    pub fn harness_operation_has_hatch_source(
+    pub fn harness_hatch_source_paths(
         &self,
         operation_id: &str,
-        source: &str,
-    ) -> Result<bool, String> {
+        job_id: &str,
+    ) -> Result<Vec<String>, String> {
+        if !self.harness_operation_hatch(operation_id)? {
+            return Ok(Vec::new());
+        }
+        let Some(run_dir) = self.harness_operation_hatch_run_dir(operation_id)? else {
+            return Ok(Vec::new());
+        };
         let connection = self
             .connection
             .lock()
             .map_err(|_| "Could not lock conversation database".to_owned())?;
         let mut statement = connection
             .prepare(
-                "SELECT result_json
-                 FROM harness_tool_executions
-                 WHERE operation_id = ?1
-                   AND tool_name = 'generate_images'
-                   AND status = 'succeeded'
-                   AND result_json IS NOT NULL",
+                "SELECT t.arguments_json, t.result_json, s.snapshot_json
+                 FROM harness_tool_executions t
+                 JOIN harness_operations o ON o.id = t.operation_id
+                 JOIN harness_operations current ON current.id = ?1 AND current.thread_id = o.thread_id
+                 JOIN harness_snapshots s ON s.id = t.snapshot_id
+                 WHERE t.tool_name = 'generate_images'
+                   AND t.status = 'succeeded'
+                   AND t.result_json IS NOT NULL
+                 ORDER BY t.started_at DESC, t.rowid DESC",
             )
             .map_err(database_error)?;
         let results = statement
-            .query_map([operation_id], |row| row.get::<_, String>(0))
+            .query_map([operation_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
             .map_err(database_error)?;
-        for result_json in results {
-            let result_json = result_json.map_err(database_error)?;
+        for result in results {
+            let (arguments_json, result_json, snapshot_json) = result.map_err(database_error)?;
+            let snapshot: serde_json::Value = serde_json::from_str(&snapshot_json)
+                .map_err(|error| format!("Stored harness snapshot is invalid: {error}"))?;
+            // Resuming the same conversation/run may reuse an earlier operation's
+            // generated output. Other conversations, run directories and jobs
+            // never contribute provenance.
+            if snapshot.get("hatch").and_then(serde_json::Value::as_bool) != Some(true)
+                || !snapshot
+                    .get("hatchRunDir")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|path| crate::path_equals(Path::new(path), Path::new(&run_dir)))
+            {
+                continue;
+            }
+            let arguments: serde_json::Value = serde_json::from_str(&arguments_json)
+                .map_err(|error| format!("Stored harness tool arguments are invalid: {error}"))?;
+            if arguments
+                .get("hatchJobId")
+                .and_then(serde_json::Value::as_str)
+                != Some(job_id)
+            {
+                continue;
+            }
             let result: serde_json::Value = serde_json::from_str(&result_json)
                 .map_err(|error| format!("Stored harness tool result is invalid: {error}"))?;
-            let Some(output) = result.get("output").and_then(serde_json::Value::as_str) else {
-                continue;
-            };
-            let Ok(payload) = serde_json::from_str::<serde_json::Value>(output) else {
-                continue;
-            };
-            if payload
+            // Older ledgers kept provenance only inside the output string.
+            let payload = result
+                .get("output")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|output| serde_json::from_str::<serde_json::Value>(output).ok());
+            return Ok(result
                 .get("hatchSourcePaths")
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(|paths| {
-                    paths.iter().any(|candidate| {
-                        candidate
-                            .as_str()
-                            .is_some_and(|candidate| paths_equal(candidate, source))
-                    })
+                .or_else(|| {
+                    payload
+                        .as_ref()
+                        .and_then(|value| value.get("hatchSourcePaths"))
                 })
-            {
-                return Ok(true);
-            }
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|path| !path.is_empty())
+                .map(str::to_owned)
+                .collect());
         }
-        Ok(false)
+        Ok(Vec::new())
     }
 
     pub fn harness_hatch_status_requires_action(&self, operation_id: &str) -> Result<bool, String> {
@@ -3089,10 +3115,20 @@ impl Database {
             "succeeded"
         };
         let output = response.output.chars().take(20_000).collect::<String>();
-        let result_json = serde_json::json!({
+        let mut result_json = serde_json::json!({
             "output": output,
             "isError": response.is_error,
         });
+        // Keep authoritative image sources outside the bounded display text.
+        // Truncating a JSON output must not erase a paid generation's provenance.
+        if !response.is_error
+            && let Ok(payload) = serde_json::from_str::<serde_json::Value>(&response.output)
+            && let Some(paths) = payload
+                .get("hatchSourcePaths")
+                .and_then(serde_json::Value::as_array)
+        {
+            result_json["hatchSourcePaths"] = serde_json::Value::Array(paths.clone());
+        }
         connection
             .execute(
                 "UPDATE harness_tool_executions
@@ -3649,6 +3685,165 @@ mod tests {
             .into_started()
             .unwrap();
         assert_ne!(restarted.operation_id, started.operation_id);
+    }
+
+    #[test]
+    fn hatch_source_provenance_survives_large_generation_results() {
+        let database = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        database.save_thread(&sample_thread()).unwrap();
+        let request = HarnessDraftRequest {
+            thread_id: "thread-1".to_owned(),
+            raw_user_input: "hatch".to_owned(),
+            attachment_ids: Vec::new(),
+            mode: HarnessMode::Goal,
+            permission_level: PermissionLevel::Full,
+            requested_profile_id: Some("test".to_owned()),
+            workspace: Some("C:/workspace".to_owned()),
+            hatch: true,
+            hatch_run_dir: Some("C:/workspace/run".to_owned()),
+        };
+        let started = database
+            .start_harness_operation(&request, "C:/workspace", "test")
+            .unwrap()
+            .into_started()
+            .unwrap();
+        let source = "C:/generated_images/ig_idle.png";
+        database
+            .start_harness_tool_execution(
+                &started.operation_id,
+                "generate-idle",
+                "generate_images",
+                "costly",
+                &serde_json::json!({"hatchJobId": "idle", "hatchRunDir": "C:/workspace/run"}),
+            )
+            .unwrap();
+        database.finish_harness_tool_execution(&started.operation_id, "generate-idle", &crate::models::ToolExecutionResponse {
+            output: serde_json::json!({"assets": [{"prompt": "frog".repeat(6000)}], "hatchSourcePaths": [source]}).to_string(),
+            is_error: false,
+        }).unwrap();
+        assert_eq!(
+            database
+                .harness_hatch_source_paths(&started.operation_id, "idle")
+                .unwrap(),
+            [source]
+        );
+        assert!(
+            database
+                .harness_hatch_source_paths(&started.operation_id, "base")
+                .unwrap()
+                .is_empty()
+        );
+
+        let save_generation = |call_id: &str, job_id: &str, paths: &[&str], is_error: bool| {
+            database
+                .start_harness_tool_execution(
+                    &started.operation_id,
+                    call_id,
+                    "generate_images",
+                    "costly",
+                    &serde_json::json!({"hatchJobId": job_id, "hatchRunDir": "C:/workspace/run"}),
+                )
+                .unwrap();
+            database
+                .finish_harness_tool_execution(
+                    &started.operation_id,
+                    call_id,
+                    &crate::models::ToolExecutionResponse {
+                        output: serde_json::json!({"hatchSourcePaths": paths}).to_string(),
+                        is_error,
+                    },
+                )
+                .unwrap();
+        };
+        save_generation("base", "base", &["C:/generated_images/ig_base.png"], false);
+        save_generation(
+            "idle-repair",
+            "idle",
+            &["C:/generated_images/ig_idle_new.png"],
+            false,
+        );
+        save_generation(
+            "idle-failed",
+            "idle",
+            &["C:/generated_images/ig_failed.png"],
+            true,
+        );
+        assert_eq!(
+            database
+                .harness_hatch_source_paths(&started.operation_id, "idle")
+                .unwrap(),
+            ["C:/generated_images/ig_idle_new.png"]
+        );
+
+        // Legacy untruncated results still work without the separate metadata.
+        database.connection.lock().unwrap().execute(
+            "UPDATE harness_tool_executions SET result_json = ?1 WHERE call_id = 'base'",
+            [serde_json::json!({"output": serde_json::json!({"hatchSourcePaths": ["C:/generated_images/ig_base.png"]}).to_string(), "isError": false}).to_string()],
+        ).unwrap();
+        assert_eq!(
+            database
+                .harness_hatch_source_paths(&started.operation_id, "base")
+                .unwrap(),
+            ["C:/generated_images/ig_base.png"]
+        );
+
+        database
+            .update_harness_operation_state(&started.operation_id, &RuntimeState::Failed)
+            .unwrap();
+        let resumed = database
+            .start_harness_operation(&request, "C:/workspace", "test")
+            .unwrap()
+            .into_started()
+            .unwrap();
+        assert_eq!(
+            database
+                .harness_hatch_source_paths(&resumed.operation_id, "idle")
+                .unwrap(),
+            ["C:/generated_images/ig_idle_new.png"]
+        );
+        database
+            .update_harness_operation_state(&resumed.operation_id, &RuntimeState::Failed)
+            .unwrap();
+        let other_run = database
+            .start_harness_operation(
+                &HarnessDraftRequest {
+                    hatch_run_dir: Some("C:/workspace/other-run".to_owned()),
+                    ..request.clone()
+                },
+                "C:/workspace",
+                "test",
+            )
+            .unwrap()
+            .into_started()
+            .unwrap();
+        assert!(
+            database
+                .harness_hatch_source_paths(&other_run.operation_id, "idle")
+                .unwrap()
+                .is_empty()
+        );
+        let mut other_thread = sample_thread();
+        other_thread.id = "thread-2".to_owned();
+        other_thread.messages.clear();
+        database.save_thread(&other_thread).unwrap();
+        let other = database
+            .start_harness_operation(
+                &HarnessDraftRequest {
+                    thread_id: other_thread.id,
+                    ..request
+                },
+                "C:/workspace",
+                "test",
+            )
+            .unwrap()
+            .into_started()
+            .unwrap();
+        assert!(
+            database
+                .harness_hatch_source_paths(&other.operation_id, "idle")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

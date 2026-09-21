@@ -22,6 +22,7 @@ const AUTONOMOUS_DEEPENING_INTERVAL_MS: i64 = 3 * 60 * 60_000;
 const AUTONOMOUS_EXPLORATION_INTERVAL_MS: i64 = 6 * 60 * 60_000;
 const AUTONOMOUS_LEARNING_RETRY_BASE_MS: i64 = 20 * 60_000;
 const AUTONOMOUS_LEARNING_STALE_MS: i64 = 10 * 60_000;
+const AUTONOMOUS_LEARNING_MAX_ATTEMPTS: u32 = 3;
 const RECENT_OBSERVATION_TTL_MS: i64 = 72 * 60 * 60_000;
 const PATROL_INTERVAL_MS: i64 = 6 * 60_000;
 const CHECK_IN_SLOTS: [u32; 5] = [9 * 60, 12 * 60, 15 * 60, 18 * 60, 21 * 60];
@@ -253,6 +254,32 @@ pub struct PetLearningQuestionInput<'a> {
     pub provider_id: Option<&'a str>,
 }
 
+impl PetLearningQuest {
+    fn fail_attempt(&mut self, now: i64, formation: bool, error: &str) -> bool {
+        let attempts = if formation {
+            self.formation_attempts
+        } else {
+            self.attempts
+        };
+        let will_retry = attempts < AUTONOMOUS_LEARNING_MAX_ATTEMPTS;
+        self.status = match (formation, will_retry) {
+            (true, true) => "formation-retrying",
+            (true, false) => "formation-failed",
+            (false, true) => "retrying",
+            (false, false) => "failed",
+        }
+        .to_owned();
+        self.started_at = None;
+        self.completed_at = (!will_retry).then_some(now);
+        self.error = Some(shorten(error, 180));
+        self.next_retry_at = will_retry.then(|| {
+            let multiplier = 1_i64 << attempts.saturating_sub(1).min(2);
+            now.saturating_add(AUTONOMOUS_LEARNING_RETRY_BASE_MS.saturating_mul(multiplier))
+        });
+        will_retry
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PetUserObservation {
@@ -419,27 +446,28 @@ impl StoredPetLife {
                 .as_deref()
                 .map(|value| shorten(value.trim(), 120))
                 .filter(|value| !value.is_empty());
-            if quest.status == "formulating"
-                && quest.started_at.is_some_and(|started| {
-                    now.saturating_sub(started) >= AUTONOMOUS_LEARNING_STALE_MS
-                })
+            let stale = quest
+                .started_at
+                .is_none_or(|started| now.saturating_sub(started) >= AUTONOMOUS_LEARNING_STALE_MS);
+            let formation = matches!(
+                quest.status.as_str(),
+                "formulating" | "formation-retrying" | "formation-pending"
+            );
+            let exhausted = if formation {
+                quest.formation_attempts >= AUTONOMOUS_LEARNING_MAX_ATTEMPTS
+            } else {
+                quest.attempts >= AUTONOMOUS_LEARNING_MAX_ATTEMPTS
+            };
+            if matches!(quest.status.as_str(), "formulating" | "asking") && stale
+                || matches!(
+                    quest.status.as_str(),
+                    "formation-retrying" | "formation-pending" | "retrying" | "pending"
+                ) && exhausted
             {
-                quest.status = "formation-retrying".to_owned();
-                quest.next_retry_at = Some(now);
-                quest.error = Some(
-                    "The previous question-forming request was interrupted; I will reflect again."
-                        .to_owned(),
-                );
-            }
-            if quest.status == "asking"
-                && quest.started_at.is_some_and(|started| {
-                    now.saturating_sub(started) >= AUTONOMOUS_LEARNING_STALE_MS
-                })
-            {
-                quest.status = "retrying".to_owned();
-                quest.next_retry_at = Some(now);
-                quest.error = Some(
-                    "The previous Agent request was interrupted; I will try again.".to_owned(),
+                quest.fail_attempt(
+                    now,
+                    formation,
+                    "The previous learning request was interrupted or exhausted its retry budget.",
                 );
             }
         }
@@ -500,9 +528,25 @@ impl StoredPetLife {
         }
     }
 
+    pub fn recover_interrupted_learning(&mut self, now: i64) -> bool {
+        let mut changed = false;
+        for quest in &mut self.learning_quests {
+            if matches!(quest.status.as_str(), "formulating" | "asking") {
+                let formation = quest.status == "formulating";
+                quest.fail_attempt(
+                    now,
+                    formation,
+                    "The previous learning request was interrupted by an application restart.",
+                );
+                changed = true;
+            }
+        }
+        changed
+    }
+
     pub fn tick(&mut self, now: i64, pet_name: &str, memories: &[PetMemory]) -> bool {
-        self.normalize(now);
         let before = self.clone();
+        self.normalize(now);
         let was_sleeping = self.behavior.state == "sleeping";
         self.apply_elapsed_needs(now);
         self.absorb_memories(now, memories);
@@ -1084,15 +1128,20 @@ impl StoredPetLife {
         let title = normalize_required(input.title, 90, "Knowledge title")?;
         let summary = normalize_required(input.summary, 1_200, "Knowledge summary")?;
         let source_ref = input.source_ref.map(|value| shorten(value, 160));
+        let source_kind = normalize_source_kind(input.source_kind);
         if let Some(existing) = self.knowledge.iter_mut().find(|item| {
-            source_ref.is_some() && item.source_ref == source_ref
+            // A public URL is evidence for many concepts, not a knowledge-entry ID.
+            source_kind != "web"
+                && item.source_kind == source_kind
+                && source_ref.is_some()
+                && item.source_ref == source_ref
                 || canonical(&item.title) == canonical(&title)
                     && canonical(&item.summary) == canonical(&summary)
         }) {
             existing.title = title;
             existing.summary = summary;
             existing.source = shorten(input.source.trim(), 240);
-            existing.source_kind = normalize_source_kind(input.source_kind);
+            existing.source_kind = source_kind;
             existing.tags = normalize_tags(input.tags);
             existing.updated_at = now;
             existing.confidence =
@@ -1105,7 +1154,7 @@ impl StoredPetLife {
             title,
             summary,
             source: shorten(input.source.trim(), 240),
-            source_kind: normalize_source_kind(input.source_kind),
+            source_kind,
             source_ref,
             tags: normalize_tags(input.tags),
             confidence: input.confidence.clamp(0.0, 1.0),
@@ -1136,9 +1185,10 @@ impl StoredPetLife {
             return None;
         }
         let quest = self.learning_quests.iter_mut().find(|quest| {
-            quest.status == "pending"
-                || quest.status == "retrying"
-                    && quest.next_retry_at.is_none_or(|retry_at| now >= retry_at)
+            quest.attempts < AUTONOMOUS_LEARNING_MAX_ATTEMPTS
+                && (quest.status == "pending"
+                    || quest.status == "retrying"
+                        && quest.next_retry_at.is_none_or(|retry_at| now >= retry_at))
         })?;
         quest.status = "asking".to_owned();
         quest.started_at = Some(now);
@@ -1181,9 +1231,10 @@ impl StoredPetLife {
             return None;
         }
         let quest = self.learning_quests.iter_mut().find(|quest| {
-            quest.status == "formation-pending"
-                || quest.status == "formation-retrying"
-                    && quest.next_retry_at.is_none_or(|retry_at| now >= retry_at)
+            quest.formation_attempts < AUTONOMOUS_LEARNING_MAX_ATTEMPTS
+                && (quest.status == "formation-pending"
+                    || quest.status == "formation-retrying"
+                        && quest.next_retry_at.is_none_or(|retry_at| now >= retry_at))
         })?;
         quest.status = "formulating".to_owned();
         quest.started_at = Some(now);
@@ -1333,19 +1384,7 @@ impl StoredPetLife {
         else {
             return false;
         };
-        let will_retry = quest.formation_attempts < 3;
-        quest.status = if will_retry {
-            "formation-retrying"
-        } else {
-            "formation-failed"
-        }
-        .to_owned();
-        quest.started_at = None;
-        quest.error = Some(shorten(error, 180));
-        quest.next_retry_at = will_retry.then(|| {
-            let multiplier = 1_i64 << quest.formation_attempts.saturating_sub(1).min(2);
-            now.saturating_add(AUTONOMOUS_LEARNING_RETRY_BASE_MS.saturating_mul(multiplier))
-        });
+        let will_retry = quest.fail_attempt(now, true, error);
         self.set_behavior(
             now,
             "resting",
@@ -1414,14 +1453,7 @@ impl StoredPetLife {
         else {
             return false;
         };
-        let will_retry = quest.attempts < 3;
-        quest.status = if will_retry { "retrying" } else { "failed" }.to_owned();
-        quest.started_at = None;
-        quest.error = Some(shorten(error, 180));
-        quest.next_retry_at = will_retry.then(|| {
-            let multiplier = 1_i64 << quest.attempts.saturating_sub(1).min(2);
-            now.saturating_add(AUTONOMOUS_LEARNING_RETRY_BASE_MS.saturating_mul(multiplier))
-        });
+        let will_retry = quest.fail_attempt(now, false, error);
         self.set_behavior(
             now,
             "resting",
@@ -3246,6 +3278,116 @@ mod tests {
         let night = local_time(2026, 8, 12, 23, 10);
         life.tick(night, "Yui", &[]);
         assert_eq!(life.behavior.state, "sleeping");
+    }
+
+    #[test]
+    fn autonomous_learning_tick_checkpoints_stale_recovery_immediately() {
+        let now = local_time(2026, 8, 12, 10, 10);
+        let mut life = StoredPetLife::new(now);
+        life.settings.autonomy_enabled = false;
+        life.tick(now, "Yui", &[]);
+        let mut quest = completed_learning_quest("context", now);
+        quest.status = "asking".to_owned();
+        quest.started_at = Some(now - AUTONOMOUS_LEARNING_STALE_MS);
+        quest.completed_at = None;
+        life.learning_quests.push(quest);
+        assert!(life.tick(now, "Yui", &[]));
+        assert_eq!(life.learning_quests[0].status, "retrying");
+        assert!(!life.tick(now, "Yui", &[]));
+    }
+
+    #[test]
+    fn autonomous_learning_stale_recovery_respects_attempt_limits() {
+        let now = local_time(2026, 8, 12, 10, 10);
+        for (active, retrying, failed) in [
+            ("formulating", "formation-retrying", "formation-failed"),
+            ("asking", "retrying", "failed"),
+        ] {
+            for attempts in [1, 3] {
+                let mut life = StoredPetLife::new(now);
+                let mut quest = completed_learning_quest("context", now);
+                quest.status = active.to_owned();
+                quest.started_at = Some(now - AUTONOMOUS_LEARNING_STALE_MS);
+                quest.completed_at = None;
+                quest.attempts = attempts;
+                quest.formation_attempts = attempts;
+                life.learning_quests.push(quest);
+                life.normalize(now);
+                let recovered = &life.learning_quests[0];
+                assert_eq!(
+                    recovered.status,
+                    if attempts < 3 { retrying } else { failed }
+                );
+                assert!(recovered.started_at.is_none());
+                if attempts < 3 {
+                    assert!(recovered.next_retry_at.is_some_and(|retry| retry > now));
+                } else {
+                    assert!(recovered.next_retry_at.is_none());
+                    assert_eq!(recovered.completed_at, Some(now));
+                }
+                assert!(life.claim_learning_question_formation(now).is_none());
+                assert!(life.claim_learning_quest(now).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn autonomous_learning_migrates_exhausted_retries_and_missing_start_times() {
+        let now = local_time(2026, 8, 12, 10, 10);
+        for (status, attempts, expected) in [
+            ("formation-retrying", 3, "formation-failed"),
+            ("retrying", 4, "failed"),
+            ("formulating", 1, "formation-retrying"),
+            ("asking", 1, "retrying"),
+        ] {
+            let mut life = StoredPetLife::new(now);
+            let mut quest = completed_learning_quest("context", now);
+            quest.status = status.to_owned();
+            quest.started_at = None;
+            quest.attempts = attempts;
+            quest.formation_attempts = attempts;
+            life.learning_quests.push(quest);
+            life.normalize(now);
+            assert_eq!(life.learning_quests[0].status, expected);
+            assert!(life.claim_learning_question_formation(now).is_none());
+            assert!(life.claim_learning_quest(now).is_none());
+        }
+    }
+
+    #[test]
+    fn autonomous_learning_keeps_distinct_knowledge_from_the_same_web_page() {
+        let now = local_time(2026, 8, 12, 10, 10);
+        let mut life = StoredPetLife::new(now);
+        for (index, title) in ["间隔复习", "主动回忆"].iter().enumerate() {
+            let mut quest = completed_learning_quest("context", now + index as i64);
+            quest.status = "asking".to_owned();
+            let quest_id = quest.id.clone();
+            life.learning_quests.push(quest);
+            life.complete_learning_quest(
+                now,
+                &quest_id,
+                PetKnowledgeInput {
+                    title,
+                    summary: &format!(
+                        "{title}有独立的适用条件和验证方法，需要保留它自己的完整解释。"
+                    ),
+                    source: "Public web research · Learning guide",
+                    source_kind: "web",
+                    source_ref: Some("https://example.com/learning"),
+                    tags: vec![],
+                    confidence: 0.7,
+                },
+                Some("test-provider"),
+            )
+            .unwrap();
+        }
+        assert_eq!(life.knowledge.len(), 2);
+        assert_eq!(life.knowledge[0].title, "间隔复习");
+        assert_eq!(life.knowledge[1].title, "主动回忆");
+        assert_ne!(
+            life.learning_quests[0].knowledge_id,
+            life.learning_quests[1].knowledge_id
+        );
     }
 
     #[test]

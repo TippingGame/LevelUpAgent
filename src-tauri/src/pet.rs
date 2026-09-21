@@ -297,13 +297,15 @@ impl PetManager {
 
     pub fn dashboard(&self) -> Result<PetDashboard, String> {
         let pets = self.list_profiles()?;
-        let mut state = self
+        let mut stored = self
             .state
             .lock()
             .map_err(|_| "Could not lock desktop pet state".to_owned())?;
+        let mut state = stored.clone();
+        let mut needs_save = false;
         if !pets.iter().any(|pet| pet.id == state.active_pet_id) {
             state.active_pet_id = DEFAULT_PET_ID.to_owned();
-            save_state(&self.state_path, &state)?;
+            needs_save = true;
         }
         let active_pet_id = state.active_pet_id.clone();
         let progress = progress_for(
@@ -333,13 +335,13 @@ impl PetManager {
             let changed = life.tick(now, display_name, &memories);
             (life.snapshot(now), changed)
         };
-        PET_PROMPT_VISIBLE.store(life.prompt.is_some(), Ordering::Relaxed);
-        if life_changed {
+        if life_changed || needs_save {
             save_state(&self.state_path, &state)?;
         }
+        PET_PROMPT_VISIBLE.store(life.prompt.is_some(), Ordering::Relaxed);
         let scale = scale_for(&state, &active_pet_id);
         update_runtime_pet_scale(scale);
-        Ok(PetDashboard {
+        let dashboard = PetDashboard {
             pets,
             active_pet_id,
             progress,
@@ -347,7 +349,9 @@ impl PetManager {
             overlay_visible: state.overlay_visible,
             scale,
             life,
-        })
+        };
+        *stored = state;
+        Ok(dashboard)
     }
 
     pub fn set_active(&self, pet_id: &str) -> Result<PetDashboard, String> {
@@ -536,20 +540,22 @@ impl PetManager {
             .ok_or_else(|| "The selected Starlight Echo is not installed".to_owned())?;
         let now = now_millis();
         let claimed = {
-            let mut state = self
+            let mut stored = self
                 .state
                 .lock()
                 .map_err(|_| "Could not lock Starlight Echo state".to_owned())?;
+            let mut state = stored.clone();
             let memories = state.memories.get(pet_id).cloned().unwrap_or_default();
             let life = state
                 .life
                 .entry(pet_id.to_owned())
                 .or_insert_with(|| StoredPetLife::new(now));
-            life.tick(now, &profile.display_name, &memories);
+            let life_changed = life.tick(now, &profile.display_name, &memories);
             let claimed = claim(life, now);
-            if claimed.is_some() {
+            if claimed.is_some() || life_changed {
                 save_state(&self.state_path, &state)?;
             }
+            *stored = state;
             claimed
         };
         Ok(claimed)
@@ -756,7 +762,9 @@ impl PetManager {
         };
         {
             let mut life = extracted.backup.life;
-            life.normalize(now_millis());
+            let now = now_millis();
+            life.recover_interrupted_learning(now);
+            life.normalize(now);
             let mut state = self
                 .state
                 .lock()
@@ -791,10 +799,12 @@ impl PetManager {
             .ok_or_else(|| "The selected Starlight Echo is not installed".to_owned())?;
         let now = now_millis();
         {
-            let mut state = self
+            let mut stored = self
                 .state
                 .lock()
                 .map_err(|_| "Could not lock Starlight Echo state".to_owned())?;
+            // Publish knowledge and status together only after their disk commit succeeds.
+            let mut state = stored.clone();
             let memories = state.memories.get(pet_id).cloned().unwrap_or_default();
             let life = state
                 .life
@@ -804,6 +814,7 @@ impl PetManager {
             mutation(life, now, &profile.display_name, &memories)?;
             life.tick(now, &profile.display_name, &memories);
             save_state(&self.state_path, &state)?;
+            *stored = state;
         }
         self.dashboard()
     }
@@ -820,10 +831,11 @@ impl PetManager {
         if usage_id.is_empty() || usage_id.chars().count() > 240 {
             return Err("Desktop pet usage IDs must be between 1 and 240 characters".to_owned());
         }
-        let mut state = self
+        let mut stored = self
             .state
             .lock()
             .map_err(|_| "Could not lock desktop pet state".to_owned())?;
+        let mut state = stored.clone();
         if state.seen_usage_ids.iter().any(|item| item == usage_id) {
             return Ok(progress_for(
                 pet_id,
@@ -843,6 +855,7 @@ impl PetManager {
         progress.requests = progress.requests.saturating_add(1);
         let output = progress_for(pet_id, progress.clone());
         save_state(&self.state_path, &state)?;
+        *stored = state;
         Ok(output)
     }
 
@@ -1314,8 +1327,15 @@ fn load_state(path: &Path) -> Result<StoredPetState, String> {
     state
         .life
         .retain(|pet_id, _| validate_pet_id(pet_id).is_ok());
+    let mut life_changed = false;
     for life in state.life.values_mut() {
+        let before = life.clone();
+        life.recover_interrupted_learning(now);
         life.normalize(now);
+        life_changed |= *life != before;
+    }
+    if life_changed {
+        save_state(path, &state)?;
     }
     Ok(state)
 }
@@ -2082,6 +2102,149 @@ mod tests {
                 .any(|item| item.id == "imagegen_skill")
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn autonomous_learning_restart_recovers_recent_requests_and_persists_retry_budget() {
+        let root = std::env::temp_dir().join(format!(
+            "levelup-pet-learning-restart-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let manager = PetManager::open(&root, &root).unwrap();
+        let now = now_millis();
+        let mut life = StoredPetLife::new(now);
+        for (index, status, attempts) in [(0, "formulating", 1), (1, "asking", 3)] {
+            life.learning_quests.push(serde_json::from_value(serde_json::json!({
+                "id": format!("restart-{index}"), "question": "怎样在应用重启后可靠恢复之前的求知状态？", "topic": "恢复",
+                "status": status, "createdAt": now, "startedAt": now,
+                "attempts": attempts, "formationAttempts": attempts
+            })).unwrap());
+        }
+        {
+            let mut state = manager.state.lock().unwrap();
+            state.life.insert("yui".to_owned(), life);
+            save_state(&manager.state_path, &state).unwrap();
+        }
+        drop(manager);
+        let restored = PetManager::open(&root, &root).unwrap();
+        let state = restored.state.lock().unwrap();
+        let quests = &state.life["yui"].learning_quests;
+        assert_eq!(quests[0].status, "formation-retrying");
+        assert!(quests[0].next_retry_at.is_some_and(|retry| retry > now));
+        assert_eq!(quests[0].formation_attempts, 1);
+        assert_eq!(quests[1].status, "failed");
+        assert!(quests[1].next_retry_at.is_none());
+        let disk: StoredPetState =
+            serde_json::from_slice(&std::fs::read(&restored.state_path).unwrap()).unwrap();
+        assert_eq!(&disk.life["yui"].learning_quests, quests);
+        drop(state);
+        drop(restored);
+        let reopened = PetManager::open(&root, &root).unwrap();
+        assert_eq!(
+            reopened.state.lock().unwrap().life["yui"].learning_quests,
+            disk.life["yui"].learning_quests
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn autonomous_learning_save_failure_does_not_publish_completion() {
+        let root = std::env::temp_dir().join(format!(
+            "levelup-pet-learning-save-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut manager = PetManager::open(&root, &root).unwrap();
+        let now = now_millis();
+        let mut life = StoredPetLife::new(now);
+        life.learning_quests.push(serde_json::from_value(serde_json::json!({
+            "id": "save-test", "question": "怎样验证知识是否已经可靠地保存在本地？", "topic": "持久化",
+            "status": "asking", "createdAt": now, "startedAt": now, "attempts": 1
+        })).unwrap());
+        manager
+            .state
+            .lock()
+            .unwrap()
+            .life
+            .insert("yui".to_owned(), life);
+        let real_state_path = manager.state_path.clone();
+        manager.state_path = root.join("blocked-state");
+        std::fs::create_dir(&manager.state_path).unwrap();
+        let complete = |manager: &PetManager| {
+            manager.complete_learning_quest(
+                "yui",
+                "save-test",
+                PetKnowledgeInput {
+                    title: "可靠保存",
+                    summary: "先完成持久化写入，再发布成功状态。",
+                    source: "Agent",
+                    source_kind: "agent",
+                    source_ref: Some("agent-question:save-test"),
+                    tags: vec![],
+                    confidence: 0.7,
+                },
+                Some("test-provider"),
+            )
+        };
+        assert!(complete(&manager).is_err());
+        {
+            let state = manager.state.lock().unwrap();
+            assert_eq!(state.life["yui"].learning_quests[0].status, "asking");
+            assert!(state.life["yui"].knowledge.is_empty());
+        }
+        manager.state_path = real_state_path;
+        complete(&manager).unwrap();
+        drop(manager);
+        let restored = PetManager::open(&root, &root).unwrap().dashboard().unwrap();
+        assert_eq!(restored.life.learning_quests[0].status, "completed");
+        assert_eq!(restored.life.knowledge.len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn autonomous_learning_save_failure_does_not_consume_a_claim() {
+        let root = std::env::temp_dir().join(format!(
+            "levelup-pet-learning-claim-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut manager = PetManager::open(&root, &root).unwrap();
+        let now = now_millis();
+        let mut life = StoredPetLife::new(now);
+        life.settings.quiet_start_minute = 0;
+        life.settings.quiet_end_minute = 0;
+        life.learning_quests.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "claim-test", "question": "", "topic": "", "status": "formation-pending",
+                "createdAt": now, "attempts": 0
+            }))
+            .unwrap(),
+        );
+        manager
+            .state
+            .lock()
+            .unwrap()
+            .life
+            .insert("yui".to_owned(), life);
+        let real_state_path = manager.state_path.clone();
+        manager.state_path = root.join("blocked-state");
+        std::fs::create_dir(&manager.state_path).unwrap();
+        assert!(manager.claim_learning_question_formation("yui").is_err());
+        {
+            let state = manager.state.lock().unwrap();
+            assert_eq!(
+                state.life["yui"].learning_quests[0].status,
+                "formation-pending"
+            );
+            assert_eq!(state.life["yui"].learning_quests[0].formation_attempts, 0);
+        }
+        manager.state_path = real_state_path;
+        let claimed = manager
+            .claim_learning_question_formation("yui")
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.formation_attempts, 1);
+        drop(manager);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -637,11 +637,14 @@ pub fn validate_generation_result(
         Ok(_) => {}
     }
     normalize_generation_draft(&source)?;
-    let package = match read_package(&source) {
+    let mut package = match read_package(&source) {
         Ok(package) => package,
         Err(error) => return Ok(ThemeGenerationValidation::Invalid(error)),
     };
     if let Err(error) = companion_layout_bytes(&package, &source) {
+        return Ok(ThemeGenerationValidation::Invalid(error));
+    }
+    if let Err(error) = embed_generation_background(&source, &mut package) {
         return Ok(ThemeGenerationValidation::Invalid(error));
     }
     cleanup_generation_background(&source);
@@ -708,23 +711,6 @@ fn normalize_generation_draft(path: &Path) -> Result<bool, String> {
             changed = true;
         }
     }
-    let theme_id = object
-        .get("id")
-        .and_then(serde_json::Value::as_str)
-        .filter(|id| validate_id(id).is_ok())
-        .map(str::to_owned);
-    if let (Some(theme_id), Some(serde_json::Value::String(css))) =
-        (theme_id, object.get_mut("css"))
-    {
-        let required_scope = format!("[data-levelup-theme=\"{theme_id}\"]");
-        if css.contains(&required_scope)
-            && !css.contains(GENERATED_BACKGROUND_CSS_MARKER)
-            && let Some((background, bytes)) = read_generation_background(path)?
-        {
-            css.push_str(&generation_background_css(&theme_id, &background, &bytes));
-            changed = true;
-        }
-    }
     if !changed {
         return Ok(false);
     }
@@ -733,6 +719,32 @@ fn normalize_generation_draft(path: &Path) -> Result<bool, String> {
         .map_err(|error| format!("Could not serialize generated theme draft: {error}"))?;
     stage_file(path, &normalized, "generated theme draft")?;
     Ok(true)
+}
+
+fn embed_generation_background(path: &Path, package: &mut ThemePackage) -> Result<(), String> {
+    if package.css.contains(GENERATED_BACKGROUND_CSS_MARKER) {
+        return Ok(());
+    }
+    let Some((background, bytes)) = read_generation_background(path)? else {
+        return Ok(());
+    };
+    // Keep invalid drafts small enough for write_file to repair. Only embed
+    // the potentially multi-megabyte image after the model's package passes
+    // validation, and check the finished package before replacing the draft.
+    package.css.push_str(&generation_background_css(
+        &package.manifest.id,
+        &background,
+        &bytes,
+    ));
+    validate_package(package)?;
+    let bytes = serde_json::to_vec(package)
+        .map_err(|error| format!("Could not serialize generated theme: {error}"))?;
+    if bytes.len() as u64 > MAX_THEME_PACKAGE_BYTES {
+        return Err(
+            "Generated theme with its background exceeds the 12 MiB package limit".to_owned(),
+        );
+    }
+    stage_file(path, &bytes, "generated theme with background")
 }
 
 /// A model may construct the outer theme JSON by placing readable multi-line
@@ -1240,6 +1252,75 @@ mod tests {
             .is_err()
         );
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn invalid_generation_with_large_background_can_be_rewritten() {
+        let root = std::env::temp_dir().join(format!(
+            "levelup-theme-background-repair-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let background_path = root.join("background.webp");
+        std::fs::write(&background_path, vec![42; 1024 * 1024]).unwrap();
+        let target = prepare_generation_target_with_background(
+            &root,
+            Some(&ThemeGenerationBackgroundSource {
+                source_path: background_path,
+                mime_type: "image/webp".to_owned(),
+                fit: "cover".to_owned(),
+                focus: "center".to_owned(),
+                readability: "balanced".to_owned(),
+            }),
+        )
+        .unwrap();
+        let mut draft = sample();
+        draft
+            .css
+            .push_str("\n@import 'https://example.test/theme.css';");
+        std::fs::write(&target.source_path, serde_json::to_vec(&draft).unwrap()).unwrap();
+        assert!(matches!(
+            validate_generation_result(&root, &target.relative_path).unwrap(),
+            ThemeGenerationValidation::Invalid(_)
+        ));
+        let (image_sidecar, _) =
+            generation_background_paths(Path::new(&target.source_path)).unwrap();
+        assert!(
+            image_sidecar.is_file(),
+            "keep the background for the corrected draft"
+        );
+
+        let write = crate::tools::execute(
+            serde_json::from_value(serde_json::json!({
+                "name": "write_file",
+                "workspace": root,
+                "arguments": {
+                    "path": target.relative_path,
+                    "content": serde_json::to_string(&sample()).unwrap()
+                }
+            }))
+            .unwrap(),
+        )
+        .await;
+        assert!(
+            !write.is_error,
+            "the invalid draft must remain repairable: {}",
+            write.output
+        );
+        assert!(matches!(
+            validate_generation_result(&root, &target.relative_path).unwrap(),
+            ThemeGenerationValidation::Valid(_)
+        ));
+        let installed = install(&root.join("installed"), Path::new(&target.source_path)).unwrap();
+        assert_eq!(installed.id, "qq-2007");
+        assert!(
+            load(&root.join("installed"), "qq-2007")
+                .unwrap()
+                .css
+                .contains("data:image/webp;base64,")
+        );
+        assert!(!image_sidecar.exists());
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -2587,6 +2587,10 @@ function App() {
     }
     operationIdsRef.current.delete(threadId);
     runModesRef.current.delete(threadId);
+    setThemeGeneration((current) => current?.threadId === threadId
+      && (harnessState !== "completed" || current.phase !== "validated")
+      ? null
+      : current);
     setThreadRunning(threadId, false);
   };
 
@@ -2940,6 +2944,13 @@ function App() {
             injectedQueueIdsRef.current.add(queueId);
             window.setTimeout(() => injectedQueueIdsRef.current.delete(queueId), 60_000);
             removeHarnessQueueItem(thread.id, queueId);
+          }
+        } else if (event.kind === "operation_completed") {
+          const payload = event.payload as { reason?: string };
+          if (payload.reason === "theme_package_validated") {
+            setThemeGeneration((current) => current?.threadId === thread.id
+              ? { ...current, phase: "validated" }
+              : current);
           }
         } else if (event.kind === "approval_required") {
           flushStreamingDelta();
@@ -4213,7 +4224,7 @@ function App() {
       const input = composerInputRef.current;
       const focused = document.activeElement;
       if (activeThreadIdRef.current === threadId && input && !input.disabled
-        && (focused === document.body || focused === input || focused?.closest(".composer-resource-actions"))) {
+        && (focused === document.body || focused === input || focused?.closest(".composer-reference-menu"))) {
         input.focus();
       }
     });
@@ -4245,26 +4256,29 @@ function App() {
     }
   };
 
-  const addSelectedResources = async (directory: boolean) => {
+  const addSelectedResources = async (directory: boolean): Promise<boolean> => {
     const threadId = activeThreadIdRef.current;
     const snapshot = draftStore.get(threadId);
     if (runningThreadIdsRef.current.has(threadId) || pendingApprovalsRef.current[threadId] || !snapshot.ready) {
       setNotice(tr("当前任务运行中，暂时不能添加附件", "Attachments cannot be added while the task is running"));
-      return;
+      return false;
     }
     if (attachmentPasteRef.current) {
       setNotice(tr("正在处理上一批附件", "The previous attachments are still being processed"));
-      return;
+      return false;
     }
     attachmentPasteRef.current = true;
     setAttachmentPasteBusy(true);
     try {
       const paths = await selectLocalResourcePaths(directory);
+      if (!paths.length) return false;
       const imported = await importLocalResources(paths, snapshot.attachments);
       const discarded = deletingThreadIdsRef.current.has(threadId) ? imported : draftStore.appendAttachments(threadId, imported);
       await Promise.all(discarded.map((item) => deleteImageAttachment(item.id).catch(() => false)));
+      return !deletingThreadIdsRef.current.has(threadId) && activeThreadIdRef.current === threadId;
     } catch (error) {
       setNotice(`${tr("无法添加附件", "Could not add attachment")}: ${errorText(error)}`);
+      return false;
     } finally {
       attachmentPasteRef.current = false;
       setAttachmentPasteBusy(false);
@@ -5474,8 +5488,7 @@ function App() {
           onDraftChange={setDraft}
           onPasteFiles={(files) => void addPastedAttachments(files, activeThreadId)}
           onPastePaths={addClipboardResourcePaths}
-          onSelectFiles={() => void addSelectedResources(false)}
-          onSelectFolder={() => void addSelectedResources(true)}
+          onSelectResources={addSelectedResources}
           onPickFile={addReferencedFile}
           onRemoveAttachment={removeDraftImage}
           onModeChange={activeThread.kind === "pet" ? () => undefined : setMode}
@@ -7244,8 +7257,7 @@ function Composer({
   onDraftChange,
   onPasteFiles,
   onPastePaths,
-  onSelectFiles,
-  onSelectFolder,
+  onSelectResources,
   onPickFile,
   onRemoveAttachment,
   onModeChange,
@@ -7272,8 +7284,7 @@ function Composer({
   onDraftChange: (value: string) => void;
   onPasteFiles: (files: File[]) => void;
   onPastePaths: () => Promise<boolean>;
-  onSelectFiles: () => void;
-  onSelectFolder: () => void;
+  onSelectResources: (directory: boolean) => Promise<boolean>;
   onPickFile: (path: string) => Promise<boolean>;
   onRemoveAttachment: (attachment: ImageAttachment) => void;
   onModeChange: (value: AgentMode) => void;
@@ -7409,6 +7420,7 @@ function Composer({
           workspace={workspace}
           running={running}
           onPickFile={onPickFile}
+          onSelectResources={onSelectResources}
           onSend={onSend}
           style={composerHeight === DEFAULT_COMPOSER_HEIGHT ? undefined : {
             height: `${composerHeight}px`,
@@ -7432,14 +7444,6 @@ function Composer({
         />
         <div className="composer-toolbar">
           <div className="composer-toolbar-options">
-            <div className="composer-resource-actions" aria-label={tr("添加文件或文件夹", "Add a file or folder")}>
-              <IconButton label={tr("添加文件", "Add files")} disabled={disabled || running} onClick={onSelectFiles}>
-                <FileInput size={15} />
-              </IconButton>
-              <IconButton label={tr("添加文件夹", "Add folder")} disabled={disabled || running} onClick={onSelectFolder}>
-                <FolderOpen size={15} />
-              </IconButton>
-            </div>
             <div className="mode-switch" aria-label={tr("运行模式", "Run mode")}>
               {(["agent", "plan", "goal", "chat"] as AgentMode[]).map((value) => (
                 <button

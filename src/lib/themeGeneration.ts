@@ -52,7 +52,7 @@ export interface ThemeGenerationRequest extends ThemeGenerationPreferences {
 export interface ThemeGenerationJob {
   threadId: string;
   sourcePath: string;
-  phase: "preparing" | "starting" | "running";
+  phase: "preparing" | "starting" | "running" | "validated";
 }
 
 export interface ThemeGenerationActivity {
@@ -65,7 +65,7 @@ export function themeGenerationReadyForImport(
   job: ThemeGenerationJob,
   activity: ThemeGenerationActivity,
 ) {
-  return job.phase === "running"
+  return job.phase === "validated"
     && !activity.running
     && !activity.pendingApproval
     && !activity.ownsOperation;

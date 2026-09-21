@@ -1510,8 +1510,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .composer-toolbar-options, .composer-toolbar-actions { min-width: 0; display: flex; align-items: center; gap: 5px; }
 .composer-toolbar-options { overflow: visible; }
 .composer-toolbar-options > * { flex: 0 0 auto; }
-.composer-resource-actions { display: flex; align-items: center; gap: 2px; }
-.composer-resource-actions .icon-button { width: 28px; height: 28px; }
 .mode-switch { flex: 0 0 auto; width: max-content; max-width: 100%; }
 .mode-switch button { flex: 0 0 auto; width: max-content; }
 .composer-toolbar-actions { justify-content: flex-end; margin-inline-start: auto; }

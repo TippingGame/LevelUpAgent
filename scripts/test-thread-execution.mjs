@@ -93,8 +93,11 @@ test("queued follow-ups wait for task completion, including tool and retry round
   assert.match(runLoop, /ready_for_follow_up = false;\s+let mut turn_request/);
   assert.doesNotMatch(runLoop, /list_harness_queue|for item in queued/);
   const completionBranches = [...runLoop.matchAll(/HarnessCompletionDecision::QueuePending => \{\s+ready_for_follow_up = true;/g)];
-  assert.equal(completionBranches.length, 3);
-  assert.equal([...runLoop.matchAll(/ready_for_follow_up = true;/g)].length, completionBranches.length);
+  const themeCompletionBranches = [...runLoop.matchAll(/if let Some\(outcome\) = complete_validated_theme_generation\([\s\S]*?return Ok\(outcome\);\s+\}\s+ready_for_follow_up = true;/g)];
+  assert.equal(completionBranches.length, 2);
+  assert.equal(themeCompletionBranches.length, 3);
+  assert.match(harnessSource, /HarnessCompletionDecision::QueuePending => Ok\(None\)/);
+  assert.equal([...runLoop.matchAll(/ready_for_follow_up = true;/g)].length, completionBranches.length + themeCompletionBranches.length);
 });
 
 test("steering a provider turn is reclassified instead of looking like a cancel", () => {

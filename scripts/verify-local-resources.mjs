@@ -26,6 +26,12 @@ export async function verifyLocalResources({ page, invoke, output, workspace, un
   const chips = page.locator(".composer-attachments .attachment-chip");
   const input = page.locator(".composer textarea");
   const count = async (number) => until(async () => await chips.count() === number && !await input.isDisabled());
+  const selectResources = async (directory) => {
+    await input.press("End");
+    await input.pressSequentially(" @");
+    await page.getByRole("option").filter({ has: page.getByText("Add files or folders", { exact: true }) }).click();
+    await page.getByRole("option").filter({ has: page.getByText(directory ? "Choose folders" : "Choose files", { exact: true }) }).click();
+  };
   await page.evaluate(({ files, folder }) => {
     const original = window.fetch;
     const dialogUrl = window.__TAURI_INTERNALS__.convertFileSrc("plugin:dialog|open", "ipc");
@@ -45,7 +51,7 @@ export async function verifyLocalResources({ page, invoke, output, workspace, un
     };
   }, { files, folder });
   try {
-    await page.getByRole("button", { name: "Add files", exact: true }).click();
+    await selectResources(false);
     await page.waitForFunction(() => Boolean(window.__resourceQA.completeDialog));
     await search("QA catalog 204");
     await page.getByRole("option").filter({ has: page.getByText("QA catalog 204", { exact: true }) }).click();
@@ -61,7 +67,7 @@ export async function verifyLocalResources({ page, invoke, output, workspace, un
     await search("native-search-hidden-token");
     await openResult("QA catalog 0");
     await count(3);
-    await page.getByRole("button", { name: "Add folder", exact: true }).click();
+    await selectResources(true);
     await count(4);
     const dialogs = await page.evaluate(() => window.__resourceQA.dialogs);
     assert.equal(dialogs[0].directory, false);
@@ -105,7 +111,7 @@ export async function verifyLocalResources({ page, invoke, output, workspace, un
     await invoke("plugin:event|emit", { event: "tauri://drag-drop", payload: { paths: capacityFiles.slice(0, 3), position: { x: 800, y: 700 } } });
     await count(23);
     await page.evaluate((paths) => { window.__resourceQA.files = paths; window.__resourceQA.completeDialog = null; }, [files[1], ...capacityFiles.slice(3)]);
-    await page.getByRole("button", { name: "Add files", exact: true }).click();
+    await selectResources(false);
     await page.waitForFunction(() => Boolean(window.__resourceQA.completeDialog));
     await page.evaluate(() => window.__resourceQA.completeDialog());
     await count(100);

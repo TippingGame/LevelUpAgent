@@ -83,6 +83,8 @@ const AUTONOMOUS_PET_MAX_WEB_SEARCHES: usize = 1;
 const AUTONOMOUS_PET_MAX_WEB_FETCHES: usize = 2;
 const AUTONOMOUS_PET_MAX_SEARCH_RESULTS: usize = 5;
 const AUTONOMOUS_PET_MAX_FETCH_CHARS: usize = 6_000;
+// End live work before pet_life's ten-minute interrupted-request recovery.
+const AUTONOMOUS_PET_STAGE_TIMEOUT: Duration = Duration::from_secs(8 * 60);
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2819,6 +2821,7 @@ async fn run_autonomous_pet_question_formation(
     dashboard: pet::PetDashboard,
     quest: pet_life::PetLearningQuest,
 ) -> Result<(), String> {
+    let pet_id = dashboard.active_pet_id.clone();
     let database = app
         .try_state::<database::Database>()
         .ok_or_else(|| "The conversation database is unavailable".to_owned())?;
@@ -2836,7 +2839,7 @@ async fn run_autonomous_pet_question_formation(
     let manager = app
         .try_state::<pet::PetManager>()
         .ok_or_else(|| "The Starlight Echo runtime is unavailable".to_owned())?;
-    let dashboard = if proposal.should_ask {
+    if proposal.should_ask {
         manager.complete_learning_question_formation(
             &dashboard.active_pet_id,
             &quest.id,
@@ -2857,11 +2860,12 @@ async fn run_autonomous_pet_question_formation(
     };
     let usage_id = format!("pet-question-formation:{}", quest.id);
     let _ = manager.record_usage(
-        &dashboard.active_pet_id,
+        &pet_id,
         &usage_id,
         response.input_tokens.unwrap_or(0),
         response.output_tokens.unwrap_or(0),
     );
+    let dashboard = manager.dashboard()?;
     let _ = app.emit_to("pet", "pet://refresh", &dashboard);
     let _ = app.emit_to("main", "pet://refresh", &dashboard);
     Ok(())
@@ -2872,6 +2876,7 @@ async fn run_autonomous_pet_learning(
     dashboard: pet::PetDashboard,
     quest: pet_life::PetLearningQuest,
 ) -> Result<(), String> {
+    let pet_id = dashboard.active_pet_id.clone();
     let database = app
         .try_state::<database::Database>()
         .ok_or_else(|| "The conversation database is unavailable".to_owned())?;
@@ -2943,7 +2948,7 @@ async fn run_autonomous_pet_learning(
     if !web_sources.is_empty() {
         tags.push("web".to_owned());
     }
-    let dashboard = manager.complete_learning_quest(
+    manager.complete_learning_quest(
         &dashboard.active_pet_id,
         &quest.id,
         pet_life::PetKnowledgeInput {
@@ -2959,11 +2964,12 @@ async fn run_autonomous_pet_learning(
     )?;
     let usage_id = format!("pet-autonomous-learning:{}", quest.id);
     let _ = manager.record_usage(
-        &dashboard.active_pet_id,
+        &pet_id,
         &usage_id,
         response.input_tokens.unwrap_or(0),
         response.output_tokens.unwrap_or(0),
     );
+    let dashboard = manager.dashboard()?;
     let _ = app.emit_to("pet", "pet://refresh", &dashboard);
     let _ = app.emit_to("main", "pet://refresh", &dashboard);
     Ok(())
@@ -2987,9 +2993,104 @@ fn autonomous_pet_learning_connection_ready(app: &tauri::AppHandle) -> bool {
         .any(|profile| profile.allow_unauthenticated || load_api_key(&profile.id).is_ok())
 }
 
+#[derive(Clone, Copy)]
+enum AutonomousPetLearningStage {
+    Question,
+    Answer,
+}
+
+async fn run_autonomous_pet_work(
+    app: tauri::AppHandle,
+    dashboard: pet::PetDashboard,
+    quest: pet_life::PetLearningQuest,
+    stage: AutonomousPetLearningStage,
+) {
+    let pet_id = dashboard.active_pet_id.clone();
+    let event = match stage {
+        AutonomousPetLearningStage::Question => "autonomous_question_formation",
+        AutonomousPetLearningStage::Answer => "autonomous_learning",
+    };
+    logging::write(
+        "info",
+        "pet",
+        &format!("{event}_started"),
+        serde_json::json!({ "petId": pet_id, "questId": quest.id }),
+    );
+    let result = tokio::time::timeout(AUTONOMOUS_PET_STAGE_TIMEOUT, async {
+        match stage {
+            AutonomousPetLearningStage::Question => {
+                run_autonomous_pet_question_formation(&app, dashboard, quest.clone()).await
+            }
+            AutonomousPetLearningStage::Answer => {
+                run_autonomous_pet_learning(&app, dashboard, quest.clone()).await
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        Err("Autonomous learning request timed out after eight minutes".to_owned())
+    });
+    if let Err(error) = result {
+        logging::write(
+            "warn",
+            "pet",
+            &format!("{event}_failed"),
+            serde_json::json!({
+                "petId": pet_id, "questId": quest.id, "error": logging::safe_error(&error),
+            }),
+        );
+        if let Some(manager) = app.try_state::<pet::PetManager>() {
+            let result = match stage {
+                AutonomousPetLearningStage::Question => manager.fail_learning_question_formation(
+                    &pet_id,
+                    &quest.id,
+                    "Agent did not form a grounded question this time.",
+                ),
+                AutonomousPetLearningStage::Answer => manager.fail_learning_quest(
+                    &pet_id,
+                    &quest.id,
+                    "Agent did not provide a reliable answer this time.",
+                ),
+            };
+            match result {
+                Ok(dashboard) => {
+                    let _ = app.emit_to("pet", "pet://refresh", &dashboard);
+                    let _ = app.emit_to("main", "pet://refresh", &dashboard);
+                }
+                Err(error) => logging::write(
+                    "warn",
+                    "pet",
+                    "autonomous_learning_state_update_failed",
+                    serde_json::json!({ "petId": pet_id, "questId": quest.id, "error": logging::safe_error(&error) }),
+                ),
+            }
+        }
+    } else {
+        logging::write(
+            "info",
+            "pet",
+            &format!("{event}_completed"),
+            serde_json::json!({ "petId": pet_id, "questId": quest.id }),
+        );
+    }
+}
+
+fn claim_autonomous_pet_work(
+    manager: &pet::PetManager,
+    pet_id: &str,
+) -> Result<Option<(pet_life::PetLearningQuest, AutonomousPetLearningStage)>, String> {
+    if let Some(quest) = manager.claim_learning_question_formation(pet_id)? {
+        return Ok(Some((quest, AutonomousPetLearningStage::Question)));
+    }
+    Ok(manager
+        .claim_learning_quest(pet_id)?
+        .map(|quest| (quest, AutonomousPetLearningStage::Answer)))
+}
+
 fn start_pet_life_loop(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut delay = Duration::from_secs(1);
+        let mut learning_task: Option<tauri::async_runtime::JoinHandle<()>> = None;
         loop {
             tokio::time::sleep(delay).await;
             let Some(manager) = app.try_state::<pet::PetManager>() else {
@@ -3002,6 +3103,24 @@ fn start_pet_life_loop(app: tauri::AppHandle) {
             delay = Duration::from_secs(15);
             let _ = app.emit_to("pet", "pet://refresh", &dashboard);
             let _ = app.emit_to("main", "pet://refresh", &dashboard);
+            // Life keeps ticking while a model or web request is pending. Only one
+            // background learning stage may run, including across pet switches.
+            if learning_task
+                .as_ref()
+                .is_some_and(|task| !task.inner().is_finished())
+            {
+                continue;
+            }
+            if let Some(task) = learning_task.take()
+                && let Err(error) = task.await
+            {
+                logging::write(
+                    "warn",
+                    "pet",
+                    "autonomous_learning_task_failed",
+                    serde_json::json!({ "error": logging::safe_error(&error.to_string()) }),
+                );
+            }
             let runtime_busy = app
                 .try_state::<pet::PetRuntime>()
                 .and_then(|runtime| runtime.activities().ok())
@@ -3013,87 +3132,26 @@ fn start_pet_life_loop(app: tauri::AppHandle) {
                 continue;
             }
             let pet_id = dashboard.active_pet_id.clone();
-            if let Ok(Some(quest)) = manager.claim_learning_question_formation(&pet_id) {
-                emit_pet_dashboard(&app, &manager);
-                logging::write(
-                    "info",
-                    "pet",
-                    "autonomous_question_formation_started",
-                    serde_json::json!({ "petId": pet_id, "questId": quest.id }),
-                );
-                if let Err(error) =
-                    run_autonomous_pet_question_formation(&app, dashboard, quest.clone()).await
-                {
+            let (quest, stage) = match claim_autonomous_pet_work(&manager, &pet_id) {
+                Ok(Some(work)) => work,
+                Ok(None) => continue,
+                Err(error) => {
                     logging::write(
                         "warn",
                         "pet",
-                        "autonomous_question_formation_failed",
-                        serde_json::json!({
-                            "petId": pet_id,
-                            "questId": quest.id,
-                            "error": logging::safe_error(&error),
-                        }),
+                        "autonomous_learning_claim_failed",
+                        serde_json::json!({ "petId": pet_id, "error": logging::safe_error(&error) }),
                     );
-                    if let Some(manager) = app.try_state::<pet::PetManager>()
-                        && let Ok(dashboard) = manager.fail_learning_question_formation(
-                            &pet_id,
-                            &quest.id,
-                            "Agent did not form a grounded question this time.",
-                        )
-                    {
-                        let _ = app.emit_to("pet", "pet://refresh", &dashboard);
-                        let _ = app.emit_to("main", "pet://refresh", &dashboard);
-                    }
-                } else {
-                    logging::write(
-                        "info",
-                        "pet",
-                        "autonomous_question_formation_completed",
-                        serde_json::json!({ "petId": pet_id, "questId": quest.id }),
-                    );
+                    continue;
                 }
-                continue;
-            }
-            let Ok(Some(quest)) = manager.claim_learning_quest(&pet_id) else {
-                continue;
             };
             emit_pet_dashboard(&app, &manager);
-            logging::write(
-                "info",
-                "pet",
-                "autonomous_learning_started",
-                serde_json::json!({ "petId": pet_id, "questId": quest.id }),
-            );
-            if let Err(error) = run_autonomous_pet_learning(&app, dashboard, quest.clone()).await {
-                logging::write(
-                    "warn",
-                    "pet",
-                    "autonomous_learning_failed",
-                    serde_json::json!({
-                        "petId": pet_id,
-                        "questId": quest.id,
-                        "error": logging::safe_error(&error),
-                    }),
-                );
-                if let Some(manager) = app.try_state::<pet::PetManager>() {
-                    let dashboard = manager.fail_learning_quest(
-                        &pet_id,
-                        &quest.id,
-                        "Agent did not provide a reliable answer this time.",
-                    );
-                    if let Ok(dashboard) = dashboard {
-                        let _ = app.emit_to("pet", "pet://refresh", &dashboard);
-                        let _ = app.emit_to("main", "pet://refresh", &dashboard);
-                    }
-                }
-            } else {
-                logging::write(
-                    "info",
-                    "pet",
-                    "autonomous_learning_completed",
-                    serde_json::json!({ "petId": pet_id, "questId": quest.id }),
-                );
-            }
+            learning_task = Some(tauri::async_runtime::spawn(run_autonomous_pet_work(
+                app.clone(),
+                dashboard,
+                quest,
+                stage,
+            )));
         }
     });
 }
@@ -6054,7 +6112,14 @@ fn validate_theme_generation_after_tool(
         return Ok(None);
     }
     match theme::validate_generation_result(&run.workspace, &run.relative_path)? {
-        theme::ThemeGenerationValidation::Missing => Ok(None),
+        theme::ThemeGenerationValidation::Missing => {
+            result.is_error = true;
+            result.output.push_str(&format!(
+                "\n\nThe generated theme target does not exist: {}. Use write_file to create the complete theme package at this exact path before finishing.",
+                run.relative_path
+            ));
+            Ok(None)
+        }
         theme::ThemeGenerationValidation::Invalid(error) => {
             result.is_error = true;
             result.output.push_str(&format!(
@@ -6068,6 +6133,38 @@ fn validate_theme_generation_after_tool(
                 manifest.name, manifest.id
             ));
             Ok(Some(*manifest))
+        }
+    }
+}
+
+fn complete_validated_theme_generation(
+    database: &database::Database,
+    on_event: &Channel<crate::harness::types::HarnessRuntimeEvent>,
+    operation_id: &str,
+    round: usize,
+    manifest: theme::ThemeManifest,
+) -> Result<Option<crate::harness::types::HarnessRunOutcome>, String> {
+    let payload = serde_json::json!({
+        "round": round,
+        "reason": "theme_package_validated",
+        "themeId": manifest.id,
+        "themeName": manifest.name,
+    });
+    match database.complete_harness_operation_if_queue_empty(operation_id, &payload)? {
+        database::HarnessCompletionDecision::Completed(sequence) => {
+            let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+                operation_id,
+                sequence,
+                "operation_completed",
+                payload,
+            ));
+            Ok(Some(crate::harness::types::HarnessRunOutcome {
+                state: crate::harness::types::RuntimeState::Completed,
+            }))
+        }
+        database::HarnessCompletionDecision::QueuePending => Ok(None),
+        database::HarnessCompletionDecision::AlreadyTerminal(state) => {
+            Ok(Some(crate::harness::types::HarnessRunOutcome { state }))
         }
     }
 }
@@ -6245,6 +6342,39 @@ async fn harness_run_loop(
                 &crate::harness::types::RuntimeState::Cancelled,
             )?;
             return Err("REQUEST_CANCELLED".to_owned());
+        }
+        // Approved tools execute outside this loop. Resume through the same
+        // normalization/validation boundary before requesting another model
+        // turn, so a completed write embeds its background and finishes once.
+        if round == 1
+            && let Some(run) = theme_generation.as_ref()
+        {
+            match theme::validate_generation_result(&run.workspace, &run.relative_path)? {
+                theme::ThemeGenerationValidation::Valid(manifest) => {
+                    if let Some(outcome) = complete_validated_theme_generation(
+                        database,
+                        &on_event,
+                        &operation_id,
+                        0,
+                        *manifest,
+                    )? {
+                        return Ok(outcome);
+                    }
+                    ready_for_follow_up = true;
+                }
+                theme::ThemeGenerationValidation::Invalid(error) => history.push(AgentMessage {
+                    role: "user".to_owned(),
+                    content: format!(
+                        "The existing generated theme failed application validation: {error}. Rewrite {} with write_file to correct this error before finishing.", run.relative_path
+                    ),
+                    tool_calls: Vec::new(),
+                    tool_call_id: None,
+                    provider_reasoning_blocks: Vec::new(),
+                    internal: true,
+                    attachments: Vec::new(),
+                }),
+                theme::ThemeGenerationValidation::Missing => {}
+            }
         }
         logging::write(
             "info",
@@ -6786,6 +6916,34 @@ async fn harness_run_loop(
                     attachments: Vec::new(),
                 });
                 if response.tool_calls.is_empty() {
+                    if theme_generation.is_some() {
+                        let mut validation = ToolExecutionResponse {
+                            output: "Theme generation ended without a validated package."
+                                .to_owned(),
+                            is_error: false,
+                        };
+                        if let Some(manifest) = validate_theme_generation_after_tool(
+                            theme_generation.as_ref(),
+                            &mut validation,
+                        )? {
+                            if let Some(outcome) = complete_validated_theme_generation(
+                                database,
+                                &on_event,
+                                &operation_id,
+                                round,
+                                manifest,
+                            )? {
+                                return Ok(outcome);
+                            }
+                            ready_for_follow_up = true;
+                            continue;
+                        }
+                        database.update_harness_operation_state(
+                            &operation_id,
+                            &crate::harness::types::RuntimeState::Failed,
+                        )?;
+                        return Err(validation.output);
+                    }
                     let browser_qa_state = browser_qa_turn_state(
                         &browser_qa_mode,
                         browser_qa_workspace.as_deref(),
@@ -6974,6 +7132,13 @@ async fn harness_run_loop(
                         let pet_manager = app
                             .try_state::<pet::PetManager>()
                             .ok_or_else(|| "Pet manager is unavailable".to_owned())?;
+                        normalize_hatch_record_command(
+                            &mut call.arguments,
+                            &pet_manager,
+                            database,
+                            &operation_id,
+                            &expected_run_dir,
+                        )?;
                         hatch_provider_command_kind(
                             &call.arguments,
                             &pet_manager,
@@ -7009,9 +7174,15 @@ async fn harness_run_loop(
                             if matches!(request.mode, crate::harness::types::HarnessMode::Goal) {
                                 let _ = database.set_goal_status(&request.thread_id, "pause");
                             }
-                            return Ok(crate::harness::types::HarnessRunOutcome {
-                                state: crate::harness::types::RuntimeState::Failed,
-                            });
+                            let reason = if call.name == "run_command" {
+                                "The command must invoke one bundled hatch script with the current run directory and its required arguments."
+                            } else {
+                                "A status check must be followed by generation, recording, mirroring, finalization, repair, or a Goal update."
+                            };
+                            return Err(format!(
+                                "Pet hatching stopped: tool '{}' was not a valid next action after checking job status. {reason} Existing generated images have been preserved.",
+                                call.name
+                            ));
                         }
                     }
                     let policy_call = ToolCall {
@@ -7339,46 +7510,17 @@ async fn harness_run_loop(
                                 "latencyMs": round_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
                             }),
                         );
-                        let payload = serde_json::json!({
-                            "round": round,
-                            "reason": "theme_package_validated",
-                            "themeId": manifest.id,
-                            "themeName": manifest.name,
-                        });
-                        let sequence = match database
-                            .complete_harness_operation_if_queue_empty(&operation_id, &payload)?
-                        {
-                            database::HarnessCompletionDecision::Completed(sequence) => sequence,
-                            database::HarnessCompletionDecision::QueuePending => {
-                                ready_for_follow_up = true;
-                                logging::write(
-                                    "info",
-                                    "harness",
-                                    "round_completed",
-                                    serde_json::json!({
-                                        "operationId": &operation_id,
-                                        "threadId": &request.thread_id,
-                                        "round": round,
-                                        "outcome": "queued_follow_up",
-                                        "reason": "theme_package_validated",
-                                        "latencyMs": round_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
-                                    }),
-                                );
-                                continue;
-                            }
-                            database::HarnessCompletionDecision::AlreadyTerminal(state) => {
-                                return Ok(crate::harness::types::HarnessRunOutcome { state });
-                            }
-                        };
-                        let _ = on_event.send(crate::harness::types::HarnessRuntimeEvent::new(
+                        if let Some(outcome) = complete_validated_theme_generation(
+                            database,
+                            &on_event,
                             &operation_id,
-                            sequence,
-                            "operation_completed",
-                            payload,
-                        ));
-                        return Ok(crate::harness::types::HarnessRunOutcome {
-                            state: crate::harness::types::RuntimeState::Completed,
-                        });
+                            round,
+                            manifest,
+                        )? {
+                            return Ok(outcome);
+                        }
+                        ready_for_follow_up = true;
+                        continue;
                     }
                     if request.hatch {
                         hatch_status_requires_action =
@@ -8716,8 +8858,18 @@ fn hatch_command_is_observation(arguments: &serde_json::Value) -> bool {
 fn path_equals(left: &Path, right: &Path) -> bool {
     #[cfg(windows)]
     {
-        left.to_string_lossy()
-            .eq_ignore_ascii_case(&right.to_string_lossy())
+        let normalize = |path: &Path| {
+            let value = path
+                .to_string_lossy()
+                .replace('/', "\\")
+                .to_ascii_lowercase();
+            if let Some(unc) = value.strip_prefix(r"\\?\unc\") {
+                format!(r"\\{unc}")
+            } else {
+                value.strip_prefix(r"\\?\").unwrap_or(&value).to_owned()
+            }
+        };
+        normalize(left) == normalize(right)
     }
     #[cfg(not(windows))]
     {
@@ -8770,6 +8922,12 @@ fn command_token_at(command: &str, start: usize) -> Option<(&str, usize)> {
         _ => {
             token_start = index;
             while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
+                if matches!(
+                    bytes[index],
+                    b';' | b'|' | b'&' | b'<' | b'>' | b'`' | b'\'' | b'"'
+                ) {
+                    return None;
+                }
                 index += 1;
             }
             token_end = index;
@@ -8784,26 +8942,25 @@ fn decode_powershell_literal(value: &str) -> String {
 
 struct BootstrapPythonInvocation<'a> {
     script: &'a str,
-    arguments: Vec<&'a str>,
     argument_values: Vec<String>,
 }
 
+impl BootstrapPythonInvocation<'_> {
+    fn arguments(&self) -> Vec<&str> {
+        self.argument_values.iter().map(String::as_str).collect()
+    }
+}
+
 fn bootstrap_python_invocation(command: &str) -> Option<BootstrapPythonInvocation<'_>> {
-    // Application-authored commands never contain shell operators. Rejecting
-    // them here prevents a forged bootstrap marker from appending a payload.
-    // A single leading PowerShell call operator is allowed for a quoted
-    // absolute Python executable; it cannot compose a second command.
+    // Parse one direct Python invocation. Operators outside quoted arguments
+    // are rejected by command_token_at; punctuation inside a quoted path or
+    // decision note is literal data for run_script, which never uses a shell.
     let command = command.trim();
     let command = command
         .strip_prefix('&')
         .map(str::trim_start)
         .unwrap_or(command);
-    if command.bytes().any(|byte| {
-        matches!(
-            byte,
-            b'\r' | b'\n' | b';' | b'|' | b'&' | b'<' | b'>' | b'`'
-        )
-    }) {
+    if command.bytes().any(|byte| matches!(byte, b'\r' | b'\n')) {
         return None;
     }
 
@@ -8835,7 +8992,6 @@ fn bootstrap_python_invocation(command: &str) -> Option<BootstrapPythonInvocatio
         return None;
     };
     cursor = next_cursor;
-    let mut arguments = Vec::new();
     let mut argument_values = Vec::new();
     while !command[cursor..].trim().is_empty() {
         let (argument, next_cursor) = command_token_at(command, cursor)?;
@@ -8844,13 +9000,11 @@ fn bootstrap_python_invocation(command: &str) -> Option<BootstrapPythonInvocatio
             Some(b'"') => argument.replace("\"\"", "\""),
             _ => argument.to_owned(),
         };
-        arguments.push(argument);
         argument_values.push(value);
         cursor = next_cursor;
     }
     Some(BootstrapPythonInvocation {
         script,
-        arguments,
         argument_values,
     })
 }
@@ -9012,8 +9166,8 @@ fn bundled_hatch_bootstrap_call_allowed(
                 canonical_inside(&work_root, expected_run_dir, true)
             };
             return run_dir_allowed
-                && arguments_allowed(&invocation.arguments, &work_root)
-                && invocation.arguments.windows(2).any(|pair| {
+                && arguments_allowed(&invocation.arguments(), &work_root)
+                && invocation.arguments().windows(2).any(|pair| {
                     matches!(pair, ["--output-dir" | "--run-dir", value] if path_equals(Path::new(value), Path::new(expected_run_dir)))
                 });
         }
@@ -9028,7 +9182,11 @@ fn provider_hatch_arguments_allowed(
 ) -> bool {
     let mut index = 0;
     let mut saw_run_dir = false;
+    let mut seen = HashSet::new();
     while index < arguments.len() {
+        if !seen.insert(arguments[index]) {
+            return false;
+        }
         match arguments[index] {
             "--run-dir" => {
                 let Some(value) = arguments.get(index + 1) else {
@@ -9082,11 +9240,11 @@ fn provider_hatch_arguments_allowed(
         }
 }
 
-fn validate_record_imagegen_source(
+fn resolve_record_imagegen_source(
     database: &database::Database,
     operation_id: &str,
     arguments: &[&str],
-) -> Result<(), String> {
+) -> Result<String, String> {
     let Some(source) = arguments
         .windows(2)
         .find_map(|pair| (pair[0] == "--source").then_some(pair[1]))
@@ -9096,11 +9254,93 @@ fn validate_record_imagegen_source(
     if !Path::new(source).is_absolute() {
         return Err("record_imagegen_result.py source must be an absolute adapter path".to_owned());
     }
-    if !database.harness_operation_has_hatch_source(operation_id, source)? {
-        return Err(
-            "record_imagegen_result.py source was not returned by generate_images in this Harness operation"
-                .to_owned(),
-        );
+    let job_id = arguments
+        .windows(2)
+        .find_map(|pair| (pair[0] == "--job-id").then_some(pair[1]))
+        .ok_or_else(|| "record_imagegen_result.py requires --job-id".to_owned())?;
+    let paths = database.harness_hatch_source_paths(operation_id, job_id)?;
+    select_hatch_source(&paths, source).ok_or_else(|| format!(
+        "No unambiguous generated source for hatch job '{job_id}' in this conversation's hatch run. Use the exact hatchSourcePaths returned for this job; existing generated images have been preserved."
+    ))
+}
+
+fn select_hatch_source(paths: &[String], requested: &str) -> Option<String> {
+    if let Some(path) = paths
+        .iter()
+        .find(|path| path_equals(Path::new(path), Path::new(requested)))
+    {
+        return Some(path.clone());
+    }
+    // Repair a retyped thread/directory only within this hatch run's latest
+    // successful generation of this exact job, never another row or run.
+    let basename = |path: &str| path.rsplit(['/', '\\']).next().unwrap_or("").to_owned();
+    let matching: Vec<_> = paths
+        .iter()
+        .filter(|path| basename(path) == basename(requested))
+        .collect();
+    if matching.len() == 1 {
+        return Some(matching[0].clone());
+    }
+    (paths.len() == 1).then(|| paths[0].clone())
+}
+
+fn normalize_hatch_record_command(
+    arguments: &mut serde_json::Value,
+    manager: &pet::PetManager,
+    database: &database::Database,
+    operation_id: &str,
+    canonical_run_dir: &str,
+) -> Result<(), String> {
+    let Some(command) = arguments.get("command").and_then(serde_json::Value::as_str) else {
+        return Ok(());
+    };
+    let Some(mut invocation) = bootstrap_python_invocation(command) else {
+        return Ok(());
+    };
+    let script = PathBuf::from(decode_powershell_literal(invocation.script));
+    if script.file_name().and_then(|name| name.to_str()) != Some("record_imagegen_result.py")
+        || hatch_provider_command_kind(arguments, manager, canonical_run_dir) != Some("action")
+    {
+        return Ok(());
+    }
+    let source = resolve_record_imagegen_source(database, operation_id, &invocation.arguments())?;
+    let source_index = invocation
+        .argument_values
+        .iter()
+        .position(|value| value == "--source")
+        .unwrap()
+        + 1;
+    if invocation.argument_values[source_index] == source {
+        return Ok(());
+    }
+    invocation.argument_values[source_index] = source;
+    let quote = |value: &str| format!("'{}'", value.replace('\'', "''"));
+    let normalized = format!(
+        "python {} {}",
+        quote(&script.to_string_lossy()),
+        invocation
+            .argument_values
+            .iter()
+            .map(|value| quote(value))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    arguments["command"] = serde_json::Value::String(normalized);
+    Ok(())
+}
+
+fn validate_record_imagegen_source(
+    database: &database::Database,
+    operation_id: &str,
+    arguments: &[&str],
+) -> Result<(), String> {
+    let source = resolve_record_imagegen_source(database, operation_id, arguments)?;
+    let requested = arguments
+        .windows(2)
+        .find(|pair| pair[0] == "--source")
+        .unwrap()[1];
+    if !path_equals(Path::new(&source), Path::new(requested)) {
+        return Err("Hatch source must use the adapter path resolved for this job".to_owned());
     }
     Ok(())
 }
@@ -9138,14 +9378,14 @@ fn validate_bundled_hatch_provider_command(
         .and_then(|name| name.to_str())
         .ok_or_else(|| "Hatch run_command script name is invalid".to_owned())?;
     let run_dir = Path::new(canonical_run_dir);
-    if !provider_hatch_arguments_allowed(script_name, &invocation.arguments, run_dir) {
+    if !provider_hatch_arguments_allowed(script_name, &invocation.arguments(), run_dir) {
         return Err(
             "Hatch run_command arguments are outside the bundled deterministic workflow or do not match the durable run directory"
                 .to_owned(),
         );
     }
     if script_name == "record_imagegen_result.py" {
-        validate_record_imagegen_source(database, operation_id, &invocation.arguments)?;
+        validate_record_imagegen_source(database, operation_id, &invocation.arguments())?;
     }
     Ok(())
 }
@@ -9259,7 +9499,7 @@ fn hatch_provider_command_kind(
     let script_name = script.file_name()?.to_str()?;
     provider_hatch_arguments_allowed(
         script_name,
-        &invocation.arguments,
+        &invocation.arguments(),
         Path::new(canonical_run_dir),
     )
     .then_some(match script_name {
@@ -9611,6 +9851,13 @@ async fn execute_tool_inner(
         let run_dir = durable_hatch_run_dir
             .as_deref()
             .ok_or_else(|| "Durable hatch command has no canonical run directory".to_owned())?;
+        normalize_hatch_record_command(
+            &mut request.arguments,
+            pet_manager,
+            database,
+            operation_id,
+            run_dir,
+        )?;
         validate_bundled_hatch_provider_command(
             &request,
             pet_manager,
@@ -12459,6 +12706,8 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        assert!(before_write.is_error);
+        assert!(before_write.output.contains(&target.relative_path));
 
         let package = serde_json::json!({
             "schemaVersion": 1,
@@ -12742,6 +12991,53 @@ mod tests {
     }
 
     #[test]
+    fn hatch_python_quoted_punctuation_is_literal_but_shell_composition_is_rejected() {
+        let command = r#"python 'C:/pets & assets/derive_running_left_from_running_right.py' --run-dir 'C:/run' --confirm-appropriate-mirror --decision-note 'No text or logos; identity & props remain unchanged | < > ` $pet'"#;
+        let invocation = bootstrap_python_invocation(command)
+            .expect("quoted punctuation is passed directly to Python, not a shell");
+        assert_eq!(
+            invocation.argument_values.last().unwrap(),
+            "No text or logos; identity & props remain unchanged | < > ` $pet"
+        );
+        for suffix in [
+            "; Write-Output injected",
+            " | cmd",
+            " && cmd",
+            " > output.txt",
+            "\ncmd",
+        ] {
+            assert!(
+                bootstrap_python_invocation(&format!(
+                    "python 'pet_job_status.py' --run-dir 'C:/run'{suffix}"
+                ))
+                .is_none(),
+                "{suffix}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn hatch_paths_accept_windows_separators_and_extended_prefixes() {
+        assert!(path_equals(
+            Path::new(r"C:\Users\Example\pet-hatch\run"),
+            Path::new("c:/users/example/pet-hatch/run")
+        ));
+        assert!(path_equals(
+            Path::new(r"\\?\C:\Users\Example\pet-hatch\run"),
+            Path::new("C:/Users/Example/pet-hatch/run")
+        ));
+        assert!(path_equals(
+            Path::new(r"\\?\UNC\server\share\run"),
+            Path::new(r"\\server\share\run")
+        ));
+        assert!(!path_equals(
+            Path::new(r"C:\pets\run"),
+            Path::new(r"C:\other\run")
+        ));
+    }
+
+    #[test]
     fn hatch_bootstrap_only_bypasses_approval_for_bundled_reads_and_scripts() {
         let root = std::env::temp_dir().join(format!(
             "levelup-hatch-bootstrap-policy-test-{}",
@@ -12920,6 +13216,138 @@ mod tests {
             hatch_provider_command_kind(&composed, &manager, &run_dir.to_string_lossy()),
             None
         );
+        let mirror = skills.join("hatch-pet/scripts/derive_running_left_from_running_right.py");
+        let mirror_command = serde_json::json!({
+            "command": format!("python '{}' --run-dir '{}' --confirm-appropriate-mirror --decision-note 'No letters; identity & props are preserved'", mirror.display(), run_dir.display())
+        });
+        assert_eq!(
+            hatch_provider_command_kind(&mirror_command, &manager, &run_dir.to_string_lossy()),
+            Some("action")
+        );
+        let duplicate = serde_json::json!({
+            "command": format!("python '{}' --run-dir '{}' --run-dir '{}' --confirm-appropriate-mirror --decision-note 'safe'", mirror.display(), run_dir.display(), outside.display())
+        });
+        assert_eq!(
+            hatch_provider_command_kind(&duplicate, &manager, &run_dir.to_string_lossy()),
+            None
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn hatch_record_command_repairs_source_from_the_job_ledger() {
+        let root =
+            std::env::temp_dir().join(format!("levelup-hatch-record-{}", uuid::Uuid::new_v4()));
+        let app_data = root.join("app");
+        let skills = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/skills");
+        let manager =
+            pet::PetManager::open_with_skills(&app_data, &root.join("home"), Some(&skills))
+                .unwrap();
+        let workspace = app_data.join("pet-hatch");
+        let run_dir = workspace.join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let database = database::Database::open(&root.join("test.sqlite3")).unwrap();
+        database
+            .save_thread(&StoredThread {
+                id: "hatch-record".to_owned(),
+                title: "hatch".to_owned(),
+                workspace: Some(workspace.to_string_lossy().into_owned()),
+                kind: None,
+                pet_id: None,
+                messages: Vec::new(),
+                updated_at: 1,
+                input_tokens: 0,
+                output_tokens: 0,
+            })
+            .unwrap();
+        let operation = database
+            .start_harness_operation(
+                &crate::harness::types::HarnessDraftRequest {
+                    thread_id: "hatch-record".to_owned(),
+                    raw_user_input: "hatch".to_owned(),
+                    attachment_ids: Vec::new(),
+                    mode: crate::harness::types::HarnessMode::Goal,
+                    permission_level: crate::harness::types::PermissionLevel::Full,
+                    requested_profile_id: Some("test".to_owned()),
+                    workspace: Some(workspace.to_string_lossy().into_owned()),
+                    hatch: true,
+                    hatch_run_dir: Some(run_dir.to_string_lossy().into_owned()),
+                },
+                &workspace.to_string_lossy(),
+                "test",
+            )
+            .unwrap()
+            .into_started()
+            .unwrap();
+        let source = root
+            .join("generated_images/O'Brien/ig_idle.png")
+            .to_string_lossy()
+            .into_owned();
+        database
+            .start_harness_tool_execution(
+                &operation.operation_id,
+                "generate-idle",
+                "generate_images",
+                "costly",
+                &serde_json::json!({ "hatchJobId": "idle" }),
+            )
+            .unwrap();
+        database
+            .finish_harness_tool_execution(
+                &operation.operation_id,
+                "generate-idle",
+                &ToolExecutionResponse {
+                    output: serde_json::json!({ "hatchSourcePaths": [&source] }).to_string(),
+                    is_error: false,
+                },
+            )
+            .unwrap();
+        let script = skills.join("hatch-pet/scripts/record_imagegen_result.py");
+        let wrong_source = root.join("wrong-thread/ig_idle.png");
+        let mut arguments = serde_json::json!({
+            "command": format!("python '{}' --run-dir '{}' --job-id 'idle' --source '{}'", script.display(), run_dir.display(), wrong_source.display())
+        });
+        normalize_hatch_record_command(
+            &mut arguments,
+            &manager,
+            &database,
+            &operation.operation_id,
+            &run_dir.to_string_lossy(),
+        )
+        .unwrap();
+        let invocation =
+            bootstrap_python_invocation(arguments["command"].as_str().unwrap()).unwrap();
+        assert!(invocation.argument_values.contains(&source));
+        validate_record_imagegen_source(
+            &database,
+            &operation.operation_id,
+            &invocation.arguments(),
+        )
+        .unwrap();
+        let mut other_job = arguments.clone();
+        other_job["command"] = serde_json::Value::String(
+            other_job["command"]
+                .as_str()
+                .unwrap()
+                .replace("'idle'", "'waving'"),
+        );
+        assert!(
+            normalize_hatch_record_command(
+                &mut other_job,
+                &manager,
+                &database,
+                &operation.operation_id,
+                &run_dir.to_string_lossy()
+            )
+            .is_err()
+        );
+        let paths = vec!["C:/one/ig_a.png".to_owned(), "C:/two/ig_b.png".to_owned()];
+        assert_eq!(
+            select_hatch_source(&paths, "C:/wrong/ig_b.png"),
+            Some(paths[1].clone())
+        );
+        assert_eq!(select_hatch_source(&paths, "C:/wrong/unknown.png"), None);
+        drop(database);
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -25,9 +25,12 @@ html[data-levelup-theme="default"] .workspace-shell:not(.armor-mode) { backgroun
 .composer-reference-menu { position: absolute; bottom: calc(100% + 12px); left: 0; z-index: 30; width: min(100%, 640px); max-height: min(360px, 48vh); display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); color: var(--text); box-shadow: 0 8px 28px rgba(0,0,0,.15); }
 .composer-reference-heading { min-height: 36px; display: flex; align-items: center; justify-content: space-between; padding: 4px 10px 4px 14px; border-bottom: 1px solid var(--line); font-size: var(--font-small); }
 .composer-reference-heading button { width: 26px; height: 26px; display: grid; place-items: center; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; }
+.composer-reference-heading strong { flex: 1; }
 .composer-reference-list { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 4px; }
 .composer-reference-list > button { width: 100%; min-height: 52px; display: flex; align-items: center; gap: 10px; padding: 7px 10px; border: 0; border-radius: 5px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
 .composer-reference-list > button[aria-selected="true"], .composer-reference-heading button:hover { background: color-mix(in srgb, var(--accent) 10%, var(--surface)); }
+.composer-reference-list > button:disabled { opacity: .5; cursor: default; }
+.composer-reference-chevron { margin-left: auto; }
 .composer-reference-list svg { flex: 0 0 auto; color: var(--muted); }
 .composer-reference-list > button > span { min-width: 0; display: grid; gap: 3px; }
 .composer-reference-list strong { font-size: var(--font-small); font-weight: 600; }
