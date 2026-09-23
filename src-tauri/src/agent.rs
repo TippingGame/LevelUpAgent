@@ -938,7 +938,7 @@ where
     }
     Ok(AgentTurnResponse {
         content,
-        tool_calls: finish_tools(tools),
+        tool_calls: finish_tools(tools)?,
         provider_reasoning_blocks: chat_reasoning_blocks(&json!({
             "reasoning_content": reasoning_content,
             "reasoning_details": reasoning_details.into_values().collect::<Vec<_>>()
@@ -1098,7 +1098,7 @@ where
     }
     Ok(AgentTurnResponse {
         content,
-        tool_calls: finish_tools(tools),
+        tool_calls: finish_tools(tools)?,
         provider_reasoning_blocks,
         input_tokens,
         output_tokens,
@@ -1276,7 +1276,7 @@ where
     }
     Ok(AgentTurnResponse {
         content,
-        tool_calls: finish_tools(tools),
+        tool_calls: finish_tools(tools)?,
         provider_reasoning_blocks: reasoning_blocks
             .into_values()
             .filter_map(|block| anthropic_reasoning_block(&block))
@@ -1455,11 +1455,6 @@ fn chat_body(request: &AgentTurnRequest, stream: bool) -> Value {
         } else {
             body["reasoning_effort"] = json!(effort);
         }
-        if effort != "none" {
-            let max_output_tokens =
-                reasoning_max_output_tokens_for_profile(&request.profile, effort);
-            body[chat_completion_token_limit_field(&request.profile)] = json!(max_output_tokens);
-        }
     }
     body
 }
@@ -1495,12 +1490,6 @@ fn responses_body(request: &AgentTurnRequest, stream: bool) -> Value {
     if let Some(effort) = normalized_reasoning_effort_value(request) {
         // MiniMax accepts OpenAI's tiers as the same adaptive on-switch.
         body["reasoning"] = json!({ "effort": if effort == "adaptive" { "high" } else { effort } });
-        if effort != "none" {
-            body["max_output_tokens"] = json!(reasoning_max_output_tokens_for_profile(
-                &request.profile,
-                effort
-            ));
-        }
     }
     body
 }
@@ -1881,50 +1870,15 @@ fn reasoning_budget_tokens(effort: &str) -> u64 {
     }
 }
 
-fn reasoning_max_output_tokens(effort: &str) -> u64 {
-    reasoning_budget_tokens(effort)
-        .saturating_add(4_096)
-        .max(8_192)
-}
-
-fn reasoning_max_output_tokens_for_profile(profile: &ProviderProfile, effort: &str) -> u64 {
-    if is_minimax_m3_model(profile) && effort == "adaptive" {
-        return 131_072;
-    }
-    if matches!(
-        anthropic_thinking_mode(profile),
-        Some(AnthropicThinkingMode::Adaptive)
-    ) {
-        return match effort {
-            "medium" => 16_384,
-            "high" => 32_768,
-            "xhigh" | "max" => 65_536,
-            _ => 8_192,
-        };
-    }
-    reasoning_max_output_tokens(effort)
-}
-
-fn chat_completion_token_limit_field(profile: &ProviderProfile) -> &'static str {
-    let id = reasoning_model_id(profile);
-    if opencode_model_or_variant(&id, "gpt-5")
-        || opencode_model_or_variant(&id, "gpt-6-astra")
-        || is_minimax_model(profile)
-        || ["o1", "o3", "o4"]
-            .iter()
-            .any(|family| opencode_model_or_variant(&id, family))
-    {
-        "max_completion_tokens"
-    } else {
-        "max_tokens"
-    }
-}
-
 fn anthropic_max_tokens(request: &AgentTurnRequest) -> u64 {
-    normalized_reasoning_effort_value(request)
-        .filter(|effort| *effort != "none")
-        .map(|effort| reasoning_max_output_tokens_for_profile(&request.profile, effort))
-        .unwrap_or(8_192)
+    // Anthropic requires max_tokens on every Messages request. Request the
+    // broadest output window used by this adapter and let the provider enforce
+    // the selected model's actual capacity.
+    if is_minimax_m3_model(&request.profile) {
+        131_072
+    } else {
+        65_536
+    }
 }
 
 fn parse_openai_chat_value(
@@ -2162,24 +2116,44 @@ fn gemini_tool_call(function: &Value, index: usize) -> Option<ToolCall> {
     })
 }
 
-fn finish_tools(tools: BTreeMap<usize, ToolAccumulator>) -> Vec<ToolCall> {
-    tools
-        .into_iter()
-        .filter_map(|(index, tool)| {
-            if tool.name.is_empty() {
-                return None;
-            }
-            Some(ToolCall {
-                id: if tool.id.is_empty() {
-                    format!("call-{index}")
-                } else {
-                    tool.id
-                },
-                name: tool.name,
-                arguments: serde_json::from_str(&tool.arguments).unwrap_or_else(|_| json!({})),
-            })
-        })
-        .collect()
+fn finish_tools(tools: BTreeMap<usize, ToolAccumulator>) -> Result<Vec<ToolCall>, String> {
+    let mut calls = Vec::with_capacity(tools.len());
+    for (index, tool) in tools {
+        if tool.name.is_empty() {
+            continue;
+        }
+        let call_id = if tool.id.is_empty() {
+            format!("{index}")
+        } else {
+            tool.id.clone()
+        };
+        let arguments = if tool.arguments.is_empty() {
+            json!({})
+        } else {
+            serde_json::from_str(&tool.arguments).map_err(|_| {
+                format!(
+                    "Provider returned incomplete or invalid JSON arguments for tool '{}' (call {}). The tool was not run; retry with a complete argument object.",
+                    tool.name, call_id
+                )
+            })?
+        };
+        if !arguments.is_object() {
+            return Err(format!(
+                "Provider returned non-object arguments for tool '{}' (call {}). The tool was not run; retry with a JSON object.",
+                tool.name, call_id
+            ));
+        }
+        calls.push(ToolCall {
+            id: if tool.id.is_empty() {
+                format!("call-{index}")
+            } else {
+                tool.id
+            },
+            name: tool.name,
+            arguments,
+        });
+    }
+    Ok(calls)
 }
 
 fn append_if_present(target: &mut String, value: Option<&Value>) {
@@ -5983,7 +5957,7 @@ mod tests {
                     assert!(headers.contains("openai-beta: responses=experimental"));
                 }
                 ProviderProtocol::AnthropicMessages => {
-                    assert_eq!(body.get("max_tokens"), Some(&json!(8192)));
+                    assert_eq!(body.get("max_tokens"), Some(&json!(65_536)));
                     assert_eq!(body.pointer("/messages/0/role"), Some(&json!("user")));
                     assert!(headers.contains("x-api-key: levelup-test-key"));
                     assert!(headers.contains("anthropic-version: 2023-06-01"));
@@ -6033,6 +6007,10 @@ mod tests {
         );
 
         request.profile.protocol = ProviderProtocol::AnthropicMessages;
+        request.profile.model = "claude-opus-5-5".to_owned();
+        request.reasoning_effort = None;
+        assert_eq!(anthropic_body(&request, false)["max_tokens"], json!(65_536));
+
         request.profile.model = "claude-opus-4-7".to_owned();
         request.reasoning_effort = Some("max".to_owned());
         let body = anthropic_body(&request, false);
@@ -6104,7 +6082,7 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_effort_adds_protocol_compatible_output_limits() {
+    fn reasoning_effort_does_not_add_client_output_limits() {
         let mut request = test_request(
             "https://levelup.example".to_owned(),
             ProviderProtocol::OpenaiChat,
@@ -6112,18 +6090,21 @@ mod tests {
         request.profile.model = "gpt-5.6-sol".to_owned();
         request.reasoning_effort = Some("high".to_owned());
         let body = chat_body(&request, false);
-        assert_eq!(body.get("max_completion_tokens"), Some(&json!(20_480)));
+        assert_eq!(body.get("reasoning_effort"), Some(&json!("high")));
         assert!(body.get("max_tokens").is_none());
+        assert!(body.get("max_completion_tokens").is_none());
 
         request.profile.model = "claude-opus-4-7".to_owned();
         request.reasoning_effort = Some("max".to_owned());
         let body = chat_body(&request, false);
-        assert_eq!(body.get("max_tokens"), Some(&json!(65_536)));
+        assert_eq!(body.get("reasoning_effort"), Some(&json!("max")));
+        assert!(body.get("max_tokens").is_none());
         assert!(body.get("max_completion_tokens").is_none());
 
         request.profile.protocol = ProviderProtocol::OpenaiResponses;
         let body = responses_body(&request, false);
-        assert_eq!(body.get("max_output_tokens"), Some(&json!(65_536)));
+        assert_eq!(body.pointer("/reasoning/effort"), Some(&json!("max")));
+        assert!(body.get("max_output_tokens").is_none());
 
         request.profile.model = "gpt-5.6-sol".to_owned();
         request.reasoning_effort = Some("none".to_owned());
@@ -6384,7 +6365,7 @@ mod tests {
         let chat = chat_body(&request, true);
         assert_eq!(chat.pointer("/thinking/type"), Some(&json!("adaptive")));
         assert_eq!(chat["reasoning_split"], true);
-        assert_eq!(chat["max_completion_tokens"], 131_072);
+        assert!(chat.get("max_completion_tokens").is_none());
         assert!(chat.get("reasoning_effort").is_none());
         request.profile.protocol = ProviderProtocol::AnthropicMessages;
         let messages = anthropic_body(&request, true);
@@ -6677,7 +6658,7 @@ mod tests {
                 }
                 "messages" => {
                     assert!(body.get("thinking").is_none());
-                    assert_eq!(body["max_tokens"], json!(8_192));
+                    assert_eq!(body["max_tokens"], json!(131_072));
                     assert!(headers.contains("x-api-key: opencode-test-key"));
                     assert!(headers.contains("anthropic-version: 2023-06-01"));
                 }
@@ -6842,6 +6823,63 @@ mod tests {
                 "signature": "signed-stream"
             })]
         );
+    }
+
+    #[tokio::test]
+    async fn anthropic_max_token_stop_reason_does_not_block_complete_tool_calls() {
+        let events = concat!(
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call-truncated\",\"name\":\"write_file\",\"input\":{}}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"index.html\\\",\\\"content\\\":\\\"<html>ok</html>\\\"}\"}}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"output_tokens\":16384}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+        );
+        let request = test_request(
+            mock_sse_server("/v1/messages", events),
+            ProviderProtocol::AnthropicMessages,
+        );
+        let result = run_turn_stream(
+            &Client::new(),
+            request,
+            "test-key",
+            CancellationToken::new(),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.output_tokens, Some(16_384));
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].arguments["path"], "index.html");
+        assert_eq!(result.tool_calls[0].arguments["content"], "<html>ok</html>");
+    }
+
+    #[test]
+    fn malformed_streamed_tool_arguments_are_not_replaced_with_empty_objects() {
+        let error = finish_tools(BTreeMap::from([(
+            0,
+            ToolAccumulator {
+                id: "call-truncated".to_owned(),
+                name: "write_file".to_owned(),
+                arguments: r#"{"path":"index.html","content":"<html>"#.to_owned(),
+            },
+        )]))
+        .unwrap_err();
+        assert!(error.contains("incomplete or invalid JSON arguments"));
+        assert!(error.contains("write_file"));
+    }
+
+    #[test]
+    fn non_stream_anthropic_max_token_response_keeps_complete_tool_call() {
+        let result = parse_anthropic_value(
+            &json!({
+                "stop_reason": "max_tokens",
+                "usage": { "output_tokens": 16_384 },
+                "content": [{ "type": "tool_use", "id": "call-complete", "name": "write_file", "input": { "path": "index.html", "content": "<html>ok</html>" } }]
+            }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].arguments["path"], "index.html");
     }
 
     #[tokio::test]
