@@ -32,6 +32,7 @@
   },
   "bundle": {
     "active": true,
+    "publisher": "TippingGame",
     "createUpdaterArtifacts": false,
     "targets": "all",
     "resources": {
