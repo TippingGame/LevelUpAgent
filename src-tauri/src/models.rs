@@ -149,6 +149,9 @@ pub struct AgentTurnRequest {
     /// place it in their dedicated system/developer context.
     #[serde(default)]
     pub router_metadata: Option<RouterMetadata>,
+    /// Context returned by locally installed hooks, resolved by the host only.
+    #[serde(skip)]
+    pub hook_contexts: Vec<String>,
     /// Internal lifecycle records surfaced by the Harness UI. They are never
     /// sent to providers.
     #[serde(skip)]

@@ -2842,6 +2842,14 @@ fn system_prompt_with_omission(request: &AgentTurnRequest, omission: &ContextOmi
 }
 
 fn router_context_text(request: &AgentTurnRequest) -> Option<String> {
+    let mut parts = request.hook_contexts.clone();
+    if let Some(context) = legacy_router_context_text(request) {
+        parts.push(context);
+    }
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
+}
+
+fn legacy_router_context_text(request: &AgentTurnRequest) -> Option<String> {
     let router = request.router_metadata.as_ref()?;
     let mut context = format!(
         "LevelUpAxion UserPromptSubmit additionalContext (application-owned)\n- workflow: {}\n- primary Skill: {}\n- canonical Skill: {}\n- interaction: {}\n- call chain: {}",
@@ -4504,6 +4512,30 @@ mod tests {
     }
 
     #[test]
+    fn installed_hook_context_reaches_every_provider_protocol() {
+        let mut request = test_request(
+            "https://levelup.example".to_owned(),
+            ProviderProtocol::OpenaiResponses,
+        );
+        request.hook_contexts = vec!["fixture hook context".to_owned()];
+        for body in [
+            chat_body(&request, false),
+            responses_body(&request, false),
+            anthropic_body(&request, false),
+            gemini_body(&request),
+        ] {
+            assert!(body.to_string().contains("fixture hook context"));
+        }
+        assert!(!system_prompt(&request).contains("fixture hook context"));
+        request.hook_contexts.clear();
+        assert!(
+            !chat_body(&request, false)
+                .to_string()
+                .contains("fixture hook context")
+        );
+    }
+
+    #[test]
     fn router_metadata_is_rendered_as_application_owned_context() {
         let mut request = test_request(
             "https://levelup.example".to_owned(),
@@ -5353,6 +5385,7 @@ mod tests {
             custom_instructions: None,
             router_metadata: None,
             router_events: Vec::new(),
+            hook_contexts: Vec::new(),
             allow_outside_workspace: false,
             reasoning_effort: None,
         }

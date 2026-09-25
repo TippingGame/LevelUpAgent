@@ -8,6 +8,7 @@ mod database;
 mod filesystem;
 mod git;
 mod harness;
+mod hooks;
 mod layout;
 mod local_resources;
 mod logging;
@@ -809,7 +810,7 @@ fn browser_qa_skill_available(request: &AgentTurnRequest) -> bool {
         .any(|skill| skill.name.eq_ignore_ascii_case(BROWSER_QA_SKILL_NAME))
 }
 
-fn attach_skills(
+async fn attach_skills(
     app: &tauri::AppHandle,
     database: &database::Database,
     request: &mut AgentTurnRequest,
@@ -843,7 +844,39 @@ fn attach_skills(
     // run the installed LevelUpAxion router before provider execution and
     // attach its deterministic plan as application-owned context.
     if !request.hatch {
-        run_prompt_router(request, &enabled);
+        let data_root = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| error.to_string())?;
+        let prompt = request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role.eq_ignore_ascii_case("user") && !message.internal)
+            .map(|message| message.content.as_str())
+            .unwrap_or_default();
+        let hook_result = hooks::run(
+            &data_root,
+            prompt,
+            request.thread_id.as_deref(),
+            request.workspace.as_deref(),
+        )
+        .await;
+        request.hook_contexts = hook_result.contexts;
+        for event in hook_result.events {
+            logging::write("info", "hooks", "prompt_hook_result", event.clone());
+            request
+                .router_events
+                .push(RouterEvent::new("prompt_hook_result", event));
+        }
+        if hook_result.blocked {
+            return Err("A user-installed prompt hook blocked this request".to_owned());
+        }
+        if !hook_result.owns_router {
+            run_prompt_router(request, &enabled);
+        } else {
+            request.router_metadata = None;
+        }
     }
 
     // Chat mode intentionally has no dynamic tools, but it still receives
@@ -2169,6 +2202,7 @@ fn isolated_pet_agent_request(
         custom_instructions: None,
         router_metadata: None,
         router_events: Vec::new(),
+        hook_contexts: Vec::new(),
         allow_outside_workspace: false,
         reasoning_effort: None,
     })
@@ -5621,7 +5655,7 @@ async fn agent_turn(
         attach_goal(&database, &mut request)?;
         attach_subagent_tools(&mut request);
         attach_media_tools(&mut request);
-        attach_skills(&app, &database, &mut request)?;
+        attach_skills(&app, &database, &mut request).await?;
         attach_extended_tools(&mut request)?;
         attach_mcp_tools(&database, &manager, &mut request).await?;
         enforce_theme_generation_tool_catalog(&mut request);
@@ -5746,7 +5780,7 @@ async fn agent_turn_stream_inner(
     attach_goal(&database, &mut request)?;
     attach_subagent_tools(&mut request);
     attach_media_tools(&mut request);
-    attach_skills(&app, &database, &mut request)?;
+    attach_skills(&app, &database, &mut request).await?;
     attach_extended_tools(&mut request)?;
     attach_mcp_tools(&database, &manager, &mut request).await?;
     enforce_theme_generation_tool_catalog(&mut request);
@@ -6545,6 +6579,7 @@ async fn harness_run_loop(
             custom_instructions: request.custom_instructions.clone(),
             router_metadata: None,
             router_events: Vec::new(),
+            hook_contexts: Vec::new(),
             allow_outside_workspace: matches!(
                 request.permission_level,
                 crate::harness::types::PermissionLevel::Full
@@ -6569,7 +6604,7 @@ async fn harness_run_loop(
         }
         attach_subagent_tools(&mut turn_request);
         attach_media_tools(&mut turn_request);
-        attach_skills(app, database, &mut turn_request)?;
+        attach_skills(app, database, &mut turn_request).await?;
         for router_event in std::mem::take(&mut turn_request.router_events) {
             let sequence = database.append_harness_event(
                 &operation_id,
@@ -8227,6 +8262,7 @@ where
             ),
             router_metadata: None,
             router_events: Vec::new(),
+            hook_contexts: Vec::new(),
             allow_outside_workspace: false,
             reasoning_effort: None,
         };
@@ -13030,6 +13066,7 @@ mod tests {
             custom_instructions: None,
             router_metadata: None,
             router_events: Vec::new(),
+            hook_contexts: Vec::new(),
             allow_outside_workspace: false,
             reasoning_effort: None,
         };
@@ -13078,6 +13115,7 @@ mod tests {
             custom_instructions: None,
             router_metadata: None,
             router_events: Vec::new(),
+            hook_contexts: Vec::new(),
             allow_outside_workspace: false,
             reasoning_effort: None,
         };
@@ -14019,6 +14057,7 @@ mod tests {
             custom_instructions: Some("Persisted instructions.".to_owned()),
             router_metadata: None,
             router_events: Vec::new(),
+            hook_contexts: Vec::new(),
             allow_outside_workspace: false,
             reasoning_effort: None,
         };
@@ -14083,6 +14122,7 @@ mod tests {
             custom_instructions: Some("Persisted instructions.".to_owned()),
             router_metadata: None,
             router_events: Vec::new(),
+            hook_contexts: Vec::new(),
             allow_outside_workspace: false,
             reasoning_effort: Some("low".to_owned()),
         };
@@ -14152,6 +14192,7 @@ mod tests {
             custom_instructions: None,
             router_metadata: None,
             router_events: Vec::new(),
+            hook_contexts: Vec::new(),
             allow_outside_workspace: false,
             reasoning_effort: None,
         };
@@ -14202,6 +14243,7 @@ mod tests {
             custom_instructions: None,
             router_metadata: None,
             router_events: Vec::new(),
+            hook_contexts: Vec::new(),
             allow_outside_workspace: false,
             reasoning_effort: None,
         };
@@ -14229,6 +14271,7 @@ mod tests {
             custom_instructions: None,
             router_metadata: None,
             router_events: Vec::new(),
+            hook_contexts: Vec::new(),
             allow_outside_workspace: false,
             reasoning_effort: None,
         };
@@ -14280,6 +14323,7 @@ mod tests {
             custom_instructions: None,
             router_metadata: None,
             router_events: Vec::new(),
+            hook_contexts: Vec::new(),
             allow_outside_workspace: false,
             reasoning_effort: None,
         };
@@ -14322,6 +14366,7 @@ mod tests {
             custom_instructions: None,
             router_metadata: None,
             router_events: Vec::new(),
+            hook_contexts: Vec::new(),
             allow_outside_workspace: false,
             reasoning_effort: None,
         };
@@ -14400,6 +14445,7 @@ mod tests {
             custom_instructions: None,
             router_metadata: None,
             router_events: Vec::new(),
+            hook_contexts: Vec::new(),
             allow_outside_workspace: false,
             reasoning_effort: None,
         };
@@ -14453,6 +14499,7 @@ mod tests {
             custom_instructions: None,
             router_metadata: None,
             router_events: Vec::new(),
+            hook_contexts: Vec::new(),
             allow_outside_workspace: false,
             reasoning_effort: None,
         };
@@ -14759,6 +14806,7 @@ mod tests {
             custom_instructions: None,
             router_metadata: None,
             router_events: Vec::new(),
+            hook_contexts: Vec::new(),
             allow_outside_workspace: false,
             reasoning_effort: Some("max".to_owned()),
         };
@@ -15046,6 +15094,7 @@ mod tests {
             custom_instructions: None,
             router_metadata: None,
             router_events: Vec::new(),
+            hook_contexts: Vec::new(),
             allow_outside_workspace: false,
             reasoning_effort: None,
         };
@@ -15130,6 +15179,7 @@ mod tests {
             custom_instructions: None,
             router_metadata: None,
             router_events: Vec::new(),
+            hook_contexts: Vec::new(),
             allow_outside_workspace: false,
             reasoning_effort: None,
         };
@@ -15196,6 +15246,7 @@ mod tests {
             custom_instructions: None,
             router_metadata: None,
             router_events: Vec::new(),
+            hook_contexts: Vec::new(),
             allow_outside_workspace: false,
             reasoning_effort: None,
         };
