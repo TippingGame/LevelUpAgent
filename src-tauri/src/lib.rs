@@ -6095,7 +6095,7 @@ async fn harness_run(
     subagents: tauri::State<'_, subagent::SubagentManager>,
     request: crate::harness::types::HarnessRunRequest,
     on_event: Channel<crate::harness::types::HarnessRuntimeEvent>,
-) -> Result<crate::harness::types::HarnessRunOutcome, String> {
+) -> Result<crate::harness::types::HarnessRunCompletion, String> {
     let operation_id = request.operation_id.clone();
     let thread_id = request.thread_id.clone();
     let started = Instant::now();
@@ -6109,8 +6109,16 @@ async fn harness_run(
             "messageCount": request.messages.len(),
         }),
     );
-    let result =
-        harness_run_inner(app, state, database, manager, subagents, request, on_event).await;
+    let result = harness_run_inner(
+        app,
+        state,
+        database,
+        manager,
+        subagents,
+        request,
+        on_event.clone(),
+    )
+    .await;
     match &result {
         Ok(outcome) => logging::write(
             "info",
@@ -6143,7 +6151,28 @@ async fn harness_run(
             }),
         ),
     }
-    result
+    finish_harness_run_delivery(&on_event, &operation_id, result)
+}
+
+fn finish_harness_run_delivery(
+    on_event: &Channel<crate::harness::types::HarnessRuntimeEvent>,
+    operation_id: &str,
+    result: Result<crate::harness::types::HarnessRunOutcome, String>,
+) -> Result<crate::harness::types::HarnessRunCompletion, String> {
+    // Channel preserves event order, but large payloads use an asynchronous
+    // fetch and can arrive after the command's IPC result. This marker follows
+    // every event on success, approval, cancellation, and runtime failure.
+    on_event
+        .send(crate::harness::types::HarnessRuntimeEvent::transient(
+            operation_id,
+            "run_finished",
+            serde_json::json!({}),
+        ))
+        .map_err(|error| format!("Could not deliver Harness completion: {error}"))?;
+    Ok(match result {
+        Ok(outcome) => crate::harness::types::HarnessRunCompletion::Ok { outcome },
+        Err(error) => crate::harness::types::HarnessRunCompletion::Error { error },
+    })
 }
 
 struct ThemeGenerationRun {
@@ -14824,6 +14853,59 @@ mod tests {
         assert!(should_reconnect_request(timeout, false, 0, true));
         assert!(!should_reconnect_request(timeout, false, 1, true));
         assert!(should_reconnect_request(timeout, false, 1, false));
+    }
+
+    #[test]
+    fn harness_delivery_finishes_after_events_for_every_runtime_exit() {
+        use crate::harness::types::{HarnessRunOutcome, HarnessRuntimeEvent, RuntimeState};
+        let results = [
+            Ok(HarnessRunOutcome {
+                state: RuntimeState::Completed,
+            }),
+            Ok(HarnessRunOutcome {
+                state: RuntimeState::AwaitingApproval,
+            }),
+            Ok(HarnessRunOutcome {
+                state: RuntimeState::Failed,
+            }),
+            Err("REQUEST_CANCELLED".to_owned()),
+            Err("Provider failed after partial output".to_owned()),
+        ];
+        for result in results {
+            let events =
+                std::sync::Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+            let captured = events.clone();
+            let channel = Channel::new(move |body| {
+                let tauri::ipc::InvokeResponseBody::Json(json) = body else {
+                    panic!("Harness events must be JSON");
+                };
+                captured
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::from_str(&json).unwrap());
+                Ok(())
+            });
+            channel
+                .send(HarnessRuntimeEvent::new(
+                    "operation-1",
+                    5,
+                    "assistant_completed",
+                    serde_json::json!({ "content": "x".repeat(12_000) }),
+                ))
+                .unwrap();
+            let expected = match &result {
+                Ok(outcome) => serde_json::json!({ "status": "ok", "outcome": outcome }),
+                Err(error) => serde_json::json!({ "status": "error", "error": error }),
+            };
+            let completion = finish_harness_run_delivery(&channel, "operation-1", result).unwrap();
+            assert_eq!(serde_json::to_value(completion).unwrap(), expected);
+            let events = events.lock().unwrap();
+            assert_eq!(events.len(), 2);
+            assert_eq!(events[0]["kind"], "assistant_completed");
+            assert_eq!(events[1]["kind"], "run_finished");
+            assert_eq!(events[1]["operationId"], "operation-1");
+            assert_eq!(events[1]["sequence"], 0);
+        }
     }
 
     #[test]

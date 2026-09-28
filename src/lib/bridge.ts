@@ -4,6 +4,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import type { LocalAttachmentPath } from "./localAttachments";
 import type { WorkspaceFileSearch } from "./composerReferences";
 import { deduplicateMediaRefresh } from "./mediaPolling";
+import { runHarnessStream } from "./harnessStream";
 import { tr } from "./i18n";
 import type {
   AgentMessage,
@@ -1182,15 +1183,7 @@ export async function harnessRun(
   request: HarnessRunRequest,
   onEvent: (event: HarnessRuntimeEvent) => void,
 ): Promise<HarnessRunOutcome> {
-  const channel = new Channel<HarnessRuntimeEvent>();
-  channel.onmessage = onEvent;
-  return invoke<HarnessRunOutcome>("harness_run", {
-    request: {
-      ...request,
-      messages: request.messages.filter((message) => !message.status),
-    },
-    onEvent: channel,
-  });
+  return runHarnessStream(request, onEvent);
 }
 
 export async function createGoal(

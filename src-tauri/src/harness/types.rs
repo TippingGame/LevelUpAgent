@@ -213,6 +213,15 @@ pub struct HarnessRunOutcome {
     pub state: RuntimeState,
 }
 
+// Keep runtime errors in the successful IPC envelope so the frontend can
+// drain pending channel events before propagating cancellation or failure.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum HarnessRunCompletion {
+    Ok { outcome: HarnessRunOutcome },
+    Error { error: String },
+}
+
 impl HarnessRuntimeEvent {
     pub fn new(operation_id: &str, sequence: u64, kind: &str, payload: Value) -> Self {
         Self {
