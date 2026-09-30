@@ -1,5 +1,12 @@
 import type { MediaModelInfo, VideoGenerationMode } from "./types";
 
+// Resolve capabilities only; requests and saved selections keep the full model ID.
+export function mediaModelBaseId(model: string) {
+  const id = model.trim().replace(/^models\//i, "").toLowerCase();
+  return ["minimax-h3-max", "minimax-h3", "seedance-2.5", "seedance-2.0", "seedance-2", "image-01-live", "image-01"]
+    .find((base) => id === base || id.startsWith(`${base}-`)) ?? id;
+}
+
 export function selectStudioMediaModel(models: MediaModelInfo[], savedKey?: string) {
   return models.find((model) => `${model.profileId}::${model.id}` === savedKey)
     ?? models.find((model) => model.recommended)
@@ -10,18 +17,17 @@ export function mediaModelSupportsExplicitImageMask(
   model: Pick<MediaModelInfo, "id" | "protocol">,
 ) {
   const id = model.id.trim().replace(/^models\//i, "").toLocaleLowerCase();
-  const grokImage = id === "grok-imagine"
-    || id === "grok-imagine-edit"
-    || id.startsWith("grok-imagine-image");
+  const grokImage = (id === "grok-imagine" || id.startsWith("grok-imagine-"))
+    && !id.startsWith("grok-imagine-video");
   return model.protocol !== "gemini_generate_content" && !grokImage && !isMiniMaxImageModel(id);
 }
 
 export function isMiniMaxImageModel(id: string) {
-  return /^image-01(?:-live)?$/i.test(id.replace(/^models\//i, ""));
+  return ["image-01", "image-01-live"].includes(mediaModelBaseId(id));
 }
 
 export function videoModelCapabilities(model: string, mode: VideoGenerationMode = "text") {
-  const id = model.replace(/^models\//i, "").toLowerCase();
+  const id = mediaModelBaseId(model);
   const minimax = /^minimax-h3(?:-max)?$/.test(id);
   const seedance = /^seedance-2(?:\.0|\.5)?$/.test(id);
   const grok = id.startsWith("grok-imagine-video");

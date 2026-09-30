@@ -63,7 +63,7 @@ import {
   type ArmorSkillState,
 } from "../lib/armorMode";
 import { copyText } from "../lib/clipboard";
-import { isMiniMaxImageModel, mediaModelSupportsExplicitImageMask, selectStudioMediaModel, videoModelCapabilities } from "../lib/mediaCapabilities";
+import { isMiniMaxImageModel, mediaModelBaseId, mediaModelSupportsExplicitImageMask, selectStudioMediaModel, videoModelCapabilities } from "../lib/mediaCapabilities";
 import { createMediaReferenceUrl, imageEditInputs, moveMediaReference, orderedMediaReferenceUrls, type MediaReferenceUrl } from "../lib/mediaReferences";
 import { createMediaPoller } from "../lib/mediaPolling";
 import type {
@@ -226,7 +226,7 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
   // Only picker changes are persisted; automatic fallbacks never overwrite
   // a temporarily unavailable user choice.
   const selected = selectStudioMediaModel(eligibleModels, selectedKey);
-  const selectedModelId = selected?.id.toLocaleLowerCase() ?? "";
+  const selectedModelId = mediaModelBaseId(selected?.id ?? "");
   const minimaxImage = kind === "image" && isMiniMaxImageModel(selectedModelId);
   const transparentBackgroundSupported = !selectedModelId.includes("gpt-image-2") && !minimaxImage;
   const videoCapabilities = videoModelCapabilities(selectedModelId, videoMode);
@@ -1294,11 +1294,12 @@ export function MediaAssetCard({ asset, locale, onDelete, onPreview, onReuse, on
             <span><Maximize2 size={14} />{tr("查看大图", "View large")}</span>
           </button>
         ) : <img src={url} alt={asset.revisedPrompt || asset.prompt} />)}
-        {asset.status === "completed" && url && asset.kind === "video" && <video src={url} controls preload="metadata" onLoadedMetadata={(event) => {
+        {/* WebView's native download cannot save asset-protocol URLs. Use exportAsset below. */}
+        {asset.status === "completed" && url && asset.kind === "video" && <video src={url} controls controlsList="nodownload" preload="metadata" onLoadedMetadata={(event) => {
           const { videoWidth, videoHeight } = event.currentTarget;
           if (videoWidth > 0 && videoHeight > 0) setVideoRatio(videoWidth / videoHeight);
         }} />}
-        {asset.status === "completed" && url && asset.kind === "audio" && <div className="audio-preview"><AudioLines size={28} /><audio src={url} controls preload="metadata" /></div>}
+        {asset.status === "completed" && url && asset.kind === "audio" && <div className="audio-preview"><AudioLines size={28} /><audio src={url} controls controlsList="nodownload" preload="metadata" /></div>}
         {(asset.status === "queued" || asset.status === "in_progress") && <div className="pending-preview"><LoaderCircle className="spin" size={24} /><strong>{asset.downloadProgress ? tr("已生成，正在下载", "Generated, downloading") : asset.gatewayStatus === "billing" ? tr("已生成，正在结算", "Generated, settling usage") : statusLabel(asset.status)}</strong><span>{pendingAssetDetail(asset)}</span></div>}
         {asset.status === "failed" && <div className="failed-preview"><CircleAlert size={24} /><strong>{tr("生成失败", "Generation failed")}</strong></div>}
       </div>
@@ -1326,7 +1327,7 @@ export function MediaAssetCard({ asset, locale, onDelete, onPreview, onReuse, on
       {(canExport || canReuse || canEdit || onDelete) && <div className="media-asset-actions">
         {canEdit && <button className="media-edit-asset" disabled={editing} onClick={() => void editAsset()} title={tr("编辑此图", "Edit this image")} aria-label={tr("编辑此图", "Edit this image")}>{editing ? <LoaderCircle className="spin" size={13} /> : <Brush size={13} />}</button>}
         {canReuse && <button className="media-reuse-asset" disabled={reusing} onClick={() => void reuseAsset()} title={tr("复用图片与参数", "Reuse image and parameters")} aria-label={tr("复用图片与参数", "Reuse image and parameters")}>{reusing ? <LoaderCircle className="spin" size={13} /> : <RefreshCw size={13} />}</button>}
-        {canExport && <button className="media-export-asset" disabled={exporting} onClick={() => void exportAsset()} title={tr("另存为", "Save as")} aria-label={tr("另存为", "Save as")}>{exporting ? <LoaderCircle className="spin" size={13} /> : <Download size={13} />}</button>}
+        {canExport && <button className={`media-export-asset${asset.kind !== "image" ? " media-export-labeled" : ""}`} disabled={exporting} onClick={() => void exportAsset()} title={tr("另存为", "Save as")} aria-label={asset.kind === "image" ? tr("另存为", "Save as") : tr("下载（另存为）", "Download (save as)")}>{exporting ? <LoaderCircle className="spin" size={13} /> : <Download size={13} />}{asset.kind !== "image" && <span>{exporting ? tr("保存中…", "Saving…") : tr("下载", "Download")}</span>}</button>}
         {onDelete && <button className="media-delete-asset" onClick={onDelete} title={tr("删除作品", "Delete creation")} aria-label={tr("删除作品", "Delete creation")}><Trash2 size={13} /></button>}
       </div>}
     </article>

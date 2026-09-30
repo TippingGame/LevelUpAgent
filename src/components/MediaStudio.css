@@ -1,3 +1,13 @@
+.media-asset-actions .media-export-labeled {
+  width: auto;
+  display: flex;
+  gap: 4px;
+  padding: 0 7px;
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--font-caption);
+}
+
 .media-reference-source select {
   width: 100%;
   min-height: 36px;

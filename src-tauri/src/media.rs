@@ -562,9 +562,7 @@ fn classify_media_model(model: &str) -> Vec<(MediaKind, i64)> {
         || (id.contains("gemini") && id.contains("image"))
         || id.contains("image-generation")
         || is_minimax_image_model(&id)
-        || id == "grok-imagine"
-        || id == "grok-imagine-edit"
-        || id.starts_with("grok-imagine-image")
+        || is_grok_image_model(&id)
     {
         kinds.push((MediaKind::Image, image_rank(&id)));
     }
@@ -622,6 +620,8 @@ fn is_native_gemini_media_family(model: &str, kind: &MediaKind) -> bool {
 }
 
 fn image_rank(id: &str) -> i64 {
+    let normalized = native_model_base_id(id);
+    let id = normalized.as_str();
     let family = if id.ends_with("gpt-image-2.5-sunburst") {
         10_500_000_000
     } else if id == "gpt-image-2" || id.ends_with("/gpt-image-2") {
@@ -644,12 +644,12 @@ fn image_rank(id: &str) -> i64 {
         8_200_000_000
     } else if id.contains("imagen-3") {
         8_000_000_000
-    } else if id == "grok-imagine" || id == "grok-imagine-edit" {
-        7_900_000_000
     } else if id.starts_with("grok-imagine-image-quality") {
         8_100_000_000
     } else if id.starts_with("grok-imagine-image") {
         8_000_000_000
+    } else if is_grok_image_model(id) {
+        7_900_000_000
     } else if id == "image-01" {
         7_500_000_000
     } else if id == "image-01-live" {
@@ -678,6 +678,8 @@ fn audio_rank(id: &str) -> i64 {
 }
 
 fn video_rank(id: &str) -> i64 {
+    let normalized = native_model_base_id(id);
+    let id = normalized.as_str();
     let family = if id.contains("sora-2-pro") {
         9_800_000_000
     } else if id == "sora-2" || id.starts_with("sora-2-") {
@@ -2792,9 +2794,7 @@ fn is_grok_video_model(model: &str) -> bool {
 
 fn is_grok_image_model(model: &str) -> bool {
     let model = model.trim_start_matches("models/").to_ascii_lowercase();
-    model == "grok-imagine"
-        || model == "grok-imagine-edit"
-        || model.starts_with("grok-imagine-image")
+    (model == "grok-imagine" || model.starts_with("grok-imagine-")) && !is_grok_video_model(&model)
 }
 
 fn insert_grok_image_options(body: &mut Value, request: &MediaGenerationRequest) {
@@ -4581,7 +4581,12 @@ mod tests {
 
     #[tokio::test]
     async fn minimax_gateway_jobs_use_compatible_create_poll_and_content_routes() {
-        for model in ["MiniMax-H3", "MiniMax-H3-Max"] {
+        for model in [
+            "MiniMax-H3",
+            "MiniMax-H3-Max",
+            "MiniMax-H3-2K",
+            "MiniMax-H3-Max-2K",
+        ] {
             let (base_url, server) = mock_sequence_inspecting(
                 vec![
                     MockResponse {
@@ -4606,7 +4611,7 @@ mod tests {
                         body: b"mock-minimax-video".to_vec(),
                     },
                 ],
-                |index, bytes| {
+                move |index, bytes| {
                     let text = String::from_utf8_lossy(bytes);
                     assert!(
                         text.to_ascii_lowercase()
@@ -4615,6 +4620,7 @@ mod tests {
                     if index == 0 {
                         let body: Value =
                             serde_json::from_str(text.split_once("\r\n\r\n").unwrap().1).unwrap();
+                        assert_eq!(body["model"], model);
                         assert!(body.get("content").is_none());
                         assert!(body["prompt"].as_str().is_some_and(|s| !s.is_empty()));
                         assert_eq!(body["first_image"], "https://cdn.test/first.png");
@@ -4986,6 +4992,68 @@ mod tests {
             original_count,
             "recommendation must never invent a model"
         );
+    }
+
+    #[tokio::test]
+    async fn media_catalog_keeps_suffixed_aliases_and_their_routes() {
+        let ids = [
+            "MiniMax-H3-2K",
+            "MiniMax-H3-Max-2K",
+            "Seedance-2.5-custom",
+            "image-01-live-2K",
+            "grok-imagine-2K",
+            "grok-imagine-video-1.5-2K",
+        ];
+        let (base_url, server) = mock_sequence_inspecting(
+            vec![MockResponse {
+                method: "GET",
+                path: "/v1/models",
+                status: 200,
+                content_type: "application/json",
+                body: json!({"data": ids.iter().map(|id| json!({"id": id})).collect::<Vec<_>>()})
+                    .to_string()
+                    .into_bytes(),
+            }],
+            |_, _| {},
+        );
+        let mut provider = provider("relay", "MiniMax-H3");
+        provider.profile.base_url = base_url;
+        let catalog = discover_catalog(&Client::new(), &[provider.clone()], "relay").await;
+        assert!(catalog.errors.is_empty());
+        assert_eq!(catalog.models.len(), ids.len());
+        for id in ids {
+            let model = catalog.models.iter().find(|model| model.id == id).unwrap();
+            let expected = if id.starts_with("image-") || id == "grok-imagine-2K" {
+                MediaKind::Image
+            } else {
+                MediaKind::Video
+            };
+            assert_eq!(model.kind, expected);
+            let mut request = request(expected, 1);
+            request.profile_id = Some(provider.profile.id.clone());
+            request.model = Some(id.into());
+            let selections =
+                selection_candidates(std::slice::from_ref(&provider), &catalog, &request);
+            assert_eq!(selections.len(), 1);
+            assert_eq!(selections[0].model, id);
+        }
+        for id in [
+            "MiniMax-H30-2K",
+            "Seedance-20-2K",
+            "image-010-2K",
+            "gpt-6-2K",
+        ] {
+            assert!(classify_media_model(id).is_empty(), "{id}");
+        }
+        assert_eq!(
+            video_rank("minimax-h3-max-2k"),
+            video_rank("minimax-h3-max")
+        );
+        assert_eq!(
+            video_rank("seedance-2.5-custom"),
+            video_rank("seedance-2.5")
+        );
+        server.join().unwrap();
     }
 
     #[tokio::test]

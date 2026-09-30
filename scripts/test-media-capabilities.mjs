@@ -1,6 +1,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isMiniMaxImageModel, mediaModelSupportsExplicitImageMask, selectStudioMediaModel, videoModelCapabilities } from "../src/lib/mediaCapabilities.ts";
+import { isMiniMaxImageModel, mediaModelBaseId, mediaModelSupportsExplicitImageMask, selectStudioMediaModel, videoModelCapabilities } from "../src/lib/mediaCapabilities.ts";
+
+test("suffixed aliases inherit the most specific base capabilities", () => {
+  for (const base of ["MiniMax-H3", "MiniMax-H3-Max", "Seedance-2", "Seedance-2.0", "Seedance-2.5", "grok-imagine-video-1.5"]) {
+    for (const mode of ["text", "image", "first_last", "reference", "video"]) {
+      assert.deepEqual(videoModelCapabilities(`${base}-2K`, mode), videoModelCapabilities(base, mode));
+    }
+  }
+  assert.equal(mediaModelBaseId("models/IMAGE-01-LIVE-2K"), "image-01-live");
+  assert.ok(isMiniMaxImageModel("image-01-2K"));
+  for (const id of ["image-01-live-2K", "grok-imagine-2K", "grok-imagine-edit-2K"]) {
+    assert.equal(mediaModelSupportsExplicitImageMask({ id, protocol: "openai_chat" }), false);
+  }
+  assert.equal(videoModelCapabilities("MiniMax-H30-2K").native, false);
+  assert.equal(videoModelCapabilities("Seedance-20-2K").native, false);
+  assert.equal(isMiniMaxImageModel("image-010-2K"), false);
+  const alias = { id: "MiniMax-H3-2K", profileId: "minimax" };
+  assert.equal(selectStudioMediaModel([alias], "minimax::MiniMax-H3-2K"), alias);
+});
 
 test("studio uses an available recommendation and preserves explicit model choice", () => {
   const live = { id: "image-01-live", profileId: "minimax", recommended: false };

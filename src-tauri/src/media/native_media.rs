@@ -1,32 +1,50 @@
 //! MiniMax's native media protocol and the common Seedance video relay contract.
 use super::*;
 
+// Longest known variant wins. Only capability checks use this base ID;
+// catalog entries, requests, and saved assets retain the complete alias.
+pub(super) fn native_model_base_id(model: &str) -> String {
+    let id = model
+        .trim()
+        .trim_start_matches("models/")
+        .to_ascii_lowercase();
+    [
+        "minimax-h3-max",
+        "minimax-h3",
+        "seedance-2.5",
+        "seedance-2.0",
+        "seedance-2",
+        "image-01-live",
+        "image-01",
+    ]
+    .into_iter()
+    .find(|base| {
+        id == *base
+            || id
+                .strip_prefix(base)
+                .is_some_and(|suffix| suffix.starts_with('-'))
+    })
+    .unwrap_or(&id)
+    .to_owned()
+}
+
 pub(super) fn is_minimax_image_model(model: &str) -> bool {
     matches!(
-        model
-            .trim_start_matches("models/")
-            .to_ascii_lowercase()
-            .as_str(),
+        native_model_base_id(model).as_str(),
         "image-01" | "image-01-live"
     )
 }
 
 pub(super) fn is_minimax_video_model(model: &str) -> bool {
     matches!(
-        model
-            .trim_start_matches("models/")
-            .to_ascii_lowercase()
-            .as_str(),
+        native_model_base_id(model).as_str(),
         "minimax-h3" | "minimax-h3-max"
     )
 }
 
 pub(super) fn is_seedance_video_model(model: &str) -> bool {
     matches!(
-        model
-            .trim_start_matches("models/")
-            .to_ascii_lowercase()
-            .as_str(),
+        native_model_base_id(model).as_str(),
         "seedance-2" | "seedance-2.0" | "seedance-2.5"
     )
 }
@@ -89,7 +107,7 @@ pub(super) fn validate_native_video_request(
     references: &[ManagedReference],
 ) -> Result<(), String> {
     validate_video_references(request, references)?;
-    let id = model.to_ascii_lowercase();
+    let id = native_model_base_id(model);
     let seedance = is_seedance_video_model(model);
     let max = id.ends_with("-max");
     let version_25 = id.ends_with("2.5");
@@ -423,7 +441,7 @@ fn minimax_image_body(
             let height = height
                 .parse::<u32>()
                 .map_err(|_| "Invalid MiniMax image height")?;
-            if model.eq_ignore_ascii_case("image-01-live")
+            if native_model_base_id(model) == "image-01-live"
                 || !(512..=2048).contains(&width)
                 || !(512..=2048).contains(&height)
                 || width % 8 != 0
@@ -437,7 +455,7 @@ fn minimax_image_body(
             if !matches!(
                 size,
                 "1:1" | "16:9" | "4:3" | "3:2" | "2:3" | "3:4" | "9:16" | "21:9"
-            ) || (size == "21:9" && model.eq_ignore_ascii_case("image-01-live"))
+            ) || (size == "21:9" && native_model_base_id(model) == "image-01-live")
             {
                 return Err("Unsupported MiniMax image aspect ratio".to_owned());
             }
@@ -520,6 +538,42 @@ fn minimax_image_sources(value: &Value) -> Result<Vec<BlobSource>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suffixed_models_preserve_ids_and_base_validation() {
+        let mut seedance = request("Seedance-2.5-custom");
+        seedance.seconds = Some(30);
+        seedance.video_mode = VideoGenerationMode::Reference;
+        seedance.reference_urls = (0..30)
+            .map(|i| format!("https://cdn.test/{i}.png"))
+            .collect();
+        let body = native_video_body("Seedance-2.5-custom", &seedance, &[]).unwrap();
+        assert_eq!(body["model"], "Seedance-2.5-custom");
+        assert_eq!(body["duration"], 30);
+        assert_eq!(body["referenceImages"].as_array().unwrap().len(), 30);
+        assert!(native_video_body("Seedance-2-custom", &seedance, &[]).is_err());
+        seedance.video_resolution = Some("1080p".into());
+        assert!(native_video_body("Seedance-2.5-custom", &seedance, &[]).is_err());
+
+        let mut h3 = request("MiniMax-H3-2K");
+        h3.video_resolution = Some("2K".into());
+        let body = native_video_body("MiniMax-H3-2K", &h3, &[]).unwrap();
+        assert_eq!(body["model"], "MiniMax-H3-2K");
+        assert!(native_video_body("MiniMax-H3-Max-2K", &h3, &[]).is_err());
+        h3.video_resolution = Some("768p".into());
+        h3.video_mode = VideoGenerationMode::Reference;
+        h3.reference_urls = vec!["https://cdn.test/image.png".into()];
+        assert!(native_video_body("MiniMax-H3-Max-custom", &h3, &[]).is_err());
+
+        let mut image = request("image-01-live-custom");
+        image.size = Some("1024x1024".into());
+        assert!(minimax_image_body("image-01-live-custom", &image, &[], None).is_err());
+        image.size = Some("1:1".into());
+        assert_eq!(
+            minimax_image_body("image-01-live-custom", &image, &[], None).unwrap()["model"],
+            "image-01-live-custom"
+        );
+    }
 
     fn request(model: &str) -> MediaGenerationRequest {
         serde_json::from_value(json!({"kind": "video", "model": model, "prompt": "A slow camera pan", "count": 1, "seconds": 10})).unwrap()
