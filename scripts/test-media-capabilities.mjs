@@ -63,7 +63,7 @@ test("only Seedance 2.5 exposes 30 seconds and 30 image references", () => {
   assert.deepEqual(v2.resolutions, ["480p", "720p", "1080p", "4K"]);
   assert.equal(v2.referenceLimit, 9);
   assert.ok(!v2.durations.includes(30));
-  assert.deepEqual(v25.resolutions, ["480p", "720p"]);
+  assert.deepEqual(v25.resolutions, ["480p", "720p", "1080p"]);
   assert.equal(v25.referenceLimit, 30);
   assert.ok(v25.durations.includes(30));
 });

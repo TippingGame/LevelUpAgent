@@ -129,8 +129,8 @@ pub(super) fn validate_native_video_request(
         .unwrap_or(default_resolution)
         .to_ascii_lowercase();
     let supported = if seedance {
-        matches!(resolution.as_str(), "480p" | "720p")
-            || (!version_25 && matches!(resolution.as_str(), "1080p" | "4k"))
+        matches!(resolution.as_str(), "480p" | "720p" | "1080p")
+            || (!version_25 && resolution == "4k")
     } else if max {
         matches!(resolution.as_str(), "480p" | "768p")
     } else {
@@ -553,6 +553,10 @@ mod tests {
         assert_eq!(body["referenceImages"].as_array().unwrap().len(), 30);
         assert!(native_video_body("Seedance-2-custom", &seedance, &[]).is_err());
         seedance.video_resolution = Some("1080p".into());
+        let body = native_video_body("Seedance-2.5-custom", &seedance, &[]).unwrap();
+        assert_eq!(body["model"], "Seedance-2.5-custom");
+        assert_eq!(body["resolution"], "1080p");
+        seedance.video_resolution = Some("4K".into());
         assert!(native_video_body("Seedance-2.5-custom", &seedance, &[]).is_err());
 
         let mut h3 = request("MiniMax-H3-2K");
@@ -660,7 +664,10 @@ mod tests {
         assert_eq!(swapped["last_image"], "https://cdn.test/first.png");
         assert!(native_video_body("Seedance-2", &request, &[]).is_err());
         request.video_resolution = Some("1080p".into());
-        assert!(native_video_body("Seedance-2.5", &request, &[]).is_err());
+        assert_eq!(
+            native_video_body("Seedance-2.5", &request, &[]).unwrap()["resolution"],
+            "1080p"
+        );
         request.seconds = Some(15);
         assert!(native_video_body("Seedance-2", &request, &[]).is_ok());
     }

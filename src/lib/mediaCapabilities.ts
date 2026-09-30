@@ -39,7 +39,7 @@ export function videoModelCapabilities(model: string, mode: VideoGenerationMode 
     ? max ? ["text", "image", "first_last"] : ["text", "image", "first_last", "reference"]
     : grok15 ? ["image"] : grok ? ["text", "image", "reference", "video"] : ["text"];
   const resolutions = minimax ? max ? ["480p", "768p"] : ["768p", "2K"]
-    : seedance ? version25 ? ["480p", "720p"] : ["480p", "720p", "1080p", "4K"]
+    : seedance ? version25 ? ["480p", "720p", "1080p"] : ["480p", "720p", "1080p", "4K"]
     : grok15 ? ["480p", "720p", "1080p"] : ["480p", "720p"];
   const durations = native ? [max ? 5 : 4, ...(max ? [] : [5]), 8, 10, 12, 15, ...(version25 ? [20, 30] : [])]
     : grok ? mode === "reference" ? [4, 8, 10] : [4, 8, 10, 12, 15] : [4, 8, 12];
