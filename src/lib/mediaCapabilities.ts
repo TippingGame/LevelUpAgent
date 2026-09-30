@@ -9,8 +9,15 @@ export function mediaModelBaseId(model: string) {
 
 export function selectStudioMediaModel(models: MediaModelInfo[], savedKey?: string) {
   return models.find((model) => `${model.profileId}::${model.id}` === savedKey)
-    ?? models.find((model) => model.recommended)
     ?? models[0];
+}
+
+export function sortStudioMediaModels(models: MediaModelInfo[]) {
+  return [...models].sort((left, right) =>
+    left.id.localeCompare(right.id, "en", { numeric: true, sensitivity: "base" })
+    || left.profileName.localeCompare(right.profileName, "zh-CN", { numeric: true })
+    || left.profileId.localeCompare(right.profileId, "en"),
+  );
 }
 
 export function mediaModelSupportsExplicitImageMask(

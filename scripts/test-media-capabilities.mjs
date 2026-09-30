@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isMiniMaxImageModel, mediaModelBaseId, mediaModelSupportsExplicitImageMask, selectStudioMediaModel, videoModelCapabilities } from "../src/lib/mediaCapabilities.ts";
+import { isMiniMaxImageModel, mediaModelBaseId, mediaModelSupportsExplicitImageMask, selectStudioMediaModel, sortStudioMediaModels, videoModelCapabilities } from "../src/lib/mediaCapabilities.ts";
 
 test("suffixed aliases inherit the most specific base capabilities", () => {
   for (const base of ["MiniMax-H3", "MiniMax-H3-Max", "Seedance-2", "Seedance-2.0", "Seedance-2.5", "grok-imagine-video-1.5"]) {
@@ -20,18 +20,31 @@ test("suffixed aliases inherit the most specific base capabilities", () => {
   assert.equal(selectStudioMediaModel([alias], "minimax::MiniMax-H3-2K"), alias);
 });
 
-test("studio uses an available recommendation and preserves explicit model choice", () => {
+test("studio follows list order and preserves explicit model choice without recommendation bias", () => {
   const live = { id: "image-01-live", profileId: "minimax", recommended: false };
   const image = { id: "image-01", profileId: "minimax", recommended: true };
-  assert.equal(selectStudioMediaModel([live, image]), image);
+  assert.equal(selectStudioMediaModel([live, image]), live);
+  assert.equal(selectStudioMediaModel([live, image], "missing::model"), live);
+  assert.equal(selectStudioMediaModel([live, image], "minimax::image-01"), image);
   assert.equal(selectStudioMediaModel([live, image], "minimax::image-01-live"), live);
   assert.equal(selectStudioMediaModel([image], "minimax::image-01-live"), image);
   assert.equal(selectStudioMediaModel([live, image], "minimax::image-01-live"), live);
   assert.equal(selectStudioMediaModel([]), undefined);
   const seedance2 = { id: "Seedance-2", profileId: "seedance", recommended: false };
   const seedance25 = { id: "Seedance-2.5", profileId: "seedance", recommended: true };
-  assert.equal(selectStudioMediaModel([seedance2, seedance25]), seedance25);
+  assert.equal(selectStudioMediaModel([seedance2, seedance25]), seedance2);
   assert.equal(selectStudioMediaModel([seedance2, seedance25], "seedance::Seedance-2"), seedance2);
+});
+
+test("studio sorts model names naturally without recommendation or rank priority", () => {
+  const models = [
+    { id: "model-10", profileName: "A", profileId: "a", recommended: true, rank: 100 },
+    { id: "model-2", profileName: "B", profileId: "b", recommended: false, rank: 1 },
+    { id: "model-2", profileName: "A", profileId: "a", recommended: false, rank: 1 },
+  ];
+  const sorted = sortStudioMediaModels(models);
+  assert.deepEqual(sorted, [models[2], models[1], models[0]]);
+  assert.equal(models[0].id, "model-10");
 });
 
 test("MiniMax image families use character references without mask controls", () => {

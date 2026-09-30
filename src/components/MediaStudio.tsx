@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -63,7 +64,7 @@ import {
   type ArmorSkillState,
 } from "../lib/armorMode";
 import { copyText } from "../lib/clipboard";
-import { isMiniMaxImageModel, mediaModelBaseId, mediaModelSupportsExplicitImageMask, selectStudioMediaModel, videoModelCapabilities } from "../lib/mediaCapabilities";
+import { isMiniMaxImageModel, mediaModelBaseId, mediaModelSupportsExplicitImageMask, selectStudioMediaModel, sortStudioMediaModels, videoModelCapabilities } from "../lib/mediaCapabilities";
 import { createMediaReferenceUrl, imageEditInputs, moveMediaReference, orderedMediaReferenceUrls, type MediaReferenceUrl } from "../lib/mediaReferences";
 import { createMediaPoller } from "../lib/mediaPolling";
 import type {
@@ -213,7 +214,7 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
   const historyRequestRef = useRef<Record<MediaKind, number>>({ image: 0, video: 0, audio: 0 });
 
   const models = useMemo(
-    () => (catalog?.models ?? []).filter((model) => model.kind === kind),
+    () => sortStudioMediaModels((catalog?.models ?? []).filter((model) => model.kind === kind)),
     [catalog, kind],
   );
   const editInputs = imageEditInputs(imageEditEntries, imageReferences);
@@ -956,14 +957,12 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
                 {requiresImageMask && models.length > 0 && eligibleModels.length === 0 && <option value="">{tr("没有支持 PNG 蒙版的模型", "No model supports PNG masks")}</option>}
                 {models.map((model) => (
                   <option value={modelKey(model)} disabled={requiresImageMask && !mediaModelSupportsExplicitImageMask(model)} key={modelKey(model)}>
-                    {model.recommended ? `★ ${tr("推荐", "Recommended")} · ` : ""}{model.id} · {model.profileName}{requiresImageMask && !mediaModelSupportsExplicitImageMask(model) ? tr(" · 不支持蒙版", " · No mask support") : ""}
+                    {model.id} · {model.profileName}{requiresImageMask && !mediaModelSupportsExplicitImageMask(model) ? tr(" · 不支持蒙版", " · No mask support") : ""}
                   </option>
                 ))}
               </select>
             </label>
-            {requiresImageMask && selected
-              ? <span className="recommended-model"><Check size={12} />{tr("当前模型支持 PNG 蒙版编辑", "The current model supports PNG mask editing")}</span>
-              : selected?.recommended && <span className="recommended-model"><Sparkles size={12} />{tr("已自动选择推荐模型", "Recommended model selected automatically")}</span>}
+            {requiresImageMask && selected && <span className="recommended-model"><Check size={12} />{tr("当前模型支持 PNG 蒙版编辑", "The current model supports PNG mask editing")}</span>}
           </div>
 
           {kind === "image" && <div className="media-image-mode-control">
@@ -1369,6 +1368,9 @@ export function MediaImagePreview({
   const [imageSize, setImageSize] = useState({ width: 0, height: 0 });
   const [view, setView] = useState<PreviewTransform>({ zoom: 1, x: 0, y: 0 });
   const viewRef = useRef(view);
+  const exportingRef = useRef(false);
+  const currentAssetIdRef = useRef(asset.id);
+  currentAssetIdRef.current = asset.id;
   const [dragging, setDragging] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState(false);
@@ -1389,7 +1391,6 @@ export function MediaImagePreview({
     const resetView = { zoom: 1, x: 0, y: 0 };
     viewRef.current = resetView;
     setView(resetView);
-    setExporting(false);
     setExportError(false);
   }, [asset.id]);
 
@@ -1401,14 +1402,6 @@ export function MediaImagePreview({
   useEffect(() => () => {
     if (dragFrameRef.current !== null) window.cancelAnimationFrame(dragFrameRef.current);
   }, []);
-
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
 
   useEffect(() => {
     const handleResize = () => {
@@ -1559,12 +1552,6 @@ export function MediaImagePreview({
     } else if (event.key.toLocaleLowerCase() === "f") {
       event.preventDefault();
       fitImage();
-    } else if (event.key === "ArrowLeft") {
-      event.preventDefault();
-      panBy(56, 0);
-    } else if (event.key === "ArrowRight") {
-      event.preventDefault();
-      panBy(-56, 0);
     } else if (event.key === "ArrowUp") {
       event.preventDefault();
       panBy(0, 56);
@@ -1574,23 +1561,44 @@ export function MediaImagePreview({
     }
   };
 
-  if (!url) return null;
   const navigateTo = (next: MediaAsset | undefined) => {
     if (!next) return;
     onNavigate(next);
   };
-  const downloadImage = async () => {
-    if (exporting || asset.status !== "completed" || !asset.fileName) return;
+  const downloadImage = useCallback(async () => {
+    if (exportingRef.current || asset.status !== "completed" || !asset.fileName) return;
+    exportingRef.current = true;
     setExporting(true);
     setExportError(false);
     try {
       await exportMediaAsset(asset);
     } catch {
-      setExportError(true);
+      if (currentAssetIdRef.current === asset.id) setExportError(true);
     } finally {
+      exportingRef.current = false;
       setExporting(false);
     }
-  };
+  }, [asset]);
+
+  useEffect(() => {
+    if (!url) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      if (event.target instanceof HTMLElement && event.target.closest("input, textarea, select, [contenteditable]:not([contenteditable='false'])")) return;
+      if (!["Escape", "ArrowLeft", "ArrowRight", "Enter"].includes(event.key)) return;
+      // Capture before the focused button or canvas handles the key.
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.key === "Escape") onClose();
+      else if (event.key === "ArrowLeft" && previousAsset) onNavigate(previousAsset);
+      else if (event.key === "ArrowRight" && nextAsset) onNavigate(nextAsset);
+      else if (event.key === "Enter" && !event.repeat) void downloadImage();
+    };
+    window.addEventListener("keydown", handleKeyDown, true);
+    return () => window.removeEventListener("keydown", handleKeyDown, true);
+  }, [url, previousAsset, nextAsset, onNavigate, onClose, downloadImage]);
+
+  if (!url) return null;
   const createdAt = new Intl.DateTimeFormat(locale, {
     year: "numeric",
     month: "short",
@@ -1625,7 +1633,8 @@ export function MediaImagePreview({
               disabled={exporting || !asset.fileName}
               onClick={() => void downloadImage()}
               aria-label={tr("下载图片", "Download image")}
-              title={exportError ? tr("下载失败，点击重试", "Download failed, click to retry") : tr("下载图片", "Download image")}
+              aria-keyshortcuts="Enter"
+              title={`${exportError ? tr("下载失败，点击重试", "Download failed, click to retry") : tr("下载图片", "Download image")} (Enter)`}
             >
               {exporting ? <LoaderCircle className="spin" size={17} /> : <Download size={17} />}
             </button>
@@ -1657,7 +1666,8 @@ export function MediaImagePreview({
             disabled={!previousAsset}
             onClick={() => navigateTo(previousAsset)}
             aria-label={tr("上一张图片", "Previous image")}
-            title={tr("上一张图片", "Previous image")}
+            aria-keyshortcuts="ArrowLeft"
+            title={`${tr("上一张图片", "Previous image")} (←)`}
           >
             <ArrowLeft size={21} />
           </button>
@@ -1685,7 +1695,8 @@ export function MediaImagePreview({
             disabled={!nextAsset}
             onClick={() => navigateTo(nextAsset)}
             aria-label={tr("下一张图片", "Next image")}
-            title={tr("下一张图片", "Next image")}
+            aria-keyshortcuts="ArrowRight"
+            title={`${tr("下一张图片", "Next image")} (→)`}
           >
             <ArrowRight size={21} />
           </button>
@@ -1697,7 +1708,7 @@ export function MediaImagePreview({
             <output aria-live="polite">{Math.round(view.zoom * 100)}%</output>
             <button type="button" disabled={!imageReady || view.zoom >= MAX_PREVIEW_ZOOM} onClick={() => applyZoom(view.zoom * PREVIEW_ZOOM_STEP)} aria-label={tr("放大", "Zoom in")} title={tr("放大", "Zoom in")}><ZoomIn size={15} /></button>
           </div>
-          <div className="media-image-pan-hint" aria-hidden="true"><Move size={14} /><span>{tr("拖动查看 · 滚轮缩放 · 双击切换", "Drag to pan · wheel to zoom · double-click to toggle")}</span></div>
+          <div className="media-image-pan-hint" aria-hidden="true"><Move size={14} /><span>{tr("← → 切换图片 · 回车下载 · 拖动查看 · 滚轮缩放", "← → switch images · Enter to download · drag to pan · wheel to zoom")}</span></div>
         </div>
         <footer>
           <div>
