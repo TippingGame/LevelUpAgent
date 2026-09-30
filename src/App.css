@@ -828,6 +828,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .sidebar-update-button:hover:not(:disabled) { border-color: color-mix(in srgb, var(--accent) 42%, var(--line)); background: color-mix(in srgb, var(--accent) 14%, var(--surface)); transform: translateY(-1px); }
 .sidebar-update-button:disabled { opacity: .72; cursor: wait; }
 
+.update-button-container { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.update-button-container > small { color: var(--muted); font-size: var(--font-compact); }
+.update-progress { display: block; width: 100%; height: 4px; margin-top: 3px; overflow: hidden; border-radius: 4px; background: var(--line); }
+.update-progress > span { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width .2s ease; }
+.update-progress.indeterminate > span { animation: update-download-pulse 1.4s ease-in-out infinite alternate; }
+@keyframes update-download-pulse { from { transform: translateX(0); } to { transform: translateX(185%); } }
+@media (prefers-reduced-motion: reduce) { .update-progress > span { animation: none !important; transition: none; } }
+
 .account-button {
   width: 100%;
   display: grid;

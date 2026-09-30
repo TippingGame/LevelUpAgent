@@ -332,6 +332,7 @@ import type {
   AgentMode,
   AgentThread,
   AppUpdateInfo,
+  AppUpdateProgress,
   ConfigWritePreview,
   ConfigWriteResult,
   ConversationChangeSet,
@@ -858,6 +859,7 @@ function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const [availableAppUpdate, setAvailableAppUpdate] = useState<AppUpdateInfo | null>(null);
   const [updateInstalling, setUpdateInstalling] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<AppUpdateProgress | null>(null);
   const [gitStatus, setGitStatus] = useState<GitStatus | null>(null);
   const [gitDiff, setGitDiff] = useState<GitDiff | null>(null);
   const [goalState, setGoalState] = useState<GoalState | null>(null);
@@ -2110,12 +2112,14 @@ function App() {
   const installAvailableUpdate = async () => {
     if (!availableAppUpdate || updateInstalling) return;
     setUpdateInstalling(true);
+    setUpdateProgress({ phase: "downloading", downloadedBytes: 0 });
     setNotice(`${tr("正在下载并安装更新", "Downloading and installing update")} ${availableAppUpdate.version}`);
     try {
-      await installAppUpdate();
+      await installAppUpdate(setUpdateProgress);
     } catch (error) {
       setNotice(`${tr("更新安装失败", "Update installation failed")}: ${errorText(error)}`);
       setUpdateInstalling(false);
+      setUpdateProgress(null);
     }
   };
 
@@ -5133,13 +5137,14 @@ function App() {
               className="sidebar-update-button"
               type="button"
               disabled={updateInstalling}
-              title={availableAppUpdate.body || `${tr("安装并重启", "Install and restart")} ${availableAppUpdate.version}`}
+              title={updateInstalling ? `${updateProgressLabel(updateProgress)} · ${updateProgressDetail(updateProgress)}` : availableAppUpdate.body || `${tr("安装并重启", "Install and restart")} ${availableAppUpdate.version}`}
               onClick={() => void installAvailableUpdate()}
             >
               {updateInstalling ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}
               <span>
-                <strong>{updateInstalling ? tr("正在更新…", "Updating…") : `${tr("更新至", "Update to")} v${availableAppUpdate.version.replace(/^v/i, "")}`}</strong>
-                <small>{tr("安装完成后自动重启", "Restarts after installation")}</small>
+                <strong>{updateInstalling ? updateProgressLabel(updateProgress) : `${tr("更新至", "Update to")} v${availableAppUpdate.version.replace(/^v/i, "")}`}</strong>
+                <small>{updateInstalling ? updateProgressDetail(updateProgress) : tr("安装完成后自动重启", "Restarts after installation")}</small>
+                {updateInstalling && updateProgress?.phase === "downloading" && <UpdateProgressBar progress={updateProgress} />}
               </span>
             </button>
           )}
@@ -9388,17 +9393,49 @@ function ConnectionDialog({
   );
 }
 
+function formatUpdateBytes(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${Math.max(0, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function updateProgressLabel(progress: AppUpdateProgress | null): string {
+  if (!progress || progress.phase === "downloading") {
+    if (progress?.totalBytes) return `${tr("正在下载", "Downloading")} ${Math.min(100, Math.floor(progress.downloadedBytes / progress.totalBytes * 100))}%`;
+    return tr("正在下载…", "Downloading…");
+  }
+  return progress.phase === "installing" ? tr("正在安装…", "Installing…") : tr("正在重启…", "Restarting…");
+}
+
+function updateProgressDetail(progress: AppUpdateProgress | null): string {
+  if (!progress) return tr("准备下载", "Preparing download");
+  if (progress.phase === "downloading") {
+    return progress.totalBytes
+      ? `${formatUpdateBytes(progress.downloadedBytes)} / ${formatUpdateBytes(progress.totalBytes)}`
+      : formatUpdateBytes(progress.downloadedBytes);
+  }
+  return progress.phase === "installing" ? tr("下载完成", "Download complete") : tr("应用即将重新打开", "The app will reopen shortly");
+}
+
+function UpdateProgressBar({ progress }: { progress: AppUpdateProgress }) {
+  const percent = progress.totalBytes ? Math.min(100, Math.floor(progress.downloadedBytes / progress.totalBytes * 100)) : undefined;
+  return <span className={`update-progress${percent === undefined ? " indeterminate" : ""}`} role="progressbar" aria-label={tr("更新包下载进度", "Update download progress")} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent} aria-valuetext={updateProgressDetail(progress)}>
+    <span style={{ width: percent === undefined ? "35%" : `${percent}%` }} />
+  </span>;
+}
+
 function UpdateButton() {
   const [status, setStatus] = useState<"idle" | "checking" | "available" | "current" | "installing" | "error">("idle");
   const [version, setVersion] = useState("");
+  const [progress, setProgress] = useState<AppUpdateProgress | null>(null);
   const [detail, setDetail] = useState(tr("检查已签名更新", "Check for signed updates"));
   const act = async () => {
     if (status === "checking" || status === "installing") return;
     try {
       if (status === "available") {
         setStatus("installing");
+        setProgress({ phase: "downloading", downloadedBytes: 0 });
         setDetail(`${tr("正在安装", "Installing")} ${version}`);
-        await installAppUpdate();
+        await installAppUpdate(setProgress);
         return;
       }
       setStatus("checking");
@@ -9414,23 +9451,30 @@ function UpdateButton() {
     } catch (error) {
       setDetail(errorText(error));
       setStatus("error");
+      setProgress(null);
     }
   };
   const label = status === "checking"
     ? tr("检查更新…", "Checking…")
     : status === "installing"
-      ? tr("安装并重启…", "Installing and restarting…")
+      ? updateProgressLabel(progress)
       : status === "available"
         ? `${tr("安装", "Install")} ${version}`
         : status === "current"
           ? tr("已是最新版", "Up to date")
           : status === "error"
-            ? tr("更新未配置", "Updater not configured")
+            ? tr("更新失败，重试", "Update failed, retry")
             : tr("检查更新", "Check for updates");
   return (
-    <button className="secondary-button" onClick={act} disabled={status === "checking" || status === "installing"} title={detail}>
-      <RefreshCw size={14} className={status === "checking" || status === "installing" ? "spin" : ""} /> {label}
-    </button>
+    <div className="update-button-container">
+      <button className="secondary-button" onClick={act} disabled={status === "checking" || status === "installing"} title={status === "installing" ? updateProgressDetail(progress) : detail}>
+        <RefreshCw size={14} className={status === "checking" || status === "installing" ? "spin" : ""} /> {label}
+      </button>
+      {status === "installing" && <>
+        <small>{updateProgressDetail(progress)}</small>
+        {progress?.phase === "downloading" && <UpdateProgressBar progress={progress} />}
+      </>}
+    </div>
   );
 }
 

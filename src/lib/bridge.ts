@@ -13,6 +13,7 @@ import type {
   AgentThread,
   AgentTurnResponse,
   AppUpdateInfo,
+  AppUpdateProgress,
   BrowserPreview,
   BrowserSessionSummary,
   ConfigWritePreview,
@@ -970,14 +971,30 @@ export function checkAppUpdateOnStartup(): Promise<AppUpdateInfo | null> {
   return startupAppUpdateCheck;
 }
 
-export async function installAppUpdate(): Promise<void> {
+export async function installAppUpdate(onProgress?: (progress: AppUpdateProgress) => void): Promise<void> {
   if (!isDesktop()) throw new Error("Updates are available only in the desktop app");
   if (!pendingAppUpdate) {
     const { check } = await import("@tauri-apps/plugin-updater");
     pendingAppUpdate = await check();
   }
   if (!pendingAppUpdate) throw new Error("No update is available");
-  await pendingAppUpdate.downloadAndInstall();
+  let downloadedBytes = 0;
+  let totalBytes: number | undefined;
+  onProgress?.({ phase: "downloading", downloadedBytes });
+  await pendingAppUpdate.downloadAndInstall((event) => {
+    if (event.event === "Started") {
+      downloadedBytes = 0;
+      totalBytes = event.data.contentLength && event.data.contentLength > 0 ? event.data.contentLength : undefined;
+    } else if (event.event === "Progress") {
+      downloadedBytes += event.data.chunkLength;
+    }
+    onProgress?.({
+      phase: event.event === "Finished" ? "installing" : "downloading",
+      downloadedBytes,
+      totalBytes,
+    });
+  });
+  onProgress?.({ phase: "restarting", downloadedBytes, totalBytes });
   const { relaunch } = await import("@tauri-apps/plugin-process");
   await relaunch();
 }

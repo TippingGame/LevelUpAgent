@@ -445,6 +445,12 @@ export interface AppUpdateInfo {
   body?: string;
 }
 
+export interface AppUpdateProgress {
+  phase: "downloading" | "installing" | "restarting";
+  downloadedBytes: number;
+  totalBytes?: number;
+}
+
 export type ExternalConfigTarget = "codex" | "claude" | "gemini" | "opencode";
 
 export interface ConfigFilePreview {
