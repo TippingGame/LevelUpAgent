@@ -199,13 +199,13 @@ test("Armor Mode UI, storage, and request wiring stay connected", () => {
   const mediaStudio = readFileSync(new URL("../src/components/MediaStudio.tsx", import.meta.url), "utf8");
   const writingStudio = readFileSync(new URL("../src/components/WritingStudio.tsx", import.meta.url), "utf8");
   const constellationStudio = readFileSync(new URL("../src/components/ConstellationStudio.tsx", import.meta.url), "utf8");
-  assert.match(mediaStudio, /className=\{`media-studio\$\{dropActive \? " file-drag-active" : ""\}\$\{armorClassName\}`\}/);
+  assert.match(mediaStudio, /className=\{`media-studio creative-studio\$\{dropActive \? " file-drag-active" : ""\}\$\{armorClassName\}`\}/);
   assert.match(mediaStudio, /data-armor-level=\{armorMode \? armorModeLevel : undefined\}/);
   assert.match(mediaStudio, /armorMode=\{armorMode\}/);
   assert.match(mediaStudio, /armorModeLevel=\{armorModeLevel\}/);
-  assert.match(writingStudio, /className=\{`writing-studio\$\{armorClassName\}`\}/);
+  assert.match(writingStudio, /className=\{`writing-studio creative-studio\$\{armorClassName\}`\}/);
   assert.match(writingStudio, /data-armor-level=\{armorDataLevel\}/);
-  assert.match(constellationStudio, /className=\{`constellation-studio\$\{armorClassName\}`\}/);
+  assert.match(constellationStudio, /className=\{`constellation-studio creative-studio\$\{armorClassName\}`\}/);
   assert.match(constellationStudio, /data-armor-level=\{props\.armorMode \? props\.armorModeLevel : undefined\}/);
   assert.match(mediaStudio, /armorModeMediaPrompt\(armorMode, armorModeLevel, kind/);
   assert.match(mediaStudio, /armorModeMediaInstructions\(armorMode, armorModeLevel, kind/);

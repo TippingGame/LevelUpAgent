@@ -1,29 +1,24 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { Check, CircleAlert, GripVertical, Plus, Search, Settings2, Sparkles, Trash2, X } from "lucide-react";
 import { mediaAssetUrl } from "../lib/bridge";
-import { normalizeConstellationGraph, type ConstellationBlueprint, type ConstellationGraph } from "../lib/constellation";
+import { normalizeConstellationGraph, type ConstellationGraph } from "../lib/constellation";
 import type { ConstellationProjectRecord } from "../lib/types";
 import { tr } from "../lib/i18n";
 
-export function ConstellationOverview({ ready, loading, onRetry, onMedia, onWriting, records, query, error, onQuery, onOpen, onCreate, onImport, onCreateTemplate, onPosition, onRename, onDuplicate, onDelete, templates, onDismissError }: {
+export function ConstellationOverview({ ready, loading, onRetry, records, query, error, onQuery, onOpen, onCreate, onPosition, onRename, onDuplicate, onDelete, onDismissError }: {
   ready: boolean;
   loading: boolean;
   onRetry: () => void;
-  onMedia: () => void;
-  onWriting: () => void;
   records: ConstellationProjectRecord[];
   query: string;
   error?: string;
   onQuery: (value: string) => void;
-  onOpen: (record: ConstellationProjectRecord) => void;
+  onOpen: (record: ConstellationProjectRecord, cover: HTMLElement) => void;
   onCreate: () => void;
-  onImport: () => void;
-  onCreateTemplate: (blueprint: ConstellationBlueprint) => void;
   onPosition: (record: ConstellationProjectRecord, position: { x: number; y: number }) => void;
   onRename: (record: ConstellationProjectRecord, title: string) => void;
   onDuplicate: (record: ConstellationProjectRecord) => void;
   onDelete: (record: ConstellationProjectRecord) => void;
-  templates: ConstellationBlueprint[];
   onDismissError: () => void;
 }) {
   const projects = useMemo(() => [...records].sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)).map((record, index) => {
@@ -34,19 +29,15 @@ export function ConstellationOverview({ ready, loading, onRetry, onMedia, onWrit
   }), [records]);
   const filtered = projects.filter(({ record }) => !query.trim() || record.title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
   const planeHeight = Math.max(340, ...projects.map(({ position }) => position.y + 260));
-  const [templateId, setTemplateId] = useState(templates[0]?.id ?? "");
-  const selectedTemplate = templates.find((template) => template.id === templateId);
   return <section className="constellation-overview">
-    <header><div><span>✦</span><div><strong>{tr("星图", "Constellation")}</strong><small>{tr("把灵感连成作品", "Connect ideas into finished work")}</small></div></div><div><button type="button" onClick={onMedia}>{tr("媒体", "Media")}</button><button type="button" onClick={onWriting}>{tr("写作", "Writing")}</button><label><Search size={14} /><input value={query} onChange={(event) => onQuery(event.target.value)} placeholder={tr("寻找一片星图", "Find a constellation")} /></label><button type="button" disabled={!ready} onClick={onCreate}><Plus size={14} />{tr("新建项目", "New project")}</button><select aria-label={tr("选择模板", "Choose template")} value={templateId} onChange={(event) => setTemplateId(event.target.value)}><option value="">{tr("模板", "Template")}</option>{templates.map((template) => <option value={template.id} key={template.id}>{template.name}</option>)}</select><button type="button" disabled={!ready || !selectedTemplate} onClick={() => selectedTemplate && onCreateTemplate(selectedTemplate)}><Sparkles size={14} />{tr("从模板", "From template")}</button></div></header>
-    <div className="constellation-starfield" aria-hidden="true">{Array.from({ length: 64 }, (_, index) => <i key={index} style={{ left: `${(index * 37 + 11) % 100}%`, top: `${(index * 19 + 7) % 100}%`, opacity: .15 + (index % 4) * .12, width: index % 7 === 0 ? 2 : 1, height: index % 7 === 0 ? 2 : 1 }} />)}</div>
     <div className="constellation-overview-intro"><small>YOUR CREATIVE UNIVERSE</small><h1>{tr("让灵感，在这里相遇。", "A place for ideas to meet.")}</h1><p>{tr("每一扇小窗，都是一份可以继续生长的创作。", "Every window holds a creation ready to grow.")}</p></div>
+    <div className="constellation-overview-tools"><label><Search size={14} /><input aria-label={tr("寻找一片星图", "Find a constellation")} value={query} onChange={(event) => onQuery(event.target.value)} placeholder={tr("寻找一片星图", "Find a constellation")} />{query && <button type="button" aria-label={tr("清空搜索", "Clear search")} onClick={() => onQuery("")}><X size={12} /></button>}</label></div>
     <div className="constellation-project-grid" style={{ height: planeHeight }} inert={!ready}>
       {filtered.map(({ record, graph, position }) => <ConstellationProjectCard key={record.id} record={record} graph={graph} position={position} onOpen={onOpen} onPosition={onPosition} onRename={onRename} onDuplicate={onDuplicate} onDelete={onDelete} />)}
       {loading && <div className="constellation-overview-empty" role="status">{tr("正在加载项目…", "Loading projects…")}</div>}
       {!loading && filtered.length === 0 && <div className="constellation-overview-empty"><Sparkles size={24} /><span>{query ? tr("没有找到这片星图", "No matching constellation") : tr("从一个想法开始", "Start with an idea")}</span><button type="button" disabled={!ready} onClick={onCreate}>{tr("创建第一份项目", "Create your first project")}</button></div>}
     </div>
     {error && <div className="constellation-overview-error" role="alert"><CircleAlert size={14} /><span>{error}</span>{!ready && <button type="button" onClick={onRetry}>{tr("重试加载", "Retry loading")}</button>}<button type="button" onClick={onDismissError}><X size={14} /></button></div>}
-    <footer>{tr("点开一份创作，进入它的蓝图。", "Open a creation to enter its blueprint.")} <button type="button" disabled={!ready} onClick={onImport}>{tr("导入项目", "Import project")}</button></footer>
   </section>;
 }
 
@@ -54,7 +45,7 @@ function ConstellationProjectCard({ record, graph, position, onOpen, onPosition,
   record: ConstellationProjectRecord;
   graph: ConstellationGraph | null;
   position: { x: number; y: number };
-  onOpen: (record: ConstellationProjectRecord) => void;
+  onOpen: (record: ConstellationProjectRecord, cover: HTMLElement) => void;
   onPosition: (record: ConstellationProjectRecord, position: { x: number; y: number }) => void;
   onRename: (record: ConstellationProjectRecord, title: string) => void;
   onDuplicate: (record: ConstellationProjectRecord) => void;
@@ -68,7 +59,7 @@ function ConstellationProjectCard({ record, graph, position, onOpen, onPosition,
   useEffect(() => setOffset(position), [position.x, position.y]);
   useEffect(() => { if (!editing) setTitle(record.title); }, [editing, record.title]);
   const clamp = (x: number, y: number) => ({ x: Math.max(-350, Math.min(220, x)), y: Math.max(0, Math.min(100000, y)) });
-  return <article className="constellation-project-card" style={{ transform: `translate(${offset.x}px, ${offset.y}px)` }}>
+  return <article className="constellation-project-card" data-project-id={record.id} style={{ transform: `translate(${offset.x}px, ${offset.y}px)` }}>
     <button type="button" className="constellation-project-drag" aria-label={tr(`移动 ${record.title}`, `Move ${record.title}`)} title={tr("拖动排列；方向键微调", "Drag to arrange; arrow keys to adjust")}
       onKeyDown={(event) => {
         const delta = event.shiftKey ? 40 : 10;
@@ -92,7 +83,7 @@ function ConstellationProjectCard({ record, graph, position, onOpen, onPosition,
         onPosition(record, clamp(drag.origin.x + event.clientX - drag.x, drag.origin.y + event.clientY - drag.y));
       }}
       onPointerCancel={() => { dragRef.current = undefined; setOffset(position); }}><GripVertical size={13} /></button>
-    <button type="button" className="constellation-project-open" onClick={() => onOpen(record)}>
+    <button type="button" className="constellation-project-open" onClick={(event) => onOpen(record, event.currentTarget.querySelector<HTMLElement>(".constellation-project-cover")!)}>
       <div className="constellation-project-cover"><ProjectPreview graph={graph} /></div>
       <strong>{record.title}</strong><small>{tr(`${graph?.nodes.length ?? 0} 个创作节点`, `${graph?.nodes.length ?? 0} creative nodes`)} · {new Date(record.updatedAt).toLocaleDateString()}</small>
     </button>

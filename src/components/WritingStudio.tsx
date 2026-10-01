@@ -32,7 +32,6 @@ import {
 import {
   BookOpen,
   Bot,
-  Boxes,
   Check,
   ChevronDown,
   CircleAlert,
@@ -44,7 +43,6 @@ import {
   FileText,
   GitBranch,
   History,
-  ImagePlus,
   Import,
   LayoutDashboard,
   LibraryBig,
@@ -162,7 +160,7 @@ import {
 } from "./WritingMissionControl";
 import "@xyflow/react/dist/style.css";
 import "./WritingStudio.css";
-import "./CreationModeSwitch.css";
+import { CreativeStudioHeader } from "./CreativeStudioHeader";
 
 type StudioSection = "write" | "entities" | "story" | "references" | "goal";
 type StoryInspectorTab = "node" | "variables" | "issues";
@@ -1282,26 +1280,15 @@ export function WritingStudio({
   const selectedTextLength = Math.max(0, selection.end - selection.start);
 
   return (
-    <main className={`writing-studio${armorClassName}`} data-armor-level={armorDataLevel}>
-      <header className="writing-topbar" data-tauri-drag-region>
-        <div className="writing-brand">
-          <span><BookOpen size={17} /></span>
-          <div><strong>{tr("创作空间", "Creative Studio")}</strong><small>{saving ? tr("正在保存…", "Saving…") : savedAt ? tr("已自动保存", "Autosaved") : tr("本地写作项目", "Local writing projects")}</small></div>
-          <button
+    <main className={`writing-studio creative-studio${armorClassName}`} data-armor-level={armorDataLevel}>
+      <CreativeStudioHeader mode="writing" className="writing-topbar" subtitle={saving ? tr("正在保存…", "Saving…") : savedAt ? tr("已自动保存", "Autosaved") : tr("本地写作项目", "Local writing projects")} onMedia={onMedia} onConstellation={onConstellation} context={<button
             type="button"
             className="writing-navigator-toggle"
             aria-label={navigatorOpen ? tr("关闭写作导航", "Close writing navigation") : tr("打开写作导航", "Open writing navigation")}
             aria-expanded={navigatorOpen}
             title={navigatorOpen ? tr("关闭写作导航", "Close writing navigation") : tr("打开写作导航", "Open writing navigation")}
             onClick={() => setNavigatorOpen((value) => !value)}
-          >{navigatorOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}</button>
-        </div>
-        <div className="creation-mode-switch" role="tablist" aria-label={tr("创作类型", "Creation mode")}>
-          <button type="button" role="tab" aria-selected="false" onClick={onMedia}><ImagePlus size={14} />{tr("图片 · 视频 · 语音", "Image · Video · Speech")}</button>
-          <button type="button" role="tab" aria-selected="true" className="active"><FileText size={14} />{tr("写作", "Writing")}</button>
-          <button type="button" role="tab" aria-selected="false" onClick={onConstellation}><Boxes size={14} />{tr("星图", "Constellation")}</button>
-        </div>
-        <div className="writing-topbar-actions">
+          >{navigatorOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}</button>} actions={<div className="writing-topbar-actions">
           <button type="button" onClick={() => importRef.current?.click()} title={tr("导入 JSON、Markdown、文本或 Yarn", "Import JSON, Markdown, text, or Yarn")}><Import size={15} /></button>
           <div className="writing-menu-wrap">
             <button type="button" aria-expanded={exportOpen} onClick={() => setExportOpen((value) => !value)} title={tr("导出", "Export")}><Download size={15} /><ChevronDown size={12} /></button>
@@ -1352,10 +1339,9 @@ export function WritingStudio({
               </div>
             )}
           </div>
-        </div>
+        </div>} />
         <input ref={importRef} type="file" hidden accept=".json,.md,.markdown,.txt,.yarn" onChange={(event) => void handleImport(event)} />
         <input ref={referenceImportRef} type="file" hidden multiple accept=".md,.markdown,.txt,.json,.csv,.tsv,.yarn" onChange={(event) => void handleReferenceImport(event)} />
-      </header>
 
       <div className={`writing-layout${contextOpen ? " context-open" : ""}${navigatorOpen ? " navigator-open" : ""}`}>
         {navigatorOpen && <button type="button" className="writing-navigator-backdrop" aria-label={tr("关闭写作导航", "Close writing navigation")} onClick={() => setNavigatorOpen(false)} />}

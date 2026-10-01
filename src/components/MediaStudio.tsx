@@ -10,13 +10,11 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import "./MediaStudio.css";
-import "./CreationModeSwitch.css";
+import { CreativeStudioHeader } from "./CreativeStudioHeader";
 import {
   AudioLines,
   ArrowLeft,
   ArrowRight,
-  BookOpen,
-  Boxes,
   Brush,
   Check,
   CircleAlert,
@@ -34,7 +32,6 @@ import {
   Sparkles,
   Trash2,
   Video,
-  WandSparkles,
   X,
   ZoomIn,
   ZoomOut,
@@ -903,7 +900,7 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
   return (
     <main
       ref={rootRef}
-      className={`media-studio${dropActive ? " file-drag-active" : ""}${armorClassName}`}
+      className={`media-studio creative-studio${dropActive ? " file-drag-active" : ""}${armorClassName}`}
       data-armor-level={armorMode ? armorModeLevel : undefined}
       hidden={!active}
       onDragEnter={(event) => event.preventDefault()}
@@ -917,23 +914,12 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
           <small>{tr("素材会添加到当前创作任务，不会进入会话附件", "References are added to Media Studio, not to the conversation")}</small>
         </div>
       )}
-      <header className="media-topbar" data-tauri-drag-region>
-        <div className="media-topbar-brand">
-          <span className="media-title-icon"><WandSparkles size={17} /></span>
-          <span><strong>{tr("创作空间", "Media Studio")}</strong><small>{tr("独立于会话，所有生成结果全局保存", "Independent from conversations, with global history")}</small></span>
-        </div>
-        <div className="creation-mode-switch" role="tablist" aria-label={tr("创作类型", "Creation mode")}>
-          <button type="button" role="tab" aria-selected="true" className="active"><ImagePlus size={14} />{tr("图片 · 视频 · 语音", "Image · Video · Speech")}</button>
-          <button type="button" role="tab" aria-selected="false" onClick={onWriting}><BookOpen size={14} />{tr("写作", "Writing")}</button>
-          <button type="button" role="tab" aria-selected="false" onClick={onConstellation}><Boxes size={14} />{tr("星图", "Constellation")}</button>
-        </div>
-        <div className="media-topbar-actions">
+      <CreativeStudioHeader mode="media" className="media-topbar" subtitle={tr("图片、视频与声音", "Images, video and sound")} onWriting={onWriting} onConstellation={onConstellation} actions={<div className="media-topbar-actions">
           <button className="media-icon-button" disabled={refreshing} onClick={() => void refreshAll()} title={tr("刷新模型和历史", "Refresh models and history")}>
             <RefreshCw className={refreshing ? "spin" : ""} size={16} />
           </button>
           <button className="media-icon-button" onClick={onConfigureConnection} title={tr("模型连接设置", "Model connection settings")}><Settings2 size={16} /></button>
-        </div>
-      </header>
+        </div>} />
 
       <div className="media-studio-body">
         <section className="media-compose-panel">

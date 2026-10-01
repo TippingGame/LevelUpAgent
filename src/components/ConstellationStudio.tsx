@@ -19,6 +19,7 @@ import {
   ReactFlowProvider,
   applyEdgeChanges,
   applyNodeChanges,
+  useNodesInitialized,
   useReactFlow,
   useStoreApi,
   type Connection,
@@ -28,7 +29,6 @@ import {
   type OnConnectStartParams,
 } from "@xyflow/react";
 import {
-  BookOpen,
   Boxes,
   Check,
   ChevronLeft,
@@ -162,7 +162,8 @@ import {
 } from "./ConstellationNodes";
 import "@xyflow/react/dist/style.css";
 import "./ConstellationStudio.css";
-import "./CreationModeSwitch.css";
+import { CreativeStudioHeader } from "./CreativeStudioHeader";
+import { captureConstellationEntry, ConstellationEnterTransition, type ConstellationEntrySnapshot } from "./ConstellationEnterTransition";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isDesktop } from "../lib/bridge";
 
@@ -235,7 +236,7 @@ interface ConstellationProjectPayload {
 export function ConstellationStudio(props: ConstellationStudioProps) {
   const armorClassName = props.armorMode ? ` armor-mode armor-level-${props.armorModeLevel}` : "";
   return (
-    <main className={`constellation-studio${armorClassName}`} data-armor-level={props.armorMode ? props.armorModeLevel : undefined} hidden={!props.active}>
+    <main className={`constellation-studio creative-studio${armorClassName}`} data-armor-level={props.armorMode ? props.armorModeLevel : undefined} hidden={!props.active}>
       <ReactFlowProvider>
         <ConstellationStudioInner {...props} />
       </ReactFlowProvider>
@@ -280,6 +281,10 @@ function ConstellationStudioInner({
   const [projectRecords, setProjectRecords] = useState<ConstellationProjectRecord[]>([]);
   const [projectHydrated, setProjectHydrated] = useState(false);
   const [overviewOpen, setOverviewOpen] = useState(true);
+  const [entrySnapshot, setEntrySnapshot] = useState<ConstellationEntrySnapshot>();
+  const [initialViewportReady, setInitialViewportReady] = useState(true);
+  const finishEntry = useCallback(() => setEntrySnapshot(undefined), []);
+  const [templateId, setTemplateId] = useState(BUILT_IN_CONSTELLATION_BLUEPRINTS[0]?.id ?? "");
   const [projectQuery, setProjectQuery] = useState("");
   const [projectError, setProjectError] = useState<string>();
   const [projectLoadRevision, setProjectLoadRevision] = useState(0);
@@ -363,6 +368,17 @@ function ConstellationStudioInner({
   const suppressMarqueeClickRef = useRef(false);
   const { fitView, screenToFlowPosition, flowToScreenPosition, getIntersectingNodes } = useReactFlow<ConstellationNode, ConstellationEdge>();
   const flowStore = useStoreApi<ConstellationNode, ConstellationEdge>();
+  const nodesInitialized = useNodesInitialized();
+
+  useEffect(() => {
+    if (!active || overviewOpen || initialViewportReady || !nodesInitialized) return;
+    let cancelled = false;
+    // Measure every node before fitting a project that has no saved viewport.
+    void fitView({ padding: .18, maxZoom: 1 }).then(() => {
+      if (!cancelled) setInitialViewportReady(true);
+    });
+    return () => { cancelled = true; };
+  }, [active, overviewOpen, initialViewportReady, nodesInitialized, fitView]);
 
   useEffect(() => { connectionValidityCacheRef.current.clear(); }, [contentNodes, edges]);
 
@@ -627,7 +643,7 @@ function ConstellationStudioInner({
   useEffect(() => onPendingCountChange(mediaPending), [mediaPending, onPendingCountChange]);
 
   useEffect(() => {
-    if (!active || overviewOpen || commandOpen || editorNodeId || sourcePicker || integrationPicker || blueprintDialog) return;
+    if (!active || overviewOpen || entrySnapshot || commandOpen || editorNodeId || sourcePicker || integrationPicker || blueprintDialog) return;
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       const editing = Boolean(target?.closest("input, textarea, select, [contenteditable='true']"));
@@ -685,7 +701,7 @@ function ConstellationStudioInner({
       document.removeEventListener("visibilitychange", onVisibilityChange);
       resetSpacePan();
     };
-  }, [active, fitView, overviewOpen, commandOpen, editorNodeId, sourcePicker, integrationPicker, blueprintDialog]);
+  }, [active, fitView, overviewOpen, entrySnapshot, commandOpen, editorNodeId, sourcePicker, integrationPicker, blueprintDialog]);
 
   const checkpoint = useCallback(() => {
     const snapshot: GraphSnapshot = {
@@ -1768,6 +1784,7 @@ function ConstellationStudioInner({
     const payload = isRecord(record.payload) ? record.payload : {};
     const viewport = payload.viewport;
     restoredViewportRef.current = Boolean(isRecord(viewport) && Number.isFinite(viewport.x) && Number.isFinite(viewport.y) && Number.isFinite(viewport.zoom) && Number(viewport.zoom) > 0);
+    setInitialViewportReady(restoredViewportRef.current || graph.nodes.length === 0);
     viewportRef.current = restoredViewportRef.current ? { ...(viewport as { x: number; y: number; zoom: number }), zoom: Math.max(.18, Math.min(2.2, Number((viewport as { zoom: number }).zoom))) } : { x: 0, y: 0, zoom: 1 };
     setHistoryRevision((value) => value + 1);
     setEditorNodeId(undefined); setSourcePicker(undefined); setIntegrationPicker(undefined); setPreviewAsset(undefined); setNotice(undefined);
@@ -1777,16 +1794,18 @@ function ConstellationStudioInner({
     setOverviewOpen(false);
   };
 
-  const openProject = async (record: ConstellationProjectRecord) => {
+  const openProject = async (record: ConstellationProjectRecord, cover: HTMLElement) => {
     if (!storageReadyRef.current || runningRef.current || projectBusyRef.current) return;
     projectBusyRef.current = true;
     setProjectBusy(true);
+    const snapshot = captureConstellationEntry(cover);
     try {
       await saveCurrentProject();
       await projectSaveQueueRef.current;
       const latest = projectRecordsRef.current.find((item) => item.id === record.id);
       if (!latest) throw new Error(tr("项目已删除", "Project was deleted"));
       loadProjectIntoEditor(latest);
+      setEntrySnapshot(snapshot);
     }
     catch (reason) { setProjectError(errorText(reason)); }
     finally { projectBusyRef.current = false; setProjectBusy(false); }
@@ -1816,7 +1835,7 @@ function ConstellationStudioInner({
     if (runningRef.current || projectBusyRef.current) return;
     projectBusyRef.current = true;
     setProjectBusy(true);
-    try { await saveCurrentProject(); overviewOpenRef.current = true; setOverviewOpen(true); }
+    try { await saveCurrentProject(); setEntrySnapshot(undefined); overviewOpenRef.current = true; setOverviewOpen(true); }
     catch (reason) { setProjectError(errorText(reason)); }
     finally { projectBusyRef.current = false; setProjectBusy(false); }
   };
@@ -1865,53 +1884,47 @@ function ConstellationStudioInner({
     try { await operation; } catch (reason) { setProjectError(errorText(reason)); }
   }, []);
 
-  if (overviewOpen) return <><input ref={importInputRef} type="file" accept=".json,.levelup-constellation.json" hidden onChange={(event) => void importGraph(event)} /><ConstellationOverview
+  const overviewReady = projectHydrated && storageReadyRef.current && !projectBusy;
+  const overviewTemplates = [...BUILT_IN_CONSTELLATION_BLUEPRINTS, ...blueprints];
+  const selectedTemplate = overviewTemplates.find((template) => template.id === templateId);
+  return (
+    <>
+      <CreativeStudioHeader mode="constellation" className="constellation-topbar" subtitle={tr("把灵感连成作品", "Connect ideas into finished work")}
+        onMedia={onMedia} onWriting={onWriting} onBrandClick={() => { if (!overviewOpen) void returnToOverview(); }} brandDisabled={running || projectBusy || Boolean(entrySnapshot)}
+        context={!overviewOpen && <input className="constellation-title-input nodrag nopan" value={graphTitle} maxLength={120} aria-label={tr("星图名称", "Constellation name")} onFocus={() => setSpacePanActive(false)} onChange={(event) => setGraphTitle(event.target.value)} />}
+        actions={<div className="constellation-topbar-actions">
+          {overviewOpen ? <>
+            <button type="button" className="primary" disabled={!overviewReady} onClick={() => void createProject()} title={tr("新建项目", "New project")} aria-label={tr("新建项目", "New project")}><Plus size={14} />{tr("新建项目", "New project")}</button>
+            <select className="constellation-template-picker" aria-label={tr("选择模板", "Choose template")} value={templateId} onChange={(event) => setTemplateId(event.target.value)}><option value="">{tr("模板", "Template")}</option>{overviewTemplates.map((template) => <option value={template.id} key={template.id}>{template.name}</option>)}</select>
+            <button type="button" className="icon-only" disabled={!overviewReady || !selectedTemplate} onClick={() => selectedTemplate && void createProject(selectedTemplate)} title={tr("从模板创建", "Create from template")} aria-label={tr("从模板创建", "Create from template")}><Sparkles size={14} /></button>
+            <button type="button" className="icon-only" disabled={!overviewReady} onClick={() => importInputRef.current?.click()} title={tr("导入项目", "Import project")} aria-label={tr("导入项目", "Import project")}><FolderInput size={14} /></button>
+          </> : <>
+            <button type="button" disabled={running || projectBusy || Boolean(entrySnapshot)} onClick={() => void returnToOverview()} title={tr("返回总览", "Back to overview")}><ChevronLeft size={14} />{tr("返回总览", "Back to overview")}</button>
+            {running ? <button type="button" className="danger" onClick={stopRun} title={tr("停止", "Stop")} aria-label={tr("停止", "Stop")}><Square size={13} />{tr("停止", "Stop")}</button>
+              : <button type="button" className="primary" disabled={Boolean(entrySnapshot)} onClick={() => void runGraph()} title={tr("运行星图", "Run constellation")} aria-label={tr("运行星图", "Run constellation")}><Play size={13} />{tr("运行星图", "Run")}</button>}
+            <button type="button" className="icon-only" onClick={saveBlueprint} disabled={selectedCount === 0} title={tr("框选节点后保存为蓝图", "Save selected nodes as a blueprint")} aria-label={tr("存为蓝图", "Save blueprint")}><Save size={14} /></button>
+          </>}
+          <button type="button" className="icon-only" onClick={onConfigureConnection} title={tr("模型连接", "Model connections")} aria-label={tr("模型连接", "Model connections")}><Settings2 size={15} /></button>
+        </div>} />
+      {overviewOpen ? <ConstellationOverview
     ready={projectHydrated && storageReadyRef.current && !projectBusy}
     loading={!projectHydrated}
     onRetry={() => { hydrationRef.current = null; setProjectLoadRevision((value) => value + 1); }}
-    onMedia={onMedia}
-    onWriting={onWriting}
     records={projectRecords}
     query={projectQuery}
     error={projectError}
     onQuery={setProjectQuery}
-    onOpen={(record) => void openProject(record)}
+    onOpen={(record, cover) => void openProject(record, cover)}
     onCreate={() => void createProject()}
-    onImport={() => importInputRef.current?.click()}
-    onCreateTemplate={(blueprint) => void createProject(blueprint)}
     onPosition={(record, position) => void updateProjectRecord(record, position)}
     onRename={(record, title) => void renameProject(record, title)}
     onDuplicate={(record) => void duplicateProject(record)}
     onDelete={(record) => void removeProject(record)}
-    templates={[...BUILT_IN_CONSTELLATION_BLUEPRINTS, ...blueprints]}
     onDismissError={() => setProjectError(undefined)}
-  /></>;
-
-  return (
-    <>
-      <header className="constellation-topbar" data-tauri-drag-region>
-        <div className="constellation-brand">
-          <span><Boxes size={18} /></span>
-          <div><strong>{tr("星图", "Constellation")}</strong><small>{tr("把灵感连成作品", "Connect ideas into finished work")}</small></div>
-        </div>
-        <input className="constellation-title-input nodrag nopan" value={graphTitle} maxLength={120} aria-label={tr("星图名称", "Constellation name")} onFocus={() => setSpacePanActive(false)} onChange={(event) => setGraphTitle(event.target.value)} />
-        <div className="creation-mode-switch constellation-mode-switch" role="tablist" aria-label={tr("创作空间", "Creative Studio")}>
-          <button type="button" role="tab" aria-selected="false" onClick={onMedia}><ImagePlus size={13} />{tr("媒体", "Media")}</button>
-          <button type="button" role="tab" aria-selected="false" onClick={onWriting}><BookOpen size={13} />{tr("写作", "Writing")}</button>
-          <button type="button" role="tab" aria-selected="true" className="active"><Boxes size={13} />{tr("星图", "Constellation")}</button>
-        </div>
-        <div className="constellation-topbar-actions">
-          <button type="button" disabled={running || projectBusy} onClick={() => void returnToOverview()} title={tr("返回星图总览", "Back to constellation overview")}><ChevronLeft size={13} />{tr("总览", "Overview")}</button>
-          {running ? <button type="button" className="danger" onClick={stopRun}><Square size={13} />{tr("停止", "Stop")}</button>
-            : <button type="button" className="primary" onClick={() => void runGraph()}><Play size={13} />{tr("运行星图", "Run")}</button>}
-          <button type="button" onClick={saveBlueprint} disabled={selectedCount === 0} title={tr("框选节点后保存为蓝图", "Save selected nodes as a blueprint")}><Save size={13} />{tr("存为蓝图", "Save blueprint")}</button>
-          <button type="button" className="icon-only" onClick={onConfigureConnection} title={tr("模型连接", "Model connections")}><Settings2 size={15} /></button>
-        </div>
-      </header>
-
+  /> : <>
       {projectError && <div className="constellation-save-error" role="alert"><span>{tr("保存失败，当前编辑仍在内存中：", "Save failed; your edits are still in memory: ")}{projectError}</span><button type="button" onClick={() => void saveCurrentProject().catch(() => undefined)}>{tr("重试保存", "Retry save")}</button></div>}
       <div className="constellation-save-status" role="status">{saveState === "saving" ? tr("保存中…", "Saving…") : saveState === "dirty" ? tr("待保存", "Unsaved changes") : saveState === "error" ? tr("保存失败", "Save failed") : tr("已保存", "Saved")}</div>
-      <div ref={workbenchRef} className={`constellation-workbench${leftPanelOpen ? " left-open" : ""}${rightPanelOpen ? " right-open" : ""}`}>
+      <div ref={workbenchRef} inert={Boolean(entrySnapshot)} className={`constellation-workbench${leftPanelOpen ? " left-open" : ""}${rightPanelOpen ? " right-open" : ""}`}>
         <aside className="constellation-library-panel" aria-label={tr("节点库", "Node library")} aria-hidden={!leftPanelOpen} inert={!leftPanelOpen}>
           <div className="constellation-panel-heading"><div><LibraryBig size={15} /><strong>{tr("节点库", "Node library")}</strong></div><button type="button" aria-label={tr("关闭节点库", "Close node library")} onClick={() => setLeftPanelOpen(false)}><ChevronLeft size={15} /></button></div>
           <label className="constellation-search"><Search size={13} /><input value={libraryQuery} placeholder={tr("搜索能力或工具", "Search abilities or tools")} onChange={(event) => setLibraryQuery(event.target.value)} />{libraryQuery && <button type="button" onClick={() => setLibraryQuery("")}><X size={12} /></button>}</label>
@@ -2011,8 +2024,6 @@ function ConstellationStudioInner({
               }}
               minZoom={.18}
               maxZoom={2.2}
-              fitView={!restoredViewportRef.current}
-              fitViewOptions={{ padding: .18, maxZoom: 1 }}
               selectionOnDrag={false}
               selectionKeyCode={null}
               panActivationKeyCode={null}
@@ -2026,13 +2037,13 @@ function ConstellationStudioInner({
               autoPanSpeed={10}
               defaultEdgeOptions={CONSTELLATION_DEFAULT_EDGE_OPTIONS}
               connectionLineStyle={CONSTELLATION_CONNECTION_STYLE}
-              onlyRenderVisibleElements
+              onlyRenderVisibleElements={initialViewportReady}
               multiSelectionKeyCode={["Control", "Meta", "Shift"]}
               deleteKeyCode={["Backspace", "Delete"]}
               colorMode="light"
               proOptions={{ hideAttribution: true }}
             >
-              <Background variant={BackgroundVariant.Dots} gap={20} size={1.25} color="rgba(100,116,139,.28)" />
+              <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="rgba(147,134,165,.24)" />
               {!canvasInteracting && <MiniMap nodeColor={constellationMiniMapColor} maskColor="rgba(248,250,252,.78)" pannable zoomable />}
               <Controls showInteractive={false} position="bottom-center" />
               <Panel position="top-left" className="constellation-canvas-toolbar">
@@ -2084,6 +2095,8 @@ function ConstellationStudioInner({
 
         {!rightPanelOpen && <button type="button" className="constellation-open-blueprints" onClick={() => setRightPanelOpen(true)} title={tr("打开蓝图库", "Open blueprint library")}><Boxes size={15} /><ChevronLeft size={13} /></button>}
       </div>
+      </>}
+      {entrySnapshot && !overviewOpen && <ConstellationEnterTransition snapshot={entrySnapshot} workbenchRef={workbenchRef} onComplete={finishEntry} />}
 
       <input ref={importInputRef} type="file" accept=".json,.levelup-constellation.json" hidden onChange={(event) => void importGraph(event)} />
 

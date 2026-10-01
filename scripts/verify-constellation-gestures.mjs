@@ -77,7 +77,7 @@ async function verifyCommitAndSelection() {
   graph.edges = [];
   const record = { id: graph.id, title: graph.title, createdAt: graph.createdAt, updatedAt: graph.updatedAt,
     payload: { schemaVersion: 1, graph, viewport: { x: 0, y: 0, zoom: 1 }, overviewLayoutVersion: 2, overviewPosition: { x: 100, y: 100 } } };
-  await page.getByRole("button", { name: /总览|Overview/, exact: true }).click();
+  await page.getByRole("button", { name: /返回星图总览|Back to constellation overview/, exact: true }).click();
   await page.evaluate((record) => localStorage.setItem("levelup-agent.constellation-projects.v1", JSON.stringify([record])), record);
   await page.reload();
   await enterStudio();
@@ -88,6 +88,7 @@ async function verifyCommitAndSelection() {
   const edgeCount = () => shell.locator(".react-flow__edge").count();
   const handle = (index, direction) => node(index).locator(`.constellation-universal-${direction}`);
   await node(2).waitFor();
+  await page.locator(".constellation-enter-transition").waitFor({ state: "detached" });
 
   await drag(await center(handle(0, "output")), await center(handle(1, "input")));
   await page.waitForFunction(() => document.querySelectorAll(".react-flow__edge").length === 1);
@@ -135,12 +136,13 @@ async function verifyCommitAndSelection() {
   const inputBox = await handle(3, "input").boundingBox();
   await page.screenshot({ path: resolve(output, "handle-detail.png"), clip: { x: inputBox.x - 24, y: inputBox.y - 16, width: 110, height: 64 }, scale: "css" });
 
-  await page.getByRole("button", { name: /总览|Overview/, exact: true }).click();
+  await page.getByRole("button", { name: /返回星图总览|Back to constellation overview/, exact: true }).click();
   const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("levelup-agent.constellation-projects.v1"))[0]);
   assert.equal(saved.payload.graph.edges.length, 2);
   assert.ok(saved.payload.graph.edges.some((edge) => edge.source === graph.nodes[0].id && edge.target === graph.nodes[3].id), "reconnect must update the target");
   await project.click();
   await node(1).waitFor();
+  await page.locator(".constellation-enter-transition").waitFor({ state: "detached" });
   const reopenSource = await center(handle(0, "output"));
   await page.mouse.move(reopenSource.x, reopenSource.y);
   await page.mouse.down();
@@ -159,14 +161,24 @@ try {
   await page.goto(process.env.LEVELUP_TEST_URL ?? "http://127.0.0.1:1420/");
   await enterStudio();
   const overview = page.locator(".constellation-overview");
-  await overview.getByRole("button", { name: /新建项目|New project/ }).waitFor();
-  await overview.getByRole("combobox", { name: /选择模板|Choose template/ }).selectOption("builtin-story-film");
-  await overview.getByRole("button", { name: /从模板|From template/ }).click();
+  const header = page.locator(".constellation-topbar");
+  await header.getByRole("button", { name: /新建项目|New project/ }).waitFor();
+  await header.getByRole("combobox", { name: /选择模板|Choose template/ }).selectOption("builtin-story-film");
+  await header.getByRole("button", { name: /从模板创建|Create from template/ }).click();
 
   const shell = page.locator(".constellation-canvas-shell");
   const nodes = shell.locator(".react-flow__node");
   await nodes.first().waitFor();
-  assert.ok(await nodes.count() >= 3);
+  await page.waitForFunction(() => {
+    const canvas = document.querySelector(".constellation-canvas-shell");
+    const bounds = canvas.getBoundingClientRect();
+    const nodes = [...canvas.querySelectorAll(".react-flow__node")];
+    return nodes.length === 5 && nodes.every((node) => {
+      const rect = node.getBoundingClientRect();
+      return rect.left >= bounds.left && rect.top >= bounds.top && rect.right <= bounds.right && rect.bottom <= bounds.bottom;
+    });
+  });
+  assert.equal(await nodes.count(), 5);
   assert.ok(await shell.locator(".react-flow__edge").count() >= 2);
   const layers = await shell.evaluate((element) => {
     const edges = element.querySelector(".react-flow__edges");

@@ -8,6 +8,7 @@ const source = readFileSync(sourceUrl, "utf8");
 const studioSource = readFileSync(new URL("../src/components/ConstellationStudio.tsx", import.meta.url), "utf8");
 const nodeSource = readFileSync(new URL("../src/components/ConstellationNodes.tsx", import.meta.url), "utf8");
 const studioCss = readFileSync(new URL("../src/components/ConstellationStudio.css", import.meta.url), "utf8");
+const headerCss = readFileSync(new URL("../src/components/CreationModeSwitch.css", import.meta.url), "utf8");
 const mediaSource = readFileSync(new URL("../src/components/MediaStudio.tsx", import.meta.url), "utf8");
 const mediaCapabilitiesSource = readFileSync(new URL("../src/lib/mediaCapabilities.ts", import.meta.url), "utf8");
 const canvasSource = readFileSync(new URL("../src/components/ConstellationCanvasEditor.tsx", import.meta.url), "utf8");
@@ -523,12 +524,13 @@ test("compact side panels do not cover the fitted graph or remain keyboard-focus
   assert.match(studioSource, /inert=\{!rightPanelOpen\}/);
 });
 
-test("constellation topbar keeps the action group on the first row before the mobile collapse", () => {
-  const mediumTopbar = studioCss.match(/@container \(max-width: 1080px\) \{[\s\S]*?\n\}/)?.[0] ?? "";
-  assert.match(mediumTopbar, /\.constellation-topbar \{ grid-template-columns: minmax\(148px, \.78fr\) minmax\(0, \.92fr\) auto minmax\(250px, 1fr\);/);
-  assert.doesNotMatch(mediumTopbar, /\.constellation-mode-switch \{ display: none; \}/);
-  const compactTopbar = studioCss.match(/@container \(max-width: 760px\) \{[\s\S]*?\n\}/)?.[0] ?? "";
-  assert.match(compactTopbar, /\.constellation-studio \.constellation-mode-switch \{ display: none; \}/);
+test("creative spaces share a centered topbar and retain navigation on compact screens", () => {
+  assert.match(studioSource, /<CreativeStudioHeader mode="constellation"/);
+  assert.match(mediaSource, /<CreativeStudioHeader mode="media"/);
+  assert.match(headerCss, /grid-template-columns: minmax\(0, 1fr\) auto minmax\(0, 1fr\);/);
+  assert.match(headerCss, /@container creative-header \(max-width: 980px\)/);
+  assert.match(headerCss, /\.creation-mode-switch button span \{ display: none; \}/);
+  assert.doesNotMatch(headerCss, /\.creation-mode-switch \{ display: none;/);
 });
 
 test("constellation canvas toolbar stays on one row and scrolls instead of wrapping", () => {
