@@ -46,6 +46,16 @@ pub struct WritingProjectRecord {
     pub updated_at: i64,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConstellationProjectRecord {
+    pub id: String,
+    pub title: String,
+    pub payload: serde_json::Value,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 fn default_provider_priority() -> i32 {
     100
 }

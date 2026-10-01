@@ -1,16 +1,20 @@
 import {
   createContext,
+  memo,
   useContext,
   useEffect,
   useMemo,
   useState,
   type ComponentType,
 } from "react";
-import { Handle, Position, type NodeProps } from "@xyflow/react";
+import { Handle, Position, useUpdateNodeInternals, type NodeProps } from "@xyflow/react";
 import {
   AudioLines,
   BookOpenText,
   Brush,
+  Wrench,
+  Link2,
+  Globe2,
   ChevronDown,
   ChevronUp,
   CircleAlert,
@@ -21,6 +25,7 @@ import {
   LoaderCircle,
   Maximize2,
   Play,
+  RefreshCw,
   ScanLine,
   Sparkles,
   StickyNote,
@@ -32,6 +37,10 @@ import {
 import { mediaAssetUrl, previewAttachment } from "../lib/bridge";
 import {
   CONSTELLATION_NODE_DEFINITIONS,
+  constellationNodePorts,
+  sameConstellationValue,
+  UNIVERSAL_INPUT_HANDLE,
+  UNIVERSAL_OUTPUT_HANDLE,
   type ConstellationEdge,
   type ConstellationModelRoute,
   type ConstellationNode,
@@ -41,6 +50,7 @@ import {
 } from "../lib/constellation";
 import { tr } from "../lib/i18n";
 import type { ImageAttachment, MediaKind, MediaModelInfo, ProviderModelInfo } from "../lib/types";
+
 
 export interface ConstellationNodeActions {
   locale: string;
@@ -57,6 +67,10 @@ export interface ConstellationNodeActions {
   openPreview: (value: ConstellationValue) => void;
   downloadValue: (value: ConstellationValue) => void;
   getInputValue: (nodeId: string, handle: string) => ConstellationValue | undefined;
+  openSourcePicker: (nodeId: string, kind: "conversation" | "input" | "projectRef") => void;
+  openConversation: (threadId: string) => void;
+  selectCandidate: (nodeId: string, handle: string, index: number) => void;
+  refreshCandidates: (nodeId: string) => void;
 }
 
 const NodeActionsContext = createContext<ConstellationNodeActions | null>(null);
@@ -78,6 +92,10 @@ function useNodeActions() {
 }
 
 const NODE_ICONS: Record<ConstellationNodeKind, ComponentType<{ size?: number; className?: string }>> = {
+  conversation: BookOpenText,
+  input: Globe2,
+  localTool: Wrench,
+  projectRef: Link2,
   prompt: FileText,
   writing: BookOpenText,
   image: ImageIcon,
@@ -117,10 +135,18 @@ function writingModelRoute(model: ProviderModelInfo): ConstellationModelRoute {
 }
 
 export function ConstellationNodeCard({ id, data, selected, isConnectable }: NodeProps<ConstellationNode>) {
+  return <ConstellationNodeContent id={id} data={data} selected={selected} isConnectable={isConnectable} />;
+}
+
+const ConstellationNodeContent = memo(function ConstellationNodeContent({ id, data, selected, isConnectable }: Pick<NodeProps<ConstellationNode>, "id" | "data" | "selected" | "isConnectable">) {
   const actions = useNodeActions();
   const definition = CONSTELLATION_NODE_DEFINITIONS[data.kind];
+  const outputs = constellationNodePorts({ id, type: "constellation", data, position: { x: 0, y: 0 } }, "output");
   const Icon = NODE_ICONS[data.kind];
   const collapsed = Boolean(data.collapsed);
+  const updateNodeInternals = useUpdateNodeInternals();
+  const outputSignature = outputs.map((port) => `${port.id}:${port.type}`).join(",");
+  useEffect(() => updateNodeInternals(id), [id, collapsed, selected, outputSignature, updateNodeInternals]);
   const statusLabel = data.status === "running"
     ? tr("执行中", "Running")
     : data.status === "queued"
@@ -129,7 +155,7 @@ export function ConstellationNodeCard({ id, data, selected, isConnectable }: Nod
         ? tr("已完成", "Done")
         : data.status === "error"
           ? tr("需要处理", "Needs attention")
-          : tr("就绪", "Ready");
+          : data.status === "stale" ? tr("输入已变化", "Inputs changed") : data.status === "waiting" ? tr("等待选择结果", "Choose an output") : tr("就绪", "Ready");
 
   return (
     <article
@@ -141,14 +167,10 @@ export function ConstellationNodeCard({ id, data, selected, isConnectable }: Nod
         <div>
           <input
             className="nodrag nopan"
+            disabled={actions.running}
             value={data.title}
             maxLength={64}
             aria-label={tr("节点名称", "Node name")}
-            onKeyDown={(event) => {
-              // Keep a normal single space available for names, but do not
-              // fill the field when Space is held for a canvas pan gesture.
-              if (event.code === "Space" && event.repeat) event.preventDefault();
-            }}
             onChange={(event) => actions.updateNode(id, { title: event.target.value })}
           />
           <small>{statusLabel}</small>
@@ -173,6 +195,7 @@ export function ConstellationNodeCard({ id, data, selected, isConnectable }: Nod
         <button
           type="button"
           className="nodrag constellation-node-icon-button danger"
+          disabled={actions.running}
           title={tr("删除节点", "Delete node")}
           onClick={() => actions.removeNode(id)}
         >
@@ -180,23 +203,33 @@ export function ConstellationNodeCard({ id, data, selected, isConnectable }: Nod
         </button>
       </header>
 
+      {definition.inputs.length > 0 && <Handle
+        type="target"
+        position={Position.Left}
+        id={UNIVERSAL_INPUT_HANDLE}
+        isConnectable={isConnectable && !actions.running}
+        className="constellation-universal-handle constellation-universal-input"
+        aria-label={tr("通用输入连接点", "Universal input connection point")}
+        title={tr("拖到卡片任意位置，自动匹配输入", "Drop on the card to automatically match an input")}
+      />}
+      {outputs.length > 0 && <Handle
+        type="source"
+        position={Position.Right}
+        id={UNIVERSAL_OUTPUT_HANDLE}
+        isConnectable={isConnectable && !actions.running}
+        className="constellation-universal-handle constellation-universal-output"
+        aria-label={tr("通用输出连接点", "Universal output connection point")}
+        title={tr("从卡片拖出，自动匹配输出", "Drag from the card to automatically match an output")}
+      />}
+
       {!collapsed && (
         <>
-          {definition.inputs.length > 0 && (
+          {selected && definition.inputs.length > 0 && (
             <div className="constellation-node-ports inputs" aria-label={tr("输入端口", "Input ports")}>
               {definition.inputs.map((port) => {
                 const connected = actions.edges.some((edge) => edge.target === id && edge.targetHandle === port.id);
                 return (
                   <div className={`constellation-port-row input type-${port.type}${connected ? " connected" : ""}`} key={port.id}>
-                    <Handle
-                      type="target"
-                      position={Position.Left}
-                      id={port.id}
-                      isConnectable={isConnectable}
-                      className={`constellation-handle type-${port.type}`}
-                      aria-label={`${tr(port.label, port.labelEn)} · ${tr("输入端口", "input port")}`}
-                      title={`${tr(port.label, port.labelEn)} · ${tr("输入端口", "input port")}`}
-                    />
                     <span>{tr(port.label, port.labelEn)}</span>
                     {port.optional && <small>{tr("可选", "optional")}</small>}
                   </div>
@@ -205,7 +238,11 @@ export function ConstellationNodeCard({ id, data, selected, isConnectable }: Nod
             </div>
           )}
 
-          <div className="constellation-node-body">
+          <div className="constellation-node-body" inert={actions.running}>
+          {data.kind === "conversation" && <ConversationNodeBody id={id} data={data} />}
+            {data.kind === "input" && <InputNodeBody id={id} data={data} />}
+            {data.kind === "localTool" && <LocalToolNodeBody id={id} data={data} />}
+            {data.kind === "projectRef" && <ProjectReferenceNodeBody id={id} data={data} />}
             {data.kind === "prompt" && <PromptNodeBody id={id} data={data} />}
             {data.kind === "writing" && <WritingNodeBody id={id} data={data} />}
             {data.kind === "image" && <ImageNodeBody id={id} data={data} />}
@@ -222,23 +259,18 @@ export function ConstellationNodeCard({ id, data, selected, isConnectable }: Nod
             </div>
           )}
 
-          {definition.outputs.length > 0 && (
+          {Object.entries(data.outputCandidates ?? {}).some(([, values]) => (values?.length ?? 0) > 0) && (
+            <CandidatePicker id={id} candidates={data.outputCandidates ?? {}} selected={data.outputs ?? {}} stale={data.status === "stale"} />
+          )}
+
+          {selected && outputs.length > 0 && (
             <div className="constellation-node-ports outputs" aria-label={tr("输出端口", "Output ports")}>
-              {definition.outputs.map((port) => {
+              {outputs.map((port) => {
                 const ready = Boolean(data.outputs?.[port.id]);
                 return (
                   <div className={`constellation-port-row output type-${port.type}${ready ? " ready" : ""}`} key={port.id}>
                     {ready && <CircleCheck size={10} />}
                     <span>{tr(port.label, port.labelEn)}</span>
-                    <Handle
-                      type="source"
-                      position={Position.Right}
-                      id={port.id}
-                      isConnectable={isConnectable}
-                      className={`constellation-handle type-${port.type}`}
-                      aria-label={`${tr(port.label, port.labelEn)} · ${tr("输出端口", "output port")}`}
-                      title={`${tr(port.label, port.labelEn)} · ${tr("输出端口", "output port")}`}
-                    />
                   </div>
                 );
               })}
@@ -260,7 +292,87 @@ export function ConstellationNodeCard({ id, data, selected, isConnectable }: Nod
       )}
     </article>
   );
+});
+
+function ConversationNodeBody({ id, data }: { id: string; data: ConstellationNodeData }) {
+  const actions = useNodeActions();
+  const snapshot = data.conversationSnapshot;
+  return <div className="constellation-source-summary"><button type="button" className="nodrag constellation-source-button" onClick={() => actions.openSourcePicker(id, "conversation")}><BookOpenText size={13} />{tr("选择会话消息", "Choose conversation messages")}</button>
+    {snapshot && <button type="button" className="nodrag constellation-source-button" onClick={() => actions.openConversation(snapshot.threadId)}>{tr("打开原会话", "Open source conversation")}</button>}
+    <strong>{snapshot?.threadTitle ?? tr("未选择会话", "No conversation selected")}</strong>
+    <small>{snapshot ? tr(`${snapshot.messages.length} 条已选消息 · ${new Date(snapshot.capturedAt).toLocaleString()}`, `${snapshot.messages.length} selected messages · ${new Date(snapshot.capturedAt).toLocaleString()}`) : tr("在右侧来源面板中选择消息", "Choose messages in the source panel")}</small>
+    {snapshot?.messages.slice(0, 2).map((message) => <p key={message.id}>{message.role}: {message.content.slice(0, 120)}</p>)}
+  </div>;
 }
+
+function InputNodeBody({ id, data }: { id: string; data: ConstellationNodeData }) {
+  const actions = useNodeActions();
+  const mode = data.inputMode ?? "text";
+  return <>
+    <div className="constellation-segmented nodrag" role="radiogroup" aria-label={tr("输入类型", "Input type")}>
+      {([["text", tr("文本", "Text")], ["file", tr("文件", "File")], ["url", tr("网址", "URL")]] as const).map(([value, label]) => <button type="button" role="radio" aria-checked={mode === value} className={mode === value ? "active" : ""} key={value} onClick={() => actions.updateNode(id, { inputMode: value, inputAttachment: undefined, inputPath: value === "file" ? data.inputPath : "", outputs: undefined, status: "idle" })}>{label}</button>)}
+    </div>
+    {mode === "text" && <label className="constellation-field"><span>{tr("输入文本", "Input text")}</span><textarea className="nodrag nowheel" value={data.inputText ?? ""} maxLength={80_000} onChange={(event) => actions.updateNode(id, { inputText: event.target.value, outputs: undefined, status: "idle" })} /></label>}
+    {mode === "file" && <><button type="button" className="nodrag constellation-source-button" onClick={() => actions.openSourcePicker(id, "input")}><FolderInputIcon />{tr("选择本地文件", "Choose local file")}</button><label className="constellation-field"><span>{tr("文件路径", "File path")}</span><input className="nodrag" value={data.inputPath ?? ""} placeholder={tr("选择后自动填写", "Filled after selection")} onChange={(event) => actions.updateNode(id, { inputPath: event.target.value, inputAttachment: undefined, inputText: undefined, outputs: undefined, status: "idle" })} /></label></>}
+    {mode === "url" && <label className="constellation-field"><span>URL</span><input className="nodrag" type="url" value={data.inputUrl ?? ""} placeholder="https://" onChange={(event) => actions.updateNode(id, { inputUrl: event.target.value, outputs: undefined, status: "idle" })} /></label>}
+    {data.outputs?.text && <ValuePreview value={data.outputs.text} />}
+  </>;
+}
+
+function LocalToolNodeBody({ id, data }: { id: string; data: ConstellationNodeData }) {
+  const actions = useNodeActions();
+  return <>
+    <label className="constellation-field"><span>{tr("只读工具", "Read-only tool")}</span><select className="nodrag nowheel" value={data.toolName ?? "read_file"} onChange={(event) => actions.updateNode(id, { toolName: event.target.value, outputs: undefined, status: "idle" })}><option value="read_file">read_file</option><option value="list_files">list_files</option><option value="search_files">search_files</option><option value="web_fetch">web_fetch</option></select></label>
+    <label className="constellation-field"><span>{tr("参数 JSON", "Arguments JSON")}</span><textarea className="nodrag nowheel compact" value={data.toolArguments ?? "{}"} onChange={(event) => actions.updateNode(id, { toolArguments: event.target.value, outputs: undefined, status: "idle" })} /></label>
+    <small className="constellation-source-hint">{tr("参数中的 {{input}} 会替换为上游文本。", "Use {{input}} in arguments to insert upstream text.")}</small>
+    {data.outputs?.text && <ValuePreview value={data.outputs.text} />}
+  </>;
+}
+
+function ProjectReferenceNodeBody({ id, data }: { id: string; data: ConstellationNodeData }) {
+  const actions = useNodeActions();
+  const reference = data.projectReference;
+  return <div className="constellation-source-summary">
+    <button type="button" className="nodrag constellation-source-button" onClick={() => actions.openSourcePicker(id, "projectRef")}><Link2 size={13} />{tr("选择作品输出", "Choose project output")}</button>
+    {reference && <button type="button" className="nodrag constellation-source-button" onClick={() => actions.refreshCandidates(id)} disabled={actions.running}><RefreshCw size={12} />{tr("刷新来源", "Refresh source")}</button>}
+    <strong>{reference ? tr("已固定作品快照", "Pinned project snapshot") : tr("未选择作品", "No project selected")}</strong>
+    <small>{reference ? `${reference.projectId} · ${reference.nodeId} · ${reference.outputHandle}` : tr("选择后只在刷新时更新", "Refresh explicitly to update")}</small>
+    {data.projectValue && <ValuePreview value={data.projectValue} />}
+  </div>;
+}
+
+function CandidatePicker({
+  id,
+  candidates,
+  selected,
+  stale,
+}: {
+  id: string;
+  candidates: Partial<Record<string, ConstellationValue[]>>;
+  selected: Partial<Record<string, ConstellationValue>>;
+  stale: boolean;
+}) {
+  const actions = useNodeActions();
+  const entries = Object.entries(candidates).flatMap(([handle, values]) => (values ?? []).map((value, index) => ({ handle, value, index })));
+  if (entries.length === 0) return null;
+  return <section className="constellation-candidate-picker" aria-label={tr("候选结果", "Output candidates")}>
+    <div className="constellation-candidate-heading"><span>{tr(`${entries.length} 个候选结果`, `${entries.length} output candidates`)}</span><button type="button" className="nodrag" onClick={() => actions.refreshCandidates(id)} disabled={actions.running} title={tr("刷新候选状态", "Refresh candidate status")}><RefreshCw size={12} />{tr("刷新", "Refresh")}</button></div>
+    {stale && <small>{tr("输入已变化，请重新运行；以下为之前的结果。", "Inputs changed. Run again; these are previous results.")}</small>}
+    <div className="constellation-candidate-list">
+      {entries.map(({ handle, value, index }) => {
+        const chosen = sameConstellationValue(selected[handle], value);
+        const pending = value.asset && value.asset.status !== "completed";
+        return <div className={`constellation-candidate${chosen ? " selected" : ""}`} key={`${handle}:${value.asset?.id ?? value.createdAt}:${index}`}>
+          <ValuePreview value={value} thumbnail />
+          <div className="constellation-candidate-meta"><strong>{handle} · {index + 1}</strong><small>{pending ? value.asset?.status : tr("可选择", "Ready to choose")}</small></div>
+          <button type="button" className="nodrag" disabled={actions.running || stale || Boolean(pending) || chosen} onClick={() => actions.selectCandidate(id, handle, index)}>{chosen ? tr("已选择", "Selected") : tr("选择", "Choose")}</button>
+        </div>;
+      })}
+    </div>
+  </section>;
+}
+
+function FolderInputIcon() { return <Download size={13} />; }
 
 function PromptNodeBody({ id, data }: { id: string; data: ConstellationNodeData }) {
   const actions = useNodeActions();
@@ -537,6 +649,10 @@ export const CONSTELLATION_NODE_TYPES = {
 
 export function constellationMiniMapColor(node: ConstellationNode) {
   return ({
+    conversation: "#6366f1",
+    input: "#06b6d4",
+    localTool: "#0f766e",
+    projectRef: "#db2777",
     prompt: "#a78bfa",
     writing: "#8b5cf6",
     image: "#f43f5e",
@@ -545,7 +661,7 @@ export function constellationMiniMapColor(node: ConstellationNode) {
     canvas: "#f59e0b",
     output: "#64748b",
     note: "#eab308",
-  } as const)[node.data.kind];
+  } as const)[node.data.kind] ?? "#64748b";
 }
 
 export function mediaKindLabel(kind: MediaKind) {

@@ -43,11 +43,11 @@ use futures_util::future::join_all;
 use models::{
     AgentMessage, AgentSkillSummary, AgentStreamEvent, AgentToolDefinition, AgentTurnRequest,
     AgentTurnResponse, AttachmentPreview, ConfigWritePreview, ConfigWriteResult,
-    ExternalConfigCandidate, ExternalConfigTarget, GatewayDiagnostics, GitDiff, GitRollbackPreview,
-    GitRollbackResult, GitStatus, GitWorkspaceSnapshot, GoalCreateRequest, GoalState,
-    ImageAttachment, McpSecretValues, McpServerConfig, McpServerSnapshot, McpServerUpsert,
-    McpTransport, MediaAsset, MediaAssetPage, MediaBatchResult, MediaCatalog,
-    MediaGenerationRequest, MediaKind, MediaStatus, ModelInfo, ProviderHealth,
+    ConstellationProjectRecord, ExternalConfigCandidate, ExternalConfigTarget, GatewayDiagnostics,
+    GitDiff, GitRollbackPreview, GitRollbackResult, GitStatus, GitWorkspaceSnapshot,
+    GoalCreateRequest, GoalState, ImageAttachment, McpSecretValues, McpServerConfig,
+    McpServerSnapshot, McpServerUpsert, McpTransport, MediaAsset, MediaAssetPage, MediaBatchResult,
+    MediaCatalog, MediaGenerationRequest, MediaKind, MediaStatus, ModelInfo, ProviderHealth,
     ProviderModelCatalog, ProviderModelInfo, ProviderProfile, ProviderRequestLog, ProviderSettings,
     RouterEvent, RouterMetadata, SkillCreateRequest, SkillDeleteRequest, SkillInfo,
     SkillInstallRequest, SkillInstallResult, SkillLocation, SkillMutationResult,
@@ -11419,6 +11419,29 @@ fn delete_writing_project(
 }
 
 #[tauri::command]
+fn list_constellation_projects(
+    database: tauri::State<'_, database::Database>,
+) -> Result<Vec<ConstellationProjectRecord>, String> {
+    database.list_constellation_projects()
+}
+
+#[tauri::command]
+fn save_constellation_project(
+    database: tauri::State<'_, database::Database>,
+    project: ConstellationProjectRecord,
+) -> Result<(), String> {
+    database.save_constellation_project(&project)
+}
+
+#[tauri::command]
+fn delete_constellation_project(
+    database: tauri::State<'_, database::Database>,
+    project_id: String,
+) -> Result<bool, String> {
+    database.delete_constellation_project(&project_id)
+}
+
+#[tauri::command]
 fn export_writing_file(destination: String, content: String) -> Result<String, String> {
     if content.len() > 16 * 1024 * 1024 {
         return Err("Writing export may not exceed 16 MiB".to_owned());
@@ -12075,6 +12098,9 @@ pub fn run() {
             list_writing_projects,
             save_writing_project,
             delete_writing_project,
+            list_constellation_projects,
+            save_constellation_project,
+            delete_constellation_project,
             export_writing_file,
             export_conversation_file,
             read_conversation_file,

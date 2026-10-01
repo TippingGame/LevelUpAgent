@@ -13,12 +13,13 @@ use crate::harness::types::{
     RuntimeState,
 };
 use crate::models::{
-    GoalCreateRequest, GoalState, GoalStatus, ImageAttachment, McpServerConfig, McpTransport,
-    MediaAsset, MediaKind, MediaStatus, ProviderHealth, ProviderProfile, ProviderRequestLog,
-    ProviderSettings, StoredMessage, StoredThread, ToolCall, WritingProjectRecord,
+    ConstellationProjectRecord, GoalCreateRequest, GoalState, GoalStatus, ImageAttachment,
+    McpServerConfig, McpTransport, MediaAsset, MediaKind, MediaStatus, ProviderHealth,
+    ProviderProfile, ProviderRequestLog, ProviderSettings, StoredMessage, StoredThread, ToolCall,
+    WritingProjectRecord,
 };
 
-const SCHEMA_VERSION: i64 = 19;
+const SCHEMA_VERSION: i64 = 20;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HarnessRecoverySummary {
@@ -184,6 +185,14 @@ impl Database {
                     id TEXT PRIMARY KEY NOT NULL,
                     title TEXT NOT NULL,
                     project_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                 );
+
+                 CREATE TABLE IF NOT EXISTS constellation_projects (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    title TEXT NOT NULL,
                     payload_json TEXT NOT NULL,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL
@@ -468,7 +477,9 @@ impl Database {
                  CREATE INDEX IF NOT EXISTS idx_media_assets_thread
                    ON media_assets(thread_id, created_at DESC);
                  CREATE INDEX IF NOT EXISTS idx_writing_projects_updated_at
-                   ON writing_projects(updated_at DESC);",
+                   ON writing_projects(updated_at DESC);
+                 CREATE INDEX IF NOT EXISTS idx_constellation_projects_updated_at
+                   ON constellation_projects(updated_at DESC);",
             )
             .map_err(database_error)?;
         connection
@@ -1285,6 +1296,82 @@ impl Database {
         connection
             .execute("DELETE FROM writing_projects WHERE id = ?1", [id])
             .map(|changed| changed > 0)
+            .map_err(database_error)
+    }
+
+    pub fn list_constellation_projects(&self) -> Result<Vec<ConstellationProjectRecord>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock constellation database".to_owned())?;
+        let mut statement = connection.prepare(
+            "SELECT id, title, payload_json, created_at, updated_at FROM constellation_projects ORDER BY updated_at DESC"
+        ).map_err(database_error)?;
+        statement
+            .query_map([], |row| {
+                let payload: String = row.get(2)?;
+                Ok(ConstellationProjectRecord {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    payload: serde_json::from_str(&payload).map_err(json_column_error)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                })
+            })
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)
+    }
+
+    pub fn save_constellation_project(
+        &self,
+        project: &ConstellationProjectRecord,
+    ) -> Result<(), String> {
+        if project.id.is_empty()
+            || project.id.len() > 128
+            || !project
+                .id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        {
+            return Err(
+                "Constellation project ID must be 1-128 letters, numbers, dashes, or underscores"
+                    .to_owned(),
+            );
+        }
+        if project.title.trim().is_empty() || project.title.trim().chars().count() > 200 {
+            return Err("Constellation project title must be 1-200 characters".to_owned());
+        }
+        if project.created_at < 0
+            || project.updated_at < project.created_at
+            || !project.payload.is_object()
+        {
+            return Err("Invalid constellation project payload or timestamps".to_owned());
+        }
+        let payload = serde_json::to_string(&project.payload).map_err(|e| e.to_string())?;
+        if payload.len() > 16 * 1024 * 1024 {
+            return Err("Constellation project data may not exceed 16 MiB".to_owned());
+        }
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock constellation database".to_owned())?;
+        connection.execute(
+            "INSERT INTO constellation_projects (id, title, payload_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET title = excluded.title, payload_json = excluded.payload_json, updated_at = excluded.updated_at",
+            params![project.id, project.title.trim(), payload, project.created_at, project.updated_at],
+        ).map_err(database_error)?;
+        Ok(())
+    }
+
+    pub fn delete_constellation_project(&self, id: &str) -> Result<bool, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "Could not lock constellation database".to_owned())?;
+        connection
+            .execute("DELETE FROM constellation_projects WHERE id = ?1", [id])
+            .map(|n| n > 0)
             .map_err(database_error)
     }
 
@@ -5270,5 +5357,78 @@ mod tests {
         assert_eq!(database.list_writing_projects().unwrap(), vec![project]);
         assert!(database.delete_writing_project("story-1").unwrap());
         assert!(!database.delete_writing_project("story-1").unwrap());
+    }
+    #[test]
+    fn constellation_projects_survive_reopen_update_and_delete_without_limit() {
+        let directory = std::env::temp_dir().join(format!(
+            "levelup-constellation-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let path = directory.join("constellation.sqlite");
+        {
+            let database = Database::open(&path).unwrap();
+            for index in 0..105 {
+                database.save_constellation_project(&ConstellationProjectRecord {
+                    id: format!("project-{index}"), title: format!("Project {index}"),
+                    payload: serde_json::json!({"graph": {"nodes": [], "edges": []}, "viewport": {"x": 15, "y": 30, "zoom": 0.8}}),
+                    created_at: 100, updated_at: 100 + index,
+                }).unwrap();
+            }
+            let mut project = database.list_constellation_projects().unwrap()[0].clone();
+            project.title = "  Renamed ✦  ".to_owned();
+            project.created_at = 200;
+            project.updated_at = 300;
+            database.save_constellation_project(&project).unwrap();
+        }
+        let database = Database::open(&path).unwrap();
+        let records = database.list_constellation_projects().unwrap();
+        assert_eq!(records.len(), 105);
+        assert_eq!(records[0].title, "Renamed ✦");
+        assert_eq!(records[0].created_at, 100);
+        assert_eq!(records[0].payload["viewport"]["zoom"], 0.8);
+        for record in records {
+            assert!(database.delete_constellation_project(&record.id).unwrap());
+        }
+        drop(database);
+        assert!(
+            Database::open(&path)
+                .unwrap()
+                .list_constellation_projects()
+                .unwrap()
+                .is_empty()
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn constellation_projects_reject_invalid_records_without_overwriting() {
+        let database = Database::from_connection(Connection::open_in_memory().unwrap()).unwrap();
+        let good = ConstellationProjectRecord {
+            id: "valid-id".to_owned(),
+            title: "Valid".to_owned(),
+            payload: serde_json::json!({"nodes": []}),
+            created_at: 10,
+            updated_at: 20,
+        };
+        database.save_constellation_project(&good).unwrap();
+        let mut invalid = good.clone();
+        invalid.id = "../bad".to_owned();
+        assert!(database.save_constellation_project(&invalid).is_err());
+        invalid = good.clone();
+        invalid.title = " ".to_owned();
+        assert!(database.save_constellation_project(&invalid).is_err());
+        invalid = good.clone();
+        invalid.title = "✦".repeat(201);
+        assert!(database.save_constellation_project(&invalid).is_err());
+        invalid = good.clone();
+        invalid.updated_at = 9;
+        assert!(database.save_constellation_project(&invalid).is_err());
+        invalid = good.clone();
+        invalid.created_at = -1;
+        assert!(database.save_constellation_project(&invalid).is_err());
+        invalid = good.clone();
+        invalid.payload = serde_json::json!([]);
+        assert!(database.save_constellation_project(&invalid).is_err());
+        assert_eq!(database.list_constellation_projects().unwrap(), vec![good]);
     }
 }

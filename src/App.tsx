@@ -4909,6 +4909,7 @@ function App() {
       : tr("点击刷新，余额每 60 秒自动更新", "Click to refresh; updates automatically every 60 seconds");
   const qq2007Title = localizedThreadTitle(activeThread.title);
   const sidebarCollapsed = sidebarWidth === COLLAPSED_SIDEBAR_WIDTH;
+  const dockedInspectorLayout = !activeLayout.definition.root.className?.includes("qq2007-layout");
 
   const sidebarSlot = (
       <aside className="sidebar">
@@ -5201,6 +5202,8 @@ function App() {
       <DeferredWorkspace active={workspaceView === "constellation"}>
       <ConstellationStudio
         active={workspaceView === "constellation"}
+        threads={threads}
+        onOpenConversation={activateThread}
         locale={locale}
         armorMode={armorMode}
         armorModeLevel={armorModeLevel}
@@ -5526,8 +5529,10 @@ function App() {
   ) : null;
 
   function sidebarMaxWidth() {
-    const responsiveMainMinWidth = window.matchMedia("(max-width: 1180px)").matches ? 500 : 0;
-    const inspectorMinWidth = window.matchMedia("(min-width: 1181px)").matches
+    const dockedInspector = dockedInspectorLayout && window.innerWidth > 680;
+    // Keep these bounds aligned with the shell's CSS grid during either kind of resize.
+    const responsiveMainMinWidth = dockedInspector ? 320 : window.innerWidth <= 1180 ? 500 : 0;
+    const inspectorMinWidth = (dockedInspector || window.innerWidth > 1180)
       && rightPanelOpen
       && workspaceView === "chat"
       ? MIN_INSPECTOR_WIDTH
@@ -5623,6 +5628,10 @@ function App() {
     const preferredWidth = sidebarWidth
       ?? document.querySelector<HTMLElement>(".sidebar")?.getBoundingClientRect().width
       ?? DEFAULT_SIDEBAR_WIDTH;
+    if (dockedInspectorLayout) {
+      const inspectorMinWidth = rightPanelOpen && workspaceView === "chat" ? MIN_INSPECTOR_WIDTH : 0;
+      return Math.min(preferredWidth, Math.max(COLLAPSED_SIDEBAR_WIDTH, viewportWidth - 320 - inspectorMinWidth));
+    }
     return viewportWidth <= 1180
       ? Math.min(preferredWidth, Math.max(0, viewportWidth - 500))
       : preferredWidth;
@@ -5630,7 +5639,8 @@ function App() {
 
   function inspectorMaxWidth(viewportWidth = window.innerWidth) {
     const sidebarOccupancy = effectiveSidebarWidth(viewportWidth);
-    return Math.max(MIN_INSPECTOR_WIDTH, Math.floor(viewportWidth - sidebarOccupancy));
+    const workspaceMinWidth = dockedInspectorLayout && viewportWidth > 680 ? 320 : 0;
+    return Math.max(MIN_INSPECTOR_WIDTH, Math.floor(viewportWidth - sidebarOccupancy - workspaceMinWidth));
   }
 
   function commitInspectorWidth(width: number) {

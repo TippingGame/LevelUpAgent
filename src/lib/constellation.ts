@@ -1,5 +1,8 @@
 import type { Edge as FlowEdge, Node as FlowNode, XYPosition } from "@xyflow/react";
 import type {
+  ConstellationConversationSnapshot,
+  ConstellationProjectOutputReference,
+  ConstellationProjectRecord,
   ImageAttachment,
   MediaAsset,
   MediaKind,
@@ -9,8 +12,14 @@ import type {
 export const CONSTELLATION_SCHEMA_VERSION = 1 as const;
 export const CONSTELLATION_STORAGE_KEY = "levelup-agent.constellation.v1";
 export const CONSTELLATION_BLUEPRINTS_KEY = "levelup-agent.constellation-blueprints.v1";
+export const UNIVERSAL_INPUT_HANDLE = "__constellation_input__";
+export const UNIVERSAL_OUTPUT_HANDLE = "__constellation_output__";
 
 export type ConstellationNodeKind =
+  | "conversation"
+  | "input"
+  | "localTool"
+  | "projectRef"
   | "prompt"
   | "writing"
   | "image"
@@ -21,7 +30,7 @@ export type ConstellationNodeKind =
   | "note";
 
 export type ConstellationPortType = "text" | "image" | "video" | "audio" | "media";
-export type ConstellationRunStatus = "idle" | "queued" | "running" | "success" | "error";
+export type ConstellationRunStatus = "idle" | "queued" | "running" | "success" | "error" | "stale" | "waiting";
 export type ImageOperation = "generate" | "edit" | "outpaint" | "inpaint";
 
 export interface ConstellationValue {
@@ -30,6 +39,47 @@ export interface ConstellationValue {
   asset?: MediaAsset;
   attachment?: ImageAttachment;
   createdAt: number;
+}
+
+export function constellationValueReady(value: ConstellationValue | undefined): value is ConstellationValue {
+  if (!value) return false;
+  if (value.type === "text") return typeof value.text === "string" && value.text.trim().length > 0;
+  return value.asset ? value.asset.status === "completed" : Boolean(value.attachment);
+}
+
+export function sameConstellationValue(a: ConstellationValue | undefined, b: ConstellationValue | undefined) {
+  if (!a || !b || a.type !== b.type) return false;
+  if (a.asset || b.asset) return Boolean(a.asset?.id) && a.asset?.id === b.asset?.id;
+  if (a.attachment || b.attachment) return Boolean(a.attachment?.id) && a.attachment?.id === b.attachment?.id;
+  return a.createdAt === b.createdAt && a.text === b.text;
+}
+
+/** Refresh keeps the user's choice; one completed candidate can flow automatically. */
+export function constellationCandidateOutputs(data: ConstellationNodeData, candidates: NonNullable<ConstellationNodeData["outputCandidates"]>) {
+  const outputs: NonNullable<ConstellationNodeData["outputs"]> = {};
+  for (const [handle, values] of Object.entries(candidates)) {
+    const selected = values?.find((value) => sameConstellationValue(value, data.outputs?.[handle]));
+    const value = selected ?? (values?.length === 1 ? values[0] : undefined);
+    if (constellationValueReady(value)) outputs[handle] = value;
+  }
+  return outputs;
+}
+
+/** Old candidates remain previewable, but cannot satisfy changed inputs. */
+export function constellationCandidateSelection(data: ConstellationNodeData, handle: string, index: number): ConstellationValue | undefined {
+  const value = data.outputCandidates?.[handle]?.[index];
+  return data.status !== "stale" && constellationValueReady(value) ? value : undefined;
+}
+
+/** Resolve the stable identity without mutating the saved local snapshot. */
+export function constellationProjectReferenceValue(records: ConstellationProjectRecord[], currentProjectId: string, reference: ConstellationProjectOutputReference): ConstellationValue | undefined {
+  if (reference.projectId === currentProjectId) return undefined;
+  const source = records.find((record) => record.id === reference.projectId);
+  const payload = source?.payload && typeof source.payload === "object" && !Array.isArray(source.payload) ? source.payload as Record<string, unknown> : undefined;
+  const graph = normalizeConstellationGraph(payload?.graph ?? payload);
+  const node = graph?.nodes.find((item) => item.id === reference.nodeId);
+  const value = node?.data.outputs?.[reference.outputHandle];
+  return node?.data.status === "success" && constellationValueReady(value) && value.type === reference.valueType ? structuredClone(value) : undefined;
 }
 
 export interface ConstellationModelRoute {
@@ -61,6 +111,19 @@ export interface ConstellationNodeData extends Record<string, unknown> {
   canvasResult?: ImageAttachment;
   maskAttachment?: ImageAttachment;
   outputs?: Partial<Record<string, ConstellationValue>>;
+  conversationSnapshot?: ConstellationConversationSnapshot;
+  inputMode?: "text" | "file" | "url";
+  inputText?: string;
+  inputPath?: string;
+  inputUrl?: string;
+  inputAttachment?: ImageAttachment;
+  toolName?: string;
+  toolArguments?: string;
+  projectReference?: ConstellationProjectOutputReference;
+  /** The selected value is copied so a source project can change independently. */
+  projectValue?: ConstellationValue;
+  /** All generation candidates are kept; outputs contains the one routed downstream. */
+  outputCandidates?: Partial<Record<string, ConstellationValue[]>>;
   status: ConstellationRunStatus;
   error?: string;
   collapsed?: boolean;
@@ -72,6 +135,42 @@ export type ConstellationEdgeData = Record<string, unknown> & {
   valueType: ConstellationPortType;
 };
 export type ConstellationEdge = FlowEdge<ConstellationEdgeData>;
+
+export function constellationConnectionMembers(edges: ConstellationEdge[], edgeId: string) {
+  const representative = edges.find((edge) => edge.id === edgeId);
+  return representative ? edges.filter((edge) => edge.source === representative.source && edge.target === representative.target) : [];
+}
+
+export function groupConstellationConnections(edges: ConstellationEdge[]): ConstellationEdge[] {
+  const groups = new Map<string, ConstellationEdge>();
+  for (const edge of edges) {
+    const key = JSON.stringify([edge.source, edge.target]);
+    const existing = groups.get(key);
+    if (existing) {
+      existing.selected ||= edge.selected;
+      continue;
+    }
+    groups.set(key, { ...edge, sourceHandle: UNIVERSAL_OUTPUT_HANDLE, targetHandle: UNIVERSAL_INPUT_HANDLE });
+  }
+  return [...groups.values()];
+}
+
+export interface ConstellationConnectionMapping {
+  sourceHandle: string;
+  targetHandle: string;
+  valueType: ConstellationPortType;
+}
+
+export interface ConstellationConnectionIntent {
+  source?: string | null;
+  target?: string | null;
+  sourceHandle?: string | null;
+  targetHandle?: string | null;
+}
+
+export type ConstellationConnectionResolution =
+  | { valid: true; mappings: ConstellationConnectionMapping[] }
+  | { valid: false; reason: string; reasonEn: string };
 
 export interface ConstellationGraph {
   schemaVersion: typeof CONSTELLATION_SCHEMA_VERSION;
@@ -118,6 +217,53 @@ export interface ConstellationNodeDefinition {
 }
 
 export const CONSTELLATION_NODE_DEFINITIONS: Record<ConstellationNodeKind, ConstellationNodeDefinition> = {
+  conversation: {
+    kind: "conversation",
+    label: "会话快照",
+    labelEn: "Conversation Snapshot",
+    description: "选择会话中的明确消息作为可追溯输入",
+    descriptionEn: "Select explicit messages from a traceable conversation snapshot",
+    category: "input",
+    inputs: [],
+    outputs: [{ id: "text", type: "text", label: "快照文本", labelEn: "Snapshot text" }],
+    defaultSize: { width: 310, height: 300 },
+  },
+  input: {
+    kind: "input",
+    label: "外部输入",
+    labelEn: "External Input",
+    description: "接入文本、文件或受控 HTTP 文本",
+    descriptionEn: "Bring in text, files, or bounded HTTP text",
+    category: "input",
+    inputs: [],
+    outputs: [
+      { id: "text", type: "text", label: "文本", labelEn: "Text" },
+      { id: "image", type: "image", label: "图像", labelEn: "Image", optional: true },
+    ],
+    defaultSize: { width: 300, height: 290 },
+  },
+  localTool: {
+    kind: "localTool",
+    label: "本地工具",
+    labelEn: "Local Tool",
+    description: "通过应用工具与权限边界读取或处理本地数据",
+    descriptionEn: "Use host tools through the app permission boundary",
+    category: "tool",
+    inputs: [{ id: "input", type: "text", label: "输入", labelEn: "Input", optional: true }],
+    outputs: [{ id: "text", type: "text", label: "工具结果", labelEn: "Tool result" }],
+    defaultSize: { width: 308, height: 280 },
+  },
+  projectRef: {
+    kind: "projectRef",
+    label: "作品引用",
+    labelEn: "Project Output",
+    description: "引用另一份星图的稳定节点输出快照",
+    descriptionEn: "Reference a stable output snapshot from another constellation",
+    category: "input",
+    inputs: [],
+    outputs: [{ id: "output", type: "media", label: "作品", labelEn: "Output" }],
+    defaultSize: { width: 300, height: 260 },
+  },
   prompt: {
     kind: "prompt",
     label: "提示词",
@@ -236,6 +382,10 @@ export function createConstellationNode(kind: ConstellationNodeKind, position: X
     status: "idle",
   };
   const variants: Partial<Record<ConstellationNodeKind, Partial<ConstellationNodeData>>> = {
+    conversation: { conversationSnapshot: undefined },
+    input: { inputMode: "text", inputText: "", inputPath: "", inputUrl: "", inputAttachment: undefined },
+    localTool: { toolName: "read_file", toolArguments: "{\"path\":\"\"}" },
+    projectRef: { projectReference: undefined },
     prompt: { prompt: "", subtitle: "连接到能力节点" },
     writing: { prompt: "", instruction: "根据输入完成创作，只输出可直接使用的正文。" },
     image: {
@@ -296,6 +446,31 @@ export function findPort(kind: ConstellationNodeKind, direction: "input" | "outp
   return ports.find((port) => port.id === handle);
 }
 
+/**
+ * Source cards expose the type that their selected value actually has. This
+ * prevents a blank file or a generic project reference from creating a
+ * visual image edge which cannot carry an image at runtime.
+ */
+export function constellationNodePorts(node: ConstellationNode, direction: "input" | "output") {
+  const definition = CONSTELLATION_NODE_DEFINITIONS[node.data.kind];
+  if (direction === "input") return definition.inputs;
+  if (node.data.kind === "input") {
+    if (node.data.inputMode === "file" && node.data.inputAttachment?.kind === "image") {
+      return definition.outputs.filter((port) => port.id === "image");
+    }
+    return definition.outputs.filter((port) => port.id === "text");
+  }
+  if (node.data.kind === "projectRef") {
+    const type = node.data.projectValue?.type ?? node.data.projectReference?.valueType;
+    return type ? definition.outputs.map((port) => ({ ...port, type })) : [];
+  }
+  return definition.outputs;
+}
+
+export function findConstellationNodePort(node: ConstellationNode, direction: "input" | "output", handle?: string | null) {
+  return constellationNodePorts(node, direction).find((port) => port.id === handle);
+}
+
 export function portTypesCompatible(source: ConstellationPortType, target: ConstellationPortType) {
   return source === target || target === "media";
 }
@@ -331,8 +506,8 @@ export function validateConstellationConnection(
   const source = nodes.find((node) => node.id === connection.source);
   const target = nodes.find((node) => node.id === connection.target);
   if (!source || !target) return { valid: false, reason: "节点不存在", reasonEn: "The node does not exist" };
-  const output = findPort(source.data.kind, "output", connection.sourceHandle);
-  const input = findPort(target.data.kind, "input", connection.targetHandle);
+  const output = findConstellationNodePort(source, "output", connection.sourceHandle);
+  const input = findConstellationNodePort(target, "input", connection.targetHandle);
   if (!output || !input) return { valid: false, reason: "端口不存在", reasonEn: "The port does not exist" };
   if (!portTypesCompatible(output.type, input.type)) {
     return { valid: false, reason: `${output.label} 不能连接到 ${input.label}`, reasonEn: `${output.labelEn} cannot connect to ${input.labelEn}` };
@@ -352,6 +527,103 @@ export function validateConstellationConnection(
   return { valid: true, valueType: output.type };
 }
 
+function connectionPortScore(source: ConstellationPort, target: ConstellationPort) {
+  if (source.id === "mask" && target.id !== "mask") return -1;
+  if (target.id === "mask" && source.id !== "mask") return -1;
+  if (!portTypesCompatible(source.type, target.type)) return -1;
+  let score = 0;
+  if (source.id === target.id) score += 100;
+  if (source.type === target.type) score += 20;
+  if (target.multiple) score -= 1;
+  if (target.id === "prompt" || target.id === "text") score += 10;
+  if (target.id === "context") score += 2;
+  return score;
+}
+
+function connectionMappingExists(
+  edges: ConstellationEdge[],
+  sourceId: string,
+  sourceHandle: string,
+  targetId: string,
+  targetHandle: string,
+) {
+  return edges.some((edge) => edge.source === sourceId
+    && edge.sourceHandle === sourceHandle
+    && edge.target === targetId
+    && edge.targetHandle === targetHandle);
+}
+
+/**
+ * Resolve a gesture on a node pair into the persisted, exact port mappings.
+ * The universal handles used by the editor are intentionally not represented
+ * here: this function only returns real ports understood by the executor.
+ */
+export function resolveConstellationConnection(
+  nodes: ConstellationNode[],
+  edges: ConstellationEdge[],
+  intent: ConstellationConnectionIntent,
+): ConstellationConnectionResolution {
+  if (!intent.source || !intent.target) {
+    return { valid: false, reason: "连接缺少节点", reasonEn: "The connection is missing a node" };
+  }
+  const sourceNode = nodes.find((node) => node.id === intent.source);
+  const targetNode = nodes.find((node) => node.id === intent.target);
+  if (!sourceNode || !targetNode) {
+    return { valid: false, reason: "节点不存在", reasonEn: "The node does not exist" };
+  }
+  const sourcePorts = constellationNodePorts(sourceNode, "output")
+    .filter((port) => !intent.sourceHandle || port.id === intent.sourceHandle);
+  const targetPorts = constellationNodePorts(targetNode, "input")
+    .filter((port) => !intent.targetHandle || port.id === intent.targetHandle);
+  if (sourcePorts.length === 0 || targetPorts.length === 0) {
+    return { valid: false, reason: "端口不存在", reasonEn: "The port does not exist" };
+  }
+  if (wouldCreateConstellationCycle(edges, sourceNode.id, targetNode.id)) {
+    return { valid: false, reason: "星图必须保持为无环流程", reasonEn: "A constellation must remain acyclic" };
+  }
+
+  const planned: ConstellationConnectionMapping[] = [];
+  const occupied = new Set(
+    edges
+      .filter((edge) => edge.target === targetNode.id)
+      .map((edge) => edge.targetHandle),
+  );
+  const mappedSourceHandles = new Set(
+    edges
+      .filter((edge) => edge.source === sourceNode.id && edge.target === targetNode.id)
+      .map((edge) => edge.sourceHandle),
+  );
+  const mappingOccupied = (target: ConstellationPort) => !target.multiple && occupied.has(target.id);
+  const mappingPlanned = (target: ConstellationPort) => !target.multiple
+    && planned.some((mapping) => mapping.targetHandle === target.id);
+
+  for (const sourcePort of sourcePorts) {
+    if (!intent.targetHandle && mappedSourceHandles.has(sourcePort.id)) continue;
+    const candidates = targetPorts
+      .map((targetPort) => ({ targetPort, score: connectionPortScore(sourcePort, targetPort) }))
+      .filter(({ score, targetPort }) => score >= 0 && !mappingOccupied(targetPort) && !mappingPlanned(targetPort))
+      .sort((a, b) => b.score - a.score || a.targetPort.id.localeCompare(b.targetPort.id));
+    const candidate = candidates[0];
+    if (!candidate) continue;
+    if (connectionMappingExists(edges, sourceNode.id, sourcePort.id, targetNode.id, candidate.targetPort.id)) continue;
+    const mapping: ConstellationConnectionMapping = {
+      sourceHandle: sourcePort.id,
+      targetHandle: candidate.targetPort.id,
+      valueType: sourcePort.type,
+    };
+    planned.push(mapping);
+    occupied.add(candidate.targetPort.id);
+  }
+
+  if (planned.length === 0) {
+    const alreadyConnected = edges.some((edge) => edge.source === sourceNode.id && edge.target === targetNode.id);
+    return alreadyConnected
+      ? { valid: false, reason: "这条连接已经存在或没有可补充的端口", reasonEn: "The connection already exists or has no available port" }
+      : { valid: false, reason: "没有兼容且可用的端口", reasonEn: "No compatible, available port exists" };
+  }
+  return { valid: true, mappings: planned };
+}
+
 export function constellationDependencyClosure(targetIds: Iterable<string>, edges: ConstellationEdge[]) {
   const required = new Set(targetIds);
   let changed = true;
@@ -365,6 +637,39 @@ export function constellationDependencyClosure(targetIds: Iterable<string>, edge
     }
   }
   return required;
+}
+
+export function constellationDescendants(sourceIds: Iterable<string>, edges: ConstellationEdge[]) {
+  const affected = new Set(sourceIds);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const edge of edges) if (affected.has(edge.source) && !affected.has(edge.target)) {
+      affected.add(edge.target);
+      changed = true;
+    }
+  }
+  return affected;
+}
+
+export function staleConstellationNodes(nodes: ConstellationNode[], edges: ConstellationEdge[], sourceIds: Iterable<string>) {
+  const affected = constellationDescendants(sourceIds, edges);
+  return nodes.map((node) => affected.has(node.id) && node.data.kind !== "note"
+    ? { ...node, data: { ...node.data, status: "stale" as const, error: undefined } }
+    : node);
+}
+
+/** Include only missing/stale ancestors; successful values are durable caches. */
+export function constellationRunPlan(nodes: ConstellationNode[], edges: ConstellationEdge[], targets?: string[]) {
+  const required = targets?.length ? constellationDependencyClosure(targets, edges) : new Set(nodes.map((node) => node.id));
+  const forced = new Set(targets ?? []);
+  const execute = new Set(nodes.filter((node) => required.has(node.id) && node.data.kind !== "note"
+    && (forced.has(node.id) || node.data.status !== "success" || !Object.values(node.data.outputs ?? {}).some(constellationValueReady))).map((node) => node.id));
+  // Re-executing an upstream node invalidates every included dependent, even
+  // when that dependent had a successful output before this run.
+  const affected = constellationDescendants(execute, edges);
+  for (const id of affected) if (required.has(id)) execute.add(id);
+  return { required, execute };
 }
 
 export function constellationExecutionLayers(
@@ -405,21 +710,31 @@ export function constellationExecutionLayers(
 
 function serializableNode(node: ConstellationNode, forBlueprint = false): ConstellationNode {
   const data = structuredClone(node.data);
-  data.status = "idle";
+  data.status = ["success", "stale", "waiting"].includes(node.data.status) ? node.data.status : "idle";
   delete data.error;
   if (forBlueprint) {
+    data.status = "idle";
     delete data.outputs;
     delete data.references;
     delete data.canvasSource;
     delete data.canvasResult;
     delete data.maskAttachment;
+    delete data.conversationSnapshot;
+    delete data.projectReference;
+    delete data.projectValue;
+    delete data.outputCandidates;
+    delete data.inputAttachment;
+    delete data.inputPath;
+    delete data.inputText;
+    delete data.inputUrl;
+    if (data.kind === "localTool") data.toolArguments = "{}";
   }
   return {
     id: node.id,
     type: "constellation",
     position: { x: finite(node.position.x), y: finite(node.position.y) },
     width: finite(node.measured?.width ?? node.width, CONSTELLATION_NODE_DEFINITIONS[data.kind].defaultSize.width),
-    height: finite(node.measured?.height ?? node.height, undefined),
+    // Card height follows its contents, including collapsed and selected states.
     parentId: undefined,
     extent: undefined,
     selected: false,
@@ -659,7 +974,7 @@ export const BUILT_IN_CONSTELLATION_BLUEPRINTS: ConstellationBlueprint[] = [
 export function normalizeConstellationGraph(value: unknown): ConstellationGraph | null {
   if (!isRecord(value) || !Array.isArray(value.nodes) || !Array.isArray(value.edges)) return null;
   const nodes = value.nodes.map(normalizeNode).filter((node): node is ConstellationNode => Boolean(node));
-  if (nodes.length === 0 || nodes.length > 500) return null;
+  if (nodes.length > 500 || (value.nodes.length > 0 && nodes.length === 0)) return null;
   const seenNodeIds = new Set<string>();
   for (const node of nodes) {
     if (seenNodeIds.has(node.id)) node.id = makeId(node.data.kind);
@@ -688,7 +1003,7 @@ export function normalizeConstellationGraph(value: unknown): ConstellationGraph 
   return {
     schemaVersion: CONSTELLATION_SCHEMA_VERSION,
     id: stringValue(value.id, makeId("graph"), 120),
-    title: stringValue(value.title, "我的星图", 120),
+    title: stringValue(value.title, "我的星图", 200),
     nodes,
     edges,
     createdAt: timestamp(value.createdAt, now),
@@ -730,13 +1045,13 @@ function normalizeNode(value: unknown): ConstellationNode | null {
     x: finite(value.position.x),
     y: finite(value.position.y),
   });
-  const data = { ...base.data, ...structuredClone(value.data), kind, status: "idle" as const };
+  const storedStatus: ConstellationRunStatus = value.data.status === "success" || value.data.status === "stale" || value.data.status === "waiting" ? value.data.status : "idle";
+  const data = { ...base.data, ...structuredClone(value.data), kind, status: storedStatus };
   delete data.error;
   return {
     ...base,
     id: value.id.slice(0, 160),
     width: finite(value.width, base.width ?? CONSTELLATION_NODE_DEFINITIONS[kind].defaultSize.width),
-    height: finite(value.height, undefined),
     data,
   };
 }
@@ -780,7 +1095,7 @@ function timestamp(value: unknown, fallback: number) {
 }
 
 function stringValue(value: unknown, fallback: string, maxLength: number) {
-  return typeof value === "string" ? (value.trim().slice(0, maxLength) || fallback) : fallback;
+  return typeof value === "string" ? (Array.from(value.trim()).slice(0, maxLength).join("") || fallback) : fallback;
 }
 
 export function mediaKindForConstellationNode(kind: ConstellationNodeKind): MediaKind | null {

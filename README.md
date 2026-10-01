@@ -58,6 +58,8 @@ pnpm tauri build
 
 当前发布版本为 `1.0.64`。Windows 未配置 Authenticode，macOS 使用 ad-hoc 签名、尚未公证。跨平台发布与实体机验证边界见发布文档。
 
+当前本地测试版本为 `1.1.65`，尚未发布；构建与测试记录见 [1.1.65 本地测试包](docs/VERSION_1.1.65.md)。
+
 ## 许可
 
 [LGPL-3.0-only](LICENSE)。第三方归属见 [THIRD_PARTY_NOTICES](src-tauri/THIRD_PARTY_NOTICES.md)。

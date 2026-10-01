@@ -1,3 +1,4 @@
+import { createConstellationBrowserStore } from "./constellationStorage";
 import { listen } from "@tauri-apps/api/event";
 import { Channel, convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -18,6 +19,7 @@ import type {
   BrowserSessionSummary,
   ConfigWritePreview,
   ConfigWriteResult,
+  ConstellationProjectRecord,
   ExternalConfigCandidate,
   ExternalConfigTarget,
   GitDiff,
@@ -676,7 +678,6 @@ export async function saveProviderSettings(settings: ProviderSettings): Promise<
 const BROWSER_WRITING_PROJECTS_KEY = "levelup-agent.writing-projects.v1";
 const MAX_WRITING_BYTES = 16 * 1024 * 1024;
 const MAX_CONVERSATION_BYTES = 64 * 1024 * 1024;
-
 export async function listWritingProjects(): Promise<WritingProjectRecord[]> {
   if (isDesktop()) return invoke<WritingProjectRecord[]>("list_writing_projects");
   try {
@@ -711,6 +712,18 @@ export async function deleteWritingProject(projectId: string): Promise<boolean> 
   const next = current.filter((item) => item.id !== projectId);
   localStorage.setItem(BROWSER_WRITING_PROJECTS_KEY, JSON.stringify(next));
   return next.length !== current.length;
+}
+
+const browserConstellationStore = createConstellationBrowserStore(() => localStorage);
+export async function listConstellationProjects(): Promise<ConstellationProjectRecord[]> {
+  return isDesktop() ? invoke<ConstellationProjectRecord[]>("list_constellation_projects") : browserConstellationStore.list();
+}
+export async function saveConstellationProject(project: ConstellationProjectRecord): Promise<void> {
+  if (isDesktop()) await invoke("save_constellation_project", { project });
+  else await browserConstellationStore.save(project);
+}
+export async function deleteConstellationProject(projectId: string): Promise<boolean> {
+  return isDesktop() ? invoke<boolean>("delete_constellation_project", { projectId }) : browserConstellationStore.remove(projectId);
 }
 
 export async function exportWritingFile(

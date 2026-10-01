@@ -43,6 +43,38 @@ export interface WritingProjectRecord {
   updatedAt: number;
 }
 
+export interface ConstellationProjectRecord {
+  id: string;
+  title: string;
+  payload: unknown;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ConstellationMessageSnapshot {
+  id: string;
+  role: AgentMessage["role"];
+  content: string;
+  createdAt: number;
+  attachments: ImageAttachment[];
+}
+
+export interface ConstellationConversationSnapshot {
+  threadId: string;
+  threadTitle: string;
+  messageIds: string[];
+  messages: ConstellationMessageSnapshot[];
+  capturedAt: number;
+}
+
+export interface ConstellationProjectOutputReference {
+  projectId: string;
+  nodeId: string;
+  outputHandle: string;
+  valueType: "text" | "image" | "video" | "audio";
+  capturedAt: number;
+}
+
 export interface ThemeManifest {
   schemaVersion: 1 | 2;
   id: string;

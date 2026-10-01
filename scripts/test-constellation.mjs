@@ -67,6 +67,88 @@ test("typed ports reject incompatible, duplicate, and cyclic connections", () =>
   }).valid, false);
 });
 
+test("automatic connection resolution maps compatible ports without exposing port details", () => {
+  const prompt = constellation.createConstellationNode("prompt", { x: 0, y: 0 });
+  const image = constellation.createConstellationNode("image", { x: 300, y: 0 });
+  const canvas = constellation.createConstellationNode("canvas", { x: 600, y: 0 });
+
+  assert.deepEqual(
+    constellation.resolveConstellationConnection([prompt, image], [], { source: prompt.id, target: image.id }),
+    { valid: true, mappings: [{ sourceHandle: "text", targetHandle: "prompt", valueType: "text" }] },
+  );
+
+  const imageToCanvas = constellation.resolveConstellationConnection([image, canvas], [], {
+    source: image.id,
+    target: canvas.id,
+  });
+  assert.deepEqual(imageToCanvas, {
+    valid: true,
+    mappings: [{ sourceHandle: "image", targetHandle: "image", valueType: "image" }],
+  });
+});
+
+test("automatic resolution complements existing mappings and preserves canvas mask semantics", () => {
+  const canvas = constellation.createConstellationNode("canvas", { x: 0, y: 0 });
+  const image = constellation.createConstellationNode("image", { x: 300, y: 0 });
+  const imageEdge = constellation.createConstellationEdge(canvas.id, "image", image.id, "image", "image");
+  const resolved = constellation.resolveConstellationConnection([canvas, image], [imageEdge], {
+    source: canvas.id,
+    target: image.id,
+  });
+  assert.deepEqual(resolved, {
+    valid: true,
+    mappings: [{ sourceHandle: "mask", targetHandle: "mask", valueType: "image" }],
+  });
+
+  const writing = constellation.createConstellationNode("writing", { x: 300, y: 0 });
+  const firstText = constellation.createConstellationNode("prompt", { x: 0, y: 0 });
+  const secondText = constellation.createConstellationNode("prompt", { x: 0, y: 100 });
+  const firstEdge = constellation.createConstellationEdge(firstText.id, "text", writing.id, "prompt", "text");
+  const second = constellation.resolveConstellationConnection([firstText, secondText, writing], [firstEdge], {
+    source: secondText.id,
+    target: writing.id,
+  });
+  assert.equal(second.valid, true);
+  if (second.valid) assert.deepEqual(second.mappings, [{ sourceHandle: "text", targetHandle: "context", valueType: "text" }]);
+
+  const repeated = constellation.resolveConstellationConnection([firstText, writing], [firstEdge], {
+    source: firstText.id,
+    target: writing.id,
+  });
+  assert.equal(repeated.valid, false);
+});
+
+test("automatic resolution rejects cycles and incompatible gestures", () => {
+  const first = constellation.createConstellationNode("writing", { x: 0, y: 0 });
+  const second = constellation.createConstellationNode("writing", { x: 300, y: 0 });
+  const edge = constellation.createConstellationEdge(first.id, "text", second.id, "prompt", "text");
+  const cycle = constellation.resolveConstellationConnection([first, second], [edge], {
+    source: second.id,
+    target: first.id,
+  });
+  assert.equal(cycle.valid, false);
+  const prompt = constellation.createConstellationNode("prompt", { x: 0, y: 0 });
+  const audio = constellation.createConstellationNode("audio", { x: 300, y: 0 });
+  const incompatible = constellation.resolveConstellationConnection([prompt, audio], [], {
+    source: prompt.id,
+    target: audio.id,
+    targetHandle: "missing",
+  });
+  assert.equal(incompatible.valid, false);
+});
+
+test("display groups retain exact mappings while exposing one universal edge", () => {
+  const prompt = constellation.createConstellationNode("prompt", { x: 0, y: 0 });
+  const writing = constellation.createConstellationNode("writing", { x: 300, y: 0 });
+  const first = constellation.createConstellationEdge(prompt.id, "text", writing.id, "prompt", "text");
+  const second = constellation.createConstellationEdge(prompt.id, "text", writing.id, "context", "text");
+  const grouped = constellation.groupConstellationConnections([first, second]);
+  assert.equal(grouped.length, 1);
+  assert.equal(grouped[0].sourceHandle, constellation.UNIVERSAL_OUTPUT_HANDLE);
+  assert.equal(grouped[0].targetHandle, constellation.UNIVERSAL_INPUT_HANDLE);
+  assert.deepEqual(constellation.constellationConnectionMembers([first, second], grouped[0].id), [first, second]);
+});
+
 test("selected nodes round-trip as a portable blueprint with only internal edges", () => {
   const graph = constellation.createDefaultConstellationGraph();
   graph.nodes[0].selected = true;
@@ -105,6 +187,96 @@ test("execution layers include dependencies in deterministic DAG waves", () => {
   assert.deepEqual([...closure].sort(), graph.nodes.map((node) => node.id).sort());
   const layers = constellation.constellationExecutionLayers(graph.nodes, graph.edges, closure);
   assert.deepEqual(layers.map((layer) => layer.map((node) => node.data.kind)), [["prompt"], ["image"], ["output"]]);
+});
+
+test("ready values require usable text or completed media", () => {
+  assert.equal(constellation.constellationValueReady(undefined), false);
+  assert.equal(constellation.constellationValueReady({ type: "text", text: "   ", createdAt: 1 }), false);
+  assert.equal(constellation.constellationValueReady({ type: "text", text: "ready", createdAt: 1 }), true);
+  assert.equal(constellation.constellationValueReady({ type: "image", createdAt: 1, asset: { id: "queued", status: "queued" } }), false);
+  assert.equal(constellation.constellationValueReady({ type: "image", createdAt: 1, asset: { id: "done", status: "completed" } }), true);
+  assert.equal(constellation.constellationValueReady({ type: "image", createdAt: 1, attachment: { id: "local", name: "source.png", mimeType: "image/png", sizeBytes: 1, kind: "image" } }), true);
+});
+
+test("candidate output selection preserves an existing choice and waits on ambiguity", () => {
+  const node = constellation.createConstellationNode("image", { x: 0, y: 0 });
+  const first = { type: "image", createdAt: 1, asset: { id: "first", status: "completed" } };
+  const second = { type: "image", createdAt: 2, asset: { id: "second", status: "completed" } };
+  node.data.outputs = { image: second };
+  assert.deepEqual(constellation.constellationCandidateOutputs(node.data, { image: [first, second] }), { image: second });
+  node.data.outputs = {};
+  assert.deepEqual(constellation.constellationCandidateOutputs(node.data, { image: [first, second] }), {});
+  assert.deepEqual(constellation.constellationCandidateOutputs(node.data, { image: [first] }), { image: first });
+  assert.deepEqual(constellation.constellationCandidateOutputs(node.data, { image: [{ ...first, asset: { id: "failed", status: "failed" } }] }), {});
+});
+
+test("stale propagation blocks candidate selection while retaining inspectable outputs", () => {
+  const source = constellation.createConstellationNode("image", { x: 0, y: 0 });
+  const downstream = constellation.createConstellationNode("output", { x: 300, y: 0 });
+  const value = { type: "image", createdAt: 1, asset: { id: "saved", status: "completed" } };
+  source.data.outputs = { image: value };
+  source.data.outputCandidates = { image: [value] };
+  assert.equal(constellation.constellationCandidateSelection(source.data, "image", 0), value);
+  assert.equal(constellation.constellationCandidateSelection(source.data, "image", 1), undefined);
+  const edge = constellation.createConstellationEdge(source.id, "image", downstream.id, "media", "image");
+  const stale = constellation.staleConstellationNodes([source, downstream], [edge], [source.id]);
+  assert.equal(stale.find((node) => node.id === source.id)?.data.outputCandidates?.image?.[0].asset?.id, "saved");
+  assert.equal(stale.find((node) => node.id === downstream.id)?.data.status, "stale");
+  assert.equal(constellation.constellationCandidateSelection(stale[0].data, "image", 0), undefined);
+  assert.equal(constellation.constellationValueReady(stale.find((node) => node.id === source.id)?.data.outputCandidates?.image?.[0]), true);
+});
+
+test("candidate refresh retains the current choice even if other candidates fail", () => {
+  const node = constellation.createConstellationNode("image", { x: 0, y: 0 });
+  const selected = { type: "image", createdAt: 1, asset: { id: "selected", status: "completed" } };
+  const pending = { type: "image", createdAt: 2, asset: { id: "pending", status: "queued" } };
+  node.data.outputs = { image: selected };
+  assert.deepEqual(constellation.constellationCandidateOutputs(node.data, { image: [selected, pending] }), { image: selected });
+  const finished = { ...pending, asset: { ...pending.asset, status: "completed" } };
+  assert.deepEqual(constellation.constellationCandidateOutputs(node.data, { image: [selected, finished] }), { image: selected });
+  const failed = { ...pending, asset: { ...pending.asset, status: "failed" } };
+  assert.deepEqual(constellation.constellationCandidateOutputs(node.data, { image: [selected, failed] }), { image: selected });
+  node.data.outputs.image = finished;
+  assert.deepEqual(constellation.constellationCandidateOutputs(node.data, { image: [selected, finished] }), { image: finished });
+});
+
+test("project refresh resolves stable node and port IDs without mutating retained snapshots", () => {
+  const graph = constellation.createDefaultConstellationGraph();
+  const value = { type: "text", text: "Version 1", createdAt: 1 };
+  graph.nodes[0].data.status = "success";
+  graph.nodes[0].data.outputs = { text: value };
+  const record = { id: graph.id, title: "Source", payload: { graph }, createdAt: 1, updatedAt: 1 };
+  const reference = { projectId: graph.id, nodeId: graph.nodes[0].id, outputHandle: "text", valueType: "text", capturedAt: 1 };
+  const snapshot = constellation.constellationProjectReferenceValue([record], "destination", reference);
+  assert.deepEqual(snapshot, value);
+  assert.notEqual(snapshot, value);
+  value.text = "Version 2";
+  assert.equal(snapshot.text, "Version 1");
+  assert.equal(constellation.constellationProjectReferenceValue([record], "destination", reference).text, "Version 2");
+  assert.equal(constellation.constellationProjectReferenceValue([], "destination", reference), undefined);
+  assert.equal(snapshot.text, "Version 1");
+  assert.equal(constellation.constellationProjectReferenceValue([record], graph.id, reference), undefined);
+  assert.equal(constellation.constellationProjectReferenceValue([record], "destination", { ...reference, outputHandle: "missing" }), undefined);
+  assert.equal(constellation.constellationProjectReferenceValue([record], "destination", { ...reference, valueType: "image" }), undefined);
+  graph.nodes[0].data.status = "stale";
+  assert.equal(constellation.constellationProjectReferenceValue([record], "destination", reference), undefined);
+});
+
+test("selective reruns reuse ready ancestors and invalidate every affected included descendant", () => {
+  const graph = constellation.createDefaultConstellationGraph();
+  const [prompt, image, output] = graph.nodes;
+  prompt.data = { ...prompt.data, status: "success", outputs: { text: { type: "text", text: "ready", createdAt: 1 } } };
+  const value = { type: "image", createdAt: 1, asset: { id: "saved", status: "completed" } };
+  image.data = { ...image.data, status: "success", outputs: { image: value } };
+  output.data = { ...output.data, status: "success", outputs: { media: value } };
+  assert.deepEqual([...constellation.constellationRunPlan(graph.nodes, graph.edges).execute], []);
+  assert.deepEqual([...constellation.constellationRunPlan(graph.nodes, graph.edges, [output.id]).execute], [output.id]);
+  assert.deepEqual([...constellation.constellationRunPlan(graph.nodes, graph.edges, [image.id]).execute], [image.id]);
+  prompt.data.status = "stale";
+  assert.deepEqual([...constellation.constellationRunPlan(graph.nodes, graph.edges, [output.id]).execute].sort(), graph.nodes.map(node => node.id).sort());
+  prompt.data.status = "success";
+  image.data.outputs = { image: { ...value, asset: { ...value.asset, status: "queued" } } };
+  assert.deepEqual([...constellation.constellationRunPlan(graph.nodes, graph.edges, [output.id]).execute].sort(), [image.id, output.id].sort());
 });
 
 test("all built-in blueprints use valid typed, acyclic connections", () => {
@@ -184,7 +356,7 @@ test("high-refresh-rate media and canvas gestures stay on the compositor during 
 });
 
 test("node dragging remains continuous instead of silently reintroducing grid snapping", () => {
-  assert.doesNotMatch(studioSource, /snapToGrid/);
+  assert.doesNotMatch(studioSource, /\bsnapToGrid(?:\s|=)/);
   assert.doesNotMatch(studioSource, /16px/);
 });
 
@@ -255,5 +427,51 @@ test("Space panning is isolated from editable node controls", () => {
   assert.match(studioSource, /onFocusCapture=\{\(event\) =>/);
   assert.match(studioSource, /event\.code === "Space"/);
   assert.match(studioSource, /className="constellation-title-input nodrag nopan"/);
-  assert.match(nodeSource, /event\.code === "Space" && event\.repeat/);
+  assert.match(studioSource, /window\.addEventListener\("blur", resetSpacePan\)/);
+  assert.match(studioSource, /document\.addEventListener\("visibilitychange", onVisibilityChange\)/);
+});
+
+test("saved card heights never freeze content measurement after reopen or collapse", () => {
+  const graph = constellation.createDefaultConstellationGraph();
+  for (const height of [undefined, 0, 300]) {
+    graph.nodes[0].height = height;
+    graph.nodes[0].measured = { width: 292, height: 238 };
+    const saved = constellation.serializeConstellationGraph(graph);
+    assert.equal(saved.nodes[0].height, undefined);
+    saved.nodes[0].height = height;
+    const reopened = constellation.normalizeConstellationGraph(saved);
+    assert.ok(reopened);
+    assert.equal(reopened.nodes[0].height, undefined);
+    assert.equal(reopened.nodes[0].data.prompt, graph.nodes[0].data.prompt);
+  }
+});
+
+const storageSource = readFileSync(new URL("../src/lib/constellationStorage.ts", import.meta.url), "utf8");
+const storageModule = await import(`data:text/javascript;base64,${Buffer.from(ts.transpileModule(storageSource, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText).toString("base64")}`);
+test("empty projects reopen and retain their independent identity", () => {
+  const graph = constellation.createDefaultConstellationGraph(); graph.nodes = []; graph.edges = [];
+  assert.equal(constellation.normalizeConstellationGraph(graph).id, graph.id);
+  assert.deepEqual(constellation.normalizeConstellationGraph(graph).nodes, []);
+});
+test("browser project storage serializes writes, preserves createdAt, and retains over 100 projects", async () => {
+  const memory = new Map(); const adapter = { getItem: key => memory.get(key), setItem: (key, value) => memory.set(key, value) };
+  const store = storageModule.createConstellationBrowserStore(() => adapter);
+  const record = index => ({ id: `p-${index}`, title: `Project ${index}`, payload: { graph: { nodes: [], edges: [] } }, createdAt: 10, updatedAt: 20 });
+  await Promise.all(Array.from({ length: 105 }, (_, index) => store.save(record(index))));
+  await Promise.all([store.save({ ...record(0), createdAt: 15, updatedAt: 30, title: "  Changed  " }), store.remove("p-1")]);
+  const reopened = storageModule.createConstellationBrowserStore(() => adapter);
+  const list = await reopened.list(); assert.equal(list.length, 104);
+  assert.equal(list[0].createdAt, 10); assert.equal(list[0].title, "Changed");
+  await Promise.all(list.map(item => reopened.remove(item.id))); assert.deepEqual(await store.list(), []);
+});
+test("corrupt storage and quota failures cannot silently discard projects; retries recover", async () => {
+  let raw = "invalid json"; let fail = false;
+  const store = storageModule.createConstellationBrowserStore(() => ({ getItem: () => raw, setItem: (_key, value) => { if (fail) throw new Error("quota"); raw = value; } }));
+  const record = { id: "p", title: "😀".repeat(200), payload: {}, createdAt: 0, updatedAt: 1 };
+  await assert.rejects(store.list()); await assert.rejects(store.save(record)); assert.equal(raw, "invalid json");
+  raw = "[]"; fail = true; await assert.rejects(store.save(record), /quota/); assert.equal(raw, "[]");
+  fail = false; await store.save(record); assert.equal((await store.list()).length, 1);
+  for (const patch of [{ id: "../invalid" }, { title: "x".repeat(201) }, { createdAt: -1 }, { updatedAt: 0.5 }, { payload: [] }]) {
+    assert.throws(() => store.save({ ...record, ...patch }));
+  }
 });

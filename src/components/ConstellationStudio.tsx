@@ -6,7 +6,9 @@ import {
   useState,
   type ChangeEvent,
   type DragEvent,
+  type PointerEvent as ReactPointerEvent,
 } from "react";
+import { flushSync } from "react-dom";
 import {
   Background,
   BackgroundVariant,
@@ -15,11 +17,10 @@ import {
   Panel,
   ReactFlow,
   ReactFlowProvider,
-  SelectionMode,
   applyEdgeChanges,
   applyNodeChanges,
-  reconnectEdge,
   useReactFlow,
+  useStoreApi,
   type Connection,
   type EdgeChange,
   type FinalConnectionState,
@@ -64,11 +65,20 @@ import {
   getMediaCatalog,
   getModelCatalog,
   importMediaReferences,
+  listConstellationProjects,
   listMediaAssets,
   mediaAssetUrl,
   selectImageReferences,
   selectSingleImageReference,
   selectVideoReference,
+  saveConstellationProject,
+  deleteConstellationProject,
+  executeTool,
+  harnessCheckTool,
+  selectLocalResourcePaths,
+  importLocalResources,
+  previewAttachment,
+  refreshMediaAsset,
 } from "../lib/bridge";
 import {
   armorModeMediaInstructions,
@@ -84,20 +94,31 @@ import {
   CONSTELLATION_BLUEPRINTS_KEY,
   CONSTELLATION_NODE_DEFINITIONS,
   CONSTELLATION_STORAGE_KEY,
-  constellationDependencyClosure,
+  constellationRunPlan,
+  constellationDescendants,
+  staleConstellationNodes,
+  findConstellationNodePort,
+  portTypesCompatible,
   constellationExecutionLayers,
+  constellationConnectionMembers,
+  constellationCandidateOutputs,
+  constellationCandidateSelection,
+  constellationProjectReferenceValue,
+  constellationValueReady,
+  sameConstellationValue,
   createConstellationBlueprint,
   createConstellationEdge,
   createConstellationNode,
   createDefaultConstellationGraph,
   duplicateConstellationSelection,
   findPort,
+  groupConstellationConnections,
   instantiateConstellationBlueprint,
   mediaKindForConstellationNode,
   normalizeConstellationBlueprint,
   normalizeConstellationGraph,
+  resolveConstellationConnection,
   serializeConstellationGraph,
-  validateConstellationConnection,
   type ConstellationBlueprint,
   type ConstellationEdge,
   type ConstellationGraph,
@@ -106,12 +127,15 @@ import {
   type ConstellationNodeKind,
   type ConstellationPortType,
   type ConstellationValue,
+  UNIVERSAL_INPUT_HANDLE,
+  UNIVERSAL_OUTPUT_HANDLE,
 } from "../lib/constellation";
 import { tr } from "../lib/i18n";
 import { mediaModelSupportsExplicitImageMask } from "../lib/mediaCapabilities";
 import { isTextGenerationModel, profileHasTextModel, reasoningEffortForProfile } from "../lib/modelSelection";
 import type {
   AgentMessage,
+  AgentThread,
   ImageAttachment,
   MediaAsset,
   MediaCatalog,
@@ -119,7 +143,10 @@ import type {
   ProviderModelInfo,
   ProviderProfile,
   ReasoningEffort,
+  ConstellationProjectRecord,
 } from "../lib/types";
+import { ConstellationOverview, overviewPositionFor, overviewPositionForRecords } from "./ConstellationOverview";
+import { ConstellationConversationPicker, ConstellationProjectPicker, conversationSnapshotText } from "./ConstellationSources";
 import { ConstellationCanvasEditor } from "./ConstellationCanvasEditor";
 import { MediaImagePreview } from "./MediaStudio";
 import {
@@ -131,6 +158,8 @@ import {
 import "@xyflow/react/dist/style.css";
 import "./ConstellationStudio.css";
 import "./CreationModeSwitch.css";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { isDesktop } from "../lib/bridge";
 
 interface ConstellationStudioProps {
   active: boolean;
@@ -143,6 +172,8 @@ interface ConstellationStudioProps {
   profiles: ProviderProfile[];
   reasoningEffort: ReasoningEffort;
   workspace?: string;
+  threads: AgentThread[];
+  onOpenConversation: (threadId: string) => void;
   mediaCatalogRevision: number;
   onConfigureConnection: () => void;
   onMedia: () => void;
@@ -178,13 +209,22 @@ const NODE_LIBRARY: NodeLibraryItem[] = (Object.keys(CONSTELLATION_NODE_DEFINITI
   keywords: `${CONSTELLATION_NODE_DEFINITIONS[kind].label} ${CONSTELLATION_NODE_DEFINITIONS[kind].labelEn} ${CONSTELLATION_NODE_DEFINITIONS[kind].description} ${CONSTELLATION_NODE_DEFINITIONS[kind].descriptionEn}`.toLocaleLowerCase(),
 }));
 
-const EXECUTABLE_NODE_KINDS = new Set<ConstellationNodeKind>(["prompt", "writing", "image", "video", "audio", "canvas", "output"]);
+const EXECUTABLE_NODE_KINDS = new Set<ConstellationNodeKind>(["conversation", "input", "localTool", "projectRef", "prompt", "writing", "image", "video", "audio", "canvas", "output"]);
 const CONSTELLATION_DEFAULT_EDGE_OPTIONS = {
   type: "smoothstep",
   interactionWidth: 28,
   reconnectable: true,
 } as const;
 const CONSTELLATION_CONNECTION_STYLE = { stroke: "#7c3aed", strokeWidth: 2.2 } as const;
+const CONSTELLATION_MIGRATION_MARKER = "levelup-agent.constellation-projects.migrated.v1";
+class ConstellationWaitingError extends Error {}
+
+interface ConstellationProjectPayload {
+  schemaVersion: 1;
+  graph: ConstellationGraph;
+  overviewPosition: { x: number; y: number };
+  viewport?: { x: number; y: number; zoom: number };
+}
 
 export function ConstellationStudio(props: ConstellationStudioProps) {
   const armorClassName = props.armorMode ? ` armor-mode armor-level-${props.armorModeLevel}` : "";
@@ -208,16 +248,37 @@ function ConstellationStudioInner({
   profiles,
   reasoningEffort,
   workspace,
+  threads,
+  onOpenConversation,
   mediaCatalogRevision,
   onConfigureConnection,
   onMedia,
   onWriting,
   onPendingCountChange,
 }: ConstellationStudioProps) {
-  const initialGraphRef = useRef(loadConstellationGraph());
+  const [initialGraph] = useState<ConstellationGraph>(() => loadConstellationGraph());
+  const initialGraphRef = useRef(initialGraph);
   const [nodes, setNodes] = useState<ConstellationNode[]>(initialGraphRef.current.nodes);
+  const contentNodesRef = useRef(nodes);
+  // Position/selection changes must not invalidate previews or grouped connections.
+  const contentNodes = useMemo(() => {
+    const previous = contentNodesRef.current;
+    if (previous.length !== nodes.length || nodes.some((node, index) => node.id !== previous[index].id || node.data !== previous[index].data)) {
+      contentNodesRef.current = nodes;
+    }
+    return contentNodesRef.current;
+  }, [nodes]);
   const [edges, setEdges] = useState<ConstellationEdge[]>(initialGraphRef.current.edges);
   const [graphTitle, setGraphTitle] = useState(initialGraphRef.current.title);
+  const [projectRecords, setProjectRecords] = useState<ConstellationProjectRecord[]>([]);
+  const [projectHydrated, setProjectHydrated] = useState(false);
+  const [overviewOpen, setOverviewOpen] = useState(true);
+  const [projectQuery, setProjectQuery] = useState("");
+  const [projectError, setProjectError] = useState<string>();
+  const [projectLoadRevision, setProjectLoadRevision] = useState(0);
+  const [saveState, setSaveState] = useState<"saved" | "saving" | "dirty" | "error">("saved");
+  const [projectBusy, setProjectBusy] = useState(false);
+  const overviewOpenRef = useRef(true);
   const [blueprints, setBlueprints] = useState<ConstellationBlueprint[]>(loadPersonalBlueprints);
   const [mediaCatalog, setMediaCatalog] = useState<MediaCatalog>({ models: [], errors: [] });
   const [writingModels, setWritingModels] = useState<ProviderModelInfo[]>([]);
@@ -228,8 +289,8 @@ function ConstellationStudioInner({
   const [notice, setNotice] = useState<string>();
   const [libraryQuery, setLibraryQuery] = useState("");
   const [blueprintQuery, setBlueprintQuery] = useState("");
-  const [leftPanelOpen, setLeftPanelOpen] = useState(() => typeof window === "undefined" || window.innerWidth >= 1_320);
-  const [rightPanelOpen, setRightPanelOpen] = useState(() => typeof window === "undefined" || window.innerWidth >= 1_440);
+  const [leftPanelOpen, setLeftPanelOpen] = useState(false);
+  const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [blueprintDialog, setBlueprintDialog] = useState<BlueprintDraft>();
   const [editorNodeId, setEditorNodeId] = useState<string>();
   const [historyRevision, setHistoryRevision] = useState(0);
@@ -239,6 +300,7 @@ function ConstellationStudioInner({
   const [connectionType, setConnectionType] = useState<ConstellationPortType>();
   const [spacePanActive, setSpacePanActive] = useState(false);
   const [sourcePicker, setSourcePicker] = useState<ImageSourcePickerState>();
+  const [integrationPicker, setIntegrationPicker] = useState<{ nodeId: string; kind: "conversation" | "projectRef" }>();
   const [imageHistory, setImageHistory] = useState<MediaAsset[]>([]);
   const [imageHistoryLoading, setImageHistoryLoading] = useState(false);
   const [imageHistoryLoaded, setImageHistoryLoaded] = useState(false);
@@ -252,7 +314,16 @@ function ConstellationStudioInner({
   });
   const graphRef = useRef({ nodes, edges });
   const graphTitleRef = useRef(graphTitle);
+  const projectRecordsRef = useRef(projectRecords);
+  const projectBusyRef = useRef(false);
   const autosaveTimerRef = useRef<number | null>(null);
+  const projectSaveQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+  const hydrationRef = useRef<Promise<ConstellationProjectRecord[]> | null>(null);
+  const saveSequenceRef = useRef(0);
+  const saveStateRef = useRef(saveState);
+  const viewportRef = useRef({ x: 0, y: 0, zoom: 1 });
+  const restoredViewportRef = useRef(false);
+  const storageReadyRef = useRef(false);
   const historyRef = useRef<{ undo: GraphSnapshot[]; redo: GraphSnapshot[] }>({ undo: [], redo: [] });
   const dragCheckpointRef = useRef(false);
   const runEpochRef = useRef(0);
@@ -272,30 +343,162 @@ function ConstellationStudioInner({
   });
   const operationIdsRef = useRef(new Set<string>());
   const runtimeValuesRef = useRef(new Map<string, Partial<Record<string, ConstellationValue>>>());
+  const refreshingSourcesRef = useRef(new Set<string>());
   const imageHistoryRequestRef = useRef(0);
   const imageHistoryLoadingRef = useRef(false);
   const spacePanRef = useRef(false);
-  const { fitView, screenToFlowPosition } = useReactFlow<ConstellationNode, ConstellationEdge>();
+  const reconnectingEdgeRef = useRef<string | undefined>(undefined);
+  const connectionValidityCacheRef = useRef(new Map<string, boolean>());
+  const marqueeRef = useRef<HTMLDivElement>(null);
+  const marqueeGestureRef = useRef<{ pointerId: number; left: number; top: number; width: number; height: number; flowStart: { x: number; y: number }; startX: number; startY: number; x: number; y: number; active: boolean; additive: boolean } | null>(null);
+  const marqueeFrameRef = useRef<number | null>(null);
+  const suppressMarqueeClickRef = useRef(false);
+  const { fitView, screenToFlowPosition, flowToScreenPosition, getIntersectingNodes } = useReactFlow<ConstellationNode, ConstellationEdge>();
+  const flowStore = useStoreApi<ConstellationNode, ConstellationEdge>();
+
+  useEffect(() => { connectionValidityCacheRef.current.clear(); }, [contentNodes, edges]);
+
+  useEffect(() => {
+    if (overviewOpen) return;
+    const { updateConnection, cancelConnection } = flowStore.getState();
+    let frame: number | null = null;
+    let pending: Parameters<typeof updateConnection>[0] | null = null;
+    const clear = () => {
+      if (frame !== null) window.cancelAnimationFrame(frame);
+      frame = null;
+      pending = null;
+    };
+    // Keep XYFlow's hit testing and final connection; notify renderers once per frame.
+    const update = (connection: Parameters<typeof updateConnection>[0]) => {
+      if (!flowStore.getState().connection.inProgress) {
+        updateConnection(connection);
+        return;
+      }
+      pending = connection;
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        const next = pending;
+        pending = null;
+        if (next) updateConnection(next);
+      });
+    };
+    const cancel = () => { clear(); cancelConnection(); };
+    flowStore.setState({ updateConnection: update, cancelConnection: cancel });
+    return () => {
+      clear();
+      if (flowStore.getState().updateConnection === update) flowStore.setState({ updateConnection, cancelConnection });
+    };
+  }, [flowStore, overviewOpen]);
 
   graphRef.current = { nodes, edges };
   graphTitleRef.current = graphTitle;
+  overviewOpenRef.current = overviewOpen;
+  saveStateRef.current = saveState;
+
+
+  const projectPayload = useCallback((graph: ConstellationGraph, overviewPosition?: { x: number; y: number }, viewport = viewportRef.current): ConstellationProjectPayload => ({
+    schemaVersion: 1,
+    graph,
+    overviewPosition: overviewPosition ?? { x: 0, y: 0 },
+    viewport,
+  }), []);
+
+  const queueProjectSave = useCallback((change: ConstellationProjectRecord | ((records: ConstellationProjectRecord[]) => ConstellationProjectRecord)) => {
+    const operation = projectSaveQueueRef.current.then(async () => {
+      const record = typeof change === "function" ? change(projectRecordsRef.current) : change;
+      await saveConstellationProject(record);
+      const found = projectRecordsRef.current.some((item) => item.id === record.id);
+      const next = found ? projectRecordsRef.current.map((item) => item.id === record.id ? record : item) : [...projectRecordsRef.current, record];
+      projectRecordsRef.current = next;
+      setProjectRecords(next);
+    });
+    projectSaveQueueRef.current = operation.then(() => undefined, () => undefined);
+    return operation;
+  }, []);
+
+  const saveCurrentProject = useCallback(async () => {
+    if (!storageReadyRef.current || overviewOpenRef.current) return;
+    if (autosaveTimerRef.current !== null) {
+      window.clearTimeout(autosaveTimerRef.current);
+      autosaveTimerRef.current = null;
+    }
+    const sequence = ++saveSequenceRef.current;
+    const current = graphRef.current;
+    const graph = serializeConstellationGraph({
+      schemaVersion: 1, id: graphMetaRef.current.id,
+      title: graphTitleRef.current.trim() || tr("未命名星图", "Untitled Constellation"),
+      nodes: current.nodes, edges: current.edges,
+      createdAt: graphMetaRef.current.createdAt, updatedAt: Date.now(),
+    });
+    const viewport = { ...viewportRef.current };
+    setSaveState("saving");
+    try {
+      await queueProjectSave((records) => {
+        const previous = records.find((record) => record.id === graph.id);
+        const metadata = isRecord(previous?.payload) ? previous.payload : {};
+        return {
+          id: graph.id,
+          title: graph.title,
+          payload: { ...metadata, ...projectPayload(graph, metadata.overviewPosition as { x: number; y: number } | undefined, viewport) },
+          createdAt: previous?.createdAt ?? graph.createdAt,
+          updatedAt: graph.updatedAt,
+        };
+      });
+      if (sequence === saveSequenceRef.current) { setSaveState("saved"); setProjectError(undefined); }
+    } catch (reason) {
+      setSaveState("error");
+      setProjectError(errorText(reason));
+      throw reason;
+    }
+  }, [projectPayload, queueProjectSave]);
+  const saveCurrentProjectRef = useRef(saveCurrentProject);
+  saveCurrentProjectRef.current = saveCurrentProject;
 
   useEffect(() => {
-    if (!active) return;
-    let timer = window.setTimeout(() => void fitView({ padding: .18, duration: 320, maxZoom: 1 }), 80);
-    const onResize = () => {
-      window.clearTimeout(timer);
-      timer = window.setTimeout(() => void fitView({ padding: .18, duration: 260, maxZoom: 1 }), 120);
-    };
-    window.addEventListener("resize", onResize);
-    return () => {
-      window.clearTimeout(timer);
-      window.removeEventListener("resize", onResize);
-    };
-  }, [active, fitView]);
+    let disposed = false;
+    setProjectHydrated(false);
+    storageReadyRef.current = false;
+    hydrationRef.current ??= (async () => {
+      let records = await listConstellationProjects();
+      if (localStorage.getItem(CONSTELLATION_MIGRATION_MARKER) !== "1") {
+        const raw = localStorage.getItem(CONSTELLATION_STORAGE_KEY);
+        if (records.length === 0 && raw) {
+          const legacy = normalizeConstellationGraph(JSON.parse(raw));
+          if (!legacy) throw new Error(tr("旧星图无法读取，原始数据已保留", "Legacy constellation could not be read; the original is preserved"));
+          const migrated = { id: legacy.id, title: legacy.title, payload: { schemaVersion: 1, graph: legacy, overviewPosition: { x: 0, y: 0 } }, createdAt: legacy.createdAt, updatedAt: legacy.updatedAt };
+          await queueProjectSave(migrated);
+          records = [migrated];
+        }
+        localStorage.setItem(CONSTELLATION_MIGRATION_MARKER, "1");
+      }
+      const stabilized = records
+        .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))
+        .map((record, index) => {
+          const payload = isRecord(record.payload) ? record.payload : {};
+          if (payload.overviewLayoutVersion === 2 && isRecord(payload.overviewPosition) && Number.isFinite(payload.overviewPosition.x) && Number.isFinite(payload.overviewPosition.y)) return record;
+          return { ...record, payload: { ...payload, overviewPosition: overviewPositionFor(index), overviewLayoutVersion: 2 } };
+        });
+      for (const record of stabilized) {
+        if (record !== records.find((item) => item.id === record.id)) await queueProjectSave(record);
+      }
+      return stabilized;
+    })();
+    void hydrationRef.current.then((records) => {
+      if (disposed) return;
+      projectRecordsRef.current = records;
+      setProjectRecords(records);
+      storageReadyRef.current = true;
+      setProjectError(undefined);
+      setProjectHydrated(true);
+    }).catch((reason) => {
+      if (!disposed) { setProjectError(errorText(reason)); setProjectHydrated(true); }
+    });
+    return () => { disposed = true; };
+  }, [projectLoadRevision, queueProjectSave]);
 
   useEffect(() => {
-    if (!active || !workbenchRef.current) return;
+    if (!active || overviewOpen || !workbenchRef.current) return;
     compactPanelsRef.current = null;
     const updatePanelMode = (width: number) => {
       const compact = width <= 1_080;
@@ -313,7 +516,7 @@ function ConstellationStudioInner({
     });
     observer.observe(element);
     return () => observer.disconnect();
-  }, [active]);
+  }, [active, overviewOpen]);
 
   const refreshCatalogs = useCallback(async (showSpinner = true) => {
     if (showSpinner) setCatalogLoading(true);
@@ -358,29 +561,46 @@ function ConstellationStudioInner({
   }, [active, mediaCatalogRevision]);
 
   useEffect(() => {
-    if (autosaveTimerRef.current !== null) return;
+    if (!projectHydrated || !storageReadyRef.current || overviewOpen) return;
+    ++saveSequenceRef.current;
+    setSaveState("dirty");
+    if (canvasInteracting) return;
     autosaveTimerRef.current = window.setTimeout(() => {
       autosaveTimerRef.current = null;
-      const current = graphRef.current;
-      const graph: ConstellationGraph = serializeConstellationGraph({
-        schemaVersion: 1,
-        id: graphMetaRef.current.id,
-        title: graphTitleRef.current.trim() || tr("未命名星图", "Untitled Constellation"),
-        nodes: current.nodes,
-        edges: current.edges,
-        createdAt: graphMetaRef.current.createdAt,
-        updatedAt: Date.now(),
-      });
-      try {
-        localStorage.setItem(CONSTELLATION_STORAGE_KEY, JSON.stringify(graph));
-      } catch {
-        setNotice(tr("星图自动保存失败：本地存储空间不足", "Constellation autosave failed: local storage is full"));
-      }
+      void saveCurrentProjectRef.current().catch((reason) => setProjectError(errorText(reason)));
     }, 450);
-  }, [edges, graphTitle, nodes]);
+    return () => {
+      if (autosaveTimerRef.current !== null) window.clearTimeout(autosaveTimerRef.current);
+      autosaveTimerRef.current = null;
+    };
+  }, [edges, graphTitle, nodes, projectHydrated, overviewOpen, canvasInteracting]);
 
   useEffect(() => () => {
     if (autosaveTimerRef.current !== null) window.clearTimeout(autosaveTimerRef.current);
+    void saveCurrentProjectRef.current().catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    if (!active) void saveCurrentProjectRef.current().catch(() => undefined);
+  }, [active]);
+
+  useEffect(() => {
+    const flush = () => { void saveCurrentProjectRef.current().catch(() => undefined); };
+    const visibility = () => { if (document.visibilityState === "hidden") flush(); };
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (!overviewOpenRef.current && saveStateRef.current !== "saved") {
+        flush(); event.preventDefault(); event.returnValue = "";
+      }
+    };
+    document.addEventListener("visibilitychange", visibility);
+    window.addEventListener("beforeunload", beforeUnload);
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    if (isDesktop()) void getCurrentWindow().onCloseRequested(async (event) => {
+      try { await saveCurrentProjectRef.current(); await projectSaveQueueRef.current; }
+      catch { event.preventDefault(); }
+    }).then((stop) => { if (disposed) stop(); else unlisten = stop; }).catch((reason) => setProjectError(errorText(reason)));
+    return () => { disposed = true; unlisten?.(); document.removeEventListener("visibilitychange", visibility); window.removeEventListener("beforeunload", beforeUnload); };
   }, []);
 
   useEffect(() => {
@@ -394,22 +614,17 @@ function ConstellationStudioInner({
   useEffect(() => onPendingCountChange(mediaPending), [mediaPending, onPendingCountChange]);
 
   useEffect(() => {
-    if (!active) return;
+    if (!active || overviewOpen || commandOpen || editorNodeId || sourcePicker || integrationPicker || blueprintDialog) return;
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       const editing = Boolean(target?.closest("input, textarea, select, [contenteditable='true']"));
-      const interactive = Boolean(target?.closest("button, a, input, textarea, select, [contenteditable='true']"));
       if (event.code === "Space") {
-        // React Flow's built-in Space activation is intentionally disabled
-        // below.  Keeping this state here means an editable node title can
-        // receive normal spaces without accidentally turning the canvas into
-        // a permanent pan gesture.
-        if (!editing && !interactive) {
+        if (event.isComposing || event.ctrlKey || event.metaKey || event.altKey) return;
+        spacePanRef.current = true;
+        // Buttons retain focus after a click; that must not disable canvas panning.
+        if (!editing) {
           event.preventDefault();
-          if (!event.repeat) {
-            spacePanRef.current = true;
-            setSpacePanActive(true);
-          }
+          setSpacePanActive(true);
         }
         return;
       }
@@ -440,20 +655,24 @@ function ConstellationStudioInner({
         void fitView({ padding: .16, duration: 280 });
       }
     };
-    const onKeyUp = (event: KeyboardEvent) => {
-      if (event.code !== "Space") return;
+    const resetSpacePan = () => {
       spacePanRef.current = false;
       setSpacePanActive(false);
     };
-    window.addEventListener("keydown", onKeyDown);
-    window.addEventListener("keyup", onKeyUp);
+    const onKeyUp = (event: KeyboardEvent) => { if (event.code === "Space") resetSpacePan(); };
+    const onVisibilityChange = () => { if (document.hidden) resetSpacePan(); };
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("keyup", onKeyUp, true);
+    window.addEventListener("blur", resetSpacePan);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("keyup", onKeyUp);
-      spacePanRef.current = false;
-      setSpacePanActive(false);
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keyup", onKeyUp, true);
+      window.removeEventListener("blur", resetSpacePan);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      resetSpacePan();
     };
-  }, [active, fitView]);
+  }, [active, fitView, overviewOpen, commandOpen, editorNodeId, sourcePicker, integrationPicker, blueprintDialog]);
 
   const checkpoint = useCallback(() => {
     const snapshot: GraphSnapshot = {
@@ -467,6 +686,8 @@ function ConstellationStudioInner({
   }, []);
 
   const restoreSnapshot = (snapshot: GraphSnapshot) => {
+    if (runningRef.current) return;
+    runtimeValuesRef.current.clear();
     setNodes(snapshot.nodes);
     setEdges(snapshot.edges);
     setHistoryRevision((value) => value + 1);
@@ -487,51 +708,85 @@ function ConstellationStudioInner({
   };
 
   const onNodesChange = useCallback((changes: NodeChange<ConstellationNode>[]) => {
+    if (runningRef.current && changes.some((change) => change.type === "remove")) return;
     if (changes.some((change) => change.type === "remove")) checkpoint();
-    setNodes((current) => applyNodeChanges(changes, current));
+    const removed = changes.filter((change) => change.type === "remove").map((change) => change.id);
+    if (removed.length) runtimeValuesRef.current.clear();
+    setNodes((current) => applyNodeChanges(changes, removed.length ? staleConstellationNodes(current, graphRef.current.edges, removed) : current));
+    if (removed.length) setEdges((current) => current.filter((edge) => !removed.includes(edge.source) && !removed.includes(edge.target)));
   }, [checkpoint]);
 
   const onEdgesChange = useCallback((changes: EdgeChange<ConstellationEdge>[]) => {
+    if (runningRef.current && changes.some((change) => change.type === "remove")) return;
     if (changes.some((change) => change.type === "remove")) checkpoint();
-    setEdges((current) => applyEdgeChanges(changes, current));
+    const targets = changes.filter((change) => change.type === "remove").flatMap((change) => constellationConnectionMembers(graphRef.current.edges, change.id).map((edge) => edge.target));
+    if (targets.length) { runtimeValuesRef.current.clear(); setNodes((current) => staleConstellationNodes(current, graphRef.current.edges, targets)); }
+    setEdges((current) => applyEdgeChanges(changes.flatMap((change) => {
+      if (change.type !== "remove" && change.type !== "select") return [];
+      return constellationConnectionMembers(current, change.id).map((edge) => ({ ...change, id: edge.id }));
+    }), current));
+  }, [checkpoint]);
+
+  const commitAutomaticConnection = useCallback((connection: Connection, replacingEdgeId?: string) => {
+    if (runningRef.current) return false;
+    const replaced = new Set(replacingEdgeId ? constellationConnectionMembers(graphRef.current.edges, replacingEdgeId).map((edge) => edge.id) : []);
+    const remaining = replacingEdgeId
+      ? graphRef.current.edges.filter((edge) => !replaced.has(edge.id))
+      : graphRef.current.edges;
+    const resolution = resolveConstellationConnection(graphRef.current.nodes, remaining, {
+      source: connection.source,
+      target: connection.target,
+      sourceHandle: connection.sourceHandle === UNIVERSAL_OUTPUT_HANDLE ? undefined : connection.sourceHandle,
+      targetHandle: connection.targetHandle === UNIVERSAL_INPUT_HANDLE ? undefined : connection.targetHandle,
+    });
+    if (!resolution.valid) {
+      setNotice(tr(resolution.reason, resolution.reasonEn));
+      return false;
+    }
+    checkpoint();
+    runtimeValuesRef.current.clear();
+    const targets = [connection.target, ...graphRef.current.edges.filter((edge) => replaced.has(edge.id)).map((edge) => edge.target)];
+    setNodes((current) => staleConstellationNodes(current, graphRef.current.edges, targets));
+    setEdges((current) => [
+      ...current.filter((edge) => !replaced.has(edge.id)),
+      ...resolution.mappings.map((mapping) => createConstellationEdge(
+        connection.source,
+        mapping.sourceHandle,
+        connection.target,
+        mapping.targetHandle,
+        mapping.valueType,
+      )),
+    ]);
+    return true;
   }, [checkpoint]);
 
   const onConnect = useCallback((connection: Connection) => {
-    const validation = validateConstellationConnection(graphRef.current.nodes, graphRef.current.edges, connection);
-    if (!validation.valid) {
-      setNotice(tr(validation.reason, validation.reasonEn));
-      return;
-    }
-    checkpoint();
-    setEdges((current) => [...current, createConstellationEdge(
-      connection.source,
-      connection.sourceHandle!,
-      connection.target,
-      connection.targetHandle!,
-      validation.valueType,
-    )]);
-  }, [checkpoint]);
+    commitAutomaticConnection(connection);
+  }, [commitAutomaticConnection]);
 
-  const isValidConnection = useCallback((connection: Connection | ConstellationEdge) => (
-    validateConstellationConnection(graphRef.current.nodes, graphRef.current.edges, connection).valid
-  ), []);
+  const isValidConnection = useCallback((connection: Connection | ConstellationEdge) => {
+    const key = JSON.stringify([connection.source, connection.sourceHandle, connection.target, connection.targetHandle, reconnectingEdgeRef.current]);
+    const cached = connectionValidityCacheRef.current.get(key);
+    if (cached !== undefined) return cached;
+    const excluded = new Set(reconnectingEdgeRef.current ? constellationConnectionMembers(graphRef.current.edges, reconnectingEdgeRef.current).map((edge) => edge.id) : []);
+    const resolution = resolveConstellationConnection(graphRef.current.nodes, graphRef.current.edges.filter((edge) => !excluded.has(edge.id)), {
+      source: connection.source,
+      target: connection.target,
+      sourceHandle: connection.sourceHandle === UNIVERSAL_OUTPUT_HANDLE ? undefined : connection.sourceHandle,
+      targetHandle: connection.targetHandle === UNIVERSAL_INPUT_HANDLE ? undefined : connection.targetHandle,
+    });
+    connectionValidityCacheRef.current.set(key, resolution.valid);
+    return resolution.valid;
+  }, []);
 
   const onReconnect = useCallback((oldEdge: ConstellationEdge, connection: Connection) => {
-    const remaining = graphRef.current.edges.filter((edge) => edge.id !== oldEdge.id);
-    const validation = validateConstellationConnection(graphRef.current.nodes, remaining, connection);
-    if (!validation.valid) {
-      setNotice(tr(validation.reason, validation.reasonEn));
-      return;
-    }
-    checkpoint();
-    setEdges((current) => reconnectEdge(oldEdge, connection, current).map((edge) => edge.id === oldEdge.id
-      ? { ...edge, data: { ...edge.data, valueType: validation.valueType } }
-      : edge));
-  }, [checkpoint]);
+    commitAutomaticConnection(connection, oldEdge.id);
+  }, [commitAutomaticConnection]);
 
   const beginCanvasInteraction = useCallback(() => setCanvasInteracting(true), []);
   const endCanvasInteraction = useCallback(() => setCanvasInteracting(false), []);
   const onConnectionStart = useCallback((_event: MouseEvent | TouchEvent, params: OnConnectStartParams) => {
+    connectionValidityCacheRef.current.clear();
     setCanvasInteracting(true);
     if (params.handleType !== "source" || !params.nodeId) {
       setConnectionType(undefined);
@@ -540,14 +795,28 @@ function ConstellationStudioInner({
     const node = graphRef.current.nodes.find((item) => item.id === params.nodeId);
     setConnectionType(node ? findPort(node.data.kind, "output", params.handleId)?.type : undefined);
   }, []);
-  const onConnectionEnd = useCallback((_event: MouseEvent | TouchEvent, state: FinalConnectionState) => {
+  const onConnectionEnd = useCallback((event: MouseEvent | TouchEvent, state: FinalConnectionState) => {
+    connectionValidityCacheRef.current.clear();
     setCanvasInteracting(false);
     setConnectionType(undefined);
-    if (state.isValid || !state.fromHandle) return;
+    if (state.isValid || !state.fromHandle || reconnectingEdgeRef.current) return;
+    if (event.type === "touchcancel" || event.type === "pointercancel") return;
     if (!state.toHandle) {
-      if (state.toNode) setNotice(tr("请落到节点左侧的同色输入端口；也可以依次点击两个端口", "Drop on a matching input port on the node's left, or click the two ports in sequence"));
+      const point = "changedTouches" in event ? event.changedTouches[0] : event;
+      const hit = point ? document.elementFromPoint(point.clientX, point.clientY)?.closest(".react-flow__node") : null;
+      const targetId = hit?.getAttribute("data-id") ?? state.toNode?.id;
+      if (targetId && targetId !== state.fromHandle.nodeId) {
+        const fromSource = state.fromHandle.type === "source";
+        commitAutomaticConnection({
+          source: fromSource ? state.fromHandle.nodeId : targetId,
+          sourceHandle: fromSource ? state.fromHandle.id ?? null : UNIVERSAL_OUTPUT_HANDLE,
+          target: fromSource ? targetId : state.fromHandle.nodeId,
+          targetHandle: fromSource ? UNIVERSAL_INPUT_HANDLE : state.fromHandle.id ?? null,
+        });
+      }
       return;
     }
+    if (state.fromHandle.type === state.toHandle.type) return;
     const fromSource = state.fromHandle.type === "source";
     const connection: Connection = {
       source: fromSource ? state.fromHandle.nodeId : state.toHandle.nodeId,
@@ -555,9 +824,8 @@ function ConstellationStudioInner({
       target: fromSource ? state.toHandle.nodeId : state.fromHandle.nodeId,
       targetHandle: fromSource ? state.toHandle.id ?? null : state.fromHandle.id ?? null,
     };
-    const validation = validateConstellationConnection(graphRef.current.nodes, graphRef.current.edges, connection);
-    if (!validation.valid) setNotice(tr(validation.reason, validation.reasonEn));
-  }, []);
+    commitAutomaticConnection(connection);
+  }, [commitAutomaticConnection]);
 
   const onNodeDragStart = useCallback(() => {
     if (!dragCheckpointRef.current) {
@@ -586,21 +854,101 @@ function ConstellationStudioInner({
   const onCanvasMoveStart = useCallback((event: MouseEvent | TouchEvent | null) => {
     if (event) setCanvasInteracting(true);
   }, []);
-  const onCanvasMoveEnd = useCallback((event: MouseEvent | TouchEvent | null) => {
-    if (event) setCanvasInteracting(false);
+  const onCanvasMoveEnd = useCallback((event: MouseEvent | TouchEvent | null, viewport: { x: number; y: number; zoom: number }) => {
+    viewportRef.current = viewport;
+    if (event) {
+      setCanvasInteracting(false);
+      void saveCurrentProjectRef.current().catch(() => undefined);
+    }
+  }, []);
+
+  const paintMarquee = useCallback(() => {
+    marqueeFrameRef.current = null;
+    const gesture = marqueeGestureRef.current;
+    const element = marqueeRef.current;
+    if (!gesture?.active || !element) return;
+    const start = flowToScreenPosition(gesture.flowStart);
+    gesture.startX = start.x - gesture.left;
+    gesture.startY = start.y - gesture.top;
+    element.style.transform = `translate(${Math.min(gesture.startX, gesture.x)}px, ${Math.min(gesture.startY, gesture.y)}px)`;
+    element.style.width = `${Math.abs(gesture.x - gesture.startX)}px`;
+    element.style.height = `${Math.abs(gesture.y - gesture.startY)}px`;
+    const dx = gesture.x < 30 ? 10 : gesture.x > gesture.width - 30 ? -10 : 0;
+    const dy = gesture.y < 30 ? 10 : gesture.y > gesture.height - 30 ? -10 : 0;
+    if (dx || dy) {
+      void flowStore.getState().panBy({ x: dx, y: dy });
+      marqueeFrameRef.current = window.requestAnimationFrame(paintMarquee);
+    }
+  }, [flowStore, flowToScreenPosition]);
+
+  const finishMarquee = useCallback((event: ReactPointerEvent<HTMLElement>, commit: boolean) => {
+    const gesture = marqueeGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    marqueeGestureRef.current = null;
+    if (marqueeFrameRef.current !== null) window.cancelAnimationFrame(marqueeFrameRef.current);
+    marqueeFrameRef.current = null;
+    if (marqueeRef.current) marqueeRef.current.hidden = true;
+    if (!gesture.active) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    suppressMarqueeClickRef.current = true;
+    window.setTimeout(() => { suppressMarqueeClickRef.current = false; }, 0);
+    setCanvasInteracting(false);
+    if (!commit) return;
+    const end = screenToFlowPosition({ x: event.clientX, y: event.clientY }, { snapToGrid: false });
+    const selected = new Set(getIntersectingNodes({
+      x: Math.min(gesture.flowStart.x, end.x),
+      y: Math.min(gesture.flowStart.y, end.y),
+      width: Math.abs(end.x - gesture.flowStart.x),
+      height: Math.abs(end.y - gesture.flowStart.y),
+    }, true).filter((node) => !node.hidden && node.selectable !== false).map((node) => node.id));
+    if (gesture.additive) {
+      for (const node of graphRef.current.nodes) if (node.selected) selected.add(node.id);
+    }
+    setNodes((current) => current.map((node) => node.selected === selected.has(node.id) ? node : { ...node, selected: selected.has(node.id) }));
+    setEdges((current) => current.map((edge) => {
+      const nextSelected = selected.has(edge.source) || selected.has(edge.target) || gesture.additive && !!edge.selected;
+      return edge.selected === nextSelected ? edge : { ...edge, selected: nextSelected };
+    }));
+  }, [getIntersectingNodes, screenToFlowPosition]);
+
+  useEffect(() => () => {
+    if (marqueeFrameRef.current !== null) window.cancelAnimationFrame(marqueeFrameRef.current);
   }, []);
 
   const updateNode = useCallback((nodeId: string, patch: Partial<ConstellationNodeData>) => {
-    setNodes((current) => current.map((node) => node.id === nodeId ? { ...node, data: { ...node.data, ...patch } } : node));
-  }, []);
+    const semantic = Object.keys(patch).some((key) => !["title", "collapsed", "noteColor", "status", "error"].includes(key));
+    if (semantic && runningRef.current) return;
+    if (semantic) { checkpoint(); runtimeValuesRef.current.clear(); }
+    setNodes((current) => {
+      const modified = current.map((node) => node.id === nodeId ? { ...node, data: { ...node.data, ...patch } } : node);
+      if (!semantic) return modified;
+      return staleConstellationNodes(modified, graphRef.current.edges, [nodeId]).map((node) => node.id === nodeId && (patch.status === "success" || patch.status === "waiting" || patch.status === "error") ? { ...node, data: { ...node.data, status: patch.status, error: patch.error } } : node);
+    });
+    if (semantic) {
+      const old = graphRef.current.nodes.find((node) => node.id === nodeId);
+      if (old) {
+        const next = { ...old, data: { ...old.data, ...patch } };
+        setEdges((current) => current.filter((edge) => {
+          if (edge.source !== nodeId) return true;
+          const output = findConstellationNodePort(next, "output", edge.sourceHandle);
+          const target = graphRef.current.nodes.find((node) => node.id === edge.target);
+          const input = target && findConstellationNodePort(target, "input", edge.targetHandle);
+          return Boolean(output && input && portTypesCompatible(output.type, input.type));
+        }));
+      }
+    }
+  }, [checkpoint]);
 
   const removeNode = useCallback((nodeId: string) => {
+    if (runningRef.current) return;
     checkpoint();
-    setNodes((current) => current.filter((node) => node.id !== nodeId));
+    runtimeValuesRef.current.clear();
+    setNodes((current) => staleConstellationNodes(current, graphRef.current.edges, [nodeId]).filter((node) => node.id !== nodeId));
     setEdges((current) => current.filter((edge) => edge.source !== nodeId && edge.target !== nodeId));
   }, [checkpoint]);
 
   const addNode = useCallback((kind: ConstellationNodeKind, position?: { x: number; y: number }) => {
+    if (runningRef.current) return;
     checkpoint();
     const origin = position ?? screenToFlowPosition({
       x: window.innerWidth * .52 + Math.random() * 50,
@@ -615,13 +963,12 @@ function ConstellationStudioInner({
     try {
       const selected = kind === "video" ? await selectVideoReference() : await selectImageReferences();
       if (selected.length === 0) return;
-      setNodes((current) => current.map((node) => node.id === nodeId
-        ? { ...node, data: { ...node.data, references: uniqueAttachments([...(node.data.references ?? []), ...selected]).slice(0, 8) } }
-        : node));
+      const node = graphRef.current.nodes.find((item) => item.id === nodeId);
+      if (node) updateNode(nodeId, { references: uniqueAttachments([...(node.data.references ?? []), ...selected]).slice(0, 8) });
     } catch (reason) {
       setNotice(errorText(reason));
     }
-  }, []);
+  }, [updateNode]);
 
   const openImageSourcePicker = useCallback((nodeId: string, purpose: ImageSourcePickerPurpose) => {
     setSourcePicker({ nodeId, purpose });
@@ -694,7 +1041,7 @@ function ConstellationStudioInner({
       .filter((value): value is ConstellationValue => Boolean(value));
   }, []);
 
-  const getInputValue = useCallback((nodeId: string, handle: string) => inputValues(nodeId, handle)[0], [inputValues]);
+  const getInputValue = useCallback((nodeId: string, handle: string) => inputValues(nodeId, handle)[0], [inputValues, contentNodes]);
 
   const openCanvas = useCallback(async (nodeId: string) => {
     const node = graphRef.current.nodes.find((item) => item.id === nodeId);
@@ -721,7 +1068,7 @@ function ConstellationStudioInner({
     for (const asset of imageHistory) {
       if (asset.kind === "image" && asset.status === "completed" && asset.filePath) byId.set(asset.id, asset);
     }
-    for (const node of nodes) {
+    for (const node of contentNodes) {
       for (const value of Object.values(node.data.outputs ?? {})) {
         if (value?.type === "image" && value.asset?.status === "completed" && value.asset.filePath) {
           byId.set(value.asset.id, value.asset);
@@ -729,7 +1076,7 @@ function ConstellationStudioInner({
       }
     }
     return [...byId.values()].sort((left, right) => right.createdAt - left.createdAt);
-  }, [imageHistory, nodes]);
+  }, [imageHistory, contentNodes]);
 
   const openValuePreview = useCallback((value: ConstellationValue) => {
     if (value.type !== "image" || !value.asset?.filePath || value.asset.status !== "completed") return;
@@ -747,6 +1094,82 @@ function ConstellationStudioInner({
     }
   }, []);
 
+  const chooseInputFile = useCallback(async (nodeId: string) => {
+    const projectId = graphMetaRef.current.id;
+    try {
+      const paths = await selectLocalResourcePaths(false);
+      if (!paths.length) return;
+      const attachment = (await importLocalResources([paths[0]], []))[0];
+      if (!attachment) throw new Error(tr("文件无法导入", "The file could not be imported"));
+      const values: Partial<Record<string, ConstellationValue>> = {};
+      if (attachment.kind === "image") values.image = { type: "image", attachment, createdAt: Date.now() };
+      else {
+        const preview = await previewAttachment(attachment);
+        if (!preview.text?.trim()) throw new Error(tr("此文件没有可提取的文本，请选择文本、文档或图像", "This file has no extractable text; choose text, a document, or an image"));
+        values.text = { type: "text", text: preview.text.slice(0, 80_000), attachment, createdAt: Date.now() };
+      }
+      if (graphMetaRef.current.id === projectId) updateNode(nodeId, { inputMode: "file", inputPath: paths[0], inputAttachment: attachment, inputText: values.text?.text, outputs: values, status: "success" });
+    } catch (reason) { setNotice(errorText(reason)); }
+  }, [updateNode]);
+
+  const openIntegrationSource = useCallback((nodeId: string, kind: "conversation" | "input" | "projectRef") => {
+    if (runningRef.current) return;
+    if (kind === "input") { void chooseInputFile(nodeId); return; }
+    setIntegrationPicker({ nodeId, kind });
+  }, [chooseInputFile]);
+
+  const selectCandidate = useCallback((nodeId: string, handle: string, index: number) => {
+    const node = graphRef.current.nodes.find((item) => item.id === nodeId);
+    const value = node && constellationCandidateSelection(node.data, handle, index);
+    if (runningRef.current || !value) return;
+    updateNode(nodeId, { outputs: { ...node?.data.outputs, [handle]: value }, status: "success", error: undefined });
+  }, [updateNode]);
+
+  const refreshCandidates = useCallback(async (nodeId: string) => {
+    if (runningRef.current) return;
+    const node = graphRef.current.nodes.find((item) => item.id === nodeId);
+    const projectId = graphMetaRef.current.id;
+    if (!node) return;
+    const refreshKey = `${projectId}:${nodeId}`;
+    if (refreshingSourcesRef.current.has(refreshKey)) return;
+    refreshingSourcesRef.current.add(refreshKey);
+    try {
+      if (node.data.kind === "projectRef") {
+        const reference = node.data.projectReference;
+        if (!reference) throw new Error(tr("请先选择项目作品", "Choose a project output first"));
+        const records = await listConstellationProjects();
+        const value = constellationProjectReferenceValue(records, projectId, reference);
+        if (!value) {
+          throw new Error(tr("来源项目的作品已不可用；已保留本地快照", "The source output is unavailable; the local snapshot was retained"));
+        }
+        const latest = graphRef.current.nodes.find((item) => item.id === nodeId);
+        if (graphMetaRef.current.id === projectId && !runningRef.current && latest?.data.projectReference === reference) {
+          updateNode(nodeId, { projectReference: { ...reference, capturedAt: Date.now() }, projectValue: structuredClone(value), outputs: { output: structuredClone(value) }, status: "success", error: undefined });
+        }
+        return;
+      }
+      const errors: string[] = [];
+      const entries = await Promise.all(Object.entries(node.data.outputCandidates ?? {}).map(async ([handle, values]) => [handle, await Promise.all((values ?? []).map(async (value) => {
+        if (!value.asset || !["queued", "in_progress"].includes(value.asset.status)) return value;
+        try { return { ...value, asset: await refreshMediaAsset(value.asset.id) }; }
+        catch (reason) { errors.push(errorText(reason)); return value; }
+      }))] as const));
+      const latest = graphRef.current.nodes.find((item) => item.id === nodeId);
+      if (graphMetaRef.current.id !== projectId || runningRef.current || !latest || latest.data.outputCandidates !== node.data.outputCandidates) return;
+      const candidates = Object.fromEntries(entries);
+      const outputs = constellationCandidateOutputs(latest.data, candidates);
+      const changed = Object.keys({ ...outputs, ...latest.data.outputs }).some((handle) => !sameConstellationValue(outputs[handle], latest.data.outputs?.[handle]));
+      if (latest.data.status === "stale" || !changed && latest.data.status === "success") {
+        setNodes((current) => current.map((item) => item.id === nodeId ? { ...item, data: { ...item.data, outputCandidates: candidates } } : item));
+      } else {
+        const failed = entries.length > 0 && entries.every(([, values]) => values.length > 0 && values.every((value) => value.asset?.status === "failed"));
+        updateNode(nodeId, { outputCandidates: candidates, outputs, status: Object.values(outputs).some(constellationValueReady) ? "success" : failed ? "error" : "waiting", error: failed ? tr("候选均失败，请重新运行", "All candidates failed; run again") : undefined });
+      }
+      if (errors.length) setNotice(errors.join(" · "));
+    } catch (reason) { setNotice(errorText(reason)); }
+    finally { refreshingSourcesRef.current.delete(refreshKey); }
+  }, [updateNode]);
+
   const nodeActions = useMemo<ConstellationNodeActions>(() => ({
     locale,
     edges,
@@ -762,7 +1185,11 @@ function ConstellationStudioInner({
     openPreview: openValuePreview,
     downloadValue: (value) => { void downloadValue(value); },
     getInputValue,
-  }), [chooseReferences, downloadValue, edges, getInputValue, locale, mediaCatalog.models, openCanvas, openImageSourcePicker, openValuePreview, removeNode, running, updateNode, writingModels]);
+    openSourcePicker: openIntegrationSource,
+    openConversation: onOpenConversation,
+    selectCandidate,
+    refreshCandidates: (nodeId) => { void refreshCandidates(nodeId); },
+  }), [chooseReferences, downloadValue, edges, getInputValue, locale, mediaCatalog.models, openCanvas, openImageSourcePicker, openValuePreview, removeNode, running, updateNode, writingModels, openIntegrationSource, onOpenConversation, selectCandidate, refreshCandidates]);
 
   const updateRuntimeOutput = (
     nodeId: string,
@@ -776,13 +1203,12 @@ function ConstellationStudioInner({
   };
 
   async function runGraph(targetIds?: string[]) {
-    if (runningRef.current) return;
+    if (runningRef.current || overviewOpenRef.current || projectBusyRef.current || !storageReadyRef.current) return;
     runningRef.current = true;
     const snapshot = graphRef.current;
     const epoch = ++runEpochRef.current;
-    const included = targetIds?.length
-      ? constellationDependencyClosure(targetIds, snapshot.edges)
-      : new Set(snapshot.nodes.filter((node) => EXECUTABLE_NODE_KINDS.has(node.data.kind)).map((node) => node.id));
+    const plan = constellationRunPlan(snapshot.nodes, snapshot.edges, targetIds);
+    const included = plan.required;
     let layers: ConstellationNode[][];
     try {
       layers = constellationExecutionLayers(snapshot.nodes, snapshot.edges, included);
@@ -791,39 +1217,43 @@ function ConstellationStudioInner({
       runningRef.current = false;
       return;
     }
-    runtimeValuesRef.current = new Map(snapshot.nodes.map((node) => [node.id, { ...(node.data.outputs ?? {}) }]));
+    runtimeValuesRef.current = new Map(snapshot.nodes.filter((node) => !plan.execute.has(node.id) && node.data.status === "success").map((node) => [node.id, { ...(node.data.outputs ?? {}) }]));
     const failed = new Set<string>();
+    const waiting = new Set<string>();
+    const changed = constellationDescendants(plan.execute, snapshot.edges);
     setRunning(true);
     setNotice(undefined);
-    setNodes((current) => current.map((node) => included.has(node.id) && EXECUTABLE_NODE_KINDS.has(node.data.kind)
+    setNodes((current) => staleConstellationNodes(current, snapshot.edges, changed).map((node) => plan.execute.has(node.id) && EXECUTABLE_NODE_KINDS.has(node.data.kind)
       ? { ...node, data: { ...node.data, status: "queued", error: undefined } }
       : node));
     try {
       for (const layer of layers) {
         if (runEpochRef.current !== epoch) break;
         await Promise.all(layer.map(async (node) => {
-          if (!EXECUTABLE_NODE_KINDS.has(node.data.kind)) return;
-          const blockedBy = snapshot.edges.find((edge) => edge.target === node.id && failed.has(edge.source));
+          if (!EXECUTABLE_NODE_KINDS.has(node.data.kind) || !plan.execute.has(node.id)) return;
+          const blockedBy = snapshot.edges.find((edge) => edge.target === node.id && (failed.has(edge.source) || waiting.has(edge.source)));
           if (blockedBy) {
-            failed.add(node.id);
-            updateNode(node.id, { status: "error", error: tr("上游节点执行失败", "An upstream node failed") });
+            if (waiting.has(blockedBy.source)) { waiting.add(node.id); updateNode(node.id, { status: "stale", error: tr("上游结果尚未选定，请选择后再运行", "Select the upstream result, then run again") }); }
+            else { failed.add(node.id); updateNode(node.id, { status: "error", error: tr("上游节点执行失败", "An upstream node failed") }); }
             return;
           }
           updateNode(node.id, { status: "running", error: undefined });
           try {
-            const outputs = await executeNode(node, snapshot, epoch);
+            const upstreamRerun = snapshot.edges.some((edge) => edge.target === node.id && plan.execute.has(edge.source));
+            const outputs = await executeNode(upstreamRerun && node.data.status === "waiting" ? { ...node, data: { ...node.data, status: "stale" } } : node, snapshot, epoch);
             if (runEpochRef.current === epoch) updateRuntimeOutput(node.id, outputs);
           } catch (reason) {
             if (runEpochRef.current !== epoch) return;
+            if (reason instanceof ConstellationWaitingError) { waiting.add(node.id); updateNode(node.id, { status: "waiting", error: reason.message }); return; }
             failed.add(node.id);
             updateNode(node.id, { status: "error", error: errorText(reason) });
           }
         }));
       }
       if (runEpochRef.current === epoch) {
-        setNotice(failed.size > 0
+        setNotice(waiting.size > 0 ? tr("已保留候选结果；选定作品后再运行下游", "Candidates are saved; select an output before running downstream") : failed.size > 0
           ? tr(`${failed.size} 个节点需要处理，其余分支已继续完成`, `${failed.size} node(s) need attention; other branches completed`)
-          : tr("星图执行完成，结果已保存到创作历史", "Constellation complete; outputs were saved to creation history"));
+          : plan.execute.size ? tr("星图执行完成", "Constellation run complete") : tr("所有结果均为最新，无需重复运行", "All results are current; nothing needed to run"));
       }
     } finally {
       if (runEpochRef.current === epoch) {
@@ -839,6 +1269,33 @@ function ConstellationStudioInner({
       .filter((edge) => edge.target === node.id && edge.targetHandle === handle)
       .map((edge) => runtimeValuesRef.current.get(edge.source)?.[edge.sourceHandle ?? ""])
       .filter((value): value is ConstellationValue => Boolean(value));
+    if (node.data.kind === "conversation") {
+      const text = conversationSnapshotText(node.data);
+      if (!text.trim()) throw new Error(tr("请先选择会话消息", "Choose conversation messages first"));
+      return { text: { type: "text", text, createdAt: Date.now() } };
+    }
+    if (node.data.kind === "projectRef") {
+      if (!node.data.projectReference || !constellationValueReady(node.data.projectValue)) throw new Error(tr("请先选择项目作品", "Choose a project output first"));
+      return { output: structuredClone(node.data.projectValue) };
+    }
+    if (node.data.kind === "input") {
+      if (node.data.inputMode === "file" && node.data.inputAttachment?.kind === "image") return { image: { type: "image", attachment: node.data.inputAttachment, createdAt: Date.now() } };
+      const text = node.data.inputMode === "url"
+        ? await executeReadOnlyTool("web_fetch", { url: node.data.inputUrl?.trim(), maxChars: 80_000 })
+        : node.data.inputMode === "file" && !node.data.inputAttachment
+          ? await executeReadOnlyTool("read_file", { path: node.data.inputPath?.trim() })
+          : node.data.inputText?.trim();
+      if (!text) throw new Error(tr("输入内容为空，请填写文本或选择文件", "Input is empty; enter text or choose a file"));
+      return { text: { type: "text", text: text.slice(0, 80_000), createdAt: Date.now() } };
+    }
+    if (node.data.kind === "localTool") {
+      const argumentsValue: unknown = JSON.parse(node.data.toolArguments || "{}");
+      if (!isRecord(argumentsValue)) throw new Error(tr("工具参数必须为 JSON 对象", "Tool arguments must be a JSON object"));
+      const input = incoming("input").map((value) => value.text ?? "").join("\n\n");
+      const substitute = (value: unknown): unknown => typeof value === "string" ? value.split("{{input}}").join(input) : Array.isArray(value) ? value.map(substitute) : isRecord(value) ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, substitute(item)])) : value;
+      const text = await executeReadOnlyTool(node.data.toolName ?? "read_file", substitute(argumentsValue) as Record<string, unknown>);
+      return { text: { type: "text", text: text.slice(0, 80_000), createdAt: Date.now() } };
+    }
     if (node.data.kind === "prompt") {
       const text = node.data.prompt?.trim() ?? "";
       if (!text) throw new Error(tr("提示词节点是空的", "The Prompt node is empty"));
@@ -919,6 +1376,7 @@ function ConstellationStudioInner({
     }
     const mediaKind = mediaKindForConstellationNode(node.data.kind);
     if (!mediaKind) return {};
+    if (node.data.status === "waiting" && Object.values(node.data.outputCandidates ?? {}).some((values) => values?.length)) throw new ConstellationWaitingError(tr("请刷新或选择已保存的候选结果", "Refresh or select a saved candidate"));
     const promptHandle = mediaKind === "audio" ? "text" : "prompt";
     const prompt = incoming(promptHandle).map((value) => value.text).filter(Boolean).join("\n\n") || node.data.prompt?.trim() || "";
     if (!prompt) throw new Error(tr("能力节点需要提示词或文案输入", "The ability node needs a prompt or text input"));
@@ -987,17 +1445,29 @@ function ConstellationStudioInner({
     try {
       const result = await generateMedia(request);
       if (result.assets.length === 0) throw new Error(result.errors.join(" · ") || tr("模型没有返回可用结果", "The model returned no usable output"));
-      const asset = result.assets.find((item) => item.status === "completed") ?? result.assets[0];
-      return {
-        [mediaKind]: {
-          type: mediaKind,
-          asset,
-          createdAt: Date.now(),
-        },
-      };
+      const candidates: ConstellationValue[] = result.assets.map((asset) => ({ type: mediaKind, asset, createdAt: Date.now() }));
+      if (runEpochRef.current !== epoch) throw new Error(tr("执行已停止", "Run stopped"));
+      setNodes((current) => current.map((item) => item.id === node.id ? { ...item, data: { ...item.data, outputCandidates: { [mediaKind]: candidates }, outputs: {} } } : item));
+      if (candidates.every((value) => value.asset?.status === "failed")) throw new Error(tr("所有候选结果均失败，请重新运行", "All candidates failed; run again"));
+      if (candidates.length !== 1 || candidates[0].asset?.status !== "completed") {
+        runtimeValuesRef.current.set(node.id, {});
+        throw new ConstellationWaitingError(tr("候选结果已保存，请刷新进度或选择一个结果", "Candidates saved; refresh progress or select one output"));
+      }
+      return { [mediaKind]: candidates[0] };
     } finally {
       setMediaPending((value) => Math.max(0, value - request.count));
     }
+  }
+
+  async function executeReadOnlyTool(name: string, argumentsValue: Record<string, unknown>) {
+    if (!isDesktop()) throw new Error(tr("本地工具和 HTTP 输入需要桌面应用", "Local tools and HTTP input require the desktop app"));
+    if (!["read_file", "list_files", "search_files", "web_fetch"].includes(name)) throw new Error(tr("此节点仅允许列出的只读工具", "This node only permits its listed read-only tools"));
+    const call = { id: crypto.randomUUID(), name, arguments: argumentsValue };
+    const decision = await harnessCheckTool({ mode: "agent", permissionLevel: "request", call });
+    if (decision !== "allow") throw new Error(tr("应用权限策略未允许此工具", "The app permission policy did not allow this tool"));
+    const response = await executeTool(call, workspace ?? "", undefined, undefined, [], false, false, false, "agent", "request");
+    if (response.isError) throw new Error(response.output);
+    return response.output;
   }
 
   async function valueToAttachment(value: ConstellationValue) {
@@ -1019,6 +1489,7 @@ function ConstellationStudioInner({
   };
 
   const duplicateSelection = () => {
+    if (runningRef.current) return;
     const copy = duplicateConstellationSelection(graphRef.current.nodes, graphRef.current.edges);
     if (copy.nodes.length === 0) {
       setNotice(tr("请先选择需要复制的节点", "Select nodes to duplicate first"));
@@ -1071,6 +1542,7 @@ function ConstellationStudioInner({
   };
 
   const insertBlueprint = (blueprint: ConstellationBlueprint) => {
+    if (runningRef.current) return;
     checkpoint();
     const origin = screenToFlowPosition({ x: window.innerWidth * .52, y: window.innerHeight * .45 });
     const instance = instantiateConstellationBlueprint(blueprint, origin);
@@ -1080,16 +1552,7 @@ function ConstellationStudioInner({
     window.setTimeout(() => void fitView({ nodes: instance.nodes.map((node) => ({ id: node.id })), padding: .24, duration: 280 }), 30);
   };
 
-  const newGraph = () => {
-    checkpoint();
-    const graph = createDefaultConstellationGraph();
-    graphMetaRef.current = { id: graph.id, createdAt: graph.createdAt };
-    setGraphTitle(tr("未命名星图", "Untitled Constellation"));
-    setNodes(graph.nodes.map((node) => ({ ...node, data: { ...node.data, prompt: node.data.kind === "prompt" ? "" : node.data.prompt } })));
-    setEdges(graph.edges);
-    runtimeValuesRef.current.clear();
-    window.setTimeout(() => void fitView({ padding: .2, duration: 260 }), 20);
-  };
+  const newGraph = () => { void createProject(); };
 
   const exportGraph = async () => {
     try {
@@ -1113,18 +1576,22 @@ function ConstellationStudioInner({
   const importGraph = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = "";
-    if (!file) return;
+    if (!file || projectBusyRef.current || !storageReadyRef.current) return;
+    projectBusyRef.current = true; setProjectBusy(true);
     try {
-      if (file.size > 8 * 1024 * 1024) throw new Error(tr("星图文件不能超过 8 MiB", "Constellation files may not exceed 8 MiB"));
+      if (file.size > 16 * 1024 * 1024) throw new Error(tr("星图文件不能超过 16 MiB", "Constellation files may not exceed 16 MiB"));
       const value = JSON.parse(await file.text()) as unknown;
       const record = isRecord(value) ? value : {};
       const graph = normalizeConstellationGraph(record.graph ?? value);
       if (!graph) throw new Error(tr("文件中没有有效星图", "The file does not contain a valid constellation"));
-      checkpoint();
-      graphMetaRef.current = { id: graph.id, createdAt: graph.createdAt };
-      setGraphTitle(graph.title);
-      setNodes(graph.nodes);
-      setEdges(graph.edges);
+      if (runningRef.current) throw new Error(tr("请先停止当前运行", "Stop the current run first"));
+      await saveCurrentProject();
+      graph.id = crypto.randomUUID();
+      graph.createdAt = Date.now();
+      graph.updatedAt = Date.now();
+      const imported = { id: graph.id, title: graph.title, payload: { schemaVersion: 1, graph, overviewPosition: overviewPositionForRecords(projectRecordsRef.current), overviewLayoutVersion: 2 }, createdAt: graph.createdAt, updatedAt: graph.updatedAt };
+      await queueProjectSave(imported);
+      loadProjectIntoEditor(imported);
       if (Array.isArray(record.blueprints)) {
         const incoming = record.blueprints.map(normalizeConstellationBlueprint).filter((item): item is ConstellationBlueprint => item !== null && !item.builtIn);
         setBlueprints((current) => mergeBlueprints(current, incoming));
@@ -1132,8 +1599,8 @@ function ConstellationStudioInner({
       setNotice(tr("星图导入完成", "Constellation imported"));
       window.setTimeout(() => void fitView({ padding: .18, duration: 320 }), 30);
     } catch (reason) {
-      setNotice(errorText(reason));
-    }
+      setProjectError(errorText(reason));
+    } finally { projectBusyRef.current = false; setProjectBusy(false); }
   };
 
   const onLibraryDragStart = (event: DragEvent<HTMLButtonElement>, kind: ConstellationNodeKind) => {
@@ -1156,10 +1623,11 @@ function ConstellationStudioInner({
   });
   const selectedCount = nodes.filter((node) => node.selected).length;
   const displayEdges = useMemo(() => {
-    if (!running) return edges;
-    const runningSources = new Set(nodes.filter((node) => node.data.status === "running").map((node) => node.id));
-    return edges.map((edge) => ({ ...edge, animated: runningSources.has(edge.source) }));
-  }, [edges, nodes, running]);
+    const runningSources = new Set(contentNodes.filter((node) => node.data.status === "running").map((node) => node.id));
+    return groupConstellationConnections(edges).map((edge) => ({ ...edge, animated: running && runningSources.has(edge.source) }));
+  }, [edges, contentNodes, running]);
+  const selectedConnection = displayEdges.find((edge) => edge.selected);
+  const selectedMappings = selectedConnection ? constellationConnectionMembers(edges, selectedConnection.id) : [];
   const editorNode = editorNodeId ? nodes.find((node) => node.id === editorNodeId) : undefined;
   const editorSource = editorNode?.data.canvasResult ?? editorNode?.data.canvasSource;
   keyboardActionsRef.current = {
@@ -1170,6 +1638,140 @@ function ConstellationStudioInner({
     stop: stopRun,
   };
 
+  const loadProjectIntoEditor = (record: ConstellationProjectRecord) => {
+    const graph = graphFromProjectRecord(record);
+    if (!graph) throw new Error(tr("项目数据无效", "Invalid project data"));
+    ++runEpochRef.current;
+    graphMetaRef.current = { id: graph.id, createdAt: graph.createdAt };
+    graphRef.current = { nodes: graph.nodes, edges: graph.edges };
+    graphTitleRef.current = graph.title;
+    setGraphTitle(graph.title);
+    setNodes(graph.nodes.map((node) => ({ ...node, selected: false })));
+    setEdges(graph.edges.map((edge) => ({ ...edge, selected: false })));
+    historyRef.current = { undo: [], redo: [] };
+    runtimeValuesRef.current.clear();
+    const payload = isRecord(record.payload) ? record.payload : {};
+    const viewport = payload.viewport;
+    restoredViewportRef.current = Boolean(isRecord(viewport) && Number.isFinite(viewport.x) && Number.isFinite(viewport.y) && Number.isFinite(viewport.zoom) && Number(viewport.zoom) > 0);
+    viewportRef.current = restoredViewportRef.current ? { ...(viewport as { x: number; y: number; zoom: number }), zoom: Math.max(.18, Math.min(2.2, Number((viewport as { zoom: number }).zoom))) } : { x: 0, y: 0, zoom: 1 };
+    setHistoryRevision((value) => value + 1);
+    setEditorNodeId(undefined); setSourcePicker(undefined); setIntegrationPicker(undefined); setPreviewAsset(undefined); setNotice(undefined);
+    setCommandOpen(false); setBlueprintDialog(undefined); setProjectError(undefined);
+    setLeftPanelOpen(false); setRightPanelOpen(false);
+    overviewOpenRef.current = false;
+    setOverviewOpen(false);
+  };
+
+  const openProject = async (record: ConstellationProjectRecord) => {
+    if (!storageReadyRef.current || runningRef.current || projectBusyRef.current) return;
+    projectBusyRef.current = true;
+    setProjectBusy(true);
+    try {
+      await saveCurrentProject();
+      await projectSaveQueueRef.current;
+      const latest = projectRecordsRef.current.find((item) => item.id === record.id);
+      if (!latest) throw new Error(tr("项目已删除", "Project was deleted"));
+      loadProjectIntoEditor(latest);
+    }
+    catch (reason) { setProjectError(errorText(reason)); }
+    finally { projectBusyRef.current = false; setProjectBusy(false); }
+  };
+
+  const createProject = async (blueprint?: ConstellationBlueprint) => {
+    if (!storageReadyRef.current || runningRef.current || projectBusyRef.current) return;
+    projectBusyRef.current = true;
+    setProjectBusy(true);
+    try {
+      await saveCurrentProject();
+      const graph = createDefaultConstellationGraph();
+      graph.title = blueprint?.name ?? tr("未命名星图", "Untitled Constellation");
+      if (blueprint) {
+        const instance = instantiateConstellationBlueprint(blueprint, { x: 0, y: 0 });
+        graph.nodes = instance.nodes; graph.edges = instance.edges;
+      } else { graph.nodes = []; graph.edges = []; }
+      const record = { id: graph.id, title: graph.title, payload: { schemaVersion: 1, graph, overviewPosition: overviewPositionForRecords(projectRecordsRef.current), overviewLayoutVersion: 2 }, createdAt: graph.createdAt, updatedAt: graph.updatedAt };
+      await queueProjectSave(record);
+      loadProjectIntoEditor(record);
+      if (!blueprint) setCommandOpen(true);
+    } catch (reason) { setProjectError(errorText(reason)); }
+    finally { projectBusyRef.current = false; setProjectBusy(false); }
+  };
+
+  const returnToOverview = async () => {
+    if (runningRef.current || projectBusyRef.current) return;
+    projectBusyRef.current = true;
+    setProjectBusy(true);
+    try { await saveCurrentProject(); overviewOpenRef.current = true; setOverviewOpen(true); }
+    catch (reason) { setProjectError(errorText(reason)); }
+    finally { projectBusyRef.current = false; setProjectBusy(false); }
+  };
+
+  const updateProjectRecord = useCallback(async (record: ConstellationProjectRecord, position: { x: number; y: number }) => {
+    try {
+      await queueProjectSave((records) => {
+        const latest = records.find((item) => item.id === record.id);
+        if (!latest) throw new Error(tr("项目已删除", "Project was deleted"));
+        return { ...latest, payload: { ...(isRecord(latest.payload) ? latest.payload : {}), overviewPosition: position, overviewLayoutVersion: 2 }, updatedAt: Date.now() };
+      });
+    } catch (reason) { setProjectError(errorText(reason)); }
+  }, [queueProjectSave]);
+
+  const renameProject = useCallback(async (record: ConstellationProjectRecord, title: string) => {
+    const nextTitle = Array.from(title.trim()).slice(0, 200).join("");
+    if (!nextTitle) return;
+    try {
+      await queueProjectSave((records) => {
+        const latest = records.find((item) => item.id === record.id);
+        if (!latest) throw new Error(tr("项目已删除", "Project was deleted"));
+        return { ...latest, title: nextTitle, payload: isRecord(latest.payload) ? { ...latest.payload, graph: isRecord(latest.payload.graph) ? { ...latest.payload.graph, title: nextTitle } : latest.payload.graph } : latest.payload, updatedAt: Date.now() };
+      });
+    } catch (reason) { setProjectError(errorText(reason)); }
+  }, [queueProjectSave]);
+
+  const duplicateProject = useCallback(async (record: ConstellationProjectRecord) => {
+    try {
+      await queueProjectSave((records) => {
+        const latest = records.find((item) => item.id === record.id);
+        const graph = latest && graphFromProjectRecord(latest);
+        if (!graph || !latest) throw new Error(tr("项目无法读取", "Project could not be read"));
+        const copyGraph = { ...graph, id: crypto.randomUUID(), title: `${Array.from(latest.title).slice(0, 190).join("")} ${tr("副本", "Copy")}`, createdAt: Date.now(), updatedAt: Date.now() };
+        return { id: copyGraph.id, title: copyGraph.title, payload: { ...(isRecord(latest.payload) ? latest.payload : {}), graph: copyGraph, overviewPosition: overviewPositionForRecords(records), overviewLayoutVersion: 2 }, createdAt: copyGraph.createdAt, updatedAt: copyGraph.updatedAt };
+      });
+    } catch (reason) { setProjectError(errorText(reason)); }
+  }, [queueProjectSave]);
+
+  const removeProject = useCallback(async (record: ConstellationProjectRecord) => {
+    const operation = projectSaveQueueRef.current.then(async () => {
+      await deleteConstellationProject(record.id);
+      const next = projectRecordsRef.current.filter((item) => item.id !== record.id);
+      projectRecordsRef.current = next; setProjectRecords(next);
+    });
+    projectSaveQueueRef.current = operation.catch(() => undefined);
+    try { await operation; } catch (reason) { setProjectError(errorText(reason)); }
+  }, []);
+
+  if (overviewOpen) return <><input ref={importInputRef} type="file" accept=".json,.levelup-constellation.json" hidden onChange={(event) => void importGraph(event)} /><ConstellationOverview
+    ready={projectHydrated && storageReadyRef.current && !projectBusy}
+    loading={!projectHydrated}
+    onRetry={() => { hydrationRef.current = null; setProjectLoadRevision((value) => value + 1); }}
+    onMedia={onMedia}
+    onWriting={onWriting}
+    records={projectRecords}
+    query={projectQuery}
+    error={projectError}
+    onQuery={setProjectQuery}
+    onOpen={(record) => void openProject(record)}
+    onCreate={() => void createProject()}
+    onImport={() => importInputRef.current?.click()}
+    onCreateTemplate={(blueprint) => void createProject(blueprint)}
+    onPosition={(record, position) => void updateProjectRecord(record, position)}
+    onRename={(record, title) => void renameProject(record, title)}
+    onDuplicate={(record) => void duplicateProject(record)}
+    onDelete={(record) => void removeProject(record)}
+    templates={[...BUILT_IN_CONSTELLATION_BLUEPRINTS, ...blueprints]}
+    onDismissError={() => setProjectError(undefined)}
+  /></>;
+
   return (
     <>
       <header className="constellation-topbar" data-tauri-drag-region>
@@ -1177,13 +1779,14 @@ function ConstellationStudioInner({
           <span><Boxes size={18} /></span>
           <div><strong>{tr("星图", "Constellation")}</strong><small>{tr("把灵感连成作品", "Connect ideas into finished work")}</small></div>
         </div>
-        <input className="constellation-title-input nodrag nopan" value={graphTitle} maxLength={120} aria-label={tr("星图名称", "Constellation name")} onFocus={() => { spacePanRef.current = false; setSpacePanActive(false); }} onChange={(event) => setGraphTitle(event.target.value)} />
+        <input className="constellation-title-input nodrag nopan" value={graphTitle} maxLength={120} aria-label={tr("星图名称", "Constellation name")} onFocus={() => setSpacePanActive(false)} onChange={(event) => setGraphTitle(event.target.value)} />
         <div className="creation-mode-switch constellation-mode-switch" role="tablist" aria-label={tr("创作空间", "Creative Studio")}>
           <button type="button" role="tab" aria-selected="false" onClick={onMedia}><ImagePlus size={13} />{tr("媒体", "Media")}</button>
           <button type="button" role="tab" aria-selected="false" onClick={onWriting}><BookOpen size={13} />{tr("写作", "Writing")}</button>
           <button type="button" role="tab" aria-selected="true" className="active"><Boxes size={13} />{tr("星图", "Constellation")}</button>
         </div>
         <div className="constellation-topbar-actions">
+          <button type="button" disabled={running || projectBusy} onClick={() => void returnToOverview()} title={tr("返回星图总览", "Back to constellation overview")}><ChevronLeft size={13} />{tr("总览", "Overview")}</button>
           {running ? <button type="button" className="danger" onClick={stopRun}><Square size={13} />{tr("停止", "Stop")}</button>
             : <button type="button" className="primary" onClick={() => void runGraph()}><Play size={13} />{tr("运行星图", "Run")}</button>}
           <button type="button" onClick={saveBlueprint} disabled={selectedCount === 0} title={tr("框选节点后保存为蓝图", "Save selected nodes as a blueprint")}><Save size={13} />{tr("存为蓝图", "Save blueprint")}</button>
@@ -1191,6 +1794,8 @@ function ConstellationStudioInner({
         </div>
       </header>
 
+      {projectError && <div className="constellation-save-error" role="alert"><span>{tr("保存失败，当前编辑仍在内存中：", "Save failed; your edits are still in memory: ")}{projectError}</span><button type="button" onClick={() => void saveCurrentProject().catch(() => undefined)}>{tr("重试保存", "Retry save")}</button></div>}
+      <div className="constellation-save-status" role="status">{saveState === "saving" ? tr("保存中…", "Saving…") : saveState === "dirty" ? tr("待保存", "Unsaved changes") : saveState === "error" ? tr("保存失败", "Save failed") : tr("已保存", "Saved")}</div>
       <div ref={workbenchRef} className={`constellation-workbench${leftPanelOpen ? " left-open" : ""}${rightPanelOpen ? " right-open" : ""}`}>
         <aside className="constellation-library-panel" aria-label={tr("节点库", "Node library")} aria-hidden={!leftPanelOpen} inert={!leftPanelOpen}>
           <div className="constellation-panel-heading"><div><LibraryBig size={15} /><strong>{tr("节点库", "Node library")}</strong></div><button type="button" aria-label={tr("关闭节点库", "Close node library")} onClick={() => setLeftPanelOpen(false)}><ChevronLeft size={15} /></button></div>
@@ -1208,15 +1813,57 @@ function ConstellationStudioInner({
           <div className="constellation-library-tip"><Sparkles size={13} /><span>{tr("拖到画布放置；框选后可存为自己的蓝图", "Drag to place; box-select to save your own blueprint")}</span></div>
         </aside>
 
-        <section className={`constellation-canvas-shell${canvasInteracting ? " interacting" : ""}${connectionType ? ` connecting-type-${connectionType}` : ""}`} onFocusCapture={(event) => {
+        <section tabIndex={-1} className={`constellation-canvas-shell${canvasInteracting ? " interacting" : ""}${spacePanActive ? " space-panning" : ""}${connectionType ? ` connecting-type-${connectionType}` : ""}`} onPointerDownCapture={(event) => {
+          const target = event.target as HTMLElement;
+          if (target.closest("input, textarea, select, button, a, [contenteditable='true']")) return;
+          event.currentTarget.focus({ preventScroll: true });
+          // Commit before React Flow handles this same gesture's mouse-down.
+          if (spacePanRef.current) flushSync(() => setSpacePanActive(true));
+          if (spacePanRef.current || event.button !== 0 || !event.isPrimary || !target.classList.contains("react-flow__pane")) return;
+          const bounds = event.currentTarget.getBoundingClientRect();
+          marqueeGestureRef.current = {
+            pointerId: event.pointerId,
+            left: bounds.left,
+            top: bounds.top,
+            width: bounds.width,
+            height: bounds.height,
+            flowStart: screenToFlowPosition({ x: event.clientX, y: event.clientY }, { snapToGrid: false }),
+            startX: event.clientX - bounds.left,
+            startY: event.clientY - bounds.top,
+            x: event.clientX - bounds.left,
+            y: event.clientY - bounds.top,
+            active: false,
+            additive: event.shiftKey || event.ctrlKey || event.metaKey,
+          };
+        }} onPointerMoveCapture={(event) => {
+          const gesture = marqueeGestureRef.current;
+          if (!gesture || gesture.pointerId !== event.pointerId) return;
+          if ((event.buttons & 1) === 0) { finishMarquee(event, false); return; }
+          gesture.x = event.clientX - gesture.left;
+          gesture.y = event.clientY - gesture.top;
+          if (!gesture.active) {
+            if (Math.hypot(gesture.x - gesture.startX, gesture.y - gesture.startY) < 3) return;
+            gesture.active = true;
+            event.currentTarget.setPointerCapture(event.pointerId);
+            if (marqueeRef.current) marqueeRef.current.hidden = false;
+            setCanvasInteracting(true);
+          }
+          if (marqueeFrameRef.current === null) marqueeFrameRef.current = window.requestAnimationFrame(paintMarquee);
+        }} onPointerUpCapture={(event) => finishMarquee(event, true)} onPointerCancelCapture={(event) => finishMarquee(event, false)} onLostPointerCapture={(event) => finishMarquee(event, false)} onClickCapture={(event) => {
+          if (!suppressMarqueeClickRef.current) return;
+          suppressMarqueeClickRef.current = false;
+          event.stopPropagation();
+          event.preventDefault();
+        }} onFocusCapture={(event) => {
           const target = event.target as HTMLElement | null;
           if (target?.closest("input, textarea, select, [contenteditable='true']")) {
-            spacePanRef.current = false;
             setSpacePanActive(false);
           }
         }} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; }} onDrop={onCanvasDrop}>
           <ConstellationNodeActionsProvider value={nodeActions}>
             <ReactFlow<ConstellationNode, ConstellationEdge>
+              key={graphMetaRef.current.id}
+              defaultViewport={viewportRef.current}
               nodes={nodes}
               edges={displayEdges}
               nodeTypes={CONSTELLATION_NODE_TYPES}
@@ -1224,6 +1871,8 @@ function ConstellationStudioInner({
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
               onReconnect={onReconnect}
+              onReconnectStart={(_event, edge) => { reconnectingEdgeRef.current = edge.id; connectionValidityCacheRef.current.clear(); }}
+              onReconnectEnd={() => { reconnectingEdgeRef.current = undefined; connectionValidityCacheRef.current.clear(); }}
               isValidConnection={isValidConnection}
               onConnectStart={onConnectionStart}
               onConnectEnd={onConnectionEnd}
@@ -1247,10 +1896,10 @@ function ConstellationStudioInner({
               }}
               minZoom={.18}
               maxZoom={2.2}
-              fitView
+              fitView={!restoredViewportRef.current}
               fitViewOptions={{ padding: .18, maxZoom: 1 }}
-              selectionMode={SelectionMode.Partial}
-              selectionOnDrag
+              selectionOnDrag={false}
+              selectionKeyCode={null}
               panActivationKeyCode={null}
               panOnDrag={spacePanActive ? true : [1, 2]}
               nodesDraggable={!spacePanActive}
@@ -1280,7 +1929,7 @@ function ConstellationStudioInner({
                 <button type="button" onClick={autoLayout} title={tr("自动整理", "Auto layout")}><WandSparkles size={14} /></button>
                 <button type="button" onClick={() => void fitView({ padding: .16, duration: 260 })} title={`${tr("适应画布", "Fit view")} F`}><Focus size={14} /></button>
                 <span />
-                <button type="button" onClick={newGraph} title={tr("新建星图", "New constellation")}><Plus size={14} /></button>
+                <button type="button" onClick={newGraph} disabled={running || projectBusy} title={tr("新建星图", "New constellation")}><Plus size={14} /></button>
                 <button type="button" onClick={() => importInputRef.current?.click()} title={tr("导入", "Import")}><FolderInput size={14} /></button>
                 <button type="button" onClick={() => void exportGraph()} title={tr("导出", "Export")}><Download size={14} /></button>
               </Panel>
@@ -1288,9 +1937,21 @@ function ConstellationStudioInner({
                 {selectedCount > 0 ? <><Check size={12} /><strong>{selectedCount}</strong><span>{tr("个节点已选中", "nodes selected")}</span><button type="button" onClick={saveBlueprint}><Save size={11} />{tr("存为蓝图", "Save")}</button></>
                   : <><Maximize2 size={12} /><span>{tr("点击或拖动端口连线 · 拖动框选 · Ctrl+K 搜索", "Click or drag ports to connect · drag to select · Ctrl+K search")}</span></>}
               </Panel>
+              {selectedConnection && <Panel position="top-right" className="constellation-connection-inspector">
+                <strong>{tr("连接传递", "Connection mappings")}</strong>
+                {selectedMappings.map((edge) => {
+                  const source = nodes.find((node) => node.id === edge.source);
+                  const target = nodes.find((node) => node.id === edge.target);
+                  const from = source && findPort(source.data.kind, "output", edge.sourceHandle);
+                  const to = target && findPort(target.data.kind, "input", edge.targetHandle);
+                  return <div key={edge.id}>{from ? tr(from.label, from.labelEn) : edge.sourceHandle} → {to ? tr(to.label, to.labelEn) : edge.targetHandle}</div>;
+                })}
+                <button type="button" onClick={() => onEdgesChange([{ type: "remove", id: selectedConnection.id }])}><Trash2 size={12} />{tr("断开连接", "Disconnect")}</button>
+              </Panel>}
               {commandOpen && <Panel position="top-center" className="constellation-command-panel"><CommandPalette query={commandQuery} onQuery={setCommandQuery} items={commandNodes} onChoose={addNode} onClose={() => setCommandOpen(false)} /></Panel>}
             </ReactFlow>
           </ConstellationNodeActionsProvider>
+          <div ref={marqueeRef} className="constellation-marquee" hidden aria-hidden="true" />
           {catalogLoading && <div className="constellation-catalog-loading"><LoaderCircle className="spin" size={14} />{tr("正在同步模型能力", "Syncing model capabilities")}</div>}
           {(notice || catalogError) && <div className={`constellation-notice${catalogError && !notice ? " warning" : ""}`} role="status"><CircleAlert size={14} /><span>{notice ?? catalogError}</span><button type="button" aria-label={tr("关闭提示", "Dismiss message")} onClick={() => { setNotice(undefined); setCatalogError(undefined); }}><X size={13} /></button></div>}
         </section>
@@ -1312,6 +1973,15 @@ function ConstellationStudioInner({
       <input ref={importInputRef} type="file" accept=".json,.levelup-constellation.json" hidden onChange={(event) => void importGraph(event)} />
 
       {blueprintDialog && <BlueprintDialog value={blueprintDialog} nodeCount={selectedCount} onChange={setBlueprintDialog} onCancel={() => setBlueprintDialog(undefined)} onSave={confirmBlueprint} />}
+      {integrationPicker?.kind === "conversation" && <ConstellationConversationPicker threads={threads} snapshot={nodes.find((node) => node.id === integrationPicker.nodeId)?.data.conversationSnapshot} onClose={() => setIntegrationPicker(undefined)} onChoose={(snapshot) => {
+        const text = conversationSnapshotText({ kind: "conversation", title: "", status: "idle", conversationSnapshot: snapshot });
+        updateNode(integrationPicker.nodeId, { conversationSnapshot: snapshot, outputs: { text: { type: "text", text, createdAt: Date.now() } }, status: "success" });
+        setIntegrationPicker(undefined);
+      }} />}
+      {integrationPicker?.kind === "projectRef" && <ConstellationProjectPicker records={projectRecords} currentProjectId={graphMetaRef.current.id} onClose={() => setIntegrationPicker(undefined)} onChoose={(reference, value) => {
+        updateNode(integrationPicker.nodeId, { projectReference: reference, projectValue: value, outputs: { output: value }, status: "success" });
+        setIntegrationPicker(undefined);
+      }} />}
       {sourcePicker && <ConstellationImageSourcePicker
         purpose={sourcePicker.purpose}
         assets={imageHistory}
@@ -1350,6 +2020,7 @@ function ConstellationStudioInner({
     </>
   );
 }
+
 
 function CommandPalette({ query, onQuery, items, onChoose, onClose }: {
   query: string;
@@ -1496,6 +2167,12 @@ function resolveWritingRoute(node: ConstellationNode, models: ProviderModelInfo[
     ?? models[0];
   if (!fallback) return { profileId: activeProfile.id, profileName: activeProfile.name, model: activeProfile.model, protocol: activeProfile.protocol };
   return { profileId: fallback.profileId, profileName: fallback.profileName, model: fallback.id, protocol: fallback.protocol };
+}
+
+function graphFromProjectRecord(record: ConstellationProjectRecord) {
+  const payload = isRecord(record.payload) ? record.payload : {};
+  const graph = normalizeConstellationGraph(payload.graph ?? record.payload);
+  return graph ? { ...graph, id: record.id, title: record.title, createdAt: record.createdAt, updatedAt: record.updatedAt } : null;
 }
 
 function loadConstellationGraph() {
