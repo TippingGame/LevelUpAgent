@@ -586,6 +586,13 @@
 .constellation-option-grid select { height: 31px; padding: 0 7px; }
 .constellation-field textarea { min-height: 96px; max-height: 220px; resize: vertical; padding: 8px; line-height: 1.5; }
 .constellation-field textarea.compact { min-height: 62px; max-height: 150px; }
+.constellation-tool-schema-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 0 5px; color: var(--text-primary); font-size: 11px; }
+.constellation-tool-schema-heading button { display: inline-flex; align-items: center; gap: 3px; border: 1px solid var(--border-subtle); border-radius: 5px; padding: 3px 6px; background: var(--surface-muted); color: var(--text-secondary); font-size: 10px; }
+.constellation-tool-field { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, .8fr) 56px max-content 22px; align-items: center; gap: 4px; margin-bottom: 5px; }
+.constellation-tool-output-field { grid-template-columns: minmax(0, 1fr) minmax(0, .75fr) 50px minmax(0, 1.3fr) 22px; }
+.constellation-tool-field input:not([type="checkbox"]), .constellation-tool-field select { min-width: 0; width: 100%; border: 1px solid var(--border-subtle); border-radius: 4px; padding: 4px 5px; background: var(--surface-muted); color: var(--text-primary); font-size: 10px; }
+.constellation-tool-field label { display: inline-flex; align-items: center; gap: 3px; color: var(--text-secondary); font-size: 10px; white-space: nowrap; }
+.constellation-tool-field button { min-width: 0; }
 .constellation-field textarea:focus,
 .constellation-field input:focus,
 .constellation-field select:focus,

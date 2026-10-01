@@ -1,6 +1,9 @@
 import type { Edge as FlowEdge, Node as FlowNode, XYPosition } from "@xyflow/react";
 import type {
   ConstellationConversationSnapshot,
+  ConstellationToolField,
+  ConstellationToolOutput,
+  ConstellationToolTemplate,
   ConstellationProjectOutputReference,
   ConstellationProjectRecord,
   ImageAttachment,
@@ -12,6 +15,7 @@ import type {
 export const CONSTELLATION_SCHEMA_VERSION = 1 as const;
 export const CONSTELLATION_STORAGE_KEY = "levelup-agent.constellation.v1";
 export const CONSTELLATION_BLUEPRINTS_KEY = "levelup-agent.constellation-blueprints.v1";
+export const CONSTELLATION_TOOL_TEMPLATES_KEY = "levelup-agent.constellation-tool-templates.v1";
 export const UNIVERSAL_INPUT_HANDLE = "__constellation_input__";
 export const UNIVERSAL_OUTPUT_HANDLE = "__constellation_output__";
 
@@ -112,6 +116,8 @@ export interface ConstellationNodeData extends Record<string, unknown> {
   maskAttachment?: ImageAttachment;
   outputs?: Partial<Record<string, ConstellationValue>>;
   conversationSnapshot?: ConstellationConversationSnapshot;
+  sessionCommand?: string;
+  sessionContextMode?: "upstream" | "snapshot" | "both";
   inputMode?: "text" | "file" | "url";
   inputText?: string;
   inputPath?: string;
@@ -119,6 +125,11 @@ export interface ConstellationNodeData extends Record<string, unknown> {
   inputAttachment?: ImageAttachment;
   toolName?: string;
   toolArguments?: string;
+  /** Present only on migrated pre-template nodes; cleared when a template is edited. */
+  legacyToolName?: string;
+  toolTemplateId?: string;
+  toolTemplate?: ConstellationToolTemplate;
+  toolInputs?: Record<string, string>;
   projectReference?: ConstellationProjectOutputReference;
   /** The selected value is copied so a source project can change independently. */
   projectValue?: ConstellationValue;
@@ -219,14 +230,17 @@ export interface ConstellationNodeDefinition {
 export const CONSTELLATION_NODE_DEFINITIONS: Record<ConstellationNodeKind, ConstellationNodeDefinition> = {
   conversation: {
     kind: "conversation",
-    label: "会话快照",
-    labelEn: "Conversation Snapshot",
-    description: "选择会话中的明确消息作为可追溯输入",
-    descriptionEn: "Select explicit messages from a traceable conversation snapshot",
-    category: "input",
-    inputs: [],
-    outputs: [{ id: "text", type: "text", label: "快照文本", labelEn: "Snapshot text" }],
-    defaultSize: { width: 310, height: 300 },
+    label: "会话执行",
+    labelEn: "Session Step",
+    description: "把上游星图和可选历史会话作为上下文交给模型，再继续下游节点",
+    descriptionEn: "Send graph context and optional conversation history to a model, then continue downstream",
+    category: "ability",
+    inputs: [
+      { id: "context", type: "text", label: "上游上下文", labelEn: "Upstream context", optional: true, multiple: true },
+      { id: "command", type: "text", label: "执行命令", labelEn: "Command", optional: true },
+    ],
+    outputs: [{ id: "text", type: "text", label: "会话结果", labelEn: "Session result" }],
+    defaultSize: { width: 328, height: 360 },
   },
   input: {
     kind: "input",
@@ -246,12 +260,12 @@ export const CONSTELLATION_NODE_DEFINITIONS: Record<ConstellationNodeKind, Const
     kind: "localTool",
     label: "本地工具",
     labelEn: "Local Tool",
-    description: "通过应用工具与权限边界读取或处理本地数据",
-    descriptionEn: "Use host tools through the app permission boundary",
+    description: "用可复用的输入、输出和命令模板执行本地脚本",
+    descriptionEn: "Run a local script from a reusable input, output, and command template",
     category: "tool",
-    inputs: [{ id: "input", type: "text", label: "输入", labelEn: "Input", optional: true }],
+    inputs: [{ id: "input", type: "text", label: "上游输入", labelEn: "Upstream input", optional: true, multiple: true }],
     outputs: [{ id: "text", type: "text", label: "工具结果", labelEn: "Tool result" }],
-    defaultSize: { width: 308, height: 280 },
+    defaultSize: { width: 328, height: 390 },
   },
   projectRef: {
     kind: "projectRef",
@@ -374,6 +388,82 @@ function makeId(prefix: string) {
   return `${prefix}-${uuid}`;
 }
 
+export const DEFAULT_CONSTELLATION_TOOL_TEMPLATE: ConstellationToolTemplate = {
+  id: "builtin-run-script",
+  name: "运行脚本",
+  description: "把上游文本作为 input 交给工作区脚本，并将标准输出传给下一个节点。",
+  inputSchema: [{ id: "input", name: "输入", type: "text", required: false, defaultValue: "" }],
+  outputSchema: [{ id: "stdout", name: "标准输出", type: "text" }],
+  command: "python -c \"print('tool ready')\"",
+  argumentTemplate: "{{input}}",
+  workdirMode: "workspace",
+  createdAt: 0,
+  updatedAt: 0,
+};
+
+function cleanToolField(value: unknown): ConstellationToolField | null {
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.name !== "string") return null;
+  const type = ["text", "number", "boolean", "json"].includes(String(value.type)) ? value.type as ConstellationToolField["type"] : "text";
+  return {
+    id: value.id.trim().slice(0, 64),
+    name: value.name.trim().slice(0, 120) || value.id.trim().slice(0, 64),
+    type,
+    required: value.required !== false,
+    ...(typeof value.defaultValue === "string" ? { defaultValue: value.defaultValue.slice(0, 20_000) } : {}),
+  };
+}
+
+function cleanToolOutput(value: unknown): ConstellationToolOutput | null {
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.name !== "string") return null;
+  return {
+    id: value.id.trim().slice(0, 64),
+    name: value.name.trim().slice(0, 120) || value.id.trim().slice(0, 64),
+    type: value.type === "json" ? "json" : "text",
+    ...(typeof value.source === "string" ? { source: value.source.slice(0, 500) } : {}),
+  };
+}
+
+export function normalizeConstellationToolTemplate(value: unknown): ConstellationToolTemplate | null {
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.name !== "string" || typeof value.command !== "string") return null;
+  const inputSeen = new Set<string>();
+  const inputSchema: ConstellationToolField[] = [];
+  if (Array.isArray(value.inputSchema)) for (const raw of value.inputSchema) {
+    const item = cleanToolField(raw);
+    if (item && !inputSeen.has(item.id)) { inputSeen.add(item.id); inputSchema.push(item); }
+    if (inputSchema.length >= 32) break;
+  }
+  const outputSeen = new Set<string>();
+  const outputSchema: ConstellationToolOutput[] = [];
+  if (Array.isArray(value.outputSchema)) for (const raw of value.outputSchema) {
+    const item = cleanToolOutput(raw);
+    if (item && !outputSeen.has(item.id)) { outputSeen.add(item.id); outputSchema.push(item); }
+    if (outputSchema.length >= 16) break;
+  }
+  if (outputSchema.length === 0) outputSchema.push({ id: "stdout", name: "标准输出", type: "text" });
+  const id = value.id.trim().slice(0, 128);
+  if (!id || !value.name.trim() || !value.command.trim() || inputSchema.some((field) => !field.id) || outputSchema.some((field) => !field.id)) return null;
+  return {
+    id,
+    name: value.name.trim().slice(0, 120),
+    description: typeof value.description === "string" ? value.description.trim().slice(0, 500) : "",
+    inputSchema,
+    outputSchema,
+    command: value.command.slice(0, 20_000),
+    argumentTemplate: typeof value.argumentTemplate === "string" ? value.argumentTemplate.slice(0, 20_000) : "{{input}}",
+    workdirMode: value.workdirMode === "custom" ? "custom" : "workspace",
+    ...(typeof value.workdir === "string" ? { workdir: value.workdir.slice(0, 1_000) } : {}),
+    createdAt: timestamp(value.createdAt, Date.now()),
+    updatedAt: timestamp(value.updatedAt, Date.now()),
+  };
+}
+
+export function renderConstellationTemplate(template: string, values: Record<string, string>, upstreamInput = "") {
+  return template
+    .split("{{input}}").join(upstreamInput)
+    .split("{{json}}").join(JSON.stringify(values))
+    .replace(/\{\{field:([A-Za-z0-9_-]{1,64})\}\}/g, (_match: string, id: string) => values[id] ?? "");
+}
+
 export function createConstellationNode(kind: ConstellationNodeKind, position: XYPosition): ConstellationNode {
   const definition = CONSTELLATION_NODE_DEFINITIONS[kind];
   const common: ConstellationNodeData = {
@@ -382,9 +472,15 @@ export function createConstellationNode(kind: ConstellationNodeKind, position: X
     status: "idle",
   };
   const variants: Partial<Record<ConstellationNodeKind, Partial<ConstellationNodeData>>> = {
-    conversation: { conversationSnapshot: undefined },
+    conversation: { conversationSnapshot: undefined, sessionCommand: "", sessionContextMode: "upstream" },
     input: { inputMode: "text", inputText: "", inputPath: "", inputUrl: "", inputAttachment: undefined },
-    localTool: { toolName: "read_file", toolArguments: "{\"path\":\"\"}" },
+    localTool: {
+      toolName: "read_file",
+      toolArguments: "{\"path\":\"\"}",
+      toolTemplateId: DEFAULT_CONSTELLATION_TOOL_TEMPLATE.id,
+      toolTemplate: structuredClone(DEFAULT_CONSTELLATION_TOOL_TEMPLATE),
+      toolInputs: { input: "" },
+    },
     projectRef: { projectReference: undefined },
     prompt: { prompt: "", subtitle: "连接到能力节点" },
     writing: { prompt: "", instruction: "根据输入完成创作，只输出可直接使用的正文。" },
@@ -453,6 +549,37 @@ export function findPort(kind: ConstellationNodeKind, direction: "input" | "outp
  */
 export function constellationNodePorts(node: ConstellationNode, direction: "input" | "output") {
   const definition = CONSTELLATION_NODE_DEFINITIONS[node.data.kind];
+  if (node.data.kind === "localTool" && node.data.toolTemplate) {
+    if (direction === "input") {
+      const fields = node.data.toolTemplate.inputSchema ?? [];
+      if (fields.length > 0) {
+        const seen = new Set<string>();
+        return fields
+          .filter((field) => field.id && !seen.has(field.id) && seen.add(field.id))
+          .map((field) => ({
+            id: field.id,
+            type: "text" as const,
+            label: field.name,
+            labelEn: field.name,
+            optional: !field.required,
+            multiple: field.id === "input",
+          }));
+      }
+    } else {
+      const schema = node.data.toolTemplate.outputSchema ?? [];
+      if (schema.length > 0) {
+        const ports: ConstellationPort[] = [{ id: "text", type: "text", label: "标准输出", labelEn: "Standard output" }];
+        const seen = new Set(ports.map((port) => port.id));
+        for (const field of schema) {
+          const id = field.id === "stdout" ? "text" : field.id;
+          if (!id || seen.has(id)) continue;
+          seen.add(id);
+          ports.push({ id, type: "text" as const, label: field.name, labelEn: field.name });
+        }
+        return ports;
+      }
+    }
+  }
   if (direction === "input") return definition.inputs;
   if (node.data.kind === "input") {
     if (node.data.inputMode === "file" && node.data.inputAttachment?.kind === "image") {
@@ -1045,8 +1172,26 @@ function normalizeNode(value: unknown): ConstellationNode | null {
     x: finite(value.position.x),
     y: finite(value.position.y),
   });
+  const storedData = structuredClone(value.data);
   const storedStatus: ConstellationRunStatus = value.data.status === "success" || value.data.status === "stale" || value.data.status === "waiting" ? value.data.status : "idle";
-  const data = { ...base.data, ...structuredClone(value.data), kind, status: storedStatus };
+  const data = { ...base.data, ...storedData, kind, status: storedStatus };
+  if (kind === "localTool") {
+    // Inspect the persisted payload before merging the default node data so
+    // legacy tool names can still be identified during migration.
+    const storedTemplate = normalizeConstellationToolTemplate(storedData.toolTemplate);
+    const legacyNames = ["read_file", "list_files", "search_files", "web_fetch"];
+    const legacyToolName = typeof data.legacyToolName === "string" && legacyNames.includes(data.legacyToolName)
+      ? data.legacyToolName
+      : !storedTemplate && typeof data.toolName === "string" && legacyNames.includes(data.toolName)
+      ? data.toolName
+      : undefined;
+    const template = storedTemplate ?? structuredClone(DEFAULT_CONSTELLATION_TOOL_TEMPLATE);
+    data.toolTemplate = template;
+    data.toolTemplateId = typeof data.toolTemplateId === "string" ? data.toolTemplateId : template.id;
+    data.toolInputs = isRecord(data.toolInputs) ? Object.fromEntries(Object.entries(data.toolInputs).filter(([, item]) => typeof item === "string").slice(0, 32)) : { input: "" };
+    if (legacyToolName) data.legacyToolName = legacyToolName;
+    else delete data.legacyToolName;
+  }
   delete data.error;
   return {
     ...base,

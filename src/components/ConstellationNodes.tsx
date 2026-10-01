@@ -24,6 +24,7 @@ import {
   Image as ImageIcon,
   LoaderCircle,
   Maximize2,
+  Plus,
   Play,
   RefreshCw,
   ScanLine,
@@ -49,7 +50,7 @@ import {
   type ConstellationValue,
 } from "../lib/constellation";
 import { tr } from "../lib/i18n";
-import type { ImageAttachment, MediaKind, MediaModelInfo, ProviderModelInfo } from "../lib/types";
+import type { ConstellationToolTemplate, ImageAttachment, MediaKind, MediaModelInfo, ProviderModelInfo } from "../lib/types";
 
 
 export interface ConstellationNodeActions {
@@ -71,6 +72,8 @@ export interface ConstellationNodeActions {
   openConversation: (threadId: string) => void;
   selectCandidate: (nodeId: string, handle: string, index: number) => void;
   refreshCandidates: (nodeId: string) => void;
+  toolTemplates: ConstellationToolTemplate[];
+  saveToolTemplate: (nodeId: string) => void;
 }
 
 const NodeActionsContext = createContext<ConstellationNodeActions | null>(null);
@@ -141,12 +144,14 @@ export function ConstellationNodeCard({ id, data, selected, isConnectable }: Nod
 const ConstellationNodeContent = memo(function ConstellationNodeContent({ id, data, selected, isConnectable }: Pick<NodeProps<ConstellationNode>, "id" | "data" | "selected" | "isConnectable">) {
   const actions = useNodeActions();
   const definition = CONSTELLATION_NODE_DEFINITIONS[data.kind];
+  const inputs = constellationNodePorts({ id, type: "constellation", data, position: { x: 0, y: 0 } }, "input");
   const outputs = constellationNodePorts({ id, type: "constellation", data, position: { x: 0, y: 0 } }, "output");
   const Icon = NODE_ICONS[data.kind];
   const collapsed = Boolean(data.collapsed);
   const updateNodeInternals = useUpdateNodeInternals();
+  const inputSignature = inputs.map((port) => `${port.id}:${port.type}`).join(",");
   const outputSignature = outputs.map((port) => `${port.id}:${port.type}`).join(",");
-  useEffect(() => updateNodeInternals(id), [id, collapsed, selected, outputSignature, updateNodeInternals]);
+  useEffect(() => updateNodeInternals(id), [id, collapsed, selected, inputSignature, outputSignature, updateNodeInternals]);
   const statusLabel = data.status === "running"
     ? tr("执行中", "Running")
     : data.status === "queued"
@@ -203,7 +208,7 @@ const ConstellationNodeContent = memo(function ConstellationNodeContent({ id, da
         </button>
       </header>
 
-      {definition.inputs.length > 0 && <Handle
+      {inputs.length > 0 && <Handle
         type="target"
         position={Position.Left}
         id={UNIVERSAL_INPUT_HANDLE}
@@ -224,9 +229,9 @@ const ConstellationNodeContent = memo(function ConstellationNodeContent({ id, da
 
       {!collapsed && (
         <>
-          {selected && definition.inputs.length > 0 && (
+          {selected && inputs.length > 0 && (
             <div className="constellation-node-ports inputs" aria-label={tr("输入端口", "Input ports")}>
-              {definition.inputs.map((port) => {
+              {inputs.map((port) => {
                 const connected = actions.edges.some((edge) => edge.target === id && edge.targetHandle === port.id);
                 return (
                   <div className={`constellation-port-row input type-${port.type}${connected ? " connected" : ""}`} key={port.id}>
@@ -297,12 +302,13 @@ const ConstellationNodeContent = memo(function ConstellationNodeContent({ id, da
 function ConversationNodeBody({ id, data }: { id: string; data: ConstellationNodeData }) {
   const actions = useNodeActions();
   const snapshot = data.conversationSnapshot;
-  return <div className="constellation-source-summary"><button type="button" className="nodrag constellation-source-button" onClick={() => actions.openSourcePicker(id, "conversation")}><BookOpenText size={13} />{tr("选择会话消息", "Choose conversation messages")}</button>
-    {snapshot && <button type="button" className="nodrag constellation-source-button" onClick={() => actions.openConversation(snapshot.threadId)}>{tr("打开原会话", "Open source conversation")}</button>}
-    <strong>{snapshot?.threadTitle ?? tr("未选择会话", "No conversation selected")}</strong>
-    <small>{snapshot ? tr(`${snapshot.messages.length} 条已选消息 · ${new Date(snapshot.capturedAt).toLocaleString()}`, `${snapshot.messages.length} selected messages · ${new Date(snapshot.capturedAt).toLocaleString()}`) : tr("在右侧来源面板中选择消息", "Choose messages in the source panel")}</small>
-    {snapshot?.messages.slice(0, 2).map((message) => <p key={message.id}>{message.role}: {message.content.slice(0, 120)}</p>)}
-  </div>;
+  return <>
+    <label className="constellation-field"><span>{tr("本轮命令", "Session command")}</span><textarea className="nodrag nowheel" value={data.sessionCommand ?? ""} maxLength={32_000} placeholder={tr("例如：把上游内容整理成下一步执行计划", "For example: turn the upstream content into the next execution plan")} onChange={(event) => actions.updateNode(id, { sessionCommand: event.target.value, outputs: undefined, status: "idle" })} /></label>
+    <label className="constellation-field"><span>{tr("上下文来源", "Context source")}</span><select className="nodrag nowheel" value={data.sessionContextMode ?? "upstream"} onChange={(event) => actions.updateNode(id, { sessionContextMode: event.target.value as ConstellationNodeData["sessionContextMode"], outputs: undefined, status: "idle" })}><option value="upstream">{tr("上游星图", "Upstream graph")}</option><option value="snapshot">{tr("已有会话", "Saved conversation")}</option><option value="both">{tr("上游 + 已有会话", "Upstream + saved conversation")}</option></select></label>
+    <button type="button" className="nodrag constellation-source-button" onClick={() => actions.openSourcePicker(id, "conversation")}><BookOpenText size={13} />{snapshot ? tr("更换补充会话", "Change saved conversation") : tr("添加已有会话上下文", "Add saved conversation context")}</button>
+    {snapshot && <><button type="button" className="nodrag constellation-source-button" onClick={() => actions.openConversation(snapshot.threadId)}>{tr("打开原会话", "Open source conversation")}</button><small>{tr(`${snapshot.threadTitle} · ${snapshot.messages.length} 条消息`, `${snapshot.threadTitle} · ${snapshot.messages.length} messages`)}</small></>}
+    {data.outputs?.text && <ValuePreview value={data.outputs.text} />}
+  </>;
 }
 
 function InputNodeBody({ id, data }: { id: string; data: ConstellationNodeData }) {
@@ -321,10 +327,23 @@ function InputNodeBody({ id, data }: { id: string; data: ConstellationNodeData }
 
 function LocalToolNodeBody({ id, data }: { id: string; data: ConstellationNodeData }) {
   const actions = useNodeActions();
+  const template = data.toolTemplate;
+  const fields = template?.inputSchema ?? [];
+  const updateTemplate = (next: ConstellationToolTemplate) => actions.updateNode(id, { toolTemplate: next, legacyToolName: undefined, outputs: undefined, status: "idle" });
   return <>
-    <label className="constellation-field"><span>{tr("只读工具", "Read-only tool")}</span><select className="nodrag nowheel" value={data.toolName ?? "read_file"} onChange={(event) => actions.updateNode(id, { toolName: event.target.value, outputs: undefined, status: "idle" })}><option value="read_file">read_file</option><option value="list_files">list_files</option><option value="search_files">search_files</option><option value="web_fetch">web_fetch</option></select></label>
-    <label className="constellation-field"><span>{tr("参数 JSON", "Arguments JSON")}</span><textarea className="nodrag nowheel compact" value={data.toolArguments ?? "{}"} onChange={(event) => actions.updateNode(id, { toolArguments: event.target.value, outputs: undefined, status: "idle" })} /></label>
-    <small className="constellation-source-hint">{tr("参数中的 {{input}} 会替换为上游文本。", "Use {{input}} in arguments to insert upstream text.")}</small>
+    <label className="constellation-field"><span>{tr("工具模板", "Tool template")}</span><select className="nodrag nowheel" value={data.toolTemplateId ?? template?.id ?? ""} onChange={(event) => { const next = actions.toolTemplates.find((item) => item.id === event.target.value); if (next) actions.updateNode(id, { toolTemplateId: next.id, toolTemplate: structuredClone(next), legacyToolName: undefined, toolInputs: Object.fromEntries(next.inputSchema.map((field) => [field.id, field.defaultValue ?? ""])), outputs: undefined, status: "idle" }); }}>{actions.toolTemplates.length === 0 && <option value="">{tr("暂无模板", "No templates")}</option>}{actions.toolTemplates.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
+    {template && <>
+      <label className="constellation-field"><span>{tr("模板名称", "Template name")}</span><input className="nodrag" value={template.name} maxLength={120} onChange={(event) => actions.updateNode(id, { toolTemplate: { ...template, name: event.target.value }, legacyToolName: undefined, outputs: undefined, status: "idle" })} /></label>
+      <label className="constellation-field"><span>{tr("命令模板", "Command template")}</span><textarea className="nodrag nowheel compact" value={template.command} maxLength={20_000} onChange={(event) => actions.updateNode(id, { toolTemplate: { ...template, command: event.target.value }, legacyToolName: undefined, outputs: undefined, status: "idle" })} /></label>
+      <label className="constellation-field"><span>{tr("参数模板", "Argument template")}</span><textarea className="nodrag nowheel compact" value={template.argumentTemplate} maxLength={20_000} onChange={(event) => actions.updateNode(id, { toolTemplate: { ...template, argumentTemplate: event.target.value }, legacyToolName: undefined, outputs: undefined, status: "idle" })} /></label>
+      <div className="constellation-tool-schema-heading"><strong>{tr("输入字段", "Input fields")}</strong><button type="button" className="nodrag" onClick={() => updateTemplate({ ...template, inputSchema: [...template.inputSchema, { id: `field${template.inputSchema.length + 1}`, name: tr("新字段", "New field"), type: "text", required: false }] })}><Plus size={12} />{tr("添加", "Add")}</button></div>
+      {fields.map((field, index) => <div className="constellation-tool-field" key={`${field.id}-${index}`}><input className="nodrag" aria-label={tr("字段名称", "Field name")} value={field.name} onChange={(event) => updateTemplate({ ...template, inputSchema: template.inputSchema.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item) })} /><input className="nodrag" aria-label={tr("字段 ID", "Field id")} value={field.id} onChange={(event) => updateTemplate({ ...template, inputSchema: template.inputSchema.map((item, itemIndex) => itemIndex === index ? { ...item, id: event.target.value.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 64) } : item) })} /><select className="nodrag nowheel" value={field.type} onChange={(event) => updateTemplate({ ...template, inputSchema: template.inputSchema.map((item, itemIndex) => itemIndex === index ? { ...item, type: event.target.value as typeof item.type } : item) })}><option value="text">text</option><option value="number">number</option><option value="boolean">boolean</option><option value="json">json</option></select><label><input className="nodrag" type="checkbox" checked={field.required} onChange={(event) => updateTemplate({ ...template, inputSchema: template.inputSchema.map((item, itemIndex) => itemIndex === index ? { ...item, required: event.target.checked } : item) })} />{tr("必填", "Required")}</label><button type="button" className="nodrag constellation-node-icon-button danger" title={tr("删除字段", "Delete field")} onClick={() => updateTemplate({ ...template, inputSchema: template.inputSchema.filter((_, itemIndex) => itemIndex !== index) })}><Trash2 size={11} /></button></div>)}
+      {fields.map((field) => <label className="constellation-field" key={`value-${field.id}`}><span>{field.name}{field.required ? " *" : ""}</span><input className="nodrag" value={data.toolInputs?.[field.id] ?? field.defaultValue ?? ""} placeholder={`{{field:${field.id}}}`} onChange={(event) => actions.updateNode(id, { toolInputs: { ...(data.toolInputs ?? {}), [field.id]: event.target.value }, outputs: undefined, status: "idle" })} /></label>)}
+      <div className="constellation-tool-schema-heading"><strong>{tr("输出字段", "Output fields")}</strong><button type="button" className="nodrag" onClick={() => updateTemplate({ ...template, outputSchema: [...template.outputSchema, { id: `output${template.outputSchema.length + 1}`, name: tr("输出字段", "Output field"), type: "text", source: `{{json:output${template.outputSchema.length + 1}}}` }] })}><Plus size={12} />{tr("添加", "Add")}</button></div>
+      {(template.outputSchema ?? []).map((field, index) => <div className="constellation-tool-field constellation-tool-output-field" key={`${field.id}-${index}`}><input className="nodrag" aria-label={tr("输出名称", "Output name")} value={field.name} onChange={(event) => updateTemplate({ ...template, outputSchema: template.outputSchema.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item) })} /><input className="nodrag" aria-label={tr("输出 ID", "Output id")} value={field.id} onChange={(event) => updateTemplate({ ...template, outputSchema: template.outputSchema.map((item, itemIndex) => itemIndex === index ? { ...item, id: event.target.value.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 64) } : item) })} /><select className="nodrag nowheel" value={field.type} onChange={(event) => updateTemplate({ ...template, outputSchema: template.outputSchema.map((item, itemIndex) => itemIndex === index ? { ...item, type: event.target.value as typeof item.type } : item) })}><option value="text">text</option><option value="json">json</option></select><input className="nodrag" aria-label={tr("输出来源", "Output source")} value={field.source ?? "{{stdout}}"} placeholder="{{stdout}} / {{json:key}}" onChange={(event) => updateTemplate({ ...template, outputSchema: template.outputSchema.map((item, itemIndex) => itemIndex === index ? { ...item, source: event.target.value } : item) })} /><button type="button" className="nodrag constellation-node-icon-button danger" title={tr("删除输出", "Delete output")} onClick={() => updateTemplate({ ...template, outputSchema: template.outputSchema.filter((_, itemIndex) => itemIndex !== index) })}><Trash2 size={11} /></button></div>)}
+      <small className="constellation-source-hint">{tr("命令变量：{{input}} 上游文本、{{field:id}} 字段、{{json}} 全部字段、{{args}} 参数模板。", "Command variables: {{input}} upstream text, {{field:id}} field, {{json}} all fields, {{args}} argument template.")}</small>
+      <button type="button" className="nodrag constellation-source-button" onClick={() => actions.saveToolTemplate(id)}><Wrench size={13} />{tr("保存为可复用模板", "Save reusable template")}</button>
+    </>}
     {data.outputs?.text && <ValuePreview value={data.outputs.text} />}
   </>;
 }

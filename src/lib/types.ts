@@ -67,6 +67,39 @@ export interface ConstellationConversationSnapshot {
   capturedAt: number;
 }
 
+export type ConstellationToolFieldType = "text" | "number" | "boolean" | "json";
+
+export interface ConstellationToolField {
+  id: string;
+  name: string;
+  type: ConstellationToolFieldType;
+  required: boolean;
+  defaultValue?: string;
+}
+
+export interface ConstellationToolOutput {
+  id: string;
+  name: string;
+  type: "text" | "json";
+  /** How to select this value from the script result. Defaults to stdout. */
+  source?: string;
+}
+
+/** A reusable, permission-checked local command definition used by star graphs. */
+export interface ConstellationToolTemplate {
+  id: string;
+  name: string;
+  description: string;
+  inputSchema: ConstellationToolField[];
+  outputSchema: ConstellationToolOutput[];
+  command: string;
+  argumentTemplate: string;
+  workdirMode: "workspace" | "custom";
+  workdir?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface ConstellationProjectOutputReference {
   projectId: string;
   nodeId: string;

@@ -446,6 +446,33 @@ test("saved card heights never freeze content measurement after reopen or collap
   }
 });
 
+test("session and tool nodes expose executable context and reusable templates", () => {
+  const session = constellation.createConstellationNode("conversation", { x: 0, y: 0 });
+  assert.deepEqual(constellation.CONSTELLATION_NODE_DEFINITIONS.conversation.inputs.map((port) => port.id), ["context", "command"]);
+  assert.equal(session.data.sessionContextMode, "upstream");
+  const legacy = constellation.normalizeConstellationGraph({ nodes: [{ ...session, data: { kind: "localTool", title: "旧工具", status: "idle", toolName: "read_file", toolArguments: "{}" } }], edges: [] });
+  assert.ok(legacy);
+  assert.equal(legacy.nodes[0].data.toolTemplate?.id, "builtin-run-script");
+  assert.equal(legacy.nodes[0].data.legacyToolName, "read_file");
+  assert.equal(constellation.normalizeConstellationGraph(legacy).nodes[0].data.legacyToolName, "read_file");
+  assert.equal(constellation.renderConstellationTemplate("run {{field:name}} {{input}} {{json}}", { name: "demo" }, "upstream"), "run demo upstream {\"name\":\"demo\"}");
+});
+
+test("tool templates expose schema ports and output source metadata", () => {
+  const tool = constellation.createConstellationNode("localTool", { x: 0, y: 0 });
+  tool.data.toolTemplate = {
+    ...tool.data.toolTemplate,
+    inputSchema: [{ id: "prompt", name: "Prompt", type: "text", required: true }],
+    outputSchema: [{ id: "summary", name: "Summary", type: "text", source: "{{json:summary}}" }],
+  };
+  assert.deepEqual(constellation.constellationNodePorts(tool, "input").map((port) => port.id), ["prompt"]);
+  assert.deepEqual(constellation.constellationNodePorts(tool, "output").map((port) => port.id), ["text", "summary"]);
+  const source = constellation.createConstellationNode("input", { x: 0, y: 0 });
+  const resolution = constellation.resolveConstellationConnection([source, tool], [], { source: source.id, target: tool.id });
+  assert.equal(resolution.valid, true);
+  assert.equal(resolution.valid && resolution.mappings[0].targetHandle, "prompt");
+});
+
 const storageSource = readFileSync(new URL("../src/lib/constellationStorage.ts", import.meta.url), "utf8");
 const storageModule = await import(`data:text/javascript;base64,${Buffer.from(ts.transpileModule(storageSource, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText).toString("base64")}`);
 test("empty projects reopen and retain their independent identity", () => {

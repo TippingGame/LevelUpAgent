@@ -106,12 +106,14 @@ import {
   constellationProjectReferenceValue,
   constellationValueReady,
   sameConstellationValue,
+  DEFAULT_CONSTELLATION_TOOL_TEMPLATE,
+  normalizeConstellationToolTemplate,
+  renderConstellationTemplate,
   createConstellationBlueprint,
   createConstellationEdge,
   createConstellationNode,
   createDefaultConstellationGraph,
   duplicateConstellationSelection,
-  findPort,
   groupConstellationConnections,
   instantiateConstellationBlueprint,
   mediaKindForConstellationNode,
@@ -144,7 +146,9 @@ import type {
   ProviderProfile,
   ReasoningEffort,
   ConstellationProjectRecord,
+  ConstellationToolTemplate,
 } from "../lib/types";
+import { loadConstellationToolTemplates, saveConstellationToolTemplates } from "../lib/constellationStorage";
 import { ConstellationOverview, overviewPositionFor, overviewPositionForRecords } from "./ConstellationOverview";
 import { ConstellationConversationPicker, ConstellationProjectPicker, conversationSnapshotText } from "./ConstellationSources";
 import { ConstellationCanvasEditor } from "./ConstellationCanvasEditor";
@@ -280,6 +284,7 @@ function ConstellationStudioInner({
   const [projectBusy, setProjectBusy] = useState(false);
   const overviewOpenRef = useRef(true);
   const [blueprints, setBlueprints] = useState<ConstellationBlueprint[]>(loadPersonalBlueprints);
+  const [toolTemplates, setToolTemplates] = useState<ConstellationToolTemplate[]>(() => [structuredClone(DEFAULT_CONSTELLATION_TOOL_TEMPLATE), ...loadConstellationToolTemplates(() => localStorage).filter((item) => item.id !== DEFAULT_CONSTELLATION_TOOL_TEMPLATE.id)]);
   const [mediaCatalog, setMediaCatalog] = useState<MediaCatalog>({ models: [], errors: [] });
   const [writingModels, setWritingModels] = useState<ProviderModelInfo[]>([]);
   const [catalogLoading, setCatalogLoading] = useState(false);
@@ -611,6 +616,11 @@ function ConstellationStudioInner({
     }
   }, [blueprints]);
 
+  useEffect(() => {
+    try { saveConstellationToolTemplates(() => localStorage, toolTemplates); }
+    catch { setNotice(tr("工具模板保存失败：本地存储空间不足", "Tool templates could not be saved")); }
+  }, [toolTemplates]);
+
   useEffect(() => onPendingCountChange(mediaPending), [mediaPending, onPendingCountChange]);
 
   useEffect(() => {
@@ -793,7 +803,7 @@ function ConstellationStudioInner({
       return;
     }
     const node = graphRef.current.nodes.find((item) => item.id === params.nodeId);
-    setConnectionType(node ? findPort(node.data.kind, "output", params.handleId)?.type : undefined);
+    setConnectionType(node ? findConstellationNodePort(node, "output", params.handleId)?.type : undefined);
   }, []);
   const onConnectionEnd = useCallback((event: MouseEvent | TouchEvent, state: FinalConnectionState) => {
     connectionValidityCacheRef.current.clear();
@@ -929,9 +939,9 @@ function ConstellationStudioInner({
       if (old) {
         const next = { ...old, data: { ...old.data, ...patch } };
         setEdges((current) => current.filter((edge) => {
-          if (edge.source !== nodeId) return true;
-          const output = findConstellationNodePort(next, "output", edge.sourceHandle);
-          const target = graphRef.current.nodes.find((node) => node.id === edge.target);
+          const source = edge.source === nodeId ? next : graphRef.current.nodes.find((node) => node.id === edge.source);
+          const target = edge.target === nodeId ? next : graphRef.current.nodes.find((node) => node.id === edge.target);
+          const output = source && findConstellationNodePort(source, "output", edge.sourceHandle);
           const input = target && findConstellationNodePort(target, "input", edge.targetHandle);
           return Boolean(output && input && portTypesCompatible(output.type, input.type));
         }));
@@ -1170,6 +1180,30 @@ function ConstellationStudioInner({
     finally { refreshingSourcesRef.current.delete(refreshKey); }
   }, [updateNode]);
 
+  const saveToolTemplate = useCallback((nodeId: string) => {
+    if (runningRef.current) return;
+    const node = graphRef.current.nodes.find((item) => item.id === nodeId);
+    const draft = node?.data.toolTemplate;
+    if (!node || !draft) return;
+    const now = Date.now();
+    const editingBuiltIn = node.data.toolTemplateId === DEFAULT_CONSTELLATION_TOOL_TEMPLATE.id;
+    const existing = editingBuiltIn ? undefined : toolTemplates.find((item) => item.id === node.data.toolTemplateId);
+    const normalized = normalizeConstellationToolTemplate({
+      ...draft,
+      id: existing?.id ?? (editingBuiltIn ? `tool-${crypto.randomUUID()}` : node.data.toolTemplateId ?? `tool-${crypto.randomUUID()}`),
+      name: draft.name?.trim() || node.data.title || "自定义工具",
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    });
+    if (!normalized) {
+      setNotice(tr("工具模板配置无效，请检查命令和字段", "The tool template is invalid; check its command and fields"));
+      return;
+    }
+    setToolTemplates((current) => [normalized, ...current.filter((item) => item.id !== normalized.id)]);
+    updateNode(nodeId, { toolTemplateId: normalized.id, toolTemplate: normalized, status: "idle", outputs: undefined });
+    setNotice(tr(`已保存工具模板“${normalized.name}”`, `Saved tool template “${normalized.name}”`));
+  }, [toolTemplates, updateNode]);
+
   const nodeActions = useMemo<ConstellationNodeActions>(() => ({
     locale,
     edges,
@@ -1189,7 +1223,9 @@ function ConstellationStudioInner({
     openConversation: onOpenConversation,
     selectCandidate,
     refreshCandidates: (nodeId) => { void refreshCandidates(nodeId); },
-  }), [chooseReferences, downloadValue, edges, getInputValue, locale, mediaCatalog.models, openCanvas, openImageSourcePicker, openValuePreview, removeNode, running, updateNode, writingModels, openIntegrationSource, onOpenConversation, selectCandidate, refreshCandidates]);
+    toolTemplates,
+    saveToolTemplate,
+  }), [chooseReferences, downloadValue, edges, getInputValue, locale, mediaCatalog.models, openCanvas, openImageSourcePicker, openValuePreview, removeNode, running, updateNode, writingModels, openIntegrationSource, onOpenConversation, selectCandidate, refreshCandidates, saveToolTemplate, toolTemplates]);
 
   const updateRuntimeOutput = (
     nodeId: string,
@@ -1270,9 +1306,41 @@ function ConstellationStudioInner({
       .map((edge) => runtimeValuesRef.current.get(edge.source)?.[edge.sourceHandle ?? ""])
       .filter((value): value is ConstellationValue => Boolean(value));
     if (node.data.kind === "conversation") {
-      const text = conversationSnapshotText(node.data);
-      if (!text.trim()) throw new Error(tr("请先选择会话消息", "Choose conversation messages first"));
-      return { text: { type: "text", text, createdAt: Date.now() } };
+      const upstream = incoming("context").map((value) => value.text).filter(Boolean).join("\n\n");
+      const snapshot = node.data.conversationSnapshot ? conversationSnapshotText(node.data) : "";
+      const mode = node.data.sessionContextMode ?? "upstream";
+      const context = mode === "snapshot" ? snapshot : mode === "both" ? [upstream, snapshot].filter(Boolean).join("\n\n") : upstream;
+      const command = incoming("command").map((value) => value.text).filter(Boolean).join("\n\n") || node.data.sessionCommand?.trim() || "";
+      if (!command) throw new Error(tr("会话执行节点需要一条命令", "The session step needs a command"));
+      if (!context || mode === "snapshot" && !snapshot) throw new Error(tr("请先连接上游上下文或选择已有会话", "Connect upstream context or choose a saved conversation first"));
+      const route = resolveWritingRoute(node, writingModels, activeProfile);
+      const baseProfile = profiles.find((profile) => profile.id === route.profileId) ?? activeProfile;
+      const profile: ProviderProfile = { ...baseProfile, model: route.model, protocol: route.protocol };
+      const operationId = crypto.randomUUID();
+      operationIdsRef.current.add(operationId);
+      let streamed = "";
+      const message: AgentMessage = {
+        id: crypto.randomUUID(), role: "user",
+        content: `${command}${context ? `\n\n${tr("上下文", "Context")}:\n${context}` : ""}`,
+        toolCalls: [], createdAt: Date.now(), attachments: [],
+      };
+      try {
+        const response = await agentTurnStream(
+          profile, [message], "chat", workspace, operationId,
+          (delta) => {
+            if (runEpochRef.current !== epoch) return;
+            streamed += delta;
+            updateRuntimeOutput(node.id, { text: { type: "text", text: streamed, createdAt: Date.now() } }, "running");
+          }, undefined,
+          profiles.filter((item) => item.id !== profile.id && item.failoverEnabled && profileHasTextModel(item)),
+          false, false, undefined, undefined,
+          armorModeWritingInstructions(armorMode, armorModeLevel, armorWritingIntensity, { model: profile.model, protocol: profile.protocol, skills: armorModeSkills, surface: "constellation" }),
+          reasoningEffortForProfile(profile, reasoningEffort),
+        );
+        const text = (streamed || response.content).trim();
+        if (!text) throw new Error(tr("会话模型没有返回结果", "The session model returned no result"));
+        return { text: { type: "text", text, createdAt: Date.now() } };
+      } finally { operationIdsRef.current.delete(operationId); }
     }
     if (node.data.kind === "projectRef") {
       if (!node.data.projectReference || !constellationValueReady(node.data.projectValue)) throw new Error(tr("请先选择项目作品", "Choose a project output first"));
@@ -1289,10 +1357,54 @@ function ConstellationStudioInner({
       return { text: { type: "text", text: text.slice(0, 80_000), createdAt: Date.now() } };
     }
     if (node.data.kind === "localTool") {
+      const upstreamInput = incoming("input").map((value) => value.text ?? "").join("\n\n");
+      const template = node.data.toolTemplate;
+      if (node.data.legacyToolName) {
+        const argumentsValue: unknown = JSON.parse(node.data.toolArguments || "{}");
+        if (!isRecord(argumentsValue)) throw new Error(tr("工具参数必须为 JSON 对象", "Tool arguments must be a JSON object"));
+        const substitute = (value: unknown): unknown => typeof value === "string" ? value.split("{{input}}").join(upstreamInput) : Array.isArray(value) ? value.map(substitute) : isRecord(value) ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, substitute(item)])) : value;
+        const text = await executeReadOnlyTool(node.data.legacyToolName, substitute(argumentsValue) as Record<string, unknown>);
+        return { text: { type: "text", text: text.slice(0, 80_000), createdAt: Date.now() } };
+      }
+      if (template?.command?.trim()) {
+        const values = Object.fromEntries((template.inputSchema ?? []).map((field) => {
+          const connected = incoming(field.id).map((value) => value.text ?? "").filter(Boolean).join("\n\n");
+          return [field.id, connected || (node.data.toolInputs?.[field.id] ?? field.defaultValue ?? "")];
+        }));
+        for (const field of template.inputSchema ?? []) {
+          if (field.required && !String(values[field.id] ?? "").trim()) {
+            throw new Error(tr(`请填写工具输入：${field.name}`, `Fill tool input: ${field.name}`));
+          }
+        }
+        if (template.inputSchema.some((field) => field.id === "input")) values.input ||= upstreamInput;
+        const argumentTemplate = renderConstellationTemplate(template.argumentTemplate || "{{input}}", values, upstreamInput);
+        const command = renderConstellationTemplate(template.command, values, upstreamInput).split("{{args}}").join(argumentTemplate);
+        const stdout = await executeLocalCommand(command, template.workdirMode === "custom" ? template.workdir : undefined);
+        const outputs: Partial<Record<string, ConstellationValue>> = {
+          text: { type: "text", text: stdout.slice(0, 120_000), createdAt: Date.now() },
+        };
+        let parsed: unknown;
+        try { parsed = JSON.parse(stdout); } catch { parsed = undefined; }
+        const readJsonPath = (value: unknown, path: string): unknown => path.split(".").filter(Boolean).reduce<unknown>((current, key) => isRecord(current) ? current[key] : undefined, value);
+        for (const field of template.outputSchema ?? []) {
+          const handle = field.id === "stdout" ? "text" : field.id;
+          if (!handle || handle === "text" && field.id !== "stdout") continue;
+          const source = field.source?.trim() || "{{stdout}}";
+          const match = source.match(/^\{\{json(?::([^}]+))?\}\}$/);
+          const fieldMatch = source.match(/^\{\{field:([^}]+)\}\}$/);
+          let value: unknown = source === "{{stdout}}" ? stdout : match ? (match[1] ? readJsonPath(parsed, match[1]) : parsed) : fieldMatch ? values[fieldMatch[1]] : source;
+          if (value === undefined || value === null) continue;
+          if (field.type === "json" && typeof value === "string") {
+            try { value = JSON.parse(value); } catch { /* Keep non-JSON output readable. */ }
+          }
+          const text = typeof value === "string" ? value : JSON.stringify(value);
+          outputs[handle] = { type: "text", text: text.slice(0, 120_000), createdAt: Date.now() };
+        }
+        return outputs;
+      }
       const argumentsValue: unknown = JSON.parse(node.data.toolArguments || "{}");
       if (!isRecord(argumentsValue)) throw new Error(tr("工具参数必须为 JSON 对象", "Tool arguments must be a JSON object"));
-      const input = incoming("input").map((value) => value.text ?? "").join("\n\n");
-      const substitute = (value: unknown): unknown => typeof value === "string" ? value.split("{{input}}").join(input) : Array.isArray(value) ? value.map(substitute) : isRecord(value) ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, substitute(item)])) : value;
+      const substitute = (value: unknown): unknown => typeof value === "string" ? value.split("{{input}}").join(upstreamInput) : Array.isArray(value) ? value.map(substitute) : isRecord(value) ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, substitute(item)])) : value;
       const text = await executeReadOnlyTool(node.data.toolName ?? "read_file", substitute(argumentsValue) as Record<string, unknown>);
       return { text: { type: "text", text: text.slice(0, 80_000), createdAt: Date.now() } };
     }
@@ -1466,6 +1578,19 @@ function ConstellationStudioInner({
     const decision = await harnessCheckTool({ mode: "agent", permissionLevel: "request", call });
     if (decision !== "allow") throw new Error(tr("应用权限策略未允许此工具", "The app permission policy did not allow this tool"));
     const response = await executeTool(call, workspace ?? "", undefined, undefined, [], false, false, false, "agent", "request");
+    if (response.isError) throw new Error(response.output);
+    return response.output;
+  }
+
+  async function executeLocalCommand(command: string, workdir?: string, renderedArguments?: string) {
+    if (!isDesktop()) throw new Error(tr("自定义工具需要桌面应用", "Custom tools require the desktop app"));
+    const fullCommand = renderedArguments && command.includes("{{args}}") ? command.split("{{args}}").join(renderedArguments) : command;
+    const call = { id: crypto.randomUUID(), name: "run_command", arguments: { command: fullCommand, ...(workdir?.trim() ? { workdir: workdir.trim() } : {}) } };
+    const decision = await harnessCheckTool({ mode: "agent", permissionLevel: "agent", call });
+    if (decision !== "allow") throw new Error(decision === "needs_approval"
+      ? tr("此脚本需要在会话中获得运行命令的权限后再执行", "This script needs run-command approval before it can execute")
+      : tr("应用权限策略拒绝了此脚本", "The app permission policy denied this script"));
+    const response = await executeTool(call, workspace ?? "", undefined, undefined, [], false, false, false, "agent", "agent");
     if (response.isError) throw new Error(response.output);
     return response.output;
   }
@@ -1942,8 +2067,8 @@ function ConstellationStudioInner({
                 {selectedMappings.map((edge) => {
                   const source = nodes.find((node) => node.id === edge.source);
                   const target = nodes.find((node) => node.id === edge.target);
-                  const from = source && findPort(source.data.kind, "output", edge.sourceHandle);
-                  const to = target && findPort(target.data.kind, "input", edge.targetHandle);
+                  const from = source && findConstellationNodePort(source, "output", edge.sourceHandle);
+                  const to = target && findConstellationNodePort(target, "input", edge.targetHandle);
                   return <div key={edge.id}>{from ? tr(from.label, from.labelEn) : edge.sourceHandle} → {to ? tr(to.label, to.labelEn) : edge.targetHandle}</div>;
                 })}
                 <button type="button" onClick={() => onEdgesChange([{ type: "remove", id: selectedConnection.id }])}><Trash2 size={12} />{tr("断开连接", "Disconnect")}</button>
