@@ -11,6 +11,162 @@ const studioCss = readFileSync(new URL("../src/components/ConstellationStudio.cs
 const mediaSource = readFileSync(new URL("../src/components/MediaStudio.tsx", import.meta.url), "utf8");
 const mediaCapabilitiesSource = readFileSync(new URL("../src/lib/mediaCapabilities.ts", import.meta.url), "utf8");
 const canvasSource = readFileSync(new URL("../src/components/ConstellationCanvasEditor.tsx", import.meta.url), "utf8");
+const appSource = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+const conversationSource = appSource.slice(appSource.indexOf("  const runConstellationConversation ="), appSource.indexOf("  const addReferencedFile ="));
+assert.ok(conversationSource.includes("const runConstellationConversation ="));
+const conversationCompiled = ts.transpileModule(conversationSource, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022 },
+}).outputText;
+
+function conversationHarness(options = {}) {
+  const calls = [];
+  let sequence = 0;
+  const threadsRef = { current: options.threads ?? [] };
+  const runningThreadIdsRef = { current: new Set() };
+  const pendingApprovalsRef = { current: {} };
+  const host = {
+    tr: (_zh, en) => en,
+    connectionReady: true,
+    isDesktop: () => true,
+    databaseReadyRef: { current: true },
+    threadsRef,
+    deletingThreadIdsRef: { current: new Set() },
+    createThread: (workspace) => {
+      calls.push(["create", workspace]);
+      return { id: "new-thread", title: "New conversation", workspace, messages: [] };
+    },
+    activeThread: { workspace: "G:/active" },
+    defaultWorkspace: "G:/default",
+    ensureThreadLoaded: async (id) => {
+      calls.push(["load", id]);
+      return options.stored ?? threadsRef.current.find((item) => item.id === id);
+    },
+    getPersistedThread: async (id) => {
+      calls.push(["persisted", id]);
+      return options.stored ?? null;
+    },
+    normalizeReconnectHistory: (thread) => ({ thread }),
+    runningThreadIdsRef,
+    pendingApprovalsRef,
+    operationIdsRef: { current: new Map() },
+    message: (role, content) => ({ id: `message-${++sequence}`, role, content, toolCalls: [], attachments: [] }),
+    isDefaultThreadTitle: (title) => title === "New conversation",
+    activeProfile: { id: "chosen-model" },
+    profiles: [{ id: "chosen-model" }],
+    profileHasTextModel: () => true,
+    permissionLevel: "full",
+    usesDurableHarness: (_thread, desktop) => desktop,
+    commitThread: (thread) => {
+      calls.push(["commit", thread.id]);
+      threadsRef.current = [thread, ...threadsRef.current.filter((item) => item.id !== thread.id)];
+    },
+    setThreadRunning: (id, running) => {
+      if (running) runningThreadIdsRef.current.add(id);
+      else runningThreadIdsRef.current.delete(id);
+    },
+    persistThreadNow: async (thread) => {
+      calls.push(["save", thread.id]);
+      if (options.persistence) await options.persistence();
+    },
+    harnessPreflight: async (request) => {
+      calls.push(["preflight", request]);
+      return { ok: true };
+    },
+    harnessStart: async (request) => {
+      calls.push(["start", request]);
+      return { disposition: "started", value: { operationId: "operation" } };
+    },
+    recordHarnessQueueItem: () => {},
+    runHarnessAgent: async (thread, history, mode, permission, profile) => {
+      calls.push(["run", { thread, history, mode, permission, profile }]);
+      const state = options.state ?? "completed";
+      if (!options.noResponse) {
+        thread.messages = [...history, { id: "reply", role: "assistant", content: "current result", toolCalls: [], ...options.response }];
+        host.commitThread(thread);
+      }
+      if (state === "awaiting_approval") pendingApprovalsRef.current[thread.id] = {};
+      host.setThreadRunning(thread.id, false);
+      return state;
+    },
+    runBrowserPreviewAgent: async () => {},
+    activePetIdRef: { current: null },
+  };
+  const factory = new Function(...Object.keys(host), `${conversationCompiled}\nreturn runConstellationConversation;`);
+  return { run: factory(...Object.values(host)), host, calls };
+}
+
+test("constellation sends through the normal Agent tools and binds a new conversation before starting", async () => {
+  const harness = conversationHarness();
+  const result = await harness.run({ command: "Write report.txt", context: "upstream text", workspace: "G:/graph", onThreadReady: (thread) => harness.calls.push(["bound", thread.id]) });
+  assert.equal(result.threadId, "new-thread");
+  assert.equal(result.text, "current result");
+  assert.deepEqual(harness.calls[0], ["create", "G:/graph"]);
+  assert.ok(harness.calls.findIndex(([kind]) => kind === "bound") < harness.calls.findIndex(([kind]) => kind === "start"));
+  const request = harness.calls.find(([kind]) => kind === "start")[1];
+  assert.equal(request.mode, "agent");
+  assert.equal(request.permissionLevel, "full");
+  assert.equal(request.requestedProfileId, "chosen-model");
+  assert.match(request.rawUserInput, /upstream text/);
+  const run = harness.calls.find(([kind]) => kind === "run")[1];
+  assert.equal(run.mode, "agent");
+  assert.equal(run.thread.workspace, "G:/graph");
+});
+
+test("constellation loads an existing conversation outside the current sidebar page with its full history", async () => {
+  const old = { id: "old", role: "assistant", content: "previous result", toolCalls: [] };
+  const stored = { id: "archived-page", title: "Existing conversation", workspace: "G:/original", messages: [old] };
+  const harness = conversationHarness({ stored });
+  const result = await harness.run({ threadId: stored.id, command: "Continue", workspace: "G:/graph" });
+  assert.equal(result.threadId, stored.id);
+  assert.equal(harness.calls.some(([kind]) => kind === "create"), false);
+  assert.deepEqual(harness.calls[0], ["persisted", stored.id]);
+  const run = harness.calls.find(([kind]) => kind === "run")[1];
+  assert.equal(run.history[0], old);
+  assert.equal(run.thread.workspace, stored.workspace);
+});
+
+test("a missing selected conversation does not silently create a replacement", async () => {
+  const harness = conversationHarness();
+  await assert.rejects(harness.run({ threadId: "deleted", command: "Continue" }), /unavailable/);
+  assert.equal(harness.calls.some(([kind]) => kind === "create" || kind === "start"), false);
+});
+
+test("approval, cancellation, and failed runs retain the binding and do not feed partial text downstream", async () => {
+  for (const state of ["awaiting_approval", "cancelled", "failed"]) {
+    const harness = conversationHarness({ state });
+    let bound;
+    await assert.rejects(harness.run({ command: "Write a file", onThreadReady: (thread) => { bound = thread.id; } }), /waiting for approval|did not complete/);
+    assert.equal(bound, "new-thread");
+  }
+});
+
+test("constellation never substitutes an earlier reply or an error for this turn's result", async () => {
+  const stored = { id: "existing", title: "Existing", messages: [{ id: "old", role: "assistant", content: "old result", toolCalls: [] }] };
+  for (const options of [{ noResponse: true }, { response: { isError: true } }, { response: { toolCalls: [{ name: "write_file" }] } }]) {
+    const harness = conversationHarness({ stored: { ...stored }, ...options });
+    await assert.rejects(harness.run({ threadId: stored.id, command: "Continue" }), /no usable result/);
+  }
+});
+
+test("two constellation nodes cannot start the same conversation during persistence", async () => {
+  const gate = Promise.withResolvers();
+  const stored = { id: "existing", title: "Existing", messages: [] };
+  const harness = conversationHarness({ threads: [stored], persistence: () => gate.promise });
+  const first = harness.run({ threadId: stored.id, command: "First" });
+  await new Promise(setImmediate);
+  await assert.rejects(harness.run({ threadId: stored.id, command: "Second" }), /running or waiting/);
+  gate.resolve();
+  await first;
+  assert.equal(harness.calls.filter(([kind]) => kind === "start").length, 1);
+});
+
+test("a failed submission releases the local conversation lock for retry", async () => {
+  const harness = conversationHarness({ persistence: () => { throw new Error("storage failed"); } });
+  await assert.rejects(harness.run({ command: "Run" }), /storage failed/);
+  assert.equal(harness.host.runningThreadIdsRef.current.size, 0);
+  assert.equal(harness.calls.some(([kind]) => kind === "start"), false);
+});
+
 const compiled = ts.transpileModule(source, {
   compilerOptions: {
     module: ts.ModuleKind.ESNext,
@@ -457,6 +613,26 @@ test("session and tool nodes expose executable context and reusable templates", 
   assert.equal(legacy.nodes[0].data.legacyToolName, "read_file");
   assert.equal(constellation.normalizeConstellationGraph(legacy).nodes[0].data.legacyToolName, "read_file");
   assert.equal(constellation.renderConstellationTemplate("run {{field:name}} {{input}} {{json}}", { name: "demo" }, "upstream"), "run demo upstream {\"name\":\"demo\"}");
+});
+
+test("legacy conversation snapshots migrate to bindings while reusable blueprints start unbound", () => {
+  const node = constellation.createConstellationNode("conversation", { x: 0, y: 0 });
+  node.data.conversationSnapshot = { threadId: "legacy-thread", threadTitle: "Legacy conversation", messages: [], messageIds: [], capturedAt: 1 };
+  node.data.sessionContextMode = "both";
+  const graph = constellation.normalizeConstellationGraph({ nodes: [node], edges: [] });
+  assert.equal(graph.nodes[0].data.conversationThreadId, "legacy-thread");
+  assert.equal(graph.nodes[0].data.conversationThreadTitle, "Legacy conversation");
+  assert.equal(graph.nodes[0].data.sessionContextMode, undefined);
+  const saved = constellation.serializeConstellationGraph(graph);
+  assert.equal(saved.nodes[0].data.conversationThreadId, "legacy-thread");
+  const blueprint = constellation.createConstellationBlueprint("Conversation", "", [], graph.nodes, graph.edges);
+  assert.equal(blueprint.nodes[0].data.conversationThreadId, undefined);
+  assert.equal(blueprint.nodes[0].data.conversationThreadTitle, undefined);
+  blueprint.nodes[0].data.conversationThreadId = "old-blueprint-thread";
+  blueprint.nodes[0].data.conversationThreadTitle = "Old blueprint conversation";
+  const instance = constellation.instantiateConstellationBlueprint(blueprint, { x: 0, y: 0 });
+  assert.equal(instance.nodes[0].data.conversationThreadId, undefined);
+  assert.equal(instance.nodes[0].data.conversationThreadTitle, undefined);
 });
 
 test("tool templates expose schema ports and output source metadata", () => {

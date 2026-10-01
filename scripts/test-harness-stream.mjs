@@ -53,6 +53,7 @@ function appHarness() {
   let current;
   let nextId = 0;
   const finished = [];
+  const pendingApprovalsRef = { current: {} };
   const harnessRun = compile(bridgeRun, "harnessRun", { Channel, invoke, runHarnessStream });
   const run = compile(appRun, "runHarnessAgent", {
     window, performance, setThreadRunning() {},
@@ -66,7 +67,8 @@ function appHarness() {
     STREAMING_COMMIT_CHAR_THRESHOLD: 1024, STREAMING_COMMIT_INTERVAL_MS: 0,
     harnessRun, armorMode: false, armorModeLevel: "standard", armorModeSkills: {},
     armorModeRunInstructions() {}, reasoningEffortForProfile: () => "auto", effectiveReasoningEffort: "auto",
-    pendingApprovalsRef: { current: {} }, activePetIdRef: { current: null },
+    pendingApprovalsRef, activePetIdRef: { current: null },
+    setThreadPending: (id, pending) => { pendingApprovalsRef.current[id] = pending; },
     finishThreadRun: (...args) => finished.push(args),
     tr: (_, en) => en, errorText: String, friendlyAgentError: String,
     finalizeConversationMessages: (messages) => messages,
@@ -101,7 +103,7 @@ test("large delayed completion reaches the real App projection before run cleanu
   await nextTurn();
   const finishedBeforeFinalEvent = app.finished.length;
   ipc.send(1, completed);
-  await running;
+  assert.equal(await running, "completed");
   const assistants = app.current.messages.filter((message) => message.role === "assistant");
   assert.equal(assistants.length, 1, "the stream and final payload must remain one message");
   assert.equal(finishedBeforeFinalEvent, 0, "cleanup must wait for the delayed channel payload");
@@ -129,6 +131,35 @@ test("the channel can drain before the command response, without resolving early
   assert.deepEqual(await run, outcome);
   assert.deepEqual(seen, ["assistant_completed"]);
 });
+
+test("the real App executor reports pending approval instead of successful completion", async () => {
+  const ipc = transport({ status: "ok", outcome: { state: "awaiting_approval" } });
+  const app = appHarness();
+  const running = app.run();
+  await nextTurn();
+  ipc.send(0, event("approval_required", { token: "approval-1", call: { id: "write-1", name: "write_file", arguments: {} } }));
+  ipc.send(1, event("run_finished"));
+  ipc.end(2);
+  ipc.resolve();
+  assert.equal(await running, "awaiting_approval");
+  assert.equal(app.finished.length, 0);
+});
+
+for (const [error, state] of [["REQUEST_CANCELLED", "cancelled"], ["Provider failed", "failed"]]) {
+  test(`the real App executor returns ${state} after preserving partial output`, async () => {
+    const ipc = transport({ status: "error", error });
+    const app = appHarness();
+    const running = app.run();
+    await nextTurn();
+    ipc.send(0, event("assistant_delta", { delta: "unfinished result" }));
+    ipc.send(1, event("run_finished"));
+    ipc.end(2);
+    ipc.resolve();
+    assert.equal(await running, state);
+    assert.ok(app.current.messages.some((item) => item.content === "unfinished result"));
+    assert.equal(app.finished[0][2], state);
+  });
+}
 
 for (const error of ["REQUEST_CANCELLED", "Provider failed after partial output"]) {
   test(`runtime failure drains partial output before rejecting: ${error}`, async () => {

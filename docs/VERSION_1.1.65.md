@@ -245,3 +245,41 @@ SHA-256: BADF049D20F0E67B79577C0B5F59563515D15ECDED4CAB319AF1FE71F2348849
 Previous package: backups/installer-before-scrollbar-fix-20261001-182550.
 Evidence: artifacts/connection-scrollbar-20261001 (screenshots, browser results,
 archive logs and package-result.json).
+
+## Refreshed local installer after constellation conversation execution fix
+
+Built on 2026-10-01 at 22:45 Asia/Shanghai. This supersedes the earlier same-name
+installer; earlier hashes and sizes are historical.
+
+- Constellation selects an entire existing conversation or creates one on first
+  run, with project groups and search. Message selection and context-source
+  controls were removed in the preceding refactor.
+- Execution now uses the existing Agent flow with tools, current model and
+  permissions, and the selected conversation's full history and workspace.
+  Threads outside the loaded sidebar page are fetched from persistence; missing
+  threads are reported instead of silently replaced.
+- Bind new threads before execution so approval and failure remain accessible.
+  Prevent concurrent submissions to one thread and reject incomplete, failed,
+  cancelled, approval-pending, old, and error results as downstream input.
+- Preserve bindings in project saves and remove them from reusable blueprints.
+- `pnpm check`: 230 passed, including new conversation and real App stream
+  executor tests using simulated transports. Production frontend and optimized
+  Windows/NSIS builds passed.
+- Production Edge verification passed at 1440x920, 900x700, and 720x560, including
+  project grouping, same-name projects, search, selection, and reset to automatic
+  conversation creation. No browser errors were recorded.
+- Installer integrity: All OK. Installer/application versions: 1.1.65;
+  application architecture: AMD64. All 50 bundled resources matched their source
+  hashes. The program matched the release build except for Tauri's expected
+  NSS/UNK marker, and the copied installer hash matched.
+- No actual upgrade installation or live-model file-write test was performed.
+
+Installer: G:\Work\LevelUpAgent\安装包\LevelUpAgent_1.1.65_Windows_x64-setup.exe
+
+Size: 14,064,541 bytes.
+
+SHA-256: A347B508FE1F320C427BB7BCA1B5BA7D64B2E79DFC7B9187B82C0F74EA120191
+
+Previous package: backups/installer-before-conversation-fix-20261001-224900.
+Evidence: artifacts/constellation-conversation-20261001 (picker screenshots,
+browser results, verification script and package-result.json).

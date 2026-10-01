@@ -32,11 +32,11 @@ export function ConstellationConversationPicker({ threads, selectedThreadId, onC
     const filtered = catalog
       .filter((item) => !normalized || `${item.title} ${item.workspace ?? ""}`.toLocaleLowerCase().includes(normalized))
       .sort((left, right) => right.updatedAt - left.updatedAt);
-    const groups = new Map<string, { label: string; threads: AgentThread[] }>();
+    const groups = new Map<string, { key: string; label: string; threads: AgentThread[] }>();
     for (const item of filtered) {
       const key = item.workspace?.trim() || "__default__";
       const label = item.workspace?.split(/[\\/]/).filter(Boolean).pop() || tr("默认项目", "Default project");
-      const group = groups.get(key) ?? { label, threads: [] };
+      const group = groups.get(key) ?? { key, label, threads: [] };
       group.threads.push(item);
       groups.set(key, group);
     }
@@ -47,7 +47,7 @@ export function ConstellationConversationPicker({ threads, selectedThreadId, onC
   return <SourceDialog title={tr("选择会话", "Choose conversation")} onClose={onClose}>
     <label className="constellation-source-search"><Search size={14} /><input autoFocus placeholder={tr("搜索会话", "Search conversations")} value={query} onChange={(event) => setQuery(event.target.value)} /></label>
     <div className="constellation-thread-picker-list">
-      {grouped.map((group) => <section className="constellation-thread-group" key={group.label}>
+      {grouped.map((group) => <section className="constellation-thread-group" key={group.key}>
         <header><Folder size={13} /><strong>{group.label}</strong><small>{group.threads.length}</small></header>
         <div>{group.threads.map((item) => <button type="button" className={item.id === threadId ? "active" : ""} key={item.id} onClick={() => setThreadId(item.id)}><MessageSquare size={14} /><span><strong>{item.title || tr("新会话", "New conversation")}</strong><small>{new Date(item.updatedAt).toLocaleString()}</small></span>{item.id === threadId && <span className="constellation-thread-selected">{tr("已选", "Selected")}</span>}</button>)}</div>
       </section>)}

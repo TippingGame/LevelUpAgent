@@ -178,7 +178,7 @@ interface ConstellationStudioProps {
   workspace?: string;
   threads: AgentThread[];
   onOpenConversation: (threadId: string) => void;
-  onRunConversation: (request: { threadId?: string; command: string; context?: string; workspace?: string }) => Promise<{ threadId: string; title: string; text?: string }>;
+  onRunConversation: (request: { threadId?: string; command: string; context?: string; workspace?: string; onThreadReady?: (thread: Pick<AgentThread, "id" | "title">) => void }) => Promise<{ threadId: string; title: string; text?: string }>;
   mediaCatalogRevision: number;
   onConfigureConnection: () => void;
   onMedia: () => void;
@@ -1311,7 +1311,10 @@ function ConstellationStudioInner({
       const upstream = incoming("context").map((value) => value.text).filter(Boolean).join("\n\n");
       const command = incoming("command").map((value) => value.text).filter(Boolean).join("\n\n") || node.data.sessionCommand?.trim() || "";
       if (!command) throw new Error(tr("会话执行节点需要一条命令", "The session step needs a command"));
-      const result = await onRunConversation({ threadId: node.data.conversationThreadId, command, context: upstream, workspace });
+      const result = await onRunConversation({
+        threadId: node.data.conversationThreadId, command, context: upstream, workspace,
+        onThreadReady: (thread) => updateNode(node.id, { conversationThreadId: thread.id, conversationThreadTitle: thread.title, conversationSnapshot: undefined }),
+      });
       if (result.threadId !== node.data.conversationThreadId || result.title !== node.data.conversationThreadTitle) {
         updateNode(node.id, { conversationThreadId: result.threadId, conversationThreadTitle: result.title, conversationSnapshot: undefined });
       }

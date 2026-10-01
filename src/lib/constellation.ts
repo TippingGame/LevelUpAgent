@@ -848,6 +848,8 @@ function serializableNode(node: ConstellationNode, forBlueprint = false): Conste
     delete data.canvasResult;
     delete data.maskAttachment;
     delete data.conversationSnapshot;
+    delete data.conversationThreadId;
+    delete data.conversationThreadTitle;
     delete data.projectReference;
     delete data.projectValue;
     delete data.outputCandidates;
@@ -919,13 +921,15 @@ export function instantiateConstellationBlueprint(
   origin: XYPosition,
 ): { nodes: ConstellationNode[]; edges: ConstellationEdge[] } {
   const idMap = new Map(blueprint.nodes.map((node) => [node.id, makeId(node.data.kind)]));
-  const nodes = blueprint.nodes.map((node) => ({
-    ...serializableNode(node, true),
-    id: idMap.get(node.id)!,
-    position: { x: origin.x + node.position.x, y: origin.y + node.position.y },
-    selected: true,
-    data: { ...structuredClone(node.data), status: "idle" as const },
-  }));
+  const nodes = blueprint.nodes.map((node) => {
+    const copy = serializableNode(node, true);
+    return {
+      ...copy,
+      id: idMap.get(node.id)!,
+      position: { x: origin.x + node.position.x, y: origin.y + node.position.y },
+      selected: true,
+    };
+  });
   const edges = blueprint.edges.map((edge) => ({
     ...structuredClone(edge),
     id: makeId("edge"),

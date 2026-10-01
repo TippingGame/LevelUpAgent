@@ -2623,7 +2623,7 @@ function App() {
     runFallbackProfiles: ProviderProfile[],
     operationId: string,
     options: { hatch?: boolean; hatchSkillLoaded?: boolean } = {},
-  ): Promise<void> => {
+  ): Promise<HarnessOperationState> => {
     setThreadRunning(thread.id, true);
     runModesRef.current.set(thread.id, runMode);
     operationIdsRef.current.set(thread.id, operationId);
@@ -3018,6 +3018,7 @@ function App() {
         ]));
         finishThreadRun(thread.id, operationId, outcome.state);
       }
+      return pendingApprovalsRef.current[thread.id] ? "awaiting_approval" : outcome.state;
     } catch (error) {
       cancelStreamingFrame();
       const reason = errorText(error);
@@ -3025,7 +3026,7 @@ function App() {
         settleStreamingAssistant(true);
         commitThread(projectedThread(projected));
         finishThreadRun(thread.id, operationId, "cancelled");
-        return;
+        return "cancelled";
       }
       if (lastReconnectAttempt > 0) {
         settleStreamingAssistant(true);
@@ -3040,7 +3041,7 @@ function App() {
             })];
         commitThread(projectedThread(projected));
         finishThreadRun(thread.id, operationId, "failed");
-        return;
+        return "failed";
       }
       settleStreamingAssistant(true);
       commitThread(projectedThread(finalizeConversationMessages([
@@ -3051,6 +3052,7 @@ function App() {
           }),
         ], Date.now())));
       finishThreadRun(thread.id, operationId, "failed");
+      return "failed";
     } finally {
       cancelStreamingFrame();
       stopReconnectProgress();
@@ -4223,16 +4225,24 @@ function App() {
     }
   };
 
-  const runConstellationConversation = async ({ threadId, command, context, workspace }: { threadId?: string; command: string; context?: string; workspace?: string }) => {
+  const runConstellationConversation = async ({ threadId, command, context, workspace, onThreadReady }: { threadId?: string; command: string; context?: string; workspace?: string; onThreadReady?: (thread: Pick<AgentThread, "id" | "title">) => void }) => {
     const requested = command.trim();
     if (!requested) throw new Error(tr("会话命令不能为空", "The conversation command cannot be empty"));
-    const selected = threadId ? threadsRef.current.find((item) => item.id === threadId) : undefined;
-    let thread = selected ?? createThread(workspace ?? activeThread.workspace ?? defaultWorkspace);
-    if (thread.historyLoaded === false) {
-      const loaded = await ensureThreadLoaded(thread.id);
-      if (loaded) thread = loaded;
+    if (!connectionReady) throw new Error(tr("请先配置可用的模型连接", "Configure an available model connection first"));
+    const desktop = isDesktop();
+    if (desktop && !databaseReadyRef.current) throw new Error(tr("会话数据库尚未准备好", "Conversation storage is not ready"));
+    let thread: AgentThread;
+    if (threadId) {
+      const selected = threadsRef.current.find((item) => item.id === threadId);
+      const stored = selected
+        ? await ensureThreadLoaded(threadId)
+        : desktop ? await getPersistedThread(threadId) : null;
+      if (!stored || deletingThreadIdsRef.current.has(threadId)) throw new Error(tr("所选会话已不可用，请重新选择会话", "The selected conversation is unavailable; choose another conversation"));
+      thread = normalizeReconnectHistory({ ...stored, historyLoaded: true }).thread;
+    } else {
+      thread = createThread(workspace ?? activeThread.workspace ?? defaultWorkspace);
     }
-    if (runningThreadIdsRef.current.has(thread.id) || pendingApprovalsRef.current[thread.id]) {
+    if (runningThreadIdsRef.current.has(thread.id) || pendingApprovalsRef.current[thread.id] || operationIdsRef.current.has(thread.id)) {
       throw new Error(tr("该会话正在运行或等待审批，请先处理后再继续星图", "This conversation is running or waiting for approval; resolve it before continuing the constellation"));
     }
     const content = context?.trim()
@@ -4248,36 +4258,52 @@ function App() {
     const runProfile = activeProfile;
     const runFallbackProfiles = profiles.filter((profile) => profile.id !== runProfile.id && profileHasTextModel(profile));
     const runPermission = permissionLevel;
-    const runMode: AgentMode = "chat";
-    const useHarness = usesDurableHarness(next, isDesktop());
-    commitThread(next);
-    if (useHarness) {
-      if (!databaseReadyRef.current) throw new Error(tr("会话数据库尚未准备好", "Conversation storage is not ready"));
-      await persistThreadNow(next);
-      const request = {
-        threadId: next.id,
-        rawUserInput: content,
-        attachmentIds: [],
-        mode: runMode,
-        permissionLevel: runPermission,
-        requestedProfileId: runProfile.id,
-        workspace: next.workspace,
-        hatch: false,
-      };
-      const report = await harnessPreflight(request);
-      if (!report.ok) throw new Error(report.errors.join("; ") || tr("预检未通过", "Harness preflight blocked"));
-      const submission = await harnessStart(request);
-      if (submission.disposition === "queued") {
-        recordHarnessQueueItem(next.id, submission.value);
-        throw new Error(tr("会话已加入运行队列，完成后可继续运行下游节点", "The conversation was queued; run downstream nodes after it completes"));
+    const runMode: AgentMode = "agent";
+    const useHarness = usesDurableHarness(next, desktop);
+    let handedOffToAgent = false;
+    setThreadRunning(next.id, true);
+    try {
+      commitThread(next);
+      onThreadReady?.(next);
+      if (useHarness) {
+        await persistThreadNow(next);
+        const request = {
+          threadId: next.id,
+          rawUserInput: content,
+          attachmentIds: [],
+          mode: runMode,
+          permissionLevel: runPermission,
+          requestedProfileId: runProfile.id,
+          workspace: next.workspace,
+          hatch: false,
+        };
+        const report = await harnessPreflight(request);
+        if (!report.ok) throw new Error(report.errors.join("; ") || tr("预检未通过", "Harness preflight blocked"));
+        const submission = await harnessStart(request);
+        if (submission.disposition === "queued") {
+          recordHarnessQueueItem(next.id, submission.value);
+          throw new Error(tr("会话已加入运行队列，完成后可继续运行下游节点", "The conversation was queued; run downstream nodes after it completes"));
+        }
+        handedOffToAgent = true;
+        const state = await runHarnessAgent(next, next.messages, runMode, runPermission, runProfile, runFallbackProfiles, submission.value.operationId, { hatch: false, hatchSkillLoaded: false });
+        if (state !== "completed") {
+          throw new Error(state === "awaiting_approval"
+            ? tr("会话正在等待审批，请打开会话处理后继续", "The conversation is waiting for approval; open it to continue")
+            : tr("会话执行未完成，请打开会话查看结果", "The conversation did not complete; open it to inspect the result"));
+        }
+      } else {
+        handedOffToAgent = true;
+        await runBrowserPreviewAgent(next, next.messages, 0, runMode, runPermission, Date.now(), runProfile, runFallbackProfiles, activePetIdRef.current, null);
       }
-      await runHarnessAgent(next, next.messages, runMode, runPermission, runProfile, runFallbackProfiles, submission.value.operationId, { hatch: false, hatchSkillLoaded: false });
-    } else {
-      await runBrowserPreviewAgent(next, next.messages, 0, runMode, runPermission, Date.now(), runProfile, runFallbackProfiles, activePetIdRef.current, null);
+      if (pendingApprovalsRef.current[next.id]) throw new Error(tr("会话正在等待审批，请打开会话处理后继续", "The conversation is waiting for approval; open it to continue"));
+      const latest = threadsRef.current.find((item) => item.id === next.id) ?? next;
+      const turnIndex = latest.messages.findIndex((item) => item.id === user.id);
+      const response = turnIndex < 0 ? undefined : latest.messages.slice(turnIndex + 1).reverse().find((item) => item.role === "assistant" && !item.internal && item.content.trim());
+      if (!response || response.isError || response.toolCalls.length) throw new Error(tr("本轮会话未返回可用结果，请打开会话查看详情", "This conversation turn has no usable result; open it for details"));
+      return { threadId: latest.id, title: latest.title, text: response.content };
+    } finally {
+      if (!handedOffToAgent) setThreadRunning(next.id, false);
     }
-    const latest = threadsRef.current.find((item) => item.id === next.id) ?? next;
-    const response = [...latest.messages].reverse().find((item) => item.role === "assistant" && !item.internal && item.content.trim());
-    return { threadId: latest.id, title: latest.title, text: response?.content };
   };
 
   const addReferencedFile = async (path: string): Promise<boolean> => {
