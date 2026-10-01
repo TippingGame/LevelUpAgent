@@ -615,6 +615,56 @@ test("session and tool nodes expose executable context and reusable templates", 
   assert.equal(constellation.renderConstellationTemplate("run {{field:name}} {{input}} {{json}}", { name: "demo" }, "upstream"), "run demo upstream {\"name\":\"demo\"}");
 });
 
+function localToolHarness(output, decision = "allow") {
+  const calls = [];
+  const commandSource = studioSource.slice(studioSource.indexOf("  async function executeLocalCommand("), studioSource.indexOf("  async function valueToAttachment("));
+  const nodeExecutorSource = studioSource.slice(studioSource.indexOf("  async function executeNode("), studioSource.indexOf("  async function executeReadOnlyTool("));
+  const compiled = ts.transpileModule(`${commandSource}\n${nodeExecutorSource}`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const host = {
+    tr: (_zh, en) => en,
+    isDesktop: () => true,
+    workspace: "G:/workspace",
+    runEpochRef: { current: 1 },
+    runtimeValuesRef: { current: new Map() },
+    renderConstellationTemplate: constellation.renderConstellationTemplate,
+    parseConstellationCommandOutput: constellation.parseConstellationCommandOutput,
+    isRecord: (value) => value !== null && typeof value === "object" && !Array.isArray(value),
+    harnessCheckTool: async (request) => { calls.push(["policy", request]); return decision; },
+    executeTool: async (call) => { calls.push(["execute", call]); return { output, isError: false }; },
+  };
+  const factory = new Function(...Object.keys(host), `${compiled}\nreturn executeNode;`);
+  const run = factory(...Object.values(host));
+  return { run: (node) => run(node, { nodes: [node], edges: [] }, 1), calls };
+}
+
+test("local tools forward only stdout and resolve JSON output fields from native command reports", async () => {
+  const stdout = '{"summary":"hello","meta":{"count":2}}\r\n';
+  const harness = localToolHarness(`exit code: 0\nstdout:\n${stdout}\nstderr:\nwarning\r\n`);
+  const node = constellation.createConstellationNode("localTool", { x: 0, y: 0 });
+  node.data.toolTemplate.command = 'echo "{{args}}"';
+  node.data.toolTemplate.argumentTemplate = "{{field:input}}";
+  node.data.toolInputs.input = "hello";
+  node.data.toolTemplate.outputSchema.push({ id: "summary", name: "Summary", type: "text", source: "{{json:summary}}" }, { id: "count", name: "Count", type: "text", source: "{{json:meta.count}}" });
+  const result = await harness.run(node);
+  assert.equal(harness.calls.find(([kind]) => kind === "execute")[1].arguments.command, 'echo "hello"');
+  assert.equal(result.text.text, stdout);
+  assert.equal(result.summary.text, "hello");
+  assert.equal(result.count.text, "2");
+});
+
+test("failed and malformed native command reports cannot become successful downstream text", async () => {
+  const node = constellation.createConstellationNode("localTool", { x: 0, y: 0 });
+  await assert.rejects(localToolHarness("exit code: 5\nstdout:\npartial result\nstderr:\nscript failed").run(node), /exit code 5\nscript failed/);
+  await assert.rejects(localToolHarness("exit code: -1\nstdout:\ninterrupted\nstderr:\n").run(node), /exit code -1\ninterrupted/);
+  await assert.rejects(localToolHarness("unrecognized response").run(node), /Could not read the command result/);
+});
+
+test("local tools needing approval stop before execution and direct users to conversation approval", async () => {
+  const harness = localToolHarness("unused", "needs_approval");
+  await assert.rejects(harness.run(constellation.createConstellationNode("localTool", { x: 0, y: 0 })), /use a Conversation node/);
+  assert.equal(harness.calls.some(([kind]) => kind === "execute"), false);
+});
+
 test("legacy conversation snapshots migrate to bindings while reusable blueprints start unbound", () => {
   const node = constellation.createConstellationNode("conversation", { x: 0, y: 0 });
   node.data.conversationSnapshot = { threadId: "legacy-thread", threadTitle: "Legacy conversation", messages: [], messageIds: [], capturedAt: 1 };

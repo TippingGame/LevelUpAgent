@@ -109,6 +109,7 @@ import {
   DEFAULT_CONSTELLATION_TOOL_TEMPLATE,
   normalizeConstellationToolTemplate,
   renderConstellationTemplate,
+  parseConstellationCommandOutput,
   createConstellationBlueprint,
   createConstellationEdge,
   createConstellationNode,
@@ -1190,10 +1191,16 @@ function ConstellationStudioInner({
     const now = Date.now();
     const editingBuiltIn = node.data.toolTemplateId === DEFAULT_CONSTELLATION_TOOL_TEMPLATE.id;
     const existing = editingBuiltIn ? undefined : toolTemplates.find((item) => item.id === node.data.toolTemplateId);
+    const requestedName = draft.name?.trim() || node.data.title || tr("自定义工具", "Custom tool");
+    const baseName = editingBuiltIn && requestedName === DEFAULT_CONSTELLATION_TOOL_TEMPLATE.name
+      ? `${requestedName}${tr("（副本）", " (copy)")}` : requestedName;
+    const otherNames = new Set(toolTemplates.filter((item) => item.id !== existing?.id).map((item) => item.name));
+    let name = baseName.slice(0, 120);
+    for (let suffix = 2; otherNames.has(name); suffix++) name = `${baseName.slice(0, 110)} (${suffix})`;
     const normalized = normalizeConstellationToolTemplate({
       ...draft,
       id: existing?.id ?? (editingBuiltIn ? `tool-${crypto.randomUUID()}` : node.data.toolTemplateId ?? `tool-${crypto.randomUUID()}`),
-      name: draft.name?.trim() || node.data.title || "自定义工具",
+      name,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
     });
@@ -1568,11 +1575,14 @@ function ConstellationStudioInner({
     const call = { id: crypto.randomUUID(), name: "run_command", arguments: { command: fullCommand, ...(workdir?.trim() ? { workdir: workdir.trim() } : {}) } };
     const decision = await harnessCheckTool({ mode: "agent", permissionLevel: "agent", call });
     if (decision !== "allow") throw new Error(decision === "needs_approval"
-      ? tr("此脚本需要在会话中获得运行命令的权限后再执行", "This script needs run-command approval before it can execute")
+      ? tr("此命令需要审批，请改用“会话执行”节点运行并处理审批", "This command needs approval; use a Conversation node to run it and handle approval")
       : tr("应用权限策略拒绝了此脚本", "The app permission policy denied this script"));
     const response = await executeTool(call, workspace ?? "", undefined, undefined, [], false, false, false, "agent", "agent");
     if (response.isError) throw new Error(response.output);
-    return response.output;
+    const result = parseConstellationCommandOutput(response.output);
+    if (!result) throw new Error(tr("无法读取命令执行结果", "Could not read the command result"));
+    if (result.exitCode !== 0) throw new Error(`${tr("命令执行失败，退出码", "Command failed with exit code")} ${result.exitCode}\n${result.stderr.trim() || result.stdout.trim()}`);
+    return result.stdout;
   }
 
   async function valueToAttachment(value: ConstellationValue) {

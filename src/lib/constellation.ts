@@ -392,10 +392,10 @@ function makeId(prefix: string) {
 export const DEFAULT_CONSTELLATION_TOOL_TEMPLATE: ConstellationToolTemplate = {
   id: "builtin-run-script",
   name: "运行脚本",
-  description: "把上游文本作为 input 交给工作区脚本，并将标准输出传给下一个节点。",
+  description: "输出 tool ready 的最小示例；可替换命令，并使用变量接收输入。",
   inputSchema: [{ id: "input", name: "输入", type: "text", required: false, defaultValue: "" }],
   outputSchema: [{ id: "stdout", name: "标准输出", type: "text" }],
-  command: "python -c \"print('tool ready')\"",
+  command: "echo \"tool ready\"",
   argumentTemplate: "{{input}}",
   workdirMode: "workspace",
   createdAt: 0,
@@ -463,6 +463,12 @@ export function renderConstellationTemplate(template: string, values: Record<str
     .split("{{input}}").join(upstreamInput)
     .split("{{json}}").join(JSON.stringify(values))
     .replace(/\{\{field:([A-Za-z0-9_-]{1,64})\}\}/g, (_match: string, id: string) => values[id] ?? "");
+}
+
+/** Unwrap the native run_command report before using stdout as node data. */
+export function parseConstellationCommandOutput(output: string) {
+  const match = output.match(/^exit code: (-?\d+)\nstdout:\n([\s\S]*)\nstderr:\n([\s\S]*)$/);
+  return match ? { exitCode: Number(match[1]), stdout: match[2], stderr: match[3] } : null;
 }
 
 export function createConstellationNode(kind: ConstellationNodeKind, position: XYPosition): ConstellationNode {

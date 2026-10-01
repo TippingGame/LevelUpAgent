@@ -283,3 +283,44 @@ SHA-256: A347B508FE1F320C427BB7BCA1B5BA7D64B2E79DFC7B9187B82C0F74EA120191
 Previous package: backups/installer-before-conversation-fix-20261001-224900.
 Evidence: artifacts/constellation-conversation-20261001 (picker screenshots,
 browser results, verification script and package-result.json).
+
+## Refreshed local installer after constellation node controls and templates fix
+
+Built on 2026-10-01 at 23:26 Asia/Shanghai. This supersedes the earlier same-name
+installer; earlier hashes and sizes are historical.
+
+- Aligned conversation action buttons in a shared flex row. The reusable-template
+  save button now has its own row below a consistently sized help paragraph.
+- Grouped built-in and custom templates and distinguished old duplicate names.
+  Saving an unchanged built-in name creates a named copy; further collisions get
+  a numeric suffix. Updating a custom template retains its ID.
+- Changed the built-in connectivity example to `echo "tool ready"`, which works
+  without Python and avoids the `python -c` approval restriction. Existing node
+  configurations remain intact; selecting the built-in reloads the new example.
+- Unwrapped native command reports before routing stdout or extracting JSON
+  fields. Failed commands and malformed reports cannot become successful output.
+  Approval-required commands now direct users to conversation execution.
+- Added `docs/CONSTELLATION_TOOL_TEMPLATES.md` with setup, variables, text/JSON
+  examples, persistence, and update behavior.
+- `pnpm check`: 233 passed. New tests execute the actual node and command functions
+  with simulated native responses for JSON, stderr, failure, and approval cases.
+- Production Edge checks passed at 1600x1200, 900x800, and 720x650: aligned actions,
+  separate save row, no control overflow, duplicate selection, copy naming,
+  update without duplication, reload, and preservation of old templates.
+  No browser errors. Example commands ran successfully in Windows PowerShell.
+- Production frontend, optimized Windows executable, and NSIS build passed.
+  Archive integrity: All OK. Installer/application versions: 1.1.65; architecture:
+  AMD64. All 50 bundled resources matched their sources. The program matched the
+  release executable apart from Tauri's expected NSS/UNK marker.
+- Copied installer SHA-256 matched. No actual upgrade installation or new native
+  desktop UI test was performed.
+
+Installer: G:\Work\LevelUpAgent\安装包\LevelUpAgent_1.1.65_Windows_x64-setup.exe
+
+Size: 14,065,897 bytes.
+
+SHA-256: 54BD40E2C1BEDC1A593276E51DFDA3C934A8C1D3D37871B6BA2503CEE64ED664
+
+Previous package: backups/installer-before-node-controls-fix-20261001-233028.
+Evidence: artifacts/constellation-node-controls-20261001 (screenshots, browser
+results, verification scripts, extracted package and package-result.json).
