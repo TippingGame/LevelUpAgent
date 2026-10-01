@@ -251,6 +251,22 @@
 .constellation-source-dialog > header button { width: 28px; height: 28px; display: grid; place-items: center; border: 0; border-radius: 7px; background: transparent; color: #64748b; cursor: pointer; }
 .constellation-source-search { display: flex; align-items: center; gap: 7px; margin: 12px 14px; padding: 0 9px; height: 34px; border: 1px solid #cbd5e1; border-radius: 8px; color: #64748b; }
 .constellation-source-search input { min-width: 0; flex: 1; border: 0; outline: 0; color: #1e293b; }
+.constellation-thread-picker-list { min-height: 280px; max-height: min(520px, 58vh); overflow: auto; padding: 5px 10px 12px; border-top: 1px solid #f1f5f9; border-bottom: 1px solid #e2e8f0; background: #f8fafc; }
+.constellation-thread-group { margin-top: 8px; }
+.constellation-thread-group > header { display: flex; align-items: center; gap: 6px; padding: 5px 7px; color: #64748b; }
+.constellation-thread-group > header strong { min-width: 0; flex: 1; overflow: hidden; color: #475569; font-size: .68rem; text-overflow: ellipsis; white-space: nowrap; }
+.constellation-thread-group > header small { color: #94a3b8; font-size: .6rem; }
+.constellation-thread-group > div { display: flex; flex-direction: column; gap: 2px; }
+.constellation-thread-group button { min-height: 43px; display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: #64748b; text-align: left; cursor: pointer; }
+.constellation-thread-group button:hover { background: #fff; border-color: #e2e8f0; }
+.constellation-thread-group button.active { background: #eef2ff; border-color: #c7d2fe; color: #3730a3; }
+.constellation-thread-group button > svg { flex: 0 0 auto; }
+.constellation-thread-group button > span:not(.constellation-thread-selected) { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.constellation-thread-group button > span strong { overflow: hidden; color: #334155; font-size: .72rem; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.constellation-thread-group button > span small { color: #94a3b8; font-size: .58rem; }
+.constellation-thread-selected { flex: 0 0 auto; color: #4f46e5; font-size: .58rem; }
+.constellation-thread-picker-loading, .constellation-thread-picker-empty { min-height: 190px; display: grid; place-items: center; color: #94a3b8; font-size: .7rem; }
+.constellation-thread-load-more { width: 100%; margin-top: 9px; min-height: 31px; border: 1px solid #dbe2ea; border-radius: 7px; background: #fff; color: #64748b; font-size: .65rem; cursor: pointer; }
 .constellation-source-columns { min-height: 280px; display: grid; grid-template-columns: 220px minmax(0, 1fr); border-top: 1px solid #f1f5f9; border-bottom: 1px solid #e2e8f0; }
 .constellation-source-list, .constellation-message-list, .constellation-output-list { min-height: 0; overflow: auto; padding: 8px; }
 .constellation-source-list { border-right: 1px solid #e2e8f0; }
@@ -265,6 +281,9 @@
 .constellation-source-dialog > p { margin: 10px 16px; color: #64748b; font-size: .76rem; }
 .constellation-source-dialog > footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; color: #64748b; }
 .constellation-source-dialog > footer button { min-height: 30px; padding: 0 11px; border: 0; border-radius: 7px; background: #4f46e5; color: #fff; font-size: .72rem; font-weight: 700; cursor: pointer; }
+.constellation-source-dialog > footer small { min-width: 0; flex: 1; font-size: .66rem; line-height: 1.4; }
+.constellation-source-dialog > footer .constellation-thread-create { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; border: 1px solid #dbe2ea; background: #fff; color: #475569; font-weight: 650; }
+.constellation-conversation-binding { display: block; margin: 2px 0 5px; color: #64748b; font-size: .64rem; line-height: 1.35; }
 @container (max-width: 600px) { .constellation-source-columns { grid-template-columns: 1fr; } .constellation-source-list { max-height: 145px; border-right: 0; border-bottom: 1px solid #e2e8f0; } .constellation-output-list { grid-template-columns: 1fr; } }
 
 .constellation-library-tip {

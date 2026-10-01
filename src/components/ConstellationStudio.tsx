@@ -150,7 +150,7 @@ import type {
 } from "../lib/types";
 import { loadConstellationToolTemplates, saveConstellationToolTemplates } from "../lib/constellationStorage";
 import { ConstellationOverview, overviewPositionFor, overviewPositionForRecords } from "./ConstellationOverview";
-import { ConstellationConversationPicker, ConstellationProjectPicker, conversationSnapshotText } from "./ConstellationSources";
+import { ConstellationConversationPicker, ConstellationProjectPicker } from "./ConstellationSources";
 import { ConstellationCanvasEditor } from "./ConstellationCanvasEditor";
 import { MediaImagePreview } from "./MediaStudio";
 import {
@@ -178,6 +178,7 @@ interface ConstellationStudioProps {
   workspace?: string;
   threads: AgentThread[];
   onOpenConversation: (threadId: string) => void;
+  onRunConversation: (request: { threadId?: string; command: string; context?: string; workspace?: string }) => Promise<{ threadId: string; title: string; text?: string }>;
   mediaCatalogRevision: number;
   onConfigureConnection: () => void;
   onMedia: () => void;
@@ -254,6 +255,7 @@ function ConstellationStudioInner({
   workspace,
   threads,
   onOpenConversation,
+  onRunConversation,
   mediaCatalogRevision,
   onConfigureConnection,
   onMedia,
@@ -1307,40 +1309,15 @@ function ConstellationStudioInner({
       .filter((value): value is ConstellationValue => Boolean(value));
     if (node.data.kind === "conversation") {
       const upstream = incoming("context").map((value) => value.text).filter(Boolean).join("\n\n");
-      const snapshot = node.data.conversationSnapshot ? conversationSnapshotText(node.data) : "";
-      const mode = node.data.sessionContextMode ?? "upstream";
-      const context = mode === "snapshot" ? snapshot : mode === "both" ? [upstream, snapshot].filter(Boolean).join("\n\n") : upstream;
       const command = incoming("command").map((value) => value.text).filter(Boolean).join("\n\n") || node.data.sessionCommand?.trim() || "";
       if (!command) throw new Error(tr("会话执行节点需要一条命令", "The session step needs a command"));
-      if (!context || mode === "snapshot" && !snapshot) throw new Error(tr("请先连接上游上下文或选择已有会话", "Connect upstream context or choose a saved conversation first"));
-      const route = resolveWritingRoute(node, writingModels, activeProfile);
-      const baseProfile = profiles.find((profile) => profile.id === route.profileId) ?? activeProfile;
-      const profile: ProviderProfile = { ...baseProfile, model: route.model, protocol: route.protocol };
-      const operationId = crypto.randomUUID();
-      operationIdsRef.current.add(operationId);
-      let streamed = "";
-      const message: AgentMessage = {
-        id: crypto.randomUUID(), role: "user",
-        content: `${command}${context ? `\n\n${tr("上下文", "Context")}:\n${context}` : ""}`,
-        toolCalls: [], createdAt: Date.now(), attachments: [],
-      };
-      try {
-        const response = await agentTurnStream(
-          profile, [message], "chat", workspace, operationId,
-          (delta) => {
-            if (runEpochRef.current !== epoch) return;
-            streamed += delta;
-            updateRuntimeOutput(node.id, { text: { type: "text", text: streamed, createdAt: Date.now() } }, "running");
-          }, undefined,
-          profiles.filter((item) => item.id !== profile.id && item.failoverEnabled && profileHasTextModel(item)),
-          false, false, undefined, undefined,
-          armorModeWritingInstructions(armorMode, armorModeLevel, armorWritingIntensity, { model: profile.model, protocol: profile.protocol, skills: armorModeSkills, surface: "constellation" }),
-          reasoningEffortForProfile(profile, reasoningEffort),
-        );
-        const text = (streamed || response.content).trim();
-        if (!text) throw new Error(tr("会话模型没有返回结果", "The session model returned no result"));
-        return { text: { type: "text", text, createdAt: Date.now() } };
-      } finally { operationIdsRef.current.delete(operationId); }
+      const result = await onRunConversation({ threadId: node.data.conversationThreadId, command, context: upstream, workspace });
+      if (result.threadId !== node.data.conversationThreadId || result.title !== node.data.conversationThreadTitle) {
+        updateNode(node.id, { conversationThreadId: result.threadId, conversationThreadTitle: result.title, conversationSnapshot: undefined });
+      }
+      const text = result.text?.trim();
+      if (!text) throw new Error(tr("会话尚未返回可用结果，请在会话中处理待批准操作后继续", "The conversation has no result yet; resolve any pending approval in the conversation, then continue"));
+      return { text: { type: "text", text, createdAt: Date.now() } };
     }
     if (node.data.kind === "projectRef") {
       if (!node.data.projectReference || !constellationValueReady(node.data.projectValue)) throw new Error(tr("请先选择项目作品", "Choose a project output first"));
@@ -2098,11 +2075,19 @@ function ConstellationStudioInner({
       <input ref={importInputRef} type="file" accept=".json,.levelup-constellation.json" hidden onChange={(event) => void importGraph(event)} />
 
       {blueprintDialog && <BlueprintDialog value={blueprintDialog} nodeCount={selectedCount} onChange={setBlueprintDialog} onCancel={() => setBlueprintDialog(undefined)} onSave={confirmBlueprint} />}
-      {integrationPicker?.kind === "conversation" && <ConstellationConversationPicker threads={threads} snapshot={nodes.find((node) => node.id === integrationPicker.nodeId)?.data.conversationSnapshot} onClose={() => setIntegrationPicker(undefined)} onChoose={(snapshot) => {
-        const text = conversationSnapshotText({ kind: "conversation", title: "", status: "idle", conversationSnapshot: snapshot });
-        updateNode(integrationPicker.nodeId, { conversationSnapshot: snapshot, outputs: { text: { type: "text", text, createdAt: Date.now() } }, status: "success" });
-        setIntegrationPicker(undefined);
-      }} />}
+      {integrationPicker?.kind === "conversation" && <ConstellationConversationPicker
+        threads={threads}
+        selectedThreadId={nodes.find((node) => node.id === integrationPicker.nodeId)?.data.conversationThreadId}
+        onClose={() => setIntegrationPicker(undefined)}
+        onCreate={() => {
+          updateNode(integrationPicker.nodeId, { conversationThreadId: undefined, conversationThreadTitle: undefined, conversationSnapshot: undefined, outputs: undefined, status: "idle" });
+          setIntegrationPicker(undefined);
+        }}
+        onChoose={(thread) => {
+          updateNode(integrationPicker.nodeId, { conversationThreadId: thread.id, conversationThreadTitle: thread.title, conversationSnapshot: undefined, outputs: undefined, status: "idle" });
+          setIntegrationPicker(undefined);
+        }}
+      />}
       {integrationPicker?.kind === "projectRef" && <ConstellationProjectPicker records={projectRecords} currentProjectId={graphMetaRef.current.id} onClose={() => setIntegrationPicker(undefined)} onChoose={(reference, value) => {
         updateNode(integrationPicker.nodeId, { projectReference: reference, projectValue: value, outputs: { output: value }, status: "success" });
         setIntegrationPicker(undefined);

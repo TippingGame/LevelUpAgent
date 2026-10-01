@@ -1,23 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
-import { X, Search, LoaderCircle } from "lucide-react";
-import { getPersistedThread, isDesktop, listThreadSummaries } from "../lib/bridge";
-import { constellationValueReady, normalizeConstellationGraph, type ConstellationNodeData, type ConstellationValue } from "../lib/constellation";
-import type { AgentThread, ConstellationConversationSnapshot, ConstellationProjectRecord, ConstellationProjectOutputReference, ThreadCursor } from "../lib/types";
+import { X, Search, Folder, Plus, MessageSquare } from "lucide-react";
+import { isDesktop, listThreadSummaries } from "../lib/bridge";
+import { constellationValueReady, normalizeConstellationGraph, type ConstellationValue } from "../lib/constellation";
+import type { AgentThread, ConstellationProjectRecord, ConstellationProjectOutputReference, ThreadCursor } from "../lib/types";
 import { tr } from "../lib/i18n";
 
-export function ConstellationConversationPicker({ threads, snapshot, onChoose, onClose }: {
+export function ConstellationConversationPicker({ threads, selectedThreadId, onChoose, onCreate, onClose }: {
   threads: AgentThread[];
-  snapshot?: ConstellationConversationSnapshot;
-  onChoose: (snapshot: ConstellationConversationSnapshot) => void;
+  selectedThreadId?: string;
+  onChoose: (thread: AgentThread) => void;
+  onCreate: () => void;
   onClose: () => void;
 }) {
   const [query, setQuery] = useState("");
   const [catalog, setCatalog] = useState(threads);
   const [cursor, setCursor] = useState<ThreadCursor | undefined>();
-  const [threadId, setThreadId] = useState(snapshot?.threadId ?? "");
-  const [thread, setThread] = useState<AgentThread>();
-  const [selected, setSelected] = useState(new Set(snapshot?.messageIds ?? []));
-  const [loading, setLoading] = useState(false);
+  const [threadId, setThreadId] = useState(selectedThreadId ?? "");
   const [error, setError] = useState("");
   useEffect(() => {
     let disposed = false;
@@ -29,45 +27,37 @@ export function ConstellationConversationPicker({ threads, snapshot, onChoose, o
     }, 200);
     return () => { disposed = true; window.clearTimeout(timer); };
   }, [query, threads]);
-  useEffect(() => {
-    let disposed = false;
-    setThread(undefined); setError("");
-    if (!threadId) return;
-    setLoading(true);
-    const local = threads.find((item) => item.id === threadId && item.historyLoaded !== false);
-    void (local ? Promise.resolve(local) : isDesktop() ? getPersistedThread(threadId) : Promise.resolve(null))
-      .then((value) => { if (!disposed) { if (!value) throw new Error(tr("原会话已不可用，已存快照不受影响", "Source conversation is unavailable; saved snapshot is retained")); setThread(value); } })
-      .catch((reason) => { if (!disposed) setError(String(reason)); })
-      .finally(() => { if (!disposed) setLoading(false); });
-    return () => { disposed = true; };
-  }, [threadId, threads]);
-  const messages = thread?.messages.filter((message) => !message.internal && (message.content.trim() || message.attachments.length)) ?? [];
-  const chosen = messages.filter((message) => selected.has(message.id));
-  const choose = () => {
-    if (!thread || !chosen.length) return;
-    const value: ConstellationConversationSnapshot = {
-      threadId: thread.id, threadTitle: thread.title, capturedAt: Date.now(),
-      messageIds: chosen.map((message) => message.id),
-      messages: chosen.map(({ id, role, content, createdAt, attachments }) => ({ id, role, content, createdAt, attachments: structuredClone(attachments) })),
-    };
-    if (new TextEncoder().encode(JSON.stringify(value)).byteLength > 1_000_000) { setError(tr("选中的消息超过 1 MB，请减少选择", "Selected messages exceed 1 MB; select fewer messages")); return; }
-    onChoose(value);
-  };
-  return <SourceDialog title={tr("选择会话消息", "Choose conversation messages")} onClose={onClose}>
+  const grouped = useMemo(() => {
+    const normalized = query.trim().toLocaleLowerCase();
+    const filtered = catalog
+      .filter((item) => !normalized || `${item.title} ${item.workspace ?? ""}`.toLocaleLowerCase().includes(normalized))
+      .sort((left, right) => right.updatedAt - left.updatedAt);
+    const groups = new Map<string, { label: string; threads: AgentThread[] }>();
+    for (const item of filtered) {
+      const key = item.workspace?.trim() || "__default__";
+      const label = item.workspace?.split(/[\\/]/).filter(Boolean).pop() || tr("默认项目", "Default project");
+      const group = groups.get(key) ?? { label, threads: [] };
+      group.threads.push(item);
+      groups.set(key, group);
+    }
+    return [...groups.values()];
+  }, [catalog, query]);
+  const selected = catalog.find((item) => item.id === threadId) ?? threads.find((item) => item.id === threadId);
+  const choose = () => { if (selected) onChoose(selected); };
+  return <SourceDialog title={tr("选择会话", "Choose conversation")} onClose={onClose}>
     <label className="constellation-source-search"><Search size={14} /><input autoFocus placeholder={tr("搜索会话", "Search conversations")} value={query} onChange={(event) => setQuery(event.target.value)} /></label>
-    <div className="constellation-source-columns"><div className="constellation-source-list">
-      {catalog.filter((item) => isDesktop() || item.title.toLocaleLowerCase().includes(query.toLocaleLowerCase())).map((item) => <button type="button" className={item.id === threadId ? "active" : ""} key={item.id} onClick={() => { setThreadId(item.id); setSelected(new Set(item.id === snapshot?.threadId ? snapshot.messageIds : [])); }}>{item.title}</button>)}
-      {cursor && <button type="button" onClick={() => { void listThreadSummaries(query, cursor).then((page) => { setCatalog((current) => [...current, ...page.threads.filter((item) => !current.some((old) => old.id === item.id))]); setCursor(page.nextCursor ?? undefined); }).catch((reason) => setError(String(reason))); }}>{tr("加载更多", "Load more")}</button>}
-    </div><div className="constellation-message-list">
-      {loading && <LoaderCircle className="spin" size={18} />}
-      {!loading && !messages.length && <p>{tr("选择会话后，勾选需要带入的消息。", "Choose a conversation, then select the messages to include.")}</p>}
-      {messages.map((message) => <label key={message.id}><input type="checkbox" checked={selected.has(message.id)} onChange={(event) => setSelected((current) => { const next = new Set(current); if (event.target.checked) next.add(message.id); else next.delete(message.id); return next; })} /><div><small>{message.role} · {new Date(message.createdAt).toLocaleString()}</small><p>{message.content}</p>{message.attachments.length > 0 && <small>{message.attachments.map((attachment) => attachment.name).join(" · ")}</small>}</div></label>)}
-    </div></div>
+    <div className="constellation-thread-picker-list">
+      {grouped.map((group) => <section className="constellation-thread-group" key={group.label}>
+        <header><Folder size={13} /><strong>{group.label}</strong><small>{group.threads.length}</small></header>
+        <div>{group.threads.map((item) => <button type="button" className={item.id === threadId ? "active" : ""} key={item.id} onClick={() => setThreadId(item.id)}><MessageSquare size={14} /><span><strong>{item.title || tr("新会话", "New conversation")}</strong><small>{new Date(item.updatedAt).toLocaleString()}</small></span>{item.id === threadId && <span className="constellation-thread-selected">{tr("已选", "Selected")}</span>}</button>)}</div>
+      </section>)}
+      {grouped.length === 0 && <p className="constellation-thread-picker-empty">{tr("没有匹配的会话", "No matching conversations")}</p>}
+      {cursor && <button className="constellation-thread-load-more" type="button" onClick={() => { void listThreadSummaries(query, cursor).then((page) => { setCatalog((current) => [...current, ...page.threads.filter((item) => !current.some((old) => old.id === item.id))]); setCursor(page.nextCursor ?? undefined); }).catch((reason) => setError(String(reason))); }}>{tr("加载更多会话", "Load more conversations")}</button>}
+    </div>
     {error && <p role="alert">{error}</p>}
-    <footer><small>{tr("仅保存勾选内容；原会话后续变化需重新选择。", "Only selected content is saved; refresh explicitly after source changes.")}</small><button type="button" disabled={!chosen.length || loading} onClick={choose}>{tr(`保存 ${chosen.length} 条消息`, `Save ${chosen.length} messages`)}</button></footer>
+    <footer><button type="button" className="constellation-thread-create" onClick={onCreate}><Plus size={14} />{tr("新建会话", "New conversation")}</button><small>{selected ? tr(`将复用“${selected.title}”的完整会话能力`, `Reuse the full conversation capability of “${selected.title}”`) : tr("未选择时，运行节点会自动新建会话", "If none is selected, running the node creates a new conversation")}</small><button type="button" disabled={!selected} onClick={choose}>{tr("使用此会话", "Use conversation")}</button></footer>
   </SourceDialog>;
 }
-
 export function ConstellationProjectPicker({ records, currentProjectId, onChoose, onClose }: {
   records: ConstellationProjectRecord[];
   currentProjectId: string;
@@ -93,6 +83,3 @@ export function SourceDialog({ title, onClose, children }: { title: string; onCl
   return <div className="constellation-source-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="constellation-source-dialog" role="dialog" aria-modal="true" aria-label={title}><header><strong>{title}</strong><button type="button" aria-label={tr("关闭", "Close")} onClick={onClose}><X size={16} /></button></header>{children}</section></div>;
 }
 
-export function conversationSnapshotText(data: ConstellationNodeData) {
-  return data.conversationSnapshot?.messages.map((message) => `${message.role}: ${message.content}${message.attachments.length ? `\n${message.attachments.map((item) => item.name).join(", ")}` : ""}`).join("\n\n") ?? "";
-}

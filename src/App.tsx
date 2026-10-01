@@ -4223,6 +4223,63 @@ function App() {
     }
   };
 
+  const runConstellationConversation = async ({ threadId, command, context, workspace }: { threadId?: string; command: string; context?: string; workspace?: string }) => {
+    const requested = command.trim();
+    if (!requested) throw new Error(tr("会话命令不能为空", "The conversation command cannot be empty"));
+    const selected = threadId ? threadsRef.current.find((item) => item.id === threadId) : undefined;
+    let thread = selected ?? createThread(workspace ?? activeThread.workspace ?? defaultWorkspace);
+    if (thread.historyLoaded === false) {
+      const loaded = await ensureThreadLoaded(thread.id);
+      if (loaded) thread = loaded;
+    }
+    if (runningThreadIdsRef.current.has(thread.id) || pendingApprovalsRef.current[thread.id]) {
+      throw new Error(tr("该会话正在运行或等待审批，请先处理后再继续星图", "This conversation is running or waiting for approval; resolve it before continuing the constellation"));
+    }
+    const content = context?.trim()
+      ? `${requested}\n\n${tr("来自星图上游", "From the upstream constellation")}:\n${context.trim()}`
+      : requested;
+    const user = message("user", content);
+    const next: AgentThread = {
+      ...thread,
+      title: thread.messages.length === 0 && isDefaultThreadTitle(thread.title) ? requested.slice(0, 42) : thread.title,
+      messages: [...thread.messages, user],
+      updatedAt: Date.now(),
+    };
+    const runProfile = activeProfile;
+    const runFallbackProfiles = profiles.filter((profile) => profile.id !== runProfile.id && profileHasTextModel(profile));
+    const runPermission = permissionLevel;
+    const runMode: AgentMode = "chat";
+    const useHarness = usesDurableHarness(next, isDesktop());
+    commitThread(next);
+    if (useHarness) {
+      if (!databaseReadyRef.current) throw new Error(tr("会话数据库尚未准备好", "Conversation storage is not ready"));
+      await persistThreadNow(next);
+      const request = {
+        threadId: next.id,
+        rawUserInput: content,
+        attachmentIds: [],
+        mode: runMode,
+        permissionLevel: runPermission,
+        requestedProfileId: runProfile.id,
+        workspace: next.workspace,
+        hatch: false,
+      };
+      const report = await harnessPreflight(request);
+      if (!report.ok) throw new Error(report.errors.join("; ") || tr("预检未通过", "Harness preflight blocked"));
+      const submission = await harnessStart(request);
+      if (submission.disposition === "queued") {
+        recordHarnessQueueItem(next.id, submission.value);
+        throw new Error(tr("会话已加入运行队列，完成后可继续运行下游节点", "The conversation was queued; run downstream nodes after it completes"));
+      }
+      await runHarnessAgent(next, next.messages, runMode, runPermission, runProfile, runFallbackProfiles, submission.value.operationId, { hatch: false, hatchSkillLoaded: false });
+    } else {
+      await runBrowserPreviewAgent(next, next.messages, 0, runMode, runPermission, Date.now(), runProfile, runFallbackProfiles, activePetIdRef.current, null);
+    }
+    const latest = threadsRef.current.find((item) => item.id === next.id) ?? next;
+    const response = [...latest.messages].reverse().find((item) => item.role === "assistant" && !item.internal && item.content.trim());
+    return { threadId: latest.id, title: latest.title, text: response?.content };
+  };
+
   const addReferencedFile = async (path: string): Promise<boolean> => {
     const threadId = activeThreadIdRef.current;
     const workspace = activeThread.workspace;
@@ -5204,6 +5261,7 @@ function App() {
         active={workspaceView === "constellation"}
         threads={threads}
         onOpenConversation={activateThread}
+        onRunConversation={runConstellationConversation}
         locale={locale}
         armorMode={armorMode}
         armorModeLevel={armorModeLevel}

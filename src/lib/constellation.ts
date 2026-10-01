@@ -116,8 +116,9 @@ export interface ConstellationNodeData extends Record<string, unknown> {
   maskAttachment?: ImageAttachment;
   outputs?: Partial<Record<string, ConstellationValue>>;
   conversationSnapshot?: ConstellationConversationSnapshot;
+  conversationThreadId?: string;
+  conversationThreadTitle?: string;
   sessionCommand?: string;
-  sessionContextMode?: "upstream" | "snapshot" | "both";
   inputMode?: "text" | "file" | "url";
   inputText?: string;
   inputPath?: string;
@@ -472,7 +473,7 @@ export function createConstellationNode(kind: ConstellationNodeKind, position: X
     status: "idle",
   };
   const variants: Partial<Record<ConstellationNodeKind, Partial<ConstellationNodeData>>> = {
-    conversation: { conversationSnapshot: undefined, sessionCommand: "", sessionContextMode: "upstream" },
+    conversation: { conversationSnapshot: undefined, conversationThreadId: undefined, conversationThreadTitle: undefined, sessionCommand: "" },
     input: { inputMode: "text", inputText: "", inputPath: "", inputUrl: "", inputAttachment: undefined },
     localTool: {
       toolName: "read_file",
@@ -1175,6 +1176,17 @@ function normalizeNode(value: unknown): ConstellationNode | null {
   const storedData = structuredClone(value.data);
   const storedStatus: ConstellationRunStatus = value.data.status === "success" || value.data.status === "stale" || value.data.status === "waiting" ? value.data.status : "idle";
   const data = { ...base.data, ...storedData, kind, status: storedStatus };
+  if (kind === "conversation") {
+    const legacySnapshot = data.conversationSnapshot;
+    if (!data.conversationThreadId && legacySnapshot && typeof legacySnapshot === "object" && !Array.isArray(legacySnapshot)) {
+      const snapshot = legacySnapshot as ConstellationConversationSnapshot;
+      if (typeof snapshot.threadId === "string" && snapshot.threadId.trim()) data.conversationThreadId = snapshot.threadId;
+      if (!data.conversationThreadTitle && typeof snapshot.threadTitle === "string") data.conversationThreadTitle = snapshot.threadTitle;
+    }
+    if (typeof data.conversationThreadId !== "string" || !data.conversationThreadId.trim()) delete data.conversationThreadId;
+    if (typeof data.conversationThreadTitle !== "string" || !data.conversationThreadTitle.trim()) delete data.conversationThreadTitle;
+    delete (data as Record<string, unknown>).sessionContextMode;
+  }
   if (kind === "localTool") {
     // Inspect the persisted payload before merging the default node data so
     // legacy tool names can still be identified during migration.

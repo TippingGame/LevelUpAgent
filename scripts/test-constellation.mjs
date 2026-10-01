@@ -449,7 +449,8 @@ test("saved card heights never freeze content measurement after reopen or collap
 test("session and tool nodes expose executable context and reusable templates", () => {
   const session = constellation.createConstellationNode("conversation", { x: 0, y: 0 });
   assert.deepEqual(constellation.CONSTELLATION_NODE_DEFINITIONS.conversation.inputs.map((port) => port.id), ["context", "command"]);
-  assert.equal(session.data.sessionContextMode, "upstream");
+  assert.equal(session.data.conversationThreadId, undefined);
+  assert.equal(session.data.sessionCommand, "");
   const legacy = constellation.normalizeConstellationGraph({ nodes: [{ ...session, data: { kind: "localTool", title: "旧工具", status: "idle", toolName: "read_file", toolArguments: "{}" } }], edges: [] });
   assert.ok(legacy);
   assert.equal(legacy.nodes[0].data.toolTemplate?.id, "builtin-run-script");

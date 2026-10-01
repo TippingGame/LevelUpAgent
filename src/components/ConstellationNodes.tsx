@@ -301,12 +301,12 @@ const ConstellationNodeContent = memo(function ConstellationNodeContent({ id, da
 
 function ConversationNodeBody({ id, data }: { id: string; data: ConstellationNodeData }) {
   const actions = useNodeActions();
-  const snapshot = data.conversationSnapshot;
+  const threadId = data.conversationThreadId;
+  const threadTitle = data.conversationThreadTitle;
   return <>
     <label className="constellation-field"><span>{tr("本轮命令", "Session command")}</span><textarea className="nodrag nowheel" value={data.sessionCommand ?? ""} maxLength={32_000} placeholder={tr("例如：把上游内容整理成下一步执行计划", "For example: turn the upstream content into the next execution plan")} onChange={(event) => actions.updateNode(id, { sessionCommand: event.target.value, outputs: undefined, status: "idle" })} /></label>
-    <label className="constellation-field"><span>{tr("上下文来源", "Context source")}</span><select className="nodrag nowheel" value={data.sessionContextMode ?? "upstream"} onChange={(event) => actions.updateNode(id, { sessionContextMode: event.target.value as ConstellationNodeData["sessionContextMode"], outputs: undefined, status: "idle" })}><option value="upstream">{tr("上游星图", "Upstream graph")}</option><option value="snapshot">{tr("已有会话", "Saved conversation")}</option><option value="both">{tr("上游 + 已有会话", "Upstream + saved conversation")}</option></select></label>
-    <button type="button" className="nodrag constellation-source-button" onClick={() => actions.openSourcePicker(id, "conversation")}><BookOpenText size={13} />{snapshot ? tr("更换补充会话", "Change saved conversation") : tr("添加已有会话上下文", "Add saved conversation context")}</button>
-    {snapshot && <><button type="button" className="nodrag constellation-source-button" onClick={() => actions.openConversation(snapshot.threadId)}>{tr("打开原会话", "Open source conversation")}</button><small>{tr(`${snapshot.threadTitle} · ${snapshot.messages.length} 条消息`, `${snapshot.threadTitle} · ${snapshot.messages.length} messages`)}</small></>}
+    <button type="button" className="nodrag constellation-source-button" onClick={() => actions.openSourcePicker(id, "conversation")}><BookOpenText size={13} />{threadId ? tr("更换会话", "Change conversation") : tr("选择会话", "Choose conversation")}</button>
+    {threadId ? <><button type="button" className="nodrag constellation-source-button" onClick={() => actions.openConversation(threadId)}>{tr("打开会话", "Open conversation")}</button><small className="constellation-conversation-binding">{threadTitle || tr("已绑定会话", "Conversation bound")}</small></> : <small className="constellation-conversation-binding">{tr("未绑定会话；运行时会自动新建", "No conversation bound; a new one is created when this runs")}</small>}
     {data.outputs?.text && <ValuePreview value={data.outputs.text} />}
   </>;
 }
