@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { X, Search, Folder, Plus, MessageSquare } from "lucide-react";
+import { X, Search, Folder, FolderOpen, Plus, MessageSquareText, ChevronRight } from "lucide-react";
 import { isDesktop, listThreadSummaries } from "../lib/bridge";
 import { constellationValueReady, normalizeConstellationGraph, type ConstellationValue } from "../lib/constellation";
 import type { AgentThread, ConstellationProjectRecord, ConstellationProjectOutputReference, ThreadCursor } from "../lib/types";
@@ -17,6 +17,8 @@ export function ConstellationConversationPicker({ threads, selectedThreadId, onC
   const [cursor, setCursor] = useState<ThreadCursor | undefined>();
   const [threadId, setThreadId] = useState(selectedThreadId ?? "");
   const [error, setError] = useState("");
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
+  const [collapsedSearchGroups, setCollapsedSearchGroups] = useState<Set<string>>(() => new Set());
   useEffect(() => {
     let disposed = false;
     if (!isDesktop()) { setCatalog(threads); return; }
@@ -43,14 +45,45 @@ export function ConstellationConversationPicker({ threads, selectedThreadId, onC
     return [...groups.values()];
   }, [catalog, query]);
   const selected = catalog.find((item) => item.id === threadId) ?? threads.find((item) => item.id === threadId);
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const toggleGroup = (key: string) => (normalizedQuery ? setCollapsedSearchGroups : setCollapsedGroups)((current) => {
+    const next = new Set(current);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
   const choose = () => { if (selected) onChoose(selected); };
   return <SourceDialog title={tr("选择会话", "Choose conversation")} onClose={onClose}>
-    <label className="constellation-source-search"><Search size={14} /><input autoFocus placeholder={tr("搜索会话", "Search conversations")} value={query} onChange={(event) => setQuery(event.target.value)} /></label>
+    <label className="constellation-source-search"><Search size={14} /><input autoFocus placeholder={tr("搜索会话", "Search conversations")} value={query} onChange={(event) => { setQuery(event.target.value); setCollapsedSearchGroups(new Set()); }} /></label>
     <div className="constellation-thread-picker-list">
-      {grouped.map((group) => <section className="constellation-thread-group" key={group.key}>
-        <header><Folder size={13} /><strong>{group.label}</strong><small>{group.threads.length}</small></header>
-        <div>{group.threads.map((item) => <button type="button" className={item.id === threadId ? "active" : ""} key={item.id} onClick={() => setThreadId(item.id)}><MessageSquare size={14} /><span><strong>{item.title || tr("新会话", "New conversation")}</strong><small>{new Date(item.updatedAt).toLocaleString()}</small></span>{item.id === threadId && <span className="constellation-thread-selected">{tr("已选", "Selected")}</span>}</button>)}</div>
-      </section>)}
+      {grouped.map((group) => {
+        const collapsed = (normalizedQuery ? collapsedSearchGroups : collapsedGroups).has(group.key);
+        const active = group.threads.some((item) => item.id === threadId);
+        return <section className={`constellation-thread-group${active ? " active" : ""}`} key={group.key}>
+          <div className="constellation-thread-project-row">
+            <button
+              type="button"
+              className="constellation-thread-project-toggle"
+              aria-expanded={!collapsed}
+              aria-label={`${collapsed ? tr("展开项目", "Expand project") : tr("折叠项目", "Collapse project")} ${group.label}`}
+              title={group.key === "__default__" ? tr("默认项目", "Default project") : group.key}
+              onClick={() => toggleGroup(group.key)}
+            >
+              <ChevronRight className="constellation-thread-project-chevron" size={14} />
+              {collapsed ? <Folder size={16} /> : <FolderOpen size={16} />}
+              <span className="constellation-thread-project-meta"><strong>{group.label}</strong><small>{group.threads.length} {tr("个会话", "conversations")}</small></span>
+            </button>
+          </div>
+          {!collapsed && <div className="constellation-thread-group-threads">
+            {group.threads.map((item) => <div className="constellation-thread-row" key={item.id}>
+              <button type="button" className={item.id === threadId ? "active" : ""} aria-pressed={item.id === threadId} title={item.title || tr("新会话", "New conversation")} onClick={() => setThreadId(item.id)}>
+                <MessageSquareText size={14} />
+                <span className="constellation-thread-title">{item.title || tr("新会话", "New conversation")}</span>
+                {item.id === threadId && <span className="constellation-thread-selected">{tr("已选", "Selected")}</span>}
+              </button>
+            </div>)}
+          </div>}
+        </section>;
+      })}
       {grouped.length === 0 && <p className="constellation-thread-picker-empty">{tr("没有匹配的会话", "No matching conversations")}</p>}
       {cursor && <button className="constellation-thread-load-more" type="button" onClick={() => { void listThreadSummaries(query, cursor).then((page) => { setCatalog((current) => [...current, ...page.threads.filter((item) => !current.some((old) => old.id === item.id))]); setCursor(page.nextCursor ?? undefined); }).catch((reason) => setError(String(reason))); }}>{tr("加载更多会话", "Load more conversations")}</button>}
     </div>

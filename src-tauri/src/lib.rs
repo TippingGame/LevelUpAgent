@@ -5361,6 +5361,18 @@ async fn read_clipboard_resource_paths() -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
+async fn prepare_constellation_attachments(
+    app: tauri::AppHandle,
+    attachments: Vec<ImageAttachment>,
+    workspace: String,
+) -> Result<Vec<ImageAttachment>, String> {
+    let storage = attachment_storage(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        local_resources::prepare_constellation_inputs(&storage, &attachments, Path::new(&workspace))
+    }).await.map_err(|error| format!("Could not prepare constellation inputs: {error}"))?
+}
+
+#[tauri::command]
 async fn import_clipboard_resources(
     app: tauri::AppHandle,
     attachments: Vec<ClipboardAttachmentPayload>,
@@ -12030,6 +12042,7 @@ pub fn run() {
             import_clipboard_images,
             import_clipboard_attachments,
             import_local_resources,
+            prepare_constellation_attachments,
             read_clipboard_resource_paths,
             import_clipboard_resources,
             delete_image_attachment,

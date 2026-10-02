@@ -68,6 +68,7 @@ import {
   listConstellationProjects,
   listMediaAssets,
   mediaAssetUrl,
+  onMediaAssetUpdate,
   selectImageReferences,
   selectSingleImageReference,
   selectVideoReference,
@@ -77,7 +78,6 @@ import {
   harnessCheckTool,
   selectLocalResourcePaths,
   importLocalResources,
-  previewAttachment,
   refreshMediaAsset,
 } from "../lib/bridge";
 import {
@@ -101,11 +101,15 @@ import {
   portTypesCompatible,
   constellationExecutionLayers,
   constellationConnectionMembers,
-  constellationCandidateOutputs,
+  constellationPendingMediaIds,
+  updateConstellationMediaAsset,
+  syncConstellationPreviews,
   constellationCandidateSelection,
   constellationProjectReferenceValue,
   constellationValueReady,
-  sameConstellationValue,
+  constellationInputAttachments,
+  constellationFileOutputs,
+  constellationConversationAttachments,
   DEFAULT_CONSTELLATION_TOOL_TEMPLATE,
   normalizeConstellationToolTemplate,
   renderConstellationTemplate,
@@ -134,7 +138,8 @@ import {
   UNIVERSAL_OUTPUT_HANDLE,
 } from "../lib/constellation";
 import { tr } from "../lib/i18n";
-import { mediaModelSupportsExplicitImageMask } from "../lib/mediaCapabilities";
+import { imageGenerationSize, imageModelCapabilities, mediaModelSupportsExplicitImageMask, sortStudioMediaModels, videoOutputOptions } from "../lib/mediaCapabilities";
+import { createMediaPoller } from "../lib/mediaPolling";
 import { isTextGenerationModel, profileHasTextModel, reasoningEffortForProfile } from "../lib/modelSelection";
 import type {
   AgentMessage,
@@ -180,7 +185,7 @@ interface ConstellationStudioProps {
   workspace?: string;
   threads: AgentThread[];
   onOpenConversation: (threadId: string) => void;
-  onRunConversation: (request: { threadId?: string; command: string; context?: string; workspace?: string; onThreadReady?: (thread: Pick<AgentThread, "id" | "title">) => void }) => Promise<{ threadId: string; title: string; text?: string }>;
+  onRunConversation: (request: { threadId?: string; command: string; context?: string; attachments?: ImageAttachment[]; workspace?: string; onThreadReady?: (thread: Pick<AgentThread, "id" | "title">) => void }) => Promise<{ threadId: string; title: string; text?: string }>;
   mediaCatalogRevision: number;
   onConfigureConnection: () => void;
   onMedia: () => void;
@@ -547,7 +552,7 @@ function ConstellationStudioInner({
     setCatalogError(undefined);
     try {
       const [nextMedia, nextModels] = await Promise.all([getMediaCatalog(), getModelCatalog()]);
-      setMediaCatalog(nextMedia);
+      setMediaCatalog({ ...nextMedia, models: sortStudioMediaModels(nextMedia.models) });
       setWritingModels(nextModels.models.filter(isTextGenerationModel));
       if (nextMedia.errors.length > 0 || nextModels.errors.length > 0) {
         setCatalogError([...nextMedia.errors, ...nextModels.errors].join(" · "));
@@ -639,8 +644,6 @@ function ConstellationStudioInner({
     try { saveConstellationToolTemplates(() => localStorage, toolTemplates); }
     catch { setNotice(tr("工具模板保存失败：本地存储空间不足", "Tool templates could not be saved")); }
   }, [toolTemplates]);
-
-  useEffect(() => onPendingCountChange(mediaPending), [mediaPending, onPendingCountChange]);
 
   useEffect(() => {
     if (!active || overviewOpen || entrySnapshot || commandOpen || editorNodeId || sourcePicker || integrationPicker || blueprintDialog) return;
@@ -1072,6 +1075,11 @@ function ConstellationStudioInner({
 
   const getInputValue = useCallback((nodeId: string, handle: string) => inputValues(nodeId, handle)[0], [inputValues, contentNodes]);
 
+  useEffect(() => {
+    if (running) return;
+    setNodes((current) => runningRef.current ? current : syncConstellationPreviews(current, graphRef.current.edges));
+  }, [contentNodes, edges, running]);
+
   const openCanvas = useCallback(async (nodeId: string) => {
     const node = graphRef.current.nodes.find((item) => item.id === nodeId);
     if (!node) return;
@@ -1128,16 +1136,10 @@ function ConstellationStudioInner({
     try {
       const paths = await selectLocalResourcePaths(false);
       if (!paths.length) return;
-      const attachment = (await importLocalResources([paths[0]], []))[0];
-      if (!attachment) throw new Error(tr("文件无法导入", "The file could not be imported"));
-      const values: Partial<Record<string, ConstellationValue>> = {};
-      if (attachment.kind === "image") values.image = { type: "image", attachment, createdAt: Date.now() };
-      else {
-        const preview = await previewAttachment(attachment);
-        if (!preview.text?.trim()) throw new Error(tr("此文件没有可提取的文本，请选择文本、文档或图像", "This file has no extractable text; choose text, a document, or an image"));
-        values.text = { type: "text", text: preview.text.slice(0, 80_000), attachment, createdAt: Date.now() };
-      }
-      if (graphMetaRef.current.id === projectId) updateNode(nodeId, { inputMode: "file", inputPath: paths[0], inputAttachment: attachment, inputText: values.text?.text, outputs: values, status: "success" });
+      const attachments = await importLocalResources(paths, []);
+      if (!attachments.length) throw new Error(tr("文件无法导入", "The files could not be imported"));
+      const values = constellationFileOutputs(attachments);
+      if (graphMetaRef.current.id === projectId) updateNode(nodeId, { inputMode: "file", inputPath: paths.length === 1 ? paths[0] : undefined, inputAttachment: attachments.length === 1 ? attachments[0] : undefined, inputAttachments: attachments, inputText: undefined, outputs: values, status: "success" });
     } catch (reason) { setNotice(errorText(reason)); }
   }, [updateNode]);
 
@@ -1153,6 +1155,11 @@ function ConstellationStudioInner({
     if (runningRef.current || !value) return;
     updateNode(nodeId, { outputs: { ...node?.data.outputs, [handle]: value }, status: "success", error: undefined });
   }, [updateNode]);
+
+  const applyMediaAsset = useCallback((asset: MediaAsset, projectId: string) => {
+    if (graphMetaRef.current.id !== projectId) return;
+    setNodes((current) => graphMetaRef.current.id === projectId ? updateConstellationMediaAsset(current, asset) : current);
+  }, []);
 
   const refreshCandidates = useCallback(async (nodeId: string) => {
     if (runningRef.current) return;
@@ -1178,26 +1185,42 @@ function ConstellationStudioInner({
         return;
       }
       const errors: string[] = [];
-      const entries = await Promise.all(Object.entries(node.data.outputCandidates ?? {}).map(async ([handle, values]) => [handle, await Promise.all((values ?? []).map(async (value) => {
-        if (!value.asset || !["queued", "in_progress"].includes(value.asset.status)) return value;
-        try { return { ...value, asset: await refreshMediaAsset(value.asset.id) }; }
-        catch (reason) { errors.push(errorText(reason)); return value; }
-      }))] as const));
-      const latest = graphRef.current.nodes.find((item) => item.id === nodeId);
-      if (graphMetaRef.current.id !== projectId || runningRef.current || !latest || latest.data.outputCandidates !== node.data.outputCandidates) return;
-      const candidates = Object.fromEntries(entries);
-      const outputs = constellationCandidateOutputs(latest.data, candidates);
-      const changed = Object.keys({ ...outputs, ...latest.data.outputs }).some((handle) => !sameConstellationValue(outputs[handle], latest.data.outputs?.[handle]));
-      if (latest.data.status === "stale" || !changed && latest.data.status === "success") {
-        setNodes((current) => current.map((item) => item.id === nodeId ? { ...item, data: { ...item.data, outputCandidates: candidates } } : item));
-      } else {
-        const failed = entries.length > 0 && entries.every(([, values]) => values.length > 0 && values.every((value) => value.asset?.status === "failed"));
-        updateNode(nodeId, { outputCandidates: candidates, outputs, status: Object.values(outputs).some(constellationValueReady) ? "success" : failed ? "error" : "waiting", error: failed ? tr("候选均失败，请重新运行", "All candidates failed; run again") : undefined });
-      }
-      if (errors.length) setNotice(errors.join(" · "));
+      await Promise.all(constellationPendingMediaIds([node]).map(async (id) => {
+        try { applyMediaAsset(await refreshMediaAsset(id), projectId); }
+        catch (reason) { errors.push(errorText(reason)); }
+      }));
+      if (graphMetaRef.current.id === projectId && errors.length) setNotice(errors.join(" · "));
     } catch (reason) { setNotice(errorText(reason)); }
     finally { refreshingSourcesRef.current.delete(refreshKey); }
-  }, [updateNode]);
+  }, [applyMediaAsset, updateNode]);
+
+  const pendingMediaIds = useMemo(() => constellationPendingMediaIds(contentNodes), [contentNodes]);
+  const currentProjectId = graphMetaRef.current.id;
+
+  useEffect(() => onPendingCountChange(mediaPending + pendingMediaIds.length), [mediaPending, pendingMediaIds.length, onPendingCountChange]);
+
+  useEffect(() => {
+    if (!active || overviewOpen || pendingMediaIds.length === 0) return;
+    const poller = createMediaPoller(refreshMediaAsset, (asset) => applyMediaAsset(asset, currentProjectId), () => {
+      // Transient failures remain pending and retry on the next tick.
+    });
+    const refreshPending = () => poller.poll(pendingMediaIds);
+    const timer = window.setInterval(refreshPending, 5_000);
+    window.addEventListener("focus", refreshPending);
+    document.addEventListener("visibilitychange", refreshPending);
+    refreshPending();
+    return () => {
+      poller.stop();
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshPending);
+      document.removeEventListener("visibilitychange", refreshPending);
+    };
+  }, [active, overviewOpen, currentProjectId, JSON.stringify(pendingMediaIds), applyMediaAsset]);
+
+  useEffect(() => {
+    if (!active || overviewOpen) return;
+    return onMediaAssetUpdate((asset) => applyMediaAsset(asset, currentProjectId));
+  }, [active, overviewOpen, currentProjectId, applyMediaAsset]);
 
   const saveToolTemplate = useCallback((nodeId: string) => {
     if (runningRef.current) return;
@@ -1244,13 +1267,14 @@ function ConstellationStudioInner({
     openPreview: openValuePreview,
     downloadValue: (value) => { void downloadValue(value); },
     getInputValue,
+    getInputValues: inputValues,
     openSourcePicker: openIntegrationSource,
     openConversation: onOpenConversation,
     selectCandidate,
     refreshCandidates: (nodeId) => { void refreshCandidates(nodeId); },
     toolTemplates,
     saveToolTemplate,
-  }), [chooseReferences, downloadValue, edges, getInputValue, locale, mediaCatalog.models, openCanvas, openImageSourcePicker, openValuePreview, removeNode, running, updateNode, writingModels, openIntegrationSource, onOpenConversation, selectCandidate, refreshCandidates, saveToolTemplate, toolTemplates]);
+  }), [chooseReferences, downloadValue, edges, getInputValue, inputValues, locale, mediaCatalog.models, openCanvas, openImageSourcePicker, openValuePreview, removeNode, running, updateNode, writingModels, openIntegrationSource, onOpenConversation, selectCandidate, refreshCandidates, saveToolTemplate, toolTemplates]);
 
   const updateRuntimeOutput = (
     nodeId: string,
@@ -1331,11 +1355,14 @@ function ConstellationStudioInner({
       .map((edge) => runtimeValuesRef.current.get(edge.source)?.[edge.sourceHandle ?? ""])
       .filter((value): value is ConstellationValue => Boolean(value));
     if (node.data.kind === "conversation") {
-      const upstream = incoming("context").map((value) => value.text).filter(Boolean).join("\n\n");
+      const inputs = [...incoming("context"), ...incoming("files")];
+      const upstream = inputs.map((value) => value.text).filter(Boolean).join("\n\n");
       const command = incoming("command").map((value) => value.text).filter(Boolean).join("\n\n") || node.data.sessionCommand?.trim() || "";
       if (!command) throw new Error(tr("会话执行节点需要一条命令", "The session step needs a command"));
+      const attachments = await constellationConversationAttachments([...inputs, ...incoming("command")], importLocalResources);
+      if (runEpochRef.current !== epoch) throw new Error(tr("执行已停止", "Run stopped"));
       const result = await onRunConversation({
-        threadId: node.data.conversationThreadId, command, context: upstream, workspace,
+        threadId: node.data.conversationThreadId, command, context: upstream, attachments, workspace,
         onThreadReady: (thread) => updateNode(node.id, { conversationThreadId: thread.id, conversationThreadTitle: thread.title, conversationSnapshot: undefined }),
       });
       if (result.threadId !== node.data.conversationThreadId || result.title !== node.data.conversationThreadTitle) {
@@ -1350,12 +1377,15 @@ function ConstellationStudioInner({
       return { output: structuredClone(node.data.projectValue) };
     }
     if (node.data.kind === "input") {
-      if (node.data.inputMode === "file" && node.data.inputAttachment?.kind === "image") return { image: { type: "image", attachment: node.data.inputAttachment, createdAt: Date.now() } };
+      if (node.data.inputMode === "file") {
+        let attachments = constellationInputAttachments(node.data);
+        if (!attachments.length && node.data.inputPath?.trim()) attachments = await importLocalResources([node.data.inputPath.trim()], []);
+        if (!attachments.length) throw new Error(tr("请选择文件或填写有效的文件路径", "Choose files or enter a valid file path"));
+        return constellationFileOutputs(attachments, node.data.inputText);
+      }
       const text = node.data.inputMode === "url"
         ? await executeReadOnlyTool("web_fetch", { url: node.data.inputUrl?.trim(), maxChars: 80_000 })
-        : node.data.inputMode === "file" && !node.data.inputAttachment
-          ? await executeReadOnlyTool("read_file", { path: node.data.inputPath?.trim() })
-          : node.data.inputText?.trim();
+        : node.data.inputText?.trim();
       if (!text) throw new Error(tr("输入内容为空，请填写文本或选择文件", "Input is empty; enter text or choose a file"));
       return { text: { type: "text", text: text.slice(0, 80_000), createdAt: Date.now() } };
     }
@@ -1515,6 +1545,19 @@ function ConstellationStudioInner({
       throw new Error(tr("局部重绘需要连接画板的蒙版输出", "Inpainting needs the Canvas mask output"));
     }
     const route = resolveMediaRoute(node, mediaCatalog, Boolean(mediaKind === "image" && maskAttachment));
+    const imageCapabilities = imageModelCapabilities(route.model);
+    const videoMode = mediaKind === "video"
+      ? attachments.length > 1 ? "reference" : attachments.length === 1 ? "image" : "text"
+      : "text";
+    const videoOptions = videoOutputOptions(route.model, videoMode, node.data);
+    const videoHasOutputControls = mediaKind === "video" && videoOptions.hasControls;
+    if (videoHasOutputControls && !videoOptions.capabilities.modes.includes(videoMode)) {
+      throw new Error(tr("当前模型不支持此参考图数量对应的生成方式，请调整参考图或更换模型", "This model does not support the generation mode for these references. Adjust references or choose another model"));
+    }
+    if (videoHasOutputControls && attachments.length > videoOptions.capabilities.referenceLimit) {
+      throw new Error(tr(`此模型当前最多支持 ${videoOptions.capabilities.referenceLimit} 张参考图`, `This model supports at most ${videoOptions.capabilities.referenceLimit} reference images in this mode`));
+    }
+    const imageSize = imageGenerationSize(route.model, node.data.size);
     const effectivePrompt = mediaKind === "image" && operation === "outpaint"
       ? `${prompt}\n\n${tr("扩展画面边界并无缝补全新增区域；保持原图主体、光线、透视、色彩和材质完全一致。", "Extend the image beyond its current boundaries and seamlessly complete the new area while preserving subject, lighting, perspective, color, and material.")}`
       : prompt;
@@ -1531,11 +1574,11 @@ function ConstellationStudioInner({
       }),
       count: Math.max(1, Math.min(mediaKind === "image" ? 8 : 4, node.data.count ?? 1)),
       size: mediaKind === "image"
-        ? node.data.size && node.data.size !== "auto" ? node.data.size : undefined
-        : mediaKind === "video" ? node.data.videoAspectRatio : undefined,
-      quality: mediaKind === "image" && node.data.quality !== "auto" ? node.data.quality : undefined,
-      outputFormat: mediaKind === "video" ? undefined : node.data.outputFormat,
-      background: mediaKind === "image" && node.data.background !== "auto" ? node.data.background : undefined,
+        ? imageSize !== "auto" ? imageSize : undefined
+        : mediaKind === "video" && !videoHasOutputControls ? videoOptions.size : undefined,
+      quality: mediaKind === "image" && !imageCapabilities.minimax && node.data.quality !== "auto" ? node.data.quality : undefined,
+      outputFormat: mediaKind === "video" || mediaKind === "image" && imageCapabilities.minimax ? undefined : node.data.outputFormat,
+      background: mediaKind === "image" && !imageCapabilities.minimax && node.data.background !== "auto" ? node.data.background : undefined,
       voice: mediaKind === "audio" ? node.data.voice?.trim() || undefined : undefined,
       instructions: armorModeMediaInstructions(
         armorMode,
@@ -1549,10 +1592,10 @@ function ConstellationStudioInner({
           surface: "constellation",
         },
       ),
-      seconds: mediaKind === "video" ? node.data.seconds ?? 8 : undefined,
-      videoMode: mediaKind === "video" ? attachments.length > 1 ? "reference" : attachments.length === 1 ? "image" : "text" : "text",
-      videoResolution: mediaKind === "video" ? node.data.videoResolution : undefined,
-      videoAspectRatio: mediaKind === "video" ? node.data.videoAspectRatio : undefined,
+      seconds: mediaKind === "video" ? videoOptions.seconds : undefined,
+      videoMode: mediaKind === "video" && videoHasOutputControls ? videoMode : "text",
+      videoResolution: videoHasOutputControls ? videoOptions.resolution : undefined,
+      videoAspectRatio: videoHasOutputControls ? videoOptions.aspectRatio : undefined,
       referenceAttachmentIds: attachments.map((attachment) => attachment.id),
       maskAttachmentId: mediaKind === "image" ? maskAttachment?.id : undefined,
     };
@@ -1566,7 +1609,7 @@ function ConstellationStudioInner({
       if (candidates.every((value) => value.asset?.status === "failed")) throw new Error(tr("所有候选结果均失败，请重新运行", "All candidates failed; run again"));
       if (candidates.length !== 1 || candidates[0].asset?.status !== "completed") {
         runtimeValuesRef.current.set(node.id, {});
-        throw new ConstellationWaitingError(tr("候选结果已保存，请刷新进度或选择一个结果", "Candidates saved; refresh progress or select one output"));
+        throw new ConstellationWaitingError(tr("候选结果已保存，进度会自动更新；完成后可选择结果", "Candidates saved; progress updates automatically. Choose an output when ready"));
       }
       return { [mediaKind]: candidates[0] };
     } finally {
@@ -2284,7 +2327,7 @@ function resolveMediaRoute(node: ConstellationNode, catalog: MediaCatalog, requi
     return selected;
   }
   const candidates = catalog.models.filter((model) => model.kind === kind && (!requiresMask || mediaModelSupportsExplicitImageMask(model)));
-  const fallback = candidates.find((model) => model.recommended) ?? candidates[0];
+  const fallback = candidates[0];
   if (!fallback && requiresMask && catalog.models.some((model) => model.kind === kind)) {
     throw new Error(tr(
       "当前没有支持 PNG 蒙版编辑的图像模型，请先配置支持 OpenAI Images Edit 的模型",

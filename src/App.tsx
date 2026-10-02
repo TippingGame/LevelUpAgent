@@ -181,6 +181,7 @@ import {
   installThemeFile,
   installThemeText,
   prepareThemeGeneration,
+  prepareConstellationAttachments,
   selectAndInstallTheme,
   uninstallTheme,
   updatePetActivities,
@@ -212,6 +213,7 @@ import {
   loadActiveThreadId,
   loadLastActiveThreadId,
   loadComposerHeight,
+  loadCreativeStudioView,
   loadInspectorWidth,
   loadHiddenProjectKeys,
   loadProfiles,
@@ -237,12 +239,14 @@ import {
   saveActiveProfileId,
   saveActiveThreadId,
   saveComposerHeight,
+  saveCreativeStudioView,
   saveInspectorWidth,
   saveHiddenProjectKeys,
   saveSidebarWidth,
   saveThreads,
   saveActiveThemeId,
   saveDiffViewSettings,
+  type CreativeStudioView,
 } from "./lib/storage";
 import {
   ARMOR_MODE_LEVELS,
@@ -427,7 +431,7 @@ interface OpenPetConversationOptions {
   openPetInterface?: boolean;
 }
 
-type WorkspaceView = "chat" | "writing" | "media" | "constellation";
+type WorkspaceView = "chat" | CreativeStudioView;
 
 function isPetHatchThread(thread: AgentThread) {
   // Do not depend on `internal` surviving an older database/export. The
@@ -776,6 +780,13 @@ function App() {
   const catalogRequestRef = useRef(0);
   const [mode, setMode] = useState<AgentMode>("agent");
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("chat");
+  const [lastCreativeView, setLastCreativeView] = useState(loadCreativeStudioView);
+  useEffect(() => {
+    if (workspaceView === "chat") return;
+    setLastCreativeView(workspaceView);
+    saveCreativeStudioView(workspaceView);
+  }, [workspaceView]);
+  const openCreativeStudio = () => setWorkspaceView(lastCreativeView);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "k" && workspaceView === "chat") {
@@ -4225,7 +4236,7 @@ function App() {
     }
   };
 
-  const runConstellationConversation = async ({ threadId, command, context, workspace, onThreadReady }: { threadId?: string; command: string; context?: string; workspace?: string; onThreadReady?: (thread: Pick<AgentThread, "id" | "title">) => void }) => {
+  const runConstellationConversation = async ({ threadId, command, context, attachments = [], workspace, onThreadReady }: { threadId?: string; command: string; context?: string; attachments?: ImageAttachment[]; workspace?: string; onThreadReady?: (thread: Pick<AgentThread, "id" | "title">) => void }) => {
     const requested = command.trim();
     if (!requested) throw new Error(tr("会话命令不能为空", "The conversation command cannot be empty"));
     if (!connectionReady) throw new Error(tr("请先配置可用的模型连接", "Configure an available model connection first"));
@@ -4248,7 +4259,7 @@ function App() {
     const content = context?.trim()
       ? `${requested}\n\n${tr("来自星图上游", "From the upstream constellation")}:\n${context.trim()}`
       : requested;
-    const user = message("user", content);
+    const user = message("user", content, { attachments });
     const next: AgentThread = {
       ...thread,
       title: thread.messages.length === 0 && isDefaultThreadTitle(thread.title) ? requested.slice(0, 42) : thread.title,
@@ -4263,6 +4274,10 @@ function App() {
     let handedOffToAgent = false;
     setThreadRunning(next.id, true);
     try {
+      if (attachments.length) {
+        if (!next.workspace) throw new Error(tr("文件编辑需要会话工作区", "A conversation workspace is required for file editing"));
+        user.attachments = await prepareConstellationAttachments(attachments, next.workspace);
+      }
       commitThread(next);
       onThreadReady?.(next);
       if (useHarness) {
@@ -4270,7 +4285,7 @@ function App() {
         const request = {
           threadId: next.id,
           rawUserInput: content,
-          attachmentIds: [],
+          attachmentIds: user.attachments.map((attachment) => attachment.id),
           mode: runMode,
           permissionLevel: runPermission,
           requestedProfileId: runProfile.id,
@@ -5060,7 +5075,7 @@ function App() {
           aria-label={tr("打开创作空间", "Open Creative Studio")}
           aria-current={workspaceView === "writing" || workspaceView === "media" || workspaceView === "constellation" ? "page" : undefined}
           onClick={() => {
-            setWorkspaceView("media");
+            openCreativeStudio();
             setProfileMenuOpen(false);
             setProjectMenuKey(null);
           }}
@@ -5855,7 +5870,7 @@ function App() {
           { id: "command.connections", label: tr("模型连接", "Model connections"), icon: <Cpu size={16} />, run: () => setSettingsOpen(true) },
           { id: "command.skills", label: "Skills", icon: <Sparkles size={16} />, run: () => setSkillsOpen(true) },
           { id: "command.mcp", label: "MCP", icon: <Network size={16} />, run: () => setMcpOpen(true) },
-          { id: "command.media", label: tr("创作空间", "Creative Studio"), icon: <ImagePlus size={16} />, run: () => setWorkspaceView("media") },
+          { id: "command.media", label: tr("创作空间", "Creative Studio"), icon: <ImagePlus size={16} />, run: openCreativeStudio },
           { id: "command.logs", label: tr("请求日志", "Request logs"), icon: <Activity size={16} />, run: () => setLogsOpen(true) },
         ]}
       />}
@@ -6125,7 +6140,7 @@ function App() {
             workspaceView={workspaceView}
             petOpen={petOpen}
             onNewThread={() => newThread()}
-            onMedia={() => setWorkspaceView("media")}
+            onMedia={openCreativeStudio}
             onPet={() => openPetManager("life")}
             onExtensions={() => setMcpOpen(true)}
             onWebsite={() => void openLevelUpWebsite()}

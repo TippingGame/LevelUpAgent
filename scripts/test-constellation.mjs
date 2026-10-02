@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import ts from "typescript";
+import { createMediaPoller } from "../src/lib/mediaPolling.ts";
 
 const sourceUrl = new URL("../src/lib/constellation.ts", import.meta.url);
 const source = readFileSync(sourceUrl, "utf8");
@@ -50,7 +51,11 @@ function conversationHarness(options = {}) {
     runningThreadIdsRef,
     pendingApprovalsRef,
     operationIdsRef: { current: new Map() },
-    message: (role, content) => ({ id: `message-${++sequence}`, role, content, toolCalls: [], attachments: [] }),
+    message: (role, content, options = {}) => ({ id: `message-${++sequence}`, role, content, toolCalls: [], attachments: options.attachments ?? [] }),
+    prepareConstellationAttachments: async (attachments, workspace) => {
+      calls.push(["prepare-files", { attachments, workspace }]);
+      return attachments.map((item) => ({ ...item, id: `working-${item.id}` }));
+    },
     isDefaultThreadTitle: (title) => title === "New conversation",
     activeProfile: { id: "chosen-model" },
     profiles: [{ id: "chosen-model" }],
@@ -126,6 +131,19 @@ test("constellation loads an existing conversation outside the current sidebar p
   assert.equal(run.thread.workspace, stored.workspace);
 });
 
+test("session attachments reach persisted history and Harness as editable workspace copies", async () => {
+  const attachments = [{ id: "image", kind: "image", name: "source.png" }, { id: "video", kind: "file", name: "source.mp4" }, { id: "audio", kind: "file", name: "voice.mp3" }, { id: "binary", kind: "file", name: "scene.blend" }];
+  const stored = { id: "existing", title: "Existing", workspace: "G:/conversation", messages: [] };
+  const harness = conversationHarness({ stored });
+  await harness.run({ threadId: "existing", command: "Edit these files", attachments, workspace: "G:/unrelated" });
+  assert.deepEqual(harness.calls.find(([kind]) => kind === "prepare-files")[1], { attachments, workspace: "G:/conversation" });
+  const request = harness.calls.find(([kind]) => kind === "start")[1];
+  assert.deepEqual(request.attachmentIds, ["working-image", "working-video", "working-audio", "working-binary"]);
+  const user = harness.calls.find(([kind]) => kind === "run")[1].history.find((item) => item.role === "user");
+  assert.deepEqual(user.attachments.map((item) => item.id), request.attachmentIds);
+  assert.ok(harness.calls.findIndex(([kind]) => kind === "prepare-files") < harness.calls.findIndex(([kind]) => kind === "save"));
+});
+
 test("a missing selected conversation does not silently create a replacement", async () => {
   const harness = conversationHarness();
   await assert.rejects(harness.run({ threadId: "deleted", command: "Continue" }), /unavailable/);
@@ -176,6 +194,33 @@ const compiled = ts.transpileModule(source, {
   fileName: "constellation.ts",
 }).outputText;
 const constellation = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString("base64")}`);
+
+test("all generated media and arbitrary files connect to conversation inputs without losing attachments", async () => {
+  const session = constellation.createConstellationNode("conversation", { x: 400, y: 0 });
+  for (const kind of ["image", "video", "audio"]) {
+    const node = constellation.createConstellationNode(kind, { x: 0, y: 0 });
+    const connection = constellation.resolveConstellationConnection([node, session], [], { source: node.id, target: session.id });
+    assert.equal(connection.valid, true);
+    assert.equal(connection.mappings[0].targetHandle, "files");
+  }
+  const attachments = [{ id: "one", kind: "file", mimeType: "application/octet-stream", name: "asset.blend", sizeBytes: 0 }, { id: "two", kind: "file", mimeType: "application/octet-stream", name: "movie.mp4", sizeBytes: 80_000_000 }];
+  const input = constellation.createConstellationNode("input", { x: 0, y: 0 });
+  input.data = { ...input.data, inputMode: "file", inputAttachments: attachments, outputs: constellation.constellationFileOutputs(attachments), status: "success" };
+  assert.equal(constellation.constellationValueReady(input.data.outputs.file), true);
+  const connection = constellation.resolveConstellationConnection([input, session], [], { source: input.id, target: session.id });
+  assert.deepEqual(connection.mappings.map((mapping) => mapping.targetHandle), ["files"]);
+  const graph = constellation.normalizeConstellationGraph({ nodes: [input, session], edges: [constellation.createConstellationEdge(input.id, "file", session.id, "files", "file")] });
+  assert.equal(graph.edges.length, 1);
+  assert.deepEqual(graph.nodes[0].data.inputAttachments, attachments);
+  const blueprint = constellation.createConstellationBlueprint("Files", "", [], graph.nodes, graph.edges);
+  assert.equal(blueprint.nodes[0].data.inputAttachments, undefined);
+  const paths = [];
+  const values = [input.data.outputs.file, input.data.outputs.file, { type: "video", asset: { id: "generated", status: "completed", filePath: "G:/media/generated.mp4" } }];
+  const result = await constellation.constellationConversationAttachments(values, async (sources) => { paths.push(...sources); return [{ ...attachments[1], id: "generated" }]; });
+  assert.deepEqual(result.map((item) => item.id), ["one", "two", "generated"]);
+  assert.deepEqual(paths, ["G:/media/generated.mp4"]);
+  await assert.rejects(constellation.constellationConversationAttachments([{ type: "video", asset: { status: "queued" } }], async () => []), /not ready/);
+});
 const mediaCapabilitiesCompiled = ts.transpileModule(mediaCapabilitiesSource, {
   compilerOptions: {
     module: ts.ModuleKind.ESNext,
@@ -367,6 +412,201 @@ test("candidate output selection preserves an existing choice and waits on ambig
   assert.deepEqual(constellation.constellationCandidateOutputs(node.data, { image: [{ ...first, asset: { id: "failed", status: "failed" } }] }), {});
 });
 
+const pendingMediaNode = (kind, ids = [kind]) => {
+  const node = constellation.createConstellationNode(kind, { x: 0, y: 0 });
+  node.data.status = "waiting";
+  node.data.outputCandidates = { [kind]: ids.map((id) => ({ type: kind, createdAt: 1, asset: { id, kind, status: "queued", progress: 0, updatedAt: 1 } })) };
+  return node;
+};
+
+test("media progress and completion update every kind without refreshing or changing other nodes", () => {
+  let nodes = ["image", "video", "audio"].map((kind) => pendingMediaNode(kind));
+  assert.deepEqual(constellation.constellationPendingMediaIds(nodes), ["image", "video", "audio"]);
+  for (const kind of ["image", "video", "audio"]) {
+    const before = nodes;
+    const progress = { id: kind, kind, status: "in_progress", progress: 45, updatedAt: 2 };
+    nodes = constellation.updateConstellationMediaAsset(nodes, progress);
+    const index = nodes.findIndex((node) => node.data.kind === kind);
+    assert.equal(nodes[index].data.outputCandidates[kind][0].asset.progress, 45);
+    assert.equal(nodes[index].data.status, "waiting");
+    assert.equal(nodes[(index + 1) % 3], before[(index + 1) % 3]);
+    const done = { ...progress, status: "completed", filePath: `/${kind}.media`, updatedAt: 3 };
+    nodes = constellation.updateConstellationMediaAsset(nodes, done);
+    assert.equal(nodes[index].data.status, "success");
+    assert.equal(nodes[index].data.outputs[kind].asset, done);
+    assert.equal(constellation.updateConstellationMediaAsset(nodes, done), nodes, "duplicate events do not trigger autosave");
+    assert.equal(constellation.updateConstellationMediaAsset(nodes, progress), nodes, "old events cannot regress completion");
+    assert.equal(constellation.updateConstellationMediaAsset(nodes, { ...progress, updatedAt: 4 }), nodes, "late polls cannot regress completion");
+  }
+  assert.deepEqual(constellation.constellationPendingMediaIds(nodes), []);
+});
+
+test("parallel candidates keep the chosen output, surface failure and preserve changed inputs", () => {
+  let nodes = [pendingMediaNode("video", ["slow", "fast"])];
+  const done = { id: "fast", status: "completed", updatedAt: 2 };
+  nodes = constellation.updateConstellationMediaAsset(nodes, done);
+  assert.equal(nodes[0].data.status, "waiting", "multiple candidates still require a choice");
+  nodes[0].data.outputs = { video: nodes[0].data.outputCandidates.video[1] };
+  nodes[0].data.status = "success";
+  nodes = constellation.updateConstellationMediaAsset(nodes, { id: "slow", status: "failed", updatedAt: 2, error: "provider failed" });
+  assert.equal(nodes[0].data.status, "success");
+  assert.equal(nodes[0].data.outputs.video.asset.id, "fast");
+  const failed = constellation.updateConstellationMediaAsset([pendingMediaNode("audio")], { id: "audio", status: "failed", updatedAt: 2, error: "provider failed" });
+  assert.equal(failed[0].data.status, "error");
+  assert.equal(failed[0].data.error, "provider failed");
+  const stale = pendingMediaNode("image");
+  stale.data.status = "stale";
+  const refreshed = constellation.updateConstellationMediaAsset([stale], { id: "image", status: "completed", updatedAt: 2 });
+  assert.equal(refreshed[0].data.status, "stale");
+  assert.equal(refreshed[0].data.outputs, stale.data.outputs);
+  assert.equal(refreshed[0].data.outputCandidates.image[0].asset.status, "completed");
+  for (const status of ["running", "queued"]) {
+    stale.data.status = status;
+    const current = [stale];
+    assert.deepEqual(constellation.constellationPendingMediaIds(current), []);
+    assert.equal(constellation.updateConstellationMediaAsset(current, { id: "image", status: "completed", updatedAt: 2 }), current);
+  }
+  assert.equal(constellation.updateConstellationMediaAsset(nodes, { id: "removed", status: "completed", updatedAt: 2 }), nodes);
+});
+
+test("completed media automatically updates preview state and clears the old upstream warning", () => {
+  for (const kind of ["video", "image", "audio"]) {
+    const source = pendingMediaNode(kind);
+    const preview = constellation.createConstellationNode("output", { x: 400, y: 0 });
+    preview.data.status = "stale";
+    preview.data.error = "Select the upstream result, then run again";
+    const edges = [constellation.createConstellationEdge(source.id, kind, preview.id, "media", kind)];
+    let nodes = [source, preview];
+    assert.equal(constellation.syncConstellationPreviews(nodes, edges), nodes, "keep the warning while pending");
+    nodes = constellation.updateConstellationMediaAsset(nodes, { id: kind, kind, status: "completed", updatedAt: 2 });
+    nodes = constellation.syncConstellationPreviews(nodes, edges);
+    assert.equal(nodes[1].data.status, "success");
+    assert.equal(nodes[1].data.error, undefined);
+    assert.equal(nodes[1].data.outputs.media, nodes[0].data.outputs[kind]);
+    assert.equal(constellation.syncConstellationPreviews(nodes, edges), nodes, "no repeated state changes or autosaves");
+  }
+});
+
+test("preview sync follows selected candidates without treating stale or failed outputs as current", () => {
+  const source = pendingMediaNode("video", ["one", "two"]);
+  const preview = constellation.createConstellationNode("output", { x: 400, y: 0 });
+  const tool = constellation.createConstellationNode("localTool", { x: 800, y: 0 });
+  preview.data.status = tool.data.status = "stale";
+  preview.data.error = "Choose an output";
+  const edges = [constellation.createConstellationEdge(source.id, "video", preview.id, "media", "video")];
+  let nodes = constellation.updateConstellationMediaAsset([source, preview, tool], { id: "one", kind: "video", status: "completed", updatedAt: 2 });
+  assert.equal(constellation.syncConstellationPreviews(nodes, edges), nodes, "multiple candidates still need a choice");
+  const choice = nodes[0].data.outputCandidates.video[0];
+  nodes[0] = { ...nodes[0], data: { ...nodes[0].data, status: "success", outputs: { video: choice } } };
+  nodes = constellation.syncConstellationPreviews(nodes, edges);
+  assert.equal(nodes[1].data.outputs.media, choice);
+  assert.equal(nodes[1].data.error, undefined);
+  assert.equal(nodes[2], tool, "passive preview updates do not execute other nodes");
+  const replacement = { ...choice, asset: { ...choice.asset, id: "two" } };
+  nodes[0] = { ...nodes[0], data: { ...nodes[0].data, outputs: { video: replacement } } };
+  nodes = constellation.syncConstellationPreviews(nodes, edges);
+  assert.equal(nodes[1].data.outputs.media, replacement, "changing a choice updates an already completed preview");
+  for (const status of ["stale", "error", "waiting", "queued", "running"]) {
+    const invalid = nodes.map((node) => ({ ...node, data: { ...node.data, status, error: "not current" } }));
+    assert.equal(constellation.syncConstellationPreviews(invalid, edges), invalid, `${status} snapshots must remain invalid`);
+  }
+  assert.equal(constellation.syncConstellationPreviews(nodes, []), nodes, "disconnected snapshots stay unchanged");
+});
+
+test("mounted media refresh handles timers, events, focus, retries and project cleanup", async () => {
+  const refreshSource = studioSource.slice(studioSource.indexOf("  const applyMediaAsset ="), studioSource.indexOf("  const saveToolTemplate ="));
+  const cleanups = [], calls = [];
+  const timers = new Map(), focus = new Map(), visibility = new Map();
+  let nodes = [pendingMediaNode("video"), pendingMediaNode("audio")];
+  let updateEvent, resolveAudio;
+  const audio = new Promise((resolve) => { resolveAudio = resolve; });
+  const host = {
+    ...constellation, createMediaPoller,
+    useCallback: (callback) => callback, useMemo: (callback) => callback(),
+    useEffect: (effect) => { const cleanup = effect(); if (cleanup) cleanups.push(cleanup); },
+    contentNodes: nodes, active: true, overviewOpen: false, mediaPending: 0,
+    graphMetaRef: { current: { id: "project" } },
+    setNodes: (update) => { nodes = update(nodes); },
+    updateNode: () => assert.fail("automatic progress must not enter edit history"),
+    onPendingCountChange: () => {},
+    window: { setInterval: (callback, delay) => { assert.equal(delay, 5000); timers.set(1, callback); return 1; }, clearInterval: (id) => timers.delete(id), addEventListener: (name, callback) => focus.set(name, callback), removeEventListener: (name) => focus.delete(name) },
+    document: { addEventListener: (name, callback) => visibility.set(name, callback), removeEventListener: (name) => visibility.delete(name) },
+    onMediaAssetUpdate: (callback) => { updateEvent = callback; return () => { updateEvent = undefined; }; },
+    refreshMediaAsset: async (id) => {
+      calls.push(id);
+      if (id === "audio") return audio;
+      if (calls.filter((value) => value === "video").length === 1) throw new Error("temporary failure");
+      return { id, status: "in_progress", progress: 35, updatedAt: 2 };
+    },
+  };
+  const compiled = ts.transpileModule(refreshSource, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  new Function(...Object.keys(host), compiled)(...Object.values(host));
+  await new Promise(setImmediate);
+  assert.deepEqual(calls, ["video", "audio"]);
+  focus.get("focus")();
+  visibility.get("visibilitychange")();
+  await new Promise(setImmediate);
+  assert.deepEqual(calls, ["video", "audio", "video"], "overlapping events reuse in-flight work");
+  assert.equal(nodes[0].data.outputCandidates.video[0].asset.progress, 35);
+  timers.get(1)();
+  await new Promise(setImmediate);
+  updateEvent({ id: "video", status: "in_progress", progress: 100, updatedAt: 3, downloadProgress: { receivedBytes: 20, totalBytes: 100 } });
+  assert.equal(nodes[0].data.outputCandidates.video[0].asset.downloadProgress.receivedBytes, 20);
+  updateEvent({ id: "video", status: "completed", filePath: "/video.mp4", updatedAt: 4 });
+  assert.equal(nodes[0].data.status, "success", "completion events need no manual refresh");
+  host.graphMetaRef.current.id = "another-project";
+  const before = nodes;
+  updateEvent({ id: "audio", status: "completed", updatedAt: 4 });
+  assert.equal(nodes, before, "a previous project's callbacks cannot update the current project");
+  cleanups.forEach((cleanup) => cleanup());
+  resolveAudio({ id: "audio", status: "completed", updatedAt: 5 });
+  await new Promise(setImmediate);
+  assert.equal(nodes, before);
+  assert.equal(timers.size + focus.size + visibility.size, 0);
+  assert.equal(updateEvent, undefined);
+});
+
+test("constellation requests honor model order and share validated studio output options", () => {
+  const routeSource = studioSource.slice(studioSource.indexOf("function resolveMediaRoute("), studioSource.indexOf("function resolveWritingRoute("));
+  const requestSource = studioSource.slice(studioSource.indexOf("    const route = resolveMediaRoute(node, mediaCatalog"), studioSource.indexOf("    setMediaPending((value) => value + request.count)"));
+  const host = {
+    ...mediaCapabilities, ...constellation, tr: (_zh, en) => en,
+    armorMode: false, armorModeLevel: "standard", armorModeSkills: {},
+    armorModeMediaPrompt: (_enabled, _level, _kind, prompt) => prompt,
+    armorModeMediaInstructions: (_enabled, _level, _kind, instructions) => instructions,
+  };
+  const compiled = ts.transpileModule(`${routeSource}\nfunction build(node, mediaCatalog, attachments = []) { const mediaKind = node.data.kind; const prompt = 'test'; const operation = 'generate'; const maskAttachment = undefined; ${requestSource} return request; }`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const build = new Function(...Object.keys(host), `${compiled}\nreturn build;`)(...Object.values(host));
+  const model = (id, kind, recommended = false) => ({ id, kind, recommended, profileId: "p", profileName: "P", protocol: "openai_chat" });
+  const node = constellation.createConstellationNode("video", { x: 0, y: 0 });
+  const h3 = model("MiniMax-H3", "video"), seedance = model("Seedance-2.5", "video", true);
+  let request = build(node, { models: [h3, seedance] });
+  assert.equal(request.model, h3.id);
+  assert.equal(request.videoResolution, "768p");
+  assert.equal(request.size, undefined);
+  request = build(node, { models: [h3] }, [{ id: "frame" }]);
+  assert.equal(request.videoAspectRatio, "adaptive");
+  assert.equal(request.videoMode, "image");
+  node.data.seconds = 30;
+  request = build(node, { models: [seedance] });
+  assert.equal(request.seconds, 30);
+  node.data.size = "720x1280";
+  request = build(node, { models: [model("sora-2", "video")] });
+  assert.equal(request.videoResolution, undefined);
+  assert.equal(request.videoAspectRatio, undefined);
+  assert.equal(request.size, "720x1280");
+  assert.equal(request.seconds, 4);
+  const image = constellation.createConstellationNode("image", { x: 0, y: 0 });
+  assert.equal(build(image, { models: [model("gpt-image-2", "image")] }).size, undefined);
+  image.data.size = "3840x2160";
+  assert.equal(build(image, { models: [model("gpt-image-2", "image")] }).size, "3840x2160");
+  image.data.quality = "4K";
+  request = build(image, { models: [model("image-01-live", "image")] });
+  assert.equal(request.size, undefined);
+  assert.equal(request.quality, undefined);
+  assert.equal(request.outputFormat, undefined);
+});
+
 test("stale propagation blocks candidate selection while retaining inspectable outputs", () => {
   const source = constellation.createConstellationNode("image", { x: 0, y: 0 });
   const downstream = constellation.createConstellationNode("output", { x: 300, y: 0 });
@@ -550,7 +790,6 @@ test("image editing exposes an explicit history source and reusable output previ
   assert.match(studioSource, /exportMediaAsset\(value\.asset\)/);
   assert.match(nodeSource, /openImageSourcePicker\(id, "image"\)/);
   assert.match(nodeSource, /constellation-preview-download/);
-  assert.match(studioSource, /node\.data\.size && node\.data\.size !== "auto"/);
   assert.match(studioSource, /runtimeValuesRef\.current\.delete\(nodeId\)/);
   assert.match(studioSource, /mediaModelSupportsExplicitImageMask/);
 });
@@ -606,7 +845,7 @@ test("saved card heights never freeze content measurement after reopen or collap
 
 test("session and tool nodes expose executable context and reusable templates", () => {
   const session = constellation.createConstellationNode("conversation", { x: 0, y: 0 });
-  assert.deepEqual(constellation.CONSTELLATION_NODE_DEFINITIONS.conversation.inputs.map((port) => port.id), ["context", "command"]);
+  assert.deepEqual(constellation.CONSTELLATION_NODE_DEFINITIONS.conversation.inputs.map((port) => port.id), ["context", "command", "files"]);
   assert.equal(session.data.conversationThreadId, undefined);
   assert.equal(session.data.sessionCommand, "");
   const legacy = constellation.normalizeConstellationGraph({ nodes: [{ ...session, data: { kind: "localTool", title: "旧工具", status: "idle", toolName: "read_file", toolArguments: "{}" } }], edges: [] });

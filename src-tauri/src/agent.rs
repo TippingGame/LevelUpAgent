@@ -3149,8 +3149,9 @@ fn text_attachment_block(attachment: &ImageAttachment) -> Option<String> {
         .replace('"', "&quot;");
     if attachment.data_base64.is_some() {
         return Some(format!(
-            "<managed_image_reference id=\"{}\" name=\"{safe_name}\" mime=\"{}\">This managed image is visual context. Only when a media generation tool is available and the user explicitly requests an edit or generated derivative, use this exact id as its reference attachment.</managed_image_reference>",
-            attachment.id, attachment.mime_type
+            "<managed_image_reference id=\"{}\" name=\"{safe_name}\" mime=\"{}\">This managed image is visual context. Only when a media generation tool is available and the user explicitly requests an edit or generated derivative, use this exact id as its reference attachment.</managed_image_reference>{}",
+            attachment.id, attachment.mime_type,
+            attachment.text_content.as_ref().map(|content| format!("\n<managed_context_file name=\"{safe_name}\" mime=\"{}\">\n{content}\n</managed_context_file>", attachment.mime_type)).unwrap_or_default()
         ));
     }
     let content = attachment.text_content.as_deref()?;
@@ -4607,7 +4608,7 @@ mod tests {
             size_bytes: 12,
             kind: crate::models::AttachmentKind::Image,
             data_base64: Some("aW1hZ2U=".to_owned()),
-            text_content: None,
+            text_content: Some("Editable copy: .levelup-attachments/working-diagram.png".to_owned()),
         });
         let responses = responses_body(&request, false);
         let chat = chat_body(&request, false);
@@ -4622,6 +4623,7 @@ mod tests {
             let reference = reference.and_then(Value::as_str).unwrap();
             assert!(reference.contains("managed_image_reference"));
             assert!(reference.contains("0123456789abcdef0123456789abcdef"));
+            assert!(reference.contains(".levelup-attachments/working-diagram.png"));
         }
         assert_eq!(
             responses.pointer("/input/0/content/2/type"),

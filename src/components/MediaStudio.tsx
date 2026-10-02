@@ -61,7 +61,7 @@ import {
   type ArmorSkillState,
 } from "../lib/armorMode";
 import { copyText } from "../lib/clipboard";
-import { isMiniMaxImageModel, mediaModelBaseId, mediaModelSupportsExplicitImageMask, selectStudioMediaModel, sortStudioMediaModels, videoModelCapabilities } from "../lib/mediaCapabilities";
+import { IMAGE_DIMENSION_OPTIONS, IMAGE_RATIO_OPTIONS, VIDEO_SIZE_OPTIONS, imageModelCapabilities, mediaModelBaseId, mediaModelSupportsExplicitImageMask, selectStudioMediaModel, sortStudioMediaModels, videoModelCapabilities } from "../lib/mediaCapabilities";
 import { createMediaReferenceUrl, imageEditInputs, moveMediaReference, orderedMediaReferenceUrls, type MediaReferenceUrl } from "../lib/mediaReferences";
 import { createMediaPoller } from "../lib/mediaPolling";
 import type {
@@ -139,25 +139,7 @@ const KIND_TABS: Array<{ kind: MediaKind; icon: typeof Image }> = [
   { kind: "video", icon: Video },
   { kind: "audio", icon: AudioLines },
 ];
-interface ImageDimensionOption {
-  value: string;
-  ratio: string;
-  experimental?: boolean;
-}
-
-const IMAGE_DIMENSION_OPTIONS: ImageDimensionOption[] = [
-  { value: "1024x1024", ratio: "1:1" },
-  { value: "1536x1024", ratio: "3:2" },
-  { value: "1024x1536", ratio: "2:3" },
-  { value: "2048x1152", ratio: "16:9" },
-  { value: "1152x2048", ratio: "9:16" },
-  { value: "2048x2048", ratio: "1:1", experimental: true },
-  { value: "3840x2160", ratio: "16:9", experimental: true },
-  { value: "2160x3840", ratio: "9:16", experimental: true },
-];
-const IMAGE_RATIO_OPTIONS = ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "21:9", "9:21"];
 const IMAGE_SIZE_OPTIONS = ["auto", ...IMAGE_DIMENSION_OPTIONS.map((option) => option.value), ...IMAGE_RATIO_OPTIONS];
-const VIDEO_SIZE_OPTIONS = ["1280x720", "720x1280", "16:9", "9:16"];
 const MEDIA_MODEL_ROUTES_KEY = "levelup-agent.media-model-routes.v1";
 const STUDIO_IMAGE_MODES: Array<{ value: StudioImageMode; label: string; labelEn: string }> = [
   { value: "generate", label: "生成", labelEn: "Generate" },
@@ -225,7 +207,8 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
   // a temporarily unavailable user choice.
   const selected = selectStudioMediaModel(eligibleModels, selectedKey);
   const selectedModelId = mediaModelBaseId(selected?.id ?? "");
-  const minimaxImage = kind === "image" && isMiniMaxImageModel(selectedModelId);
+  const imageCapabilities = imageModelCapabilities(selectedModelId);
+  const minimaxImage = kind === "image" && imageCapabilities.minimax;
   const transparentBackgroundSupported = !selectedModelId.includes("gpt-image-2") && !minimaxImage;
   const videoCapabilities = videoModelCapabilities(selectedModelId, videoMode);
   const isGrokVideo = kind === "video" && videoCapabilities.grok;
@@ -243,8 +226,8 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
     (activeVideoMode === "reference" ? referenceCount > 0 && referenceCount <= videoReferenceMaximum : referenceCount === videoReferenceMaximum)
     && (useReferenceUrls ? enteredVideoUrls.every(Boolean) : videoReferences.every((item) => item.kind === (activeVideoMode === "video" ? "video" : "image")))
   );
-  const imageDimensions = minimaxImage ? selectedModelId === "image-01-live" ? [] : IMAGE_DIMENSION_OPTIONS.filter((option) => !option.experimental || option.value === "2048x2048") : IMAGE_DIMENSION_OPTIONS;
-  const imageRatios = minimaxImage ? IMAGE_RATIO_OPTIONS.filter((ratio) => ratio !== "9:21" && (selectedModelId !== "image-01-live" || ratio !== "21:9")) : IMAGE_RATIO_OPTIONS;
+  const imageDimensions = imageCapabilities.dimensions;
+  const imageRatios = imageCapabilities.ratios;
   const imageEditReady = imageMode === "generate"
     || imageEditEntries.length > 0;
   const visibleAssets = assets.filter((asset) => asset.kind === kind);

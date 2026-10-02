@@ -1372,6 +1372,11 @@ export async function importLocalResources(sourcePaths: string[], existingAttach
   return invoke<ImageAttachment[]>("import_local_resources", { sourcePaths, existingAttachments });
 }
 
+export async function prepareConstellationAttachments(attachments: ImageAttachment[], workspace: string): Promise<ImageAttachment[]> {
+  if (!isDesktop() || !attachments.length) return attachments;
+  return invoke<ImageAttachment[]>("prepare_constellation_attachments", { attachments, workspace });
+}
+
 export async function readClipboardResourcePaths(): Promise<string[]> {
   if (!isDesktop()) return [];
   return invoke<string[]>("read_clipboard_resource_paths");

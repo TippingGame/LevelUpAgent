@@ -191,19 +191,29 @@
 .constellation-source-search { display: flex; align-items: center; gap: 7px; margin: 12px 14px; padding: 0 9px; height: 34px; border: 1px solid #cbd5e1; border-radius: 8px; color: #64748b; }
 .constellation-source-search input { min-width: 0; flex: 1; border: 0; outline: 0; color: #1e293b; }
 .constellation-thread-picker-list { min-height: 280px; max-height: min(520px, 58vh); overflow: auto; padding: 5px 10px 12px; border-top: 1px solid #f1f5f9; border-bottom: 1px solid #e2e8f0; background: #f8fafc; }
-.constellation-thread-group { margin-top: 8px; }
-.constellation-thread-group > header { display: flex; align-items: center; gap: 6px; padding: 5px 7px; color: #64748b; }
-.constellation-thread-group > header strong { min-width: 0; flex: 1; overflow: hidden; color: #475569; font-size: .68rem; text-overflow: ellipsis; white-space: nowrap; }
-.constellation-thread-group > header small { color: #94a3b8; font-size: .6rem; }
-.constellation-thread-group > div { display: flex; flex-direction: column; gap: 2px; }
-.constellation-thread-group button { min-height: 43px; display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: #64748b; text-align: left; cursor: pointer; }
-.constellation-thread-group button:hover { background: #fff; border-color: #e2e8f0; }
-.constellation-thread-group button.active { background: #eef2ff; border-color: #c7d2fe; color: #3730a3; }
-.constellation-thread-group button > svg { flex: 0 0 auto; }
-.constellation-thread-group button > span:not(.constellation-thread-selected) { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
-.constellation-thread-group button > span strong { overflow: hidden; color: #334155; font-size: .72rem; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
-.constellation-thread-group button > span small { color: #94a3b8; font-size: .58rem; }
-.constellation-thread-selected { flex: 0 0 auto; color: #4f46e5; font-size: .58rem; }
+.constellation-thread-group { margin-bottom: 3px; }
+.constellation-thread-project-row { display: flex; align-items: center; min-height: 38px; border-radius: 9px; }
+.constellation-thread-project-row:hover { background: rgba(255,255,255,.54); }
+.constellation-thread-group.active > .constellation-thread-project-row { background: rgba(255,255,255,.7); }
+.constellation-thread-group.active .constellation-thread-project-toggle > svg:nth-child(2) { color: var(--accent); }
+.constellation-thread-project-toggle { min-width: 0; width: 100%; height: 38px; display: grid; grid-template-columns: 14px 17px minmax(0, 1fr); align-items: center; gap: 6px; padding: 0 5px; border: 0; background: transparent; color: #475569; text-align: left; cursor: pointer; }
+.constellation-thread-project-toggle:hover { color: #334155; }
+.constellation-thread-project-chevron { color: #94a3b8; transition: transform .16s ease; }
+.constellation-thread-project-toggle[aria-expanded="true"] .constellation-thread-project-chevron { transform: rotate(90deg); }
+.constellation-thread-project-meta { min-width: 0; display: flex; align-items: baseline; gap: 5px; }
+.constellation-thread-project-meta strong { min-width: 0; overflow: hidden; color: inherit; font-size: var(--font-body); font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.constellation-thread-project-meta small { flex: 0 0 auto; color: var(--faint); font-size: var(--font-compact); }
+.constellation-thread-group-threads { position: relative; margin: 1px 0 5px 18px; padding-left: 8px; }
+.constellation-thread-group-threads::before { position: absolute; top: 2px; bottom: 2px; left: 0; width: 1px; content: ""; background: var(--line); }
+.constellation-thread-row { min-height: 34px; border-radius: 8px; }
+.constellation-thread-row > button { min-width: 0; width: 100%; height: 34px; display: flex; align-items: center; gap: 7px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent; color: #64748b; text-align: left; cursor: pointer; }
+.constellation-thread-row > button:hover { background: rgba(255,255,255,.82); }
+.constellation-thread-row > button.active { background: rgba(255,241,242,.92); box-shadow: inset 2px 0 var(--accent); color: #334155; }
+.constellation-thread-project-toggle:focus-visible, .constellation-thread-row > button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.constellation-thread-row > button > svg { flex: 0 0 auto; }
+.constellation-thread-title { min-width: 0; flex: 1; overflow: hidden; font-size: var(--font-small); text-overflow: ellipsis; white-space: nowrap; }
+.constellation-thread-row > button.active .constellation-thread-title { font-weight: 590; }
+.constellation-thread-selected { flex: 0 0 auto; color: var(--accent); font-size: var(--font-compact); }
 .constellation-thread-picker-loading, .constellation-thread-picker-empty { min-height: 190px; display: grid; place-items: center; color: #94a3b8; font-size: .7rem; }
 .constellation-thread-load-more { width: 100%; margin-top: 9px; min-height: 31px; border: 1px solid #dbe2ea; border-radius: 7px; background: #fff; color: #64748b; font-size: .65rem; cursor: pointer; }
 .constellation-source-columns { min-height: 280px; display: grid; grid-template-columns: 220px minmax(0, 1fr); border-top: 1px solid #f1f5f9; border-bottom: 1px solid #e2e8f0; }
@@ -677,6 +687,7 @@
 .constellation-candidate .constellation-media-placeholder span { display: none; }
 .constellation-candidate-meta { display: flex; flex: 1; flex-direction: column; min-width: 0; gap: 3px; }
 .constellation-candidate-meta small { color: #64748b; }
+.constellation-candidate-meta progress { width: 100%; height: 5px; accent-color: #8b5cf6; }
 .constellation-node.status-stale { border-color: #d6a95c; }
 .constellation-node.status-waiting { border-color: #8b5cf6; }
 .constellation-dialog-backdrop,

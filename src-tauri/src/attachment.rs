@@ -344,6 +344,9 @@ pub fn read_managed_reference(
     attachment_id: &str,
 ) -> Result<ManagedReference, String> {
     validate_id(attachment_id)?;
+    if let Some(reference) = crate::local_resources::read_media_reference(storage, attachment_id)? {
+        return Ok(reference);
+    }
     let path = storage.join(format!("{attachment_id}.bin"));
     let metadata = std::fs::metadata(&path)
         .map_err(|_| "The selected reference image is no longer available".to_owned())?;
@@ -781,6 +784,29 @@ fn stage_file_in_workspace(
     mime: &str,
     bytes: &[u8],
 ) -> Result<String, String> {
+    stage_reader_in_workspace(workspace, id, name, mime, bytes)
+}
+
+pub(crate) fn stage_local_file_in_workspace(
+    workspace: &Path,
+    id: &str,
+    name: &str,
+    source: &Path,
+) -> Result<String, String> {
+    let file = std::fs::File::open(source).map_err(|error| format!("Could not open input file: {error}"))?;
+    if !file.metadata().map_err(|error| error.to_string())?.is_file() {
+        return Err("Select files rather than folders for editable constellation inputs".into());
+    }
+    stage_reader_in_workspace(workspace, id, name, "application/octet-stream", file)
+}
+
+fn stage_reader_in_workspace(
+    workspace: &Path,
+    id: &str,
+    name: &str,
+    mime: &str,
+    mut source: impl Read,
+) -> Result<String, String> {
     validate_id(id)?;
     let root = std::fs::canonicalize(workspace)
         .map_err(|error| format!("Could not locate the attachment workspace: {error}"))?;
@@ -821,8 +847,8 @@ fn stage_file_in_workspace(
     {
         Ok(mut file) => {
             let result = crate::filesystem::restrict_file(&destination).and_then(|()| {
-                file.write_all(bytes)
-                    .and_then(|()| file.sync_all())
+                std::io::copy(&mut source, &mut file)
+                    .and_then(|_| file.sync_all())
                     .map_err(|error| {
                         format!("Could not copy attachment into the workspace: {error}")
                     })

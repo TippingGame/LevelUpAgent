@@ -104,7 +104,7 @@ export interface ConstellationProjectOutputReference {
   projectId: string;
   nodeId: string;
   outputHandle: string;
-  valueType: "text" | "image" | "video" | "audio";
+  valueType: "text" | "image" | "video" | "audio" | "file";
   capturedAt: number;
 }
 

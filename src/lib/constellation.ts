@@ -33,7 +33,7 @@ export type ConstellationNodeKind =
   | "output"
   | "note";
 
-export type ConstellationPortType = "text" | "image" | "video" | "audio" | "media";
+export type ConstellationPortType = "text" | "image" | "video" | "audio" | "file" | "media";
 export type ConstellationRunStatus = "idle" | "queued" | "running" | "success" | "error" | "stale" | "waiting";
 export type ImageOperation = "generate" | "edit" | "outpaint" | "inpaint";
 
@@ -42,19 +42,57 @@ export interface ConstellationValue {
   text?: string;
   asset?: MediaAsset;
   attachment?: ImageAttachment;
+  attachments?: ImageAttachment[];
   createdAt: number;
 }
 
 export function constellationValueReady(value: ConstellationValue | undefined): value is ConstellationValue {
   if (!value) return false;
   if (value.type === "text") return typeof value.text === "string" && value.text.trim().length > 0;
-  return value.asset ? value.asset.status === "completed" : Boolean(value.attachment);
+  return value.asset ? value.asset.status === "completed" : Boolean(value.attachment || value.attachments?.length);
+}
+
+export function constellationInputAttachments(data: ConstellationNodeData): ImageAttachment[] {
+  return data.inputAttachments?.length ? data.inputAttachments : data.inputAttachment ? [data.inputAttachment] : [];
+}
+
+export function constellationFileOutputs(attachments: ImageAttachment[], text?: string): Partial<Record<string, ConstellationValue>> {
+  if (!attachments.length) return {};
+  const attachment = attachments.length === 1 ? attachments[0] : undefined;
+  const type = attachment?.kind === "image" ? "image"
+    : attachment?.kind === "video" || attachment?.mimeType.startsWith("video/") || /\.(mp4|mov|webm|mkv|avi|m4v)$/i.test(attachment?.name ?? "") ? "video"
+    : attachment?.mimeType.startsWith("audio/") || /\.(mp3|wav|aac|flac|opus|ogg|m4a)$/i.test(attachment?.name ?? "") ? "audio" : "file";
+  const value: ConstellationValue = { type, attachment, attachments, createdAt: Date.now() };
+  return { file: { ...value, type: "file" }, [type]: value, ...(text?.trim() ? { text: { type: "text" as const, text, attachment, attachments, createdAt: value.createdAt } } : {}) };
+}
+
+/** Import generated results through the same unrestricted file picker path as local files. */
+export async function constellationConversationAttachments(
+  values: ConstellationValue[],
+  importFiles: (paths: string[], existing: ImageAttachment[]) => Promise<ImageAttachment[]>,
+): Promise<ImageAttachment[]> {
+  const attachments = new Map<string, ImageAttachment>();
+  const paths = new Set<string>();
+  for (const value of values) {
+    for (const item of [...(value.attachments ?? []), ...(value.attachment ? [value.attachment] : [])]) attachments.set(item.id, item);
+    if (value.asset) {
+      if (value.asset.status !== "completed" || !value.asset.filePath) throw new Error("上游素材尚未完成或本地文件不可用 / Upstream media is not ready or has no local file");
+      paths.add(value.asset.filePath);
+    }
+  }
+  if (paths.size) {
+    const imported = await importFiles([...paths], [...attachments.values()]);
+    if (!imported.length && !attachments.size) throw new Error("上游素材无法导入 / Could not import upstream media");
+    for (const item of imported) attachments.set(item.id, item);
+  }
+  return [...attachments.values()];
 }
 
 export function sameConstellationValue(a: ConstellationValue | undefined, b: ConstellationValue | undefined) {
   if (!a || !b || a.type !== b.type) return false;
   if (a.asset || b.asset) return Boolean(a.asset?.id) && a.asset?.id === b.asset?.id;
   if (a.attachment || b.attachment) return Boolean(a.attachment?.id) && a.attachment?.id === b.attachment?.id;
+  if (a.attachments || b.attachments) return Boolean(a.attachments?.length) && a.attachments?.length === b.attachments?.length && a.attachments?.every((item, index) => item.id === b.attachments?.[index].id);
   return a.createdAt === b.createdAt && a.text === b.text;
 }
 
@@ -69,10 +107,62 @@ export function constellationCandidateOutputs(data: ConstellationNodeData, candi
   return outputs;
 }
 
+export function constellationPendingMediaIds(nodes: ConstellationNode[]) {
+  return [...new Set(nodes.filter((node) => node.data.status !== "running" && node.data.status !== "queued").flatMap((node) => Object.values(node.data.outputCandidates ?? {})
+    .flatMap((values) => (values ?? []).flatMap(({ asset }) => asset && (asset.status === "queued" || asset.status === "in_progress") ? [asset.id] : []))))];
+}
+
+/** Merge one job independently, preserving edits and the user's candidate choice. */
+export function updateConstellationMediaAsset(nodes: ConstellationNode[], asset: MediaAsset): ConstellationNode[] {
+  let changed = false;
+  const next = nodes.map((node) => {
+    if (node.data.status === "running" || node.data.status === "queued") return node;
+    let matched = false;
+    const candidates = Object.fromEntries(Object.entries(node.data.outputCandidates ?? {}).map(([handle, values]) => [handle, values?.map((value) => {
+      const previous = value.asset;
+      if (previous?.id !== asset.id || previous.updatedAt > asset.updatedAt) return value;
+      // A late poll response must not roll back a completion event.
+      if (["completed", "failed"].includes(previous.status) && ["queued", "in_progress"].includes(asset.status)) return value;
+      if (JSON.stringify(previous) === JSON.stringify(asset)) return value;
+      matched = true;
+      return { ...value, asset };
+    })]));
+    if (!matched) return node;
+    changed = true;
+    if (node.data.status === "stale") {
+      return { ...node, data: { ...node.data, outputCandidates: candidates } };
+    }
+    const outputs = constellationCandidateOutputs(node.data, candidates);
+    const values = Object.values(candidates).flatMap((items) => items ?? []);
+    const failed = values.length > 0 && values.every((value) => value.asset?.status === "failed");
+    const status: ConstellationRunStatus = Object.values(outputs).some(constellationValueReady) ? "success" : failed ? "error" : "waiting";
+    return { ...node, data: { ...node.data, outputCandidates: candidates, outputs, status, error: failed ? values.find((value) => value.asset?.error)?.asset?.error : undefined } };
+  });
+  return changed ? next : nodes;
+}
+
 /** Old candidates remain previewable, but cannot satisfy changed inputs. */
 export function constellationCandidateSelection(data: ConstellationNodeData, handle: string, index: number): ConstellationValue | undefined {
   const value = data.outputCandidates?.[handle]?.[index];
   return data.status !== "stale" && constellationValueReady(value) ? value : undefined;
+}
+
+/** Preview nodes follow ready outputs without rerunning any generation or tools. */
+export function syncConstellationPreviews(nodes: ConstellationNode[], edges: ConstellationEdge[]): ConstellationNode[] {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  let changed = false;
+  const next = nodes.map((node) => {
+    if (node.data.kind !== "output" || node.data.status === "running" || node.data.status === "queued") return node;
+    const edge = edges.find((item) => item.target === node.id && item.targetHandle === "media");
+    const source = edge && byId.get(edge.source);
+    const value = source?.data.outputs?.[edge?.sourceHandle ?? ""];
+    // A retained result from changed inputs must not become current again.
+    if (source?.data.status !== "success" || !constellationValueReady(value)) return node;
+    if (node.data.status === "success" && !node.data.error && node.data.outputs?.media === value) return node;
+    changed = true;
+    return { ...node, data: { ...node.data, outputs: { media: value }, status: "success" as const, error: undefined } };
+  });
+  return changed ? next : nodes;
 }
 
 /** Resolve the stable identity without mutating the saved local snapshot. */
@@ -124,6 +214,7 @@ export interface ConstellationNodeData extends Record<string, unknown> {
   inputPath?: string;
   inputUrl?: string;
   inputAttachment?: ImageAttachment;
+  inputAttachments?: ImageAttachment[];
   toolName?: string;
   toolArguments?: string;
   /** Present only on migrated pre-template nodes; cleared when a template is edited. */
@@ -239,6 +330,7 @@ export const CONSTELLATION_NODE_DEFINITIONS: Record<ConstellationNodeKind, Const
     inputs: [
       { id: "context", type: "text", label: "上游上下文", labelEn: "Upstream context", optional: true, multiple: true },
       { id: "command", type: "text", label: "执行命令", labelEn: "Command", optional: true },
+      { id: "files", type: "media", label: "文件 / 媒体", labelEn: "Files / media", optional: true, multiple: true },
     ],
     outputs: [{ id: "text", type: "text", label: "会话结果", labelEn: "Session result" }],
     defaultSize: { width: 328, height: 360 },
@@ -254,6 +346,9 @@ export const CONSTELLATION_NODE_DEFINITIONS: Record<ConstellationNodeKind, Const
     outputs: [
       { id: "text", type: "text", label: "文本", labelEn: "Text" },
       { id: "image", type: "image", label: "图像", labelEn: "Image", optional: true },
+      { id: "video", type: "video", label: "视频", labelEn: "Video", optional: true },
+      { id: "audio", type: "audio", label: "音频", labelEn: "Audio", optional: true },
+      { id: "file", type: "file", label: "文件", labelEn: "Files", optional: true },
     ],
     defaultSize: { width: 300, height: 290 },
   },
@@ -589,8 +684,10 @@ export function constellationNodePorts(node: ConstellationNode, direction: "inpu
   }
   if (direction === "input") return definition.inputs;
   if (node.data.kind === "input") {
-    if (node.data.inputMode === "file" && node.data.inputAttachment?.kind === "image") {
-      return definition.outputs.filter((port) => port.id === "image");
+    if (node.data.inputMode === "file") {
+      const attachments = constellationInputAttachments(node.data);
+      const handles = attachments.length ? Object.keys(constellationFileOutputs(attachments, node.data.inputText)) : ["file", "text"];
+      return definition.outputs.filter((port) => handles.includes(port.id));
     }
     return definition.outputs.filter((port) => port.id === "text");
   }
@@ -665,7 +762,9 @@ function connectionPortScore(source: ConstellationPort, target: ConstellationPor
   if (source.id === "mask" && target.id !== "mask") return -1;
   if (target.id === "mask" && source.id !== "mask") return -1;
   if (!portTypesCompatible(source.type, target.type)) return -1;
-  let score = 0;
+  // Keep every compatible pair eligible. Multiple inputs receive a small
+  // tie-break penalty, but must not become negative and get filtered out.
+  let score = 1;
   if (source.id === target.id) score += 100;
   if (source.type === target.type) score += 20;
   if (target.multiple) score -= 1;
@@ -860,6 +959,7 @@ function serializableNode(node: ConstellationNode, forBlueprint = false): Conste
     delete data.projectValue;
     delete data.outputCandidates;
     delete data.inputAttachment;
+    delete data.inputAttachments;
     delete data.inputPath;
     delete data.inputText;
     delete data.inputUrl;
@@ -1231,7 +1331,7 @@ function normalizeEdge(value: unknown): ConstellationEdge | null {
     || typeof value.sourceHandle !== "string"
     || typeof value.targetHandle !== "string") return null;
   const data = isRecord(value.data) ? value.data : {};
-  const valueType = typeof data.valueType === "string" && ["text", "image", "video", "audio", "media"].includes(data.valueType)
+  const valueType = typeof data.valueType === "string" && ["text", "image", "video", "audio", "file", "media"].includes(data.valueType)
     ? data.valueType as ConstellationPortType
     : "media";
   return {

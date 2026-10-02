@@ -30,6 +30,9 @@ const TASK_COMPLETIONS_KEY = "levelup-agent.task-completions.v1";
 const COMPOSER_HEIGHT_KEY = "levelup-agent.composer-height.v1";
 const SIDEBAR_WIDTH_KEY = "levelup-agent.sidebar-width.v1";
 const INSPECTOR_WIDTH_KEY = "levelup-agent.inspector-width.v1";
+const CREATIVE_STUDIO_VIEW_KEY = "levelup-agent.creative-studio-view.v1";
+
+export type CreativeStudioView = "media" | "writing" | "constellation";
 
 export const DEFAULT_COMPOSER_HEIGHT = 64;
 export const MIN_COMPOSER_HEIGHT = 48;
@@ -336,6 +339,15 @@ export function saveArmorWritingIntensity(intensity: ArmorWritingIntensity) {
 export function loadHiddenProjectKeys(): Set<string> {
   const stored = readJson<unknown>(HIDDEN_PROJECTS_KEY, []);
   return new Set(Array.isArray(stored) ? stored.filter((value): value is string => typeof value === "string") : []);
+}
+
+export function loadCreativeStudioView(): CreativeStudioView {
+  const stored = readStorageValue(CREATIVE_STUDIO_VIEW_KEY);
+  return stored === "writing" || stored === "constellation" ? stored : "media";
+}
+
+export function saveCreativeStudioView(view: CreativeStudioView) {
+  writeStorageValue(CREATIVE_STUDIO_VIEW_KEY, view);
 }
 
 export function saveHiddenProjectKeys(keys: Set<string>) {

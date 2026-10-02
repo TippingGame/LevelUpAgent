@@ -52,6 +52,7 @@ import {
   type ConstellationValue,
 } from "../lib/constellation";
 import { tr } from "../lib/i18n";
+import { VIDEO_SIZE_OPTIONS, imageGenerationSize, imageModelCapabilities, videoOutputOptions } from "../lib/mediaCapabilities";
 import type { ConstellationToolTemplate, ImageAttachment, MediaKind, MediaModelInfo, ProviderModelInfo } from "../lib/types";
 
 
@@ -70,6 +71,7 @@ export interface ConstellationNodeActions {
   openPreview: (value: ConstellationValue) => void;
   downloadValue: (value: ConstellationValue) => void;
   getInputValue: (nodeId: string, handle: string) => ConstellationValue | undefined;
+  getInputValues: (nodeId: string, handle: string) => ConstellationValue[];
   openSourcePicker: (nodeId: string, kind: "conversation" | "input" | "projectRef") => void;
   openConversation: (threadId: string) => void;
   selectCandidate: (nodeId: string, handle: string, index: number) => void;
@@ -154,6 +156,7 @@ const ConstellationNodeContent = memo(function ConstellationNodeContent({ id, da
   const inputSignature = inputs.map((port) => `${port.id}:${port.type}`).join(",");
   const outputSignature = outputs.map((port) => `${port.id}:${port.type}`).join(",");
   useEffect(() => updateNodeInternals(id), [id, collapsed, selected, inputSignature, outputSignature, updateNodeInternals]);
+  const mediaPending = Object.values(data.outputCandidates ?? {}).some((values) => values?.some((value) => value.asset?.status === "queued" || value.asset?.status === "in_progress"));
   const statusLabel = data.status === "running"
     ? tr("执行中", "Running")
     : data.status === "queued"
@@ -162,7 +165,7 @@ const ConstellationNodeContent = memo(function ConstellationNodeContent({ id, da
         ? tr("已完成", "Done")
         : data.status === "error"
           ? tr("需要处理", "Needs attention")
-          : data.status === "stale" ? tr("输入已变化", "Inputs changed") : data.status === "waiting" ? tr("等待选择结果", "Choose an output") : tr("就绪", "Ready");
+          : data.status === "stale" ? tr("输入已变化", "Inputs changed") : data.status === "waiting" ? mediaPending ? tr("生成中 · 自动更新", "Generating · live updates") : tr("等待选择结果", "Choose an output") : tr("就绪", "Ready");
 
   return (
     <article
@@ -312,6 +315,7 @@ function ConversationNodeBody({ id, data }: { id: string; data: ConstellationNod
       {threadId && <button type="button" className="nodrag constellation-source-button" onClick={() => actions.openConversation(threadId)}><ExternalLink size={13} />{tr("打开会话", "Open conversation")}</button>}
     </div>
     <small className="constellation-conversation-binding">{threadId ? threadTitle || tr("已绑定会话", "Conversation bound") : tr("未绑定会话；运行时会自动新建", "No conversation bound; a new one is created when this runs")}</small>
+    <small className="constellation-source-hint">{tr("可连接图片、视频、音频或任意文件；运行时会把文件副本放入会话工作区，按本轮命令处理。", "Connect images, video, audio or any files. A working copy is placed in the conversation workspace for this command.")}</small>
     {data.outputs?.text && <ValuePreview value={data.outputs.text} />}
   </>;
 }
@@ -321,10 +325,10 @@ function InputNodeBody({ id, data }: { id: string; data: ConstellationNodeData }
   const mode = data.inputMode ?? "text";
   return <>
     <div className="constellation-segmented nodrag" role="radiogroup" aria-label={tr("输入类型", "Input type")}>
-      {([["text", tr("文本", "Text")], ["file", tr("文件", "File")], ["url", tr("网址", "URL")]] as const).map(([value, label]) => <button type="button" role="radio" aria-checked={mode === value} className={mode === value ? "active" : ""} key={value} onClick={() => actions.updateNode(id, { inputMode: value, inputAttachment: undefined, inputPath: value === "file" ? data.inputPath : "", outputs: undefined, status: "idle" })}>{label}</button>)}
+      {([["text", tr("文本", "Text")], ["file", tr("文件", "File")], ["url", tr("网址", "URL")]] as const).map(([value, label]) => <button type="button" role="radio" aria-checked={mode === value} className={mode === value ? "active" : ""} key={value} onClick={() => actions.updateNode(id, { inputMode: value, inputAttachment: undefined, inputAttachments: undefined, inputPath: value === "file" ? data.inputPath : "", outputs: undefined, status: "idle" })}>{label}</button>)}
     </div>
     {mode === "text" && <label className="constellation-field"><span>{tr("输入文本", "Input text")}</span><textarea className="nodrag nowheel" value={data.inputText ?? ""} maxLength={80_000} onChange={(event) => actions.updateNode(id, { inputText: event.target.value, outputs: undefined, status: "idle" })} /></label>}
-    {mode === "file" && <><button type="button" className="nodrag constellation-source-button" onClick={() => actions.openSourcePicker(id, "input")}><FolderInputIcon />{tr("选择本地文件", "Choose local file")}</button><label className="constellation-field"><span>{tr("文件路径", "File path")}</span><input className="nodrag" value={data.inputPath ?? ""} placeholder={tr("选择后自动填写", "Filled after selection")} onChange={(event) => actions.updateNode(id, { inputPath: event.target.value, inputAttachment: undefined, inputText: undefined, outputs: undefined, status: "idle" })} /></label></>}
+    {mode === "file" && <><button type="button" className="nodrag constellation-source-button" onClick={() => actions.openSourcePicker(id, "input")}><FolderInputIcon />{tr("选择文件（任意格式）", "Choose any files")}</button><label className="constellation-field"><span>{tr("文件路径", "File path")}</span><input className="nodrag" value={data.inputPath ?? ""} placeholder={tr("可选择多个文件", "You can choose multiple files")} onChange={(event) => actions.updateNode(id, { inputPath: event.target.value, inputAttachment: undefined, inputAttachments: undefined, inputText: undefined, outputs: undefined, status: "idle" })} /></label>{(data.inputAttachments ?? (data.inputAttachment ? [data.inputAttachment] : [])).map((attachment) => <div className="constellation-source-summary" key={attachment.id}><strong>{attachment.name}</strong><small>{attachment.kind} · {attachment.mimeType}</small></div>)}</>}
     {mode === "url" && <label className="constellation-field"><span>URL</span><input className="nodrag" type="url" value={data.inputUrl ?? ""} placeholder="https://" onChange={(event) => actions.updateNode(id, { inputUrl: event.target.value, outputs: undefined, status: "idle" })} /></label>}
     {data.outputs?.text && <ValuePreview value={data.outputs.text} />}
   </>;
@@ -397,11 +401,22 @@ function CandidatePicker({
     <div className="constellation-candidate-list">
       {entries.map(({ handle, value, index }) => {
         const chosen = sameConstellationValue(selected[handle], value);
-        const pending = value.asset && value.asset.status !== "completed";
+        const asset = value.asset;
+        const pending = asset?.status === "queued" || asset?.status === "in_progress";
+        const unavailable = asset && asset.status !== "completed";
+        const rawProgress = asset?.downloadProgress
+          ? asset.downloadProgress.totalBytes ? asset.downloadProgress.receivedBytes / asset.downloadProgress.totalBytes * 100 : undefined
+          : asset?.progress;
+        const progress = typeof rawProgress === "number" && Number.isFinite(rawProgress) ? Math.max(0, Math.min(100, Math.round(rawProgress))) : undefined;
+        const status = asset?.status === "failed" ? tr("生成失败", "Generation failed")
+          : pending ? asset?.downloadProgress ? tr("正在下载", "Downloading")
+            : asset?.gatewayStatus === "billing" ? tr("正在结算", "Settling usage")
+              : asset?.status === "queued" ? tr("正在排队", "Queued") : tr("正在生成", "Generating")
+            : tr("可选择", "Ready to choose");
         return <div className={`constellation-candidate${chosen ? " selected" : ""}`} key={`${handle}:${value.asset?.id ?? value.createdAt}:${index}`}>
           <ValuePreview value={value} thumbnail />
-          <div className="constellation-candidate-meta"><strong>{handle} · {index + 1}</strong><small>{pending ? value.asset?.status : tr("可选择", "Ready to choose")}</small></div>
-          <button type="button" className="nodrag" disabled={actions.running || stale || Boolean(pending) || chosen} onClick={() => actions.selectCandidate(id, handle, index)}>{chosen ? tr("已选择", "Selected") : tr("选择", "Choose")}</button>
+          <div className="constellation-candidate-meta"><strong>{handle} · {index + 1}</strong><small title={asset?.error}>{status}{pending && progress !== undefined ? ` · ${progress}%` : ""}</small>{pending && <progress max={100} value={progress} aria-label={tr("生成进度", "Generation progress")} />}</div>
+          <button type="button" className="nodrag" disabled={actions.running || stale || Boolean(unavailable) || chosen} onClick={() => actions.selectCandidate(id, handle, index)}>{chosen ? tr("已选择", "Selected") : tr("选择", "Choose")}</button>
         </div>;
       })}
     </div>
@@ -459,6 +474,9 @@ function WritingNodeBody({ id, data }: { id: string; data: ConstellationNodeData
 function ImageNodeBody({ id, data }: { id: string; data: ConstellationNodeData }) {
   const actions = useNodeActions();
   const models = actions.mediaModels.filter((model) => model.kind === "image");
+  const selectedModel = models.find((model) => data.modelRoute && modelRouteKey(mediaModelRoute(model)) === modelRouteKey(data.modelRoute));
+  const modelId = selectedModel?.id ?? models[0]?.id ?? "";
+  const imageCapabilities = imageModelCapabilities(modelId);
   const output = data.outputs?.image;
   const connectedPrompt = actions.edges.some((edge) => edge.target === id && edge.targetHandle === "prompt");
   const operation = data.operation ?? "generate";
@@ -485,7 +503,7 @@ function ImageNodeBody({ id, data }: { id: string; data: ConstellationNodeData }
         value={data.modelRoute ? modelRouteKey(data.modelRoute) : ""}
         options={models.map((model) => ({
           key: modelRouteKey(mediaModelRoute(model)),
-          label: `${model.recommended ? "★ " : ""}${model.id} · ${model.profileName}`,
+          label: `${model.id} · ${model.profileName}`,
           route: mediaModelRoute(model),
         }))}
         onChange={(route) => actions.updateNode(id, { modelRoute: route })}
@@ -502,12 +520,14 @@ function ImageNodeBody({ id, data }: { id: string; data: ConstellationNodeData }
         </label>
       )}
       <div className="constellation-option-grid">
-        <label><span>{tr("尺寸", "Size")}</span><select className="nodrag nowheel" value={data.size ?? "auto"} onChange={(event) => actions.updateNode(id, { size: event.target.value })}>
-          {["auto", "1024x1024", "1536x1024", "1024x1536", "16:9", "9:16", "21:9"].map((value) => <option key={value}>{value}</option>)}
+        <label><span>{tr("尺寸 / 比例", "Size / ratio")}</span><select className="nodrag nowheel" value={imageGenerationSize(modelId, data.size)} onChange={(event) => actions.updateNode(id, { size: event.target.value })}>
+          <option value="auto">auto</option>
+          <optgroup label={tr("像素尺寸", "Pixel dimensions")}>{imageCapabilities.dimensions.map((option) => <option value={option.value} key={option.value}>{option.value.replace("x", " × ")} · {option.ratio}{option.experimental ? tr(" · 实验性", " · Experimental") : ""}</option>)}</optgroup>
+          <optgroup label={tr("仅指定构图比例", "Aspect ratio only")}>{imageCapabilities.ratios.map((value) => <option value={value} key={value}>{value}</option>)}</optgroup>
         </select></label>
-        <label><span>{tr("质量", "Quality")}</span><select className="nodrag nowheel" value={data.quality ?? "auto"} onChange={(event) => actions.updateNode(id, { quality: event.target.value })}>
+        {!imageCapabilities.minimax && <label><span>{tr("质量", "Quality")}</span><select className="nodrag nowheel" value={data.quality ?? "auto"} onChange={(event) => actions.updateNode(id, { quality: event.target.value })}>
           {["auto", "high", "medium", "2K", "4K"].map((value) => <option key={value}>{value}</option>)}
-        </select></label>
+        </select></label>}
       </div>
       <ReferencePicker id={id} references={data.references ?? []} kind="image" sourceOnly={operation !== "generate"} />
       {output && <ValuePreview value={output} />}
@@ -518,6 +538,14 @@ function ImageNodeBody({ id, data }: { id: string; data: ConstellationNodeData }
 function VideoNodeBody({ id, data }: { id: string; data: ConstellationNodeData }) {
   const actions = useNodeActions();
   const models = actions.mediaModels.filter((model) => model.kind === "video");
+  const selectedModel = models.find((model) => data.modelRoute && modelRouteKey(mediaModelRoute(model)) === modelRouteKey(data.modelRoute));
+  const referenceIds = new Set([
+    ...(data.references ?? []).map((reference) => reference.id),
+    ...actions.getInputValues(id, "image").map((value) => value.attachment?.id ?? value.asset?.id).filter(Boolean),
+  ]);
+  const mode = referenceIds.size > 1 ? "reference" : referenceIds.size === 1 ? "image" : "text";
+  const videoOptions = videoOutputOptions(selectedModel?.id ?? models[0]?.id ?? "", mode, data);
+  const { capabilities, hasControls } = videoOptions;
   const output = data.outputs?.video;
   const connectedPrompt = actions.edges.some((edge) => edge.target === id && edge.targetHandle === "prompt");
   return (
@@ -526,16 +554,18 @@ function VideoNodeBody({ id, data }: { id: string; data: ConstellationNodeData }
         value={data.modelRoute ? modelRouteKey(data.modelRoute) : ""}
         options={models.map((model) => ({
           key: modelRouteKey(mediaModelRoute(model)),
-          label: `${model.recommended ? "★ " : ""}${model.id} · ${model.profileName}`,
+          label: `${model.id} · ${model.profileName}`,
           route: mediaModelRoute(model),
         }))}
         onChange={(route) => actions.updateNode(id, { modelRoute: route })}
       />
       {!connectedPrompt && <label className="constellation-field"><span>{tr("节点提示词", "Node prompt")}</span><textarea className="nodrag nowheel compact" value={data.prompt ?? ""} onChange={(event) => actions.updateNode(id, { prompt: event.target.value })} /></label>}
-      <div className="constellation-option-grid three">
-        <label><span>{tr("比例", "Ratio")}</span><select className="nodrag nowheel" value={data.videoAspectRatio ?? "16:9"} onChange={(event) => actions.updateNode(id, { videoAspectRatio: event.target.value })}>{["16:9", "9:16"].map((value) => <option key={value}>{value}</option>)}</select></label>
-        <label><span>{tr("清晰度", "Resolution")}</span><select className="nodrag nowheel" value={data.videoResolution ?? "720p"} onChange={(event) => actions.updateNode(id, { videoResolution: event.target.value })}>{["480p", "720p", "1080p"].map((value) => <option key={value}>{value}</option>)}</select></label>
-        <label><span>{tr("时长", "Duration")}</span><select className="nodrag nowheel" value={data.seconds ?? 8} onChange={(event) => actions.updateNode(id, { seconds: Number(event.target.value) })}>{[4, 8, 10, 12].map((value) => <option value={value} key={value}>{value}s</option>)}</select></label>
+      <div className={`constellation-option-grid${hasControls ? " three" : ""}`}>
+        {hasControls ? <>
+          <label><span>{tr("比例", "Ratio")}</span><select className="nodrag nowheel" disabled={videoOptions.aspectRatio === "adaptive"} value={videoOptions.aspectRatio} onChange={(event) => actions.updateNode(id, { videoAspectRatio: event.target.value })}>{videoOptions.aspectRatio === "adaptive" && <option value="adaptive">{tr("跟随首帧", "Follow first frame")}</option>}{capabilities.ratios.map((value) => <option key={value}>{value}</option>)}</select></label>
+          <label><span>{tr("清晰度", "Resolution")}</span><select className="nodrag nowheel" value={videoOptions.resolution} onChange={(event) => actions.updateNode(id, { videoResolution: event.target.value })}>{capabilities.resolutions.map((value) => <option key={value}>{value}</option>)}</select></label>
+        </> : <label><span>{tr("尺寸 / 比例", "Size / ratio")}</span><select className="nodrag nowheel" value={videoOptions.size} onChange={(event) => actions.updateNode(id, { size: event.target.value })}>{VIDEO_SIZE_OPTIONS.map((value) => <option key={value}>{value}</option>)}</select></label>}
+        <label><span>{tr("时长", "Duration")}</span><select className="nodrag nowheel" value={videoOptions.seconds} onChange={(event) => actions.updateNode(id, { seconds: Number(event.target.value) })}>{capabilities.durations.map((value) => <option value={value} key={value}>{value}s</option>)}</select></label>
       </div>
       <ReferencePicker id={id} references={data.references ?? []} kind="image" />
       {output && <ValuePreview value={output} />}
@@ -552,7 +582,7 @@ function AudioNodeBody({ id, data }: { id: string; data: ConstellationNodeData }
     <>
       <ModelSelect
         value={data.modelRoute ? modelRouteKey(data.modelRoute) : ""}
-        options={models.map((model) => ({ key: modelRouteKey(mediaModelRoute(model)), label: `${model.recommended ? "★ " : ""}${model.id} · ${model.profileName}`, route: mediaModelRoute(model) }))}
+        options={models.map((model) => ({ key: modelRouteKey(mediaModelRoute(model)), label: `${model.id} · ${model.profileName}`, route: mediaModelRoute(model) }))}
         onChange={(route) => actions.updateNode(id, { modelRoute: route })}
       />
       {!connectedText && <label className="constellation-field"><span>{tr("朗读文案", "Speech text")}</span><textarea className="nodrag nowheel compact" value={data.prompt ?? ""} onChange={(event) => actions.updateNode(id, { prompt: event.target.value })} /></label>}
@@ -626,7 +656,7 @@ function ModelSelect({
         value={value}
         onChange={(event) => onChange(options.find((option) => option.key === event.target.value)?.route)}
       >
-        <option value="">{tr("自动选择推荐模型", "Choose recommended automatically")}</option>
+        <option value="">{tr("自动选择模型", "Choose automatically")}</option>
         {options.map((option) => <option value={option.key} key={option.key}>{option.label}</option>)}
       </select>
     </label>
@@ -668,6 +698,7 @@ function ValuePreview({ value, large = false, thumbnail = false }: { value: Cons
   const actions = useNodeActions();
   const url = useMemo(() => value.asset ? mediaAssetUrl(value.asset) : undefined, [value.asset]);
   if (value.type === "text") return thumbnail ? <FileText size={24} /> : <div className={`constellation-text-preview${large ? " large" : ""}`}>{value.text}</div>;
+  if (value.type === "file") return <div className="constellation-source-summary"><FileText size={24} />{(value.attachments ?? (value.attachment ? [value.attachment] : [])).map((item) => <strong key={item.id}>{item.name}</strong>)}</div>;
   if (value.attachment) return <AttachmentThumbnail attachment={value.attachment} />;
   if (value.type === "image" && url) return <div className={`constellation-media-preview image${large ? " large" : ""}`}>
     {thumbnail ? <img src={url} alt={value.asset?.prompt || tr("生成图片", "Generated image")} /> : <button type="button" className="constellation-preview-trigger nodrag" onClick={() => actions.openPreview(value)} title={tr("打开图片预览", "Open image preview")}><img src={url} alt={value.asset?.prompt || tr("生成图片", "Generated image")} /><span><Maximize2 size={12} />{tr("预览", "Preview")}</span></button>}
