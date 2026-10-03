@@ -61,9 +61,9 @@ MiniMax 平台支持 Responses、Chat Completions、Anthropic Messages。Composi
 | MiniMax | `MiniMax-M3` | [模型调用](https://platform.minimax.io/docs/guides/text-generation) |
 | Kimi | `kimi-k3` | [Kimi API 平台](https://platform.moonshot.ai) |
 | Qwen | `qwen3.8-max` | [阿里云模型列表](https://help.aliyun.com/zh/model-studio/models) |
-| Claude | `claude-fable-5-1` | [Fable 模型页](https://www.anthropic.com/claude/fable) |
+| Claude | `claude-opus-5-5` | 用户指定 |
 | Mistral | `mistral-medium-3-5` | [模型页](https://docs.mistral.ai/models/mistral-medium-3-5-26-04) |
-| Grok | `grok-4.6`（保留） | [模型列表](https://docs.x.ai/developers/models) |
+| Grok | `grok-4.7` | 用户指定 |
 | Llama | Llama 4 Maverick（保留） | [Meta 官方模型库](https://github.com/meta-llama/llama-models) |
 | OpenCode Go | `gpt-5.6-luna`（保留） | 沿用既有 Go 专属模型目录 |
 

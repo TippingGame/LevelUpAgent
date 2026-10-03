@@ -75,7 +75,7 @@ test("discovery prefers current models only when returned by the connection", ()
     ["MiniMax", "MiniMax-M3", "MiniMax-M2.7"],
     ["Kimi", "kimi-k3", "kimi-k2.5"],
     ["Qwen", "qwen3.8-max", "qwen3.5-max"],
-    ["Claude", "claude-fable-5-1", "claude-fable-5"],
+    ["Claude", "claude-opus-5-5", "claude-fable-5-1"],
     ["Mistral", "mistral-medium-3-5", "mistral-large-3"],
   ]) {
     const profile = { ...grokProfile, name, baseUrl: "https://levelup.example/v1" };
@@ -107,12 +107,13 @@ test("Gemini Flash-Lite models remain ordered fallbacks", () => {
   assert.equal(selected?.id, "gemini-3.5-flash-lite");
 });
 
-test("Grok discovery recommends 4.6 and keeps 4.5 as a fallback", () => {
+test("Grok discovery recommends 4.7 and keeps 4.5 as a fallback", () => {
   assert.equal(selection.preferredDetectedModel(grokProfile, models(
     "grok-4",
     "grok-4.5",
     "grok-4.6",
-  ))?.id, "grok-4.6");
+    "grok-4.7",
+  ))?.id, "grok-4.7");
   assert.equal(selection.preferredDetectedModel(grokProfile, models(
     "grok-4",
     "grok-4.5",

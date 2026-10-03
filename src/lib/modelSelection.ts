@@ -37,8 +37,8 @@ const PROFILE_FAMILY_HINTS: Array<[ModelFamily, RegExp]> = [
 // exact target is not exposed by that endpoint.
 const FAMILY_PREFERENCES: Record<ModelFamily, string[]> = {
   openai: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6", "gpt-5.5", "gpt-5.4", "gpt-5.3"],
-  grok: ["grok-4.6", "grok-4.5", "grok-4.1", "grok-4"],
-  claude: ["claude-fable-5-1", "claude-fable-5", "claude-opus-5", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6", "claude-opus-4-5"],
+  grok: ["grok-4.7", "grok-4.6", "grok-4.5", "grok-4.1", "grok-4"],
+  claude: ["claude-opus-5-5", "claude-fable-5-1", "claude-fable-5", "claude-opus-5", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6", "claude-opus-4-5"],
   gemini: [
     "gemini-3.8-flash",
     "gemini-3.6-flash",
