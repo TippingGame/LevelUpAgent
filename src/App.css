@@ -1395,6 +1395,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .assistant-turn-summary:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 38%, transparent); outline-offset: 2px; }
 .assistant-turn-duration { flex: 0 0 auto; }
 .assistant-turn-preview { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--faint); text-overflow: ellipsis; white-space: nowrap; }
+.assistant-turn-details[open] .assistant-turn-preview { display: none; }
 .assistant-turn-chevron { flex: 0 0 auto; margin-left: auto; color: var(--faint); transition: transform .16s ease; }
 .assistant-turn-details[open] .assistant-turn-chevron { transform: rotate(90deg); }
 .assistant-turn-details-content { min-width: 0; padding-top: 16px; }
