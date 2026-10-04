@@ -16,6 +16,7 @@
 | 模型协议与平台路由 | [LevelUpAPI 兼容性](LEVELUPAPI_COMPATIBILITY.md) |
 | 图片、视频与素材上传 | [媒体平台](MEDIA_PLATFORMS.md) |
 | DAG、蓝图、画板与蒙版 | [星图](CONSTELLATION.md) |
+| Spine 骨骼动画、多图姿态、拆层与本机任务恢复 | [Spine 工作台](SPINE_STUDIO.md)、[第二版实施日志](SPINE_V2_IMPLEMENTATION_LOG.md)、[第三版实施日志](SPINE_V3_IMPLEMENTATION_LOG.md) |
 | 写作目标、参考库与恢复 | [写作 Goal](WRITING_GOAL_MODE.md) |
 | 剧情图与试玩 | [剧情图](STORY_GRAPH_UX.md) |
 | 执行提示配置 | [Armor Mode](ARMOR_MODE.md) |
@@ -25,6 +26,8 @@
 | 开发优先级与已知缺口 | [路线图](ROADMAP.md) |
 | 安装包、签名与更新 | [发布](RELEASE.md) |
 | 参考来源与适配范围 | [参考研究](REFERENCE_RESEARCH.md) |
+| 生图到 Unity 网格、本地与云端 3D 任务方案（调研／未实现） | [高斯泼溅与生模型工作流](GAUSSIAN_3D_WORKFLOW_RESEARCH.md) |
+| 可拆卸 3D 模块、体积核算与验证工具 | [模块验证方案](MODEL3D_MODULE_VALIDATION.md)、[逐步验证日志](MODEL3D_VALIDATION_LOG.md) |
 
 ## 历史记录
 

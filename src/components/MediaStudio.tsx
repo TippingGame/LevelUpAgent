@@ -130,6 +130,7 @@ interface MediaStudioProps {
   onReferenceDropHandled: (id: string) => void;
   onConfigureConnection: () => void;
   onPendingCountChange: (count: number) => void;
+  onSpine: () => void;
   onWriting: () => void;
   onConstellation: () => void;
 }
@@ -148,7 +149,7 @@ const STUDIO_IMAGE_MODES: Array<{ value: StudioImageMode; label: string; labelEn
   { value: "inpaint", label: "局部重绘", labelEn: "Inpaint" },
 ];
 
-export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorModeSkills, mediaCatalogRevision, dropActive, referenceDrop, onReferenceDropHandled, onConfigureConnection, onPendingCountChange, onWriting, onConstellation }: MediaStudioProps) {
+export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorModeSkills, mediaCatalogRevision, dropActive, referenceDrop, onReferenceDropHandled, onConfigureConnection, onPendingCountChange, onWriting, onConstellation, onSpine }: MediaStudioProps) {
   const rootRef = useRef<HTMLElement>(null);
   const [kind, setKind] = useState<MediaKind>("image");
   const [catalog, setCatalog] = useState<Awaited<ReturnType<typeof getMediaCatalog>> | null>(null);
@@ -897,7 +898,7 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
           <small>{tr("素材会添加到当前创作任务，不会进入会话附件", "References are added to Media Studio, not to the conversation")}</small>
         </div>
       )}
-      <CreativeStudioHeader mode="media" className="media-topbar" subtitle={tr("图片、视频与声音", "Images, video and sound")} onWriting={onWriting} onConstellation={onConstellation} actions={<div className="media-topbar-actions">
+      <CreativeStudioHeader mode="media" onSpine={onSpine} className="media-topbar" subtitle={tr("图片、视频与声音", "Images, video and sound")} onWriting={onWriting} onConstellation={onConstellation} actions={<div className="media-topbar-actions">
           <button className="media-icon-button" disabled={refreshing} onClick={() => void refreshAll()} title={tr("刷新模型和历史", "Refresh models and history")}>
             <RefreshCw className={refreshing ? "spin" : ""} size={16} />
           </button>

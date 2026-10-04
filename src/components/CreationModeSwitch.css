@@ -57,7 +57,7 @@
 .creative-studio-header :is(button, select, input):focus-visible { outline: 2px solid var(--creative-accent); outline-offset: 3px; }
 .creative-studio-header .creation-mode-switch {
   justify-self: center;
-  width: 326px;
+  width: 394px;
   height: 36px;
   display: flex;
   align-items: center;
@@ -97,7 +97,7 @@
   .creative-studio-actions .writing-model { max-width: 110px; }
 }
 @container creative-header (max-width: 980px) {
-  .creative-studio-header .creation-mode-switch { width: 116px; }
+  .creative-studio-header .creation-mode-switch { width: 148px; }
   .creative-studio-header .creation-mode-switch button:first-child { flex: 1; }
   .creative-studio-header .creation-mode-switch button { padding: 0; }
   .creative-studio-header .creation-mode-switch button span { display: none; }
@@ -127,3 +127,6 @@
 @media (prefers-reduced-motion: reduce) {
   .creative-studio-header * { transition: none; }
 }
+
+.creative-studio-header[data-creative-mode="spine"] { --creative-accent: #0284c7; --creative-accent-soft: #e0f2fe; --creative-accent-border: #bae6fd; --creative-accent-hover: #d3edfd; }
+.creative-studio-header .creation-mode-switch button[data-creative-mode="spine"] { --creative-tab-accent: #0284c7; }

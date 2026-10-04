@@ -23,6 +23,8 @@ mod pet_python;
 mod process;
 mod sandbox;
 mod skill;
+mod spine;
+mod spine_comfy;
 mod subagent;
 mod text_encoding;
 mod theme;
@@ -12115,6 +12117,8 @@ pub fn run() {
             save_constellation_project,
             delete_constellation_project,
             export_writing_file,
+            spine::export_spine_archive,
+            spine_comfy::spine_comfy_request,
             export_conversation_file,
             read_conversation_file,
             open_local_directory,

@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { BookOpen, Ellipsis, ImagePlus, Star } from "lucide-react";
+import { Bone, BookOpen, Ellipsis, ImagePlus, Star } from "lucide-react";
 import { tr } from "../lib/i18n";
 import "./CreationModeSwitch.css";
 
-type CreativeMode = "media" | "writing" | "constellation";
+type CreativeMode = "media" | "writing" | "constellation" | "spine";
 
-export function CreativeStudioHeader({ mode, className = "", subtitle, context, actions, onBrandClick, brandDisabled, onMedia, onWriting, onConstellation }: {
+export function CreativeStudioHeader({ mode, className = "", subtitle, context, actions, onBrandClick, brandDisabled, onMedia, onWriting, onConstellation, onSpine }: {
   mode: CreativeMode;
   className?: string;
   subtitle?: ReactNode;
@@ -16,6 +16,7 @@ export function CreativeStudioHeader({ mode, className = "", subtitle, context, 
   onMedia?: () => void;
   onWriting?: () => void;
   onConstellation?: () => void;
+  onSpine?: () => void;
 }) {
   const [actionsOpen, setActionsOpen] = useState(false);
   const actionsRef = useRef<HTMLDivElement>(null);
@@ -38,6 +39,7 @@ export function CreativeStudioHeader({ mode, className = "", subtitle, context, 
     { id: "media", label: tr("图片 · 视频 · 语音", "Image · Video · Speech"), Icon: ImagePlus, onClick: onMedia },
     { id: "writing", label: tr("写作", "Writing"), Icon: BookOpen, onClick: onWriting },
     { id: "constellation", label: tr("星图", "Constellation"), Icon: Star, onClick: onConstellation },
+    { id: "spine", label: "Spine", Icon: Bone, onClick: onSpine },
   ] as const;
   const Icon = modes.find((item) => item.id === mode)!.Icon;
   const brand = <><span className="creative-studio-mark"><Icon size={19} fill={mode === "constellation" ? "currentColor" : "none"} strokeWidth={1.6} /></span><span className="creative-studio-brand-text"><strong>{mode === "constellation" ? tr("星图", "Constellation") : tr("创作空间", "Creative Studio")}</strong><small>{subtitle}</small></span></>;

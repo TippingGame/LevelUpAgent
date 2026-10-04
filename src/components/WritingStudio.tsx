@@ -195,6 +195,7 @@ interface WritingStudioProps {
   workspace?: string;
   connectionReady: boolean;
   onConfigureConnection: () => void;
+  onSpine: () => void;
   onMedia: () => void;
   onConstellation: () => void;
 }
@@ -229,6 +230,7 @@ export function WritingStudio({
   connectionReady,
   onConfigureConnection,
   onMedia,
+  onSpine,
   onConstellation,
 }: WritingStudioProps) {
   const [projects, setProjects] = useState<WritingProject[]>([]);
@@ -1281,7 +1283,7 @@ export function WritingStudio({
 
   return (
     <main className={`writing-studio creative-studio${armorClassName}`} data-armor-level={armorDataLevel}>
-      <CreativeStudioHeader mode="writing" className="writing-topbar" subtitle={saving ? tr("正在保存…", "Saving…") : savedAt ? tr("已自动保存", "Autosaved") : tr("本地写作项目", "Local writing projects")} onMedia={onMedia} onConstellation={onConstellation} context={<button
+      <CreativeStudioHeader mode="writing" onSpine={onSpine} className="writing-topbar" subtitle={saving ? tr("正在保存…", "Saving…") : savedAt ? tr("已自动保存", "Autosaved") : tr("本地写作项目", "Local writing projects")} onMedia={onMedia} onConstellation={onConstellation} context={<button
             type="button"
             className="writing-navigator-toggle"
             aria-label={navigatorOpen ? tr("关闭写作导航", "Close writing navigation") : tr("打开写作导航", "Open writing navigation")}

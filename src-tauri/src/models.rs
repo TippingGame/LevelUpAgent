@@ -799,6 +799,8 @@ pub struct StoredMessage {
     pub provider_reasoning_blocks: Vec<serde_json::Value>,
     pub created_at: i64,
     #[serde(default)]
+    pub duration_ms: Option<i64>,
+    #[serde(default)]
     pub is_error: bool,
     pub request_id: Option<String>,
     #[serde(default)]

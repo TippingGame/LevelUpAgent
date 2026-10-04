@@ -1,7 +1,5 @@
 /* Reading preferences must win over fixed typography in installed themes. */
 html[data-levelup-theme="default"] .workspace-shell:not(.armor-mode) { background: var(--surface); }
-.conversation .assistant-turn-summary { min-height: 34px; border: 0; background: transparent; padding-block: 3px; }
-.conversation .assistant-turn-details[open] > .assistant-turn-summary .assistant-turn-summary-copy small { display: none; }
 .conversation .markdown-body, .chat-appearance-preview .markdown-body {
   font-size: var(--chat-font-size, 15px) !important;
   line-height: var(--chat-line-height, 1.55) !important;

@@ -8,6 +8,7 @@
     { "id": "view.chat", "description": "Show the conversation workspace." },
     { "id": "view.media", "description": "Show the media studio." },
     { "id": "view.writing", "description": "Show the writing studio." },
+    { "id": "view.spine", "description": "Show the Spine animation studio." },
     { "id": "view.constellation", "description": "Show the constellation studio." },
     { "id": "panel.open", "description": "Open the conversation details panel." },
     { "id": "panel.close", "description": "Close the conversation details panel." },

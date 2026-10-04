@@ -188,6 +188,7 @@ interface ConstellationStudioProps {
   onRunConversation: (request: { threadId?: string; command: string; context?: string; attachments?: ImageAttachment[]; workspace?: string; onThreadReady?: (thread: Pick<AgentThread, "id" | "title">) => void }) => Promise<{ threadId: string; title: string; text?: string }>;
   mediaCatalogRevision: number;
   onConfigureConnection: () => void;
+  onSpine: () => void;
   onMedia: () => void;
   onWriting: () => void;
   onPendingCountChange: (count: number) => void;
@@ -266,6 +267,7 @@ function ConstellationStudioInner({
   mediaCatalogRevision,
   onConfigureConnection,
   onMedia,
+  onSpine,
   onWriting,
   onPendingCountChange,
 }: ConstellationStudioProps) {
@@ -1932,7 +1934,7 @@ function ConstellationStudioInner({
   const selectedTemplate = overviewTemplates.find((template) => template.id === templateId);
   return (
     <>
-      <CreativeStudioHeader mode="constellation" className="constellation-topbar" subtitle={tr("把灵感连成作品", "Connect ideas into finished work")}
+      <CreativeStudioHeader mode="constellation" onSpine={onSpine} className="constellation-topbar" subtitle={tr("把灵感连成作品", "Connect ideas into finished work")}
         onMedia={onMedia} onWriting={onWriting} onBrandClick={() => { if (!overviewOpen) void returnToOverview(); }} brandDisabled={running || projectBusy || Boolean(entrySnapshot)}
         context={!overviewOpen && <input className="constellation-title-input nodrag nopan" value={graphTitle} maxLength={120} aria-label={tr("星图名称", "Constellation name")} onFocus={() => setSpacePanActive(false)} onChange={(event) => setGraphTitle(event.target.value)} />}
         actions={<div className="constellation-topbar-actions">

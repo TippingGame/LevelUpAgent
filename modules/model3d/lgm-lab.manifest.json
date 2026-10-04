@@ -1,0 +1,207 @@
+{
+  "schemaVersion": 1,
+  "backendId": "lgm-lab",
+  "version": "0.1.0",
+  "status": "experimental-contract-not-installer",
+  "licenseStatus": "research-only-until-dependency-review",
+  "source": {
+    "repository": "https://github.com/3DTopia/LGM",
+    "commit": "fe8d12cff8c827df7bb77a3c8e8b37408cb6fe4c"
+  },
+  "runtime": {
+    "pythonVersion": [
+      3,
+      10
+    ],
+    "python": {
+      "windows": "runtime/python.exe",
+      "linux": "runtime/bin/python"
+    },
+    "imports": [
+      "torch",
+      "torchvision",
+      "diffusers",
+      "transformers",
+      "safetensors",
+      "numpy",
+      "PIL",
+      "kiui",
+      "rembg",
+      "onnxruntime",
+      "xformers",
+      "diff_gaussian_rasterization",
+      "nvdiffrast",
+      "nerfacc",
+      "mcubes",
+      "xatlas",
+      "trimesh",
+      "pygltflib"
+    ]
+  },
+  "files": [
+    {
+      "path": "source/LGM/infer.py",
+      "role": "source"
+    },
+    {
+      "path": "source/LGM/convert.py",
+      "role": "source"
+    },
+    {
+      "path": "source/LGM/core/models.py",
+      "role": "source"
+    },
+    {
+      "path": "source/LGM/core/options.py",
+      "role": "source"
+    },
+    {
+      "path": "source/LGM/core/gs.py",
+      "role": "source"
+    },
+    {
+      "path": "source/LGM/mvdream/pipeline_mvdream.py",
+      "role": "source"
+    },
+    {
+      "path": "weights/lgm/model_fp16_fixrot.safetensors",
+      "role": "weight",
+      "bytes": 830126160,
+      "sourceUrl": "https://huggingface.co/ashawkey/LGM/resolve/bc0097d24ffc5efc2e6a216edd579128f85f53ab/model_fp16_fixrot.safetensors",
+      "upstreamRevision": "bc0097d24ffc5efc2e6a216edd579128f85f53ab",
+      "sha256": "744d6324656342c64f871308e73db97f0eb51858d94329b30090e986a6d050ab"
+    },
+    {
+      "path": "weights/imagedream/feature_extractor/preprocessor_config.json",
+      "role": "config",
+      "bytes": 546,
+      "sourceUrl": "https://huggingface.co/ashawkey/imagedream-ipmv-diffusers/resolve/73a034178e748421506492e91790cc62d6aefef5/feature_extractor/preprocessor_config.json",
+      "upstreamRevision": "73a034178e748421506492e91790cc62d6aefef5"
+    },
+    {
+      "path": "weights/imagedream/image_encoder/config.json",
+      "role": "config",
+      "bytes": 563,
+      "sourceUrl": "https://huggingface.co/ashawkey/imagedream-ipmv-diffusers/resolve/73a034178e748421506492e91790cc62d6aefef5/image_encoder/config.json",
+      "upstreamRevision": "73a034178e748421506492e91790cc62d6aefef5"
+    },
+    {
+      "path": "weights/imagedream/image_encoder/model.safetensors",
+      "role": "weight",
+      "bytes": 1261595704,
+      "sourceUrl": "https://huggingface.co/ashawkey/imagedream-ipmv-diffusers/resolve/73a034178e748421506492e91790cc62d6aefef5/image_encoder/model.safetensors",
+      "upstreamRevision": "73a034178e748421506492e91790cc62d6aefef5",
+      "sha256": "2a56cfd4ffcf40be097c430324ec184cc37187f6dafef128ef9225438a3c03c4"
+    },
+    {
+      "path": "weights/imagedream/model_index.json",
+      "role": "config",
+      "bytes": 548,
+      "sourceUrl": "https://huggingface.co/ashawkey/imagedream-ipmv-diffusers/resolve/73a034178e748421506492e91790cc62d6aefef5/model_index.json",
+      "upstreamRevision": "73a034178e748421506492e91790cc62d6aefef5"
+    },
+    {
+      "path": "weights/imagedream/pipeline_mvdream.py",
+      "role": "config",
+      "bytes": 24138,
+      "sourceUrl": "https://huggingface.co/ashawkey/imagedream-ipmv-diffusers/resolve/73a034178e748421506492e91790cc62d6aefef5/pipeline_mvdream.py",
+      "upstreamRevision": "73a034178e748421506492e91790cc62d6aefef5"
+    },
+    {
+      "path": "weights/imagedream/scheduler/scheduler_config.json",
+      "role": "config",
+      "bytes": 502,
+      "sourceUrl": "https://huggingface.co/ashawkey/imagedream-ipmv-diffusers/resolve/73a034178e748421506492e91790cc62d6aefef5/scheduler/scheduler_config.json",
+      "upstreamRevision": "73a034178e748421506492e91790cc62d6aefef5"
+    },
+    {
+      "path": "weights/imagedream/text_encoder/config.json",
+      "role": "config",
+      "bytes": 610,
+      "sourceUrl": "https://huggingface.co/ashawkey/imagedream-ipmv-diffusers/resolve/73a034178e748421506492e91790cc62d6aefef5/text_encoder/config.json",
+      "upstreamRevision": "73a034178e748421506492e91790cc62d6aefef5"
+    },
+    {
+      "path": "weights/imagedream/text_encoder/model.safetensors",
+      "role": "weight",
+      "bytes": 680820392,
+      "sourceUrl": "https://huggingface.co/ashawkey/imagedream-ipmv-diffusers/resolve/73a034178e748421506492e91790cc62d6aefef5/text_encoder/model.safetensors",
+      "upstreamRevision": "73a034178e748421506492e91790cc62d6aefef5",
+      "sha256": "bc1827c465450322616f06dea41596eac7d493f4e95904dcb51f0fc745c4e13f"
+    },
+    {
+      "path": "weights/imagedream/tokenizer/merges.txt",
+      "role": "config",
+      "bytes": 524619,
+      "sourceUrl": "https://huggingface.co/ashawkey/imagedream-ipmv-diffusers/resolve/73a034178e748421506492e91790cc62d6aefef5/tokenizer/merges.txt",
+      "upstreamRevision": "73a034178e748421506492e91790cc62d6aefef5"
+    },
+    {
+      "path": "weights/imagedream/tokenizer/special_tokens_map.json",
+      "role": "config",
+      "bytes": 460,
+      "sourceUrl": "https://huggingface.co/ashawkey/imagedream-ipmv-diffusers/resolve/73a034178e748421506492e91790cc62d6aefef5/tokenizer/special_tokens_map.json",
+      "upstreamRevision": "73a034178e748421506492e91790cc62d6aefef5"
+    },
+    {
+      "path": "weights/imagedream/tokenizer/tokenizer_config.json",
+      "role": "config",
+      "bytes": 855,
+      "sourceUrl": "https://huggingface.co/ashawkey/imagedream-ipmv-diffusers/resolve/73a034178e748421506492e91790cc62d6aefef5/tokenizer/tokenizer_config.json",
+      "upstreamRevision": "73a034178e748421506492e91790cc62d6aefef5"
+    },
+    {
+      "path": "weights/imagedream/tokenizer/vocab.json",
+      "role": "config",
+      "bytes": 1059962,
+      "sourceUrl": "https://huggingface.co/ashawkey/imagedream-ipmv-diffusers/resolve/73a034178e748421506492e91790cc62d6aefef5/tokenizer/vocab.json",
+      "upstreamRevision": "73a034178e748421506492e91790cc62d6aefef5"
+    },
+    {
+      "path": "weights/imagedream/unet/config.json",
+      "role": "config",
+      "bytes": 403,
+      "sourceUrl": "https://huggingface.co/ashawkey/imagedream-ipmv-diffusers/resolve/73a034178e748421506492e91790cc62d6aefef5/unet/config.json",
+      "upstreamRevision": "73a034178e748421506492e91790cc62d6aefef5"
+    },
+    {
+      "path": "weights/imagedream/unet/diffusion_pytorch_model.safetensors",
+      "role": "weight",
+      "bytes": 1883435904,
+      "sourceUrl": "https://huggingface.co/ashawkey/imagedream-ipmv-diffusers/resolve/73a034178e748421506492e91790cc62d6aefef5/unet/diffusion_pytorch_model.safetensors",
+      "upstreamRevision": "73a034178e748421506492e91790cc62d6aefef5",
+      "sha256": "28d8b241a54125fa0a041c1818a5dcdb717e6f5270eea1268172acd3ab0238e0"
+    },
+    {
+      "path": "weights/imagedream/unet/mv_unet.py",
+      "role": "config",
+      "bytes": 34436,
+      "sourceUrl": "https://huggingface.co/ashawkey/imagedream-ipmv-diffusers/resolve/73a034178e748421506492e91790cc62d6aefef5/unet/mv_unet.py",
+      "upstreamRevision": "73a034178e748421506492e91790cc62d6aefef5"
+    },
+    {
+      "path": "weights/imagedream/vae/config.json",
+      "role": "config",
+      "bytes": 601,
+      "sourceUrl": "https://huggingface.co/ashawkey/imagedream-ipmv-diffusers/resolve/73a034178e748421506492e91790cc62d6aefef5/vae/config.json",
+      "upstreamRevision": "73a034178e748421506492e91790cc62d6aefef5"
+    },
+    {
+      "path": "weights/imagedream/vae/diffusion_pytorch_model.safetensors",
+      "role": "weight",
+      "bytes": 167335342,
+      "sourceUrl": "https://huggingface.co/ashawkey/imagedream-ipmv-diffusers/resolve/73a034178e748421506492e91790cc62d6aefef5/vae/diffusion_pytorch_model.safetensors",
+      "upstreamRevision": "73a034178e748421506492e91790cc62d6aefef5",
+      "sha256": "3e4c08995484ee61270175e9e7a072b66a6e4eeb5f0c266667fe1f45b90daf9a"
+    },
+    {
+      "path": "weights/auxiliary/u2net.onnx",
+      "role": "auxiliary"
+    }
+  ],
+  "notes": [
+    "Module manifest describes an optional package; it does not download, install or execute backend code.",
+    "Only primary weights have complete byte counts and upstream SHA-256; auxiliary dependency closure remains to be locked.",
+    "Python package availability is not proof of CUDA ABI compatibility or successful inference."
+  ]
+}

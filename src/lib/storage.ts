@@ -32,7 +32,7 @@ const SIDEBAR_WIDTH_KEY = "levelup-agent.sidebar-width.v1";
 const INSPECTOR_WIDTH_KEY = "levelup-agent.inspector-width.v1";
 const CREATIVE_STUDIO_VIEW_KEY = "levelup-agent.creative-studio-view.v1";
 
-export type CreativeStudioView = "media" | "writing" | "constellation";
+export type CreativeStudioView = "media" | "writing" | "constellation" | "spine";
 
 export const DEFAULT_COMPOSER_HEIGHT = 64;
 export const MIN_COMPOSER_HEIGHT = 48;
@@ -343,7 +343,7 @@ export function loadHiddenProjectKeys(): Set<string> {
 
 export function loadCreativeStudioView(): CreativeStudioView {
   const stored = readStorageValue(CREATIVE_STUDIO_VIEW_KEY);
-  return stored === "writing" || stored === "constellation" ? stored : "media";
+  return stored === "writing" || stored === "constellation" || stored === "spine" ? stored : "media";
 }
 
 export function saveCreativeStudioView(view: CreativeStudioView) {

@@ -4,7 +4,7 @@ export const CLIENT_ACTION_EVENT = manifest.event;
 export const CLIENT_ACTION_CAPABILITY_ID = manifest.capabilityId;
 export const CLIENT_ACTION_CONTRACT_VERSION = manifest.version;
 
-export type ClientWorkspaceView = "chat" | "media" | "writing" | "constellation";
+export type ClientWorkspaceView = "chat" | "media" | "writing" | "constellation" | "spine";
 export type ClientDialog = "settings" | "themes" | "extensions" | "skills" | "instructions" | "logs" | "pet" | "armor";
 
 export interface ClientActionEvent {
@@ -44,6 +44,9 @@ export function dispatchClientAction(action: unknown, target: ClientActionTarget
       return true;
     case "view.writing":
       target.showView("writing");
+      return true;
+    case "view.spine":
+      target.showView("spine");
       return true;
     case "view.constellation":
       target.showView("constellation");

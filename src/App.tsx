@@ -59,7 +59,6 @@ import {
   ShieldAlert,
   ShieldCheck,
   TerminalSquare,
-  Timer,
   Trash2,
   Upload,
   Video,
@@ -393,6 +392,7 @@ import { mergeThreadCatalog, threadMatchesQuery } from "./lib/conversationCatalo
 import { useComposerDraft } from "./lib/useComposerDraft";
 import type { ThreadCursor } from "./lib/types";
 
+const SpineStudio = lazy(() => import("./components/SpineStudio").then((module) => ({ default: module.SpineStudio })));
 const MediaStudio = lazy(() => import("./components/MediaStudio").then((module) => ({ default: module.MediaStudio })));
 const MediaAssetCard = lazy(() => import("./components/MediaStudio").then((module) => ({ default: module.MediaAssetCard })));
 const WritingStudio = lazy(() => import("./components/WritingStudio").then((module) => ({ default: module.WritingStudio })));
@@ -799,7 +799,8 @@ function App() {
   }, [workspaceView]);
   const [mediaStudioPendingCount, setMediaStudioPendingCount] = useState(0);
   const [constellationPendingCount, setConstellationPendingCount] = useState(0);
-  const mediaPendingCount = mediaStudioPendingCount + constellationPendingCount;
+  const [spinePendingCount, setSpinePendingCount] = useState(0);
+  const mediaPendingCount = mediaStudioPendingCount + constellationPendingCount + spinePendingCount;
   const [mediaCatalogRevision, setMediaCatalogRevision] = useState(0);
   const [activePetId, setActivePetId] = useState("yui");
   const [petProfiles, setPetProfiles] = useState<PetProfile[]>([]);
@@ -2635,6 +2636,7 @@ function App() {
     operationId: string,
     options: { hatch?: boolean; hatchSkillLoaded?: boolean } = {},
   ): Promise<HarnessOperationState> => {
+    const runStartedAt = Date.now();
     setThreadRunning(thread.id, true);
     runModesRef.current.set(thread.id, runMode);
     operationIdsRef.current.set(thread.id, operationId);
@@ -3005,7 +3007,7 @@ function App() {
         setThreadRunning(thread.id, false);
       } else if (outcome.state === "completed") {
         settleStreamingAssistant(true);
-        commitThread(projectedThread(projected));
+        commitThread(projectedThread(finalizeConversationMessages(projected, runStartedAt)));
         finishThreadRun(thread.id, operationId, "completed");
       } else if (goalStop.current) {
         settleStreamingAssistant(true);
@@ -3015,18 +3017,20 @@ function App() {
           : goal.status === "paused"
             ? tr("目标已暂停，已有产物已保留，可继续执行。", "Goal paused; existing outputs are preserved and can be resumed.")
             : tr("目标已取消，已有产物已保留。", "Goal cancelled; existing outputs are preserved.");
-        commitThread(projectedThread([...projected, message("assistant", reason, assistantMessageIdentity(runProfile))]));
+        commitThread(projectedThread(finalizeConversationMessages([
+          ...projected, message("assistant", reason, assistantMessageIdentity(runProfile)),
+        ], runStartedAt)));
         finishThreadRun(thread.id, operationId, outcome.state);
       } else {
         settleStreamingAssistant(true);
         const reason = tr("Harness 运行未完成", "Harness run did not complete");
-        commitThread(projectedThread([
+        commitThread(projectedThread(finalizeConversationMessages([
           ...projected,
           message("assistant", reason, {
             isError: true,
             ...assistantMessageIdentity(runProfile),
           }),
-        ]));
+        ], runStartedAt)));
         finishThreadRun(thread.id, operationId, outcome.state);
       }
       return pendingApprovalsRef.current[thread.id] ? "awaiting_approval" : outcome.state;
@@ -3035,7 +3039,7 @@ function App() {
       const reason = errorText(error);
       if (reason.includes("REQUEST_CANCELLED")) {
         settleStreamingAssistant(true);
-        commitThread(projectedThread(projected));
+        commitThread(projectedThread(finalizeConversationMessages(projected, runStartedAt)));
         finishThreadRun(thread.id, operationId, "cancelled");
         return "cancelled";
       }
@@ -3050,7 +3054,7 @@ function App() {
               isError: true,
               ...assistantMessageIdentity(runProfile),
             })];
-        commitThread(projectedThread(projected));
+        commitThread(projectedThread(finalizeConversationMessages(projected, runStartedAt)));
         finishThreadRun(thread.id, operationId, "failed");
         return "failed";
       }
@@ -3061,7 +3065,7 @@ function App() {
             isError: true,
             ...assistantMessageIdentity(runProfile),
           }),
-        ], Date.now())));
+        ], runStartedAt)));
       finishThreadRun(thread.id, operationId, "failed");
       return "failed";
     } finally {
@@ -5070,10 +5074,10 @@ function App() {
         </div>
 
         <button
-          className={`media-nav-button${workspaceView === "writing" || workspaceView === "media" || workspaceView === "constellation" ? " active" : ""}`}
+          className={`media-nav-button${workspaceView === "writing" || workspaceView === "media" || workspaceView === "constellation" || workspaceView === "spine" ? " active" : ""}`}
           type="button"
           aria-label={tr("打开创作空间", "Open Creative Studio")}
-          aria-current={workspaceView === "writing" || workspaceView === "media" || workspaceView === "constellation" ? "page" : undefined}
+          aria-current={workspaceView === "writing" || workspaceView === "media" || workspaceView === "constellation" || workspaceView === "spine" ? "page" : undefined}
           onClick={() => {
             openCreativeStudio();
             setProfileMenuOpen(false);
@@ -5081,7 +5085,7 @@ function App() {
           }}
         >
           <ImagePlus size={16} />
-          <span><strong>{tr("创作空间", "Creative Studio")}</strong><small>{mediaPendingCount > 0 ? tr(`${mediaPendingCount} 个结果正在后台生成`, `${mediaPendingCount} outputs generating`) : tr("图片 · 视频 · 语音 · 写作 · 星图", "Image · Video · Speech · Writing · Constellation")}</small></span>
+          <span><strong>{tr("创作空间", "Creative Studio")}</strong><small>{mediaPendingCount > 0 ? tr(`${mediaPendingCount} 个结果正在后台生成`, `${mediaPendingCount} outputs generating`) : tr("图片 · 视频 · 语音 · 写作 · 星图 · Spine", "Image · Video · Speech · Writing · Constellation · Spine")}</small></span>
           {mediaPendingCount > 0 ? <span className="media-nav-progress" title={tr(`${mediaPendingCount} 个结果正在生成`, `${mediaPendingCount} outputs generating`)}><LoaderCircle className="spin" size={12} /><b>{mediaPendingCount}</b></span> : <Sparkles size={14} />}
         </button>
 
@@ -5263,6 +5267,7 @@ function App() {
     <>
       <DeferredWorkspace active={workspaceView === "media"}>
       <MediaStudio
+        onSpine={() => setWorkspaceView("spine")}
         active={workspaceView === "media"}
         locale={locale}
         armorMode={armorMode}
@@ -5280,6 +5285,7 @@ function App() {
       </DeferredWorkspace>
       <DeferredWorkspace active={workspaceView === "writing"}>
       <WritingStudio
+        onSpine={() => setWorkspaceView("spine")}
         active={workspaceView === "writing"}
         locale={locale}
         armorMode={armorMode}
@@ -5299,6 +5305,7 @@ function App() {
       </DeferredWorkspace>
       <DeferredWorkspace active={workspaceView === "constellation"}>
       <ConstellationStudio
+        onSpine={() => setWorkspaceView("spine")}
         active={workspaceView === "constellation"}
         threads={threads}
         onOpenConversation={activateThread}
@@ -5318,6 +5325,11 @@ function App() {
         onWriting={() => setWorkspaceView("writing")}
         onPendingCountChange={setConstellationPendingCount}
       />
+      </DeferredWorkspace>
+      <DeferredWorkspace active={workspaceView === "spine"}>
+        <SpineStudio active={workspaceView === "spine"} locale={locale} mediaCatalogRevision={mediaCatalogRevision}
+          onMedia={() => setWorkspaceView("media")} onWriting={() => setWorkspaceView("writing")} onConstellation={() => setWorkspaceView("constellation")}
+          onConfigureConnection={() => setSettingsOpen(true)} onPendingCountChange={setSpinePendingCount} />
       </DeferredWorkspace>
     </>
   );
@@ -6252,7 +6264,7 @@ function QQ2007Toolbar({
 }) {
   const items = [
     ["new-task", tr("新建任务", "New task"), onNewThread, false],
-    ["scheduled", tr("创作空间", "Studio"), onMedia, workspaceView === "writing" || workspaceView === "media" || workspaceView === "constellation"],
+    ["scheduled", tr("创作空间", "Studio"), onMedia, workspaceView === "writing" || workspaceView === "media" || workspaceView === "constellation" || workspaceView === "spine"],
     ["groups", tr("摇光残影", "Echo"), onPet, petOpen],
     ["plugins", tr("插件", "Extensions"), onExtensions, false],
     ["sites", tr("站点", "Website"), onWebsite, false],
@@ -6600,35 +6612,6 @@ function isToolActivityMessage(item: AgentMessage) {
   return item.role === "tool" || (item.role === "assistant" && item.toolCalls.length > 0);
 }
 
-function assistantCompletionState(items: AgentMessage[]) {
-  if (items.some((item) => item.status === "failed" || item.isError)) return "failed" as const;
-  const changeStatus = [...items].reverse().find((item) => item.changeSet)?.changeSet?.status;
-  if (changeStatus === "cancelled") return "cancelled" as const;
-  if (changeStatus === "interrupted") return "interrupted" as const;
-  if (changeStatus === "failed") return "failed" as const;
-  return "completed" as const;
-}
-
-function assistantCompletionLabel(items: AgentMessage[]) {
-  const state = assistantCompletionState(items);
-  if (state === "failed") return tr("任务失败", "Task failed");
-  if (state === "cancelled") return tr("任务已取消", "Task cancelled");
-  if (state === "interrupted") return tr("任务已中断", "Task interrupted");
-  return tr("任务已完成", "Task completed");
-}
-
-function assistantSummaryPreview(items: AgentMessage[]) {
-  const content = [...items]
-    .reverse()
-    .find((item) => item.role === "assistant" && !item.status && item.content.trim())
-    ?.content
-    .trim()
-    .replace(/^#+\s*/gm, "")
-    .replace(/\s+/g, " ");
-  if (!content) return tr("查看本轮完整记录", "View the complete turn");
-  return content.length > 220 ? `${content.slice(0, 220)}…` : content;
-}
-
 function MessageRow({ item, onEdit }: { item: AgentMessage; onEdit: (content: string) => void }) {
   return (
     <article className={`message user ${item.isError ? "error" : ""}`}>
@@ -6657,6 +6640,7 @@ function AssistantMessageGroup({
   streamingMessageId,
   collapsible = false,
   defaultOpen = false,
+  startedAt,
   pet,
   onReviewChanges,
   onReviewFile,
@@ -6667,6 +6651,7 @@ function AssistantMessageGroup({
   streamingMessageId?: string;
   collapsible?: boolean;
   defaultOpen?: boolean;
+  startedAt?: number;
   pet?: PetProfile;
   onReviewChanges: (changeSet: ConversationChangeSet) => void;
   onReviewFile: (changeSet: ConversationChangeSet, file: ConversationFileChange) => void;
@@ -6699,6 +6684,11 @@ function AssistantMessageGroup({
       toolActivityItems.push(item);
     }
   }
+  durationMs ??= changeSet && changeSet.completedAt >= changeSet.startedAt
+    ? changeSet.completedAt - changeSet.startedAt
+    : startedAt != null && items.length > 0
+      ? Math.max(0, items[items.length - 1].createdAt - startedAt)
+      : undefined;
   const identityModelName = identity?.modelName?.trim();
   const providerBrand = brandForMessage(identityModelName ?? "", identity?.providerBrand);
   const modelName = identityModelName || providerBrandLabel(providerBrand);
@@ -6757,15 +6747,8 @@ function AssistantMessageGroup({
           .map((item) => item.content.trim())
           .join("\n\n")}
       />
-      {durationMs != null && (
-        <div className="message-duration"><Timer size={13} />{tr("处理总时长", "Total processing time")} {formatDuration(durationMs)}</div>
-      )}
     </>
   );
-  const completionState = assistantCompletionState(items);
-  const completionIcon = completionState !== "completed"
-    ? <CircleAlert size={15} />
-    : <CheckCircle2 size={15} />;
   return (
     <article className="message assistant assistant-message-group">
       {pet ? (
@@ -6777,13 +6760,8 @@ function AssistantMessageGroup({
         {collapsible ? (
           <details className="assistant-turn-details" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
             <summary className="assistant-turn-summary" aria-label={open ? tr("收起本轮记录", "Collapse this turn") : tr("展开本轮记录", "Expand this turn")}>
-              <span className={`assistant-turn-status-icon${completionState !== "completed" ? " error" : ""}`}>{completionIcon}</span>
-              <span className="assistant-turn-summary-copy">
-                <strong>{assistantCompletionLabel(items)}</strong>
-                <small>{assistantSummaryPreview(items)}</small>
-              </span>
-              {durationMs != null && <span className="assistant-turn-duration">{formatDuration(durationMs)}</span>}
-              <ChevronDown className="assistant-turn-chevron" size={15} />
+              <span>{tr("用时", "Time")} {durationMs != null ? formatDuration(durationMs) : tr("未知", "unknown")}</span>
+              <ChevronRight className="assistant-turn-chevron" size={15} />
             </summary>
             <div className="assistant-turn-details-content">
               {messageMeta}
@@ -6794,6 +6772,7 @@ function AssistantMessageGroup({
           <>
             {messageMeta}
             {messageDetails}
+            {durationMs != null && <div className="message-duration">{tr("用时", "Time")} {formatDuration(durationMs)}</div>}
           </>
         )}
         {changeSet && changeSet.files.length > 0 && (
@@ -6862,7 +6841,7 @@ function ChangeSetSummary({
             </small>
           )}
         </span>
-        <span className="change-set-summary-action">{tr("在侧栏查看", "Review in side panel")}<ChevronRight size={14} /></span>
+        <span className="change-set-summary-action"><span>{tr("在侧栏查看", "Review in side panel")}</span><ChevronRight size={14} /></span>
       </button>
       <div className="change-set-file-list">
         {visibleFiles.map((file) => (
@@ -6889,7 +6868,7 @@ function ChangeSetSummary({
           >
             {filesExpanded
               ? tr("收起变更", "Collapse changes")
-              : tr(`再显示 ${hiddenCount} 个变更，可展开全部变更文件`, `Show ${hiddenCount} more changes, expand all files`)}
+              : tr(`再显示 ${hiddenCount} 个文件`, `Show ${hiddenCount} more files`)}
             <ChevronDown size={14} className={filesExpanded ? "active" : ""} />
           </button>
         )}
@@ -7163,6 +7142,7 @@ const MemoizedAssistantMessageGroup = memo(AssistantMessageGroup, (previous, nex
   && previous.streamingMessageId === next.streamingMessageId
   && previous.collapsible === next.collapsible
   && previous.defaultOpen === next.defaultOpen
+  && previous.startedAt === next.startedAt
   && previous.pet === next.pet
   && previous.onReviewChanges === next.onReviewChanges
   && previous.onReviewFile === next.onReviewFile
@@ -7254,6 +7234,9 @@ const ConversationMessageList = memo(({
             : undefined}
           collapsible={!streamingMessageId || !block.items.some((item) => item.id === streamingMessageId)}
           defaultOpen={!running && blockIndex + firstVisibleIndex === latestAssistantBlockIndex}
+          startedAt={blocks[blockIndex + firstVisibleIndex - 1]?.kind === "user"
+            ? (blocks[blockIndex + firstVisibleIndex - 1] as Extract<ConversationBlock, { kind: "user" }>).item.createdAt
+            : undefined}
           pet={pet}
           onReviewChanges={onReviewChanges}
           onReviewFile={onReviewFile}
