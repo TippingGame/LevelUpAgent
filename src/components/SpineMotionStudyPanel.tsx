@@ -5,12 +5,16 @@ import {
   captureSpinePose,
   acceptSpinePoseInference,
   fitSpinePose,
+  interpolateSpineTargets,
   type SpineMotionStudy,
 } from "../lib/spineMotion";
 import { prepareSpineSource } from "../lib/spineSource";
 import { createSpinePoseImageRequest, spinePoseImageNeighbors, spinePoseImageReferencesMatch, type SpinePoseImageRequest } from "../lib/spinePoseGeneration";
 import { SpinePoseAssistant } from "./SpinePoseAssistant";
 import { SPINE_LIMITS } from "../lib/spine";
+import { isDesktop } from "../lib/bridge";
+import { interpolateSpinePixels } from "../lib/spineBridge";
+import { planSpinePixelFrames, prepareSpinePixelInputs, spinePixelPlanMatches } from "../lib/spinePixelInterpolation";
 import type {
   SpineClip,
   SpineProject,
@@ -39,6 +43,10 @@ function targetValue(frame: SpinePoseFrame, partId: string, key: "rotation" | "b
   return frame.targets[partId]?.[key] ?? 0;
 }
 
+function readRifeSetting(key: string) {
+  try { return localStorage.getItem(`levelup-spine-rife-${key}`) || ""; } catch { return ""; }
+}
+
 export function SpineMotionStudyPanel({
   open,
   project,
@@ -59,6 +67,12 @@ export function SpineMotionStudyPanel({
   const [reviewFrameId, setReviewFrameId] = useState("");
   const [loadingImage, setLoadingImage] = useState(false);
   const [poseTime, setPoseTime] = useState(time);
+  const [rifeExecutable, setRifeExecutable] = useState(() => readRifeSetting("executable"));
+  const [rifeModel, setRifeModel] = useState(() => readRifeSetting("model"));
+  const [rifeCount, setRifeCount] = useState(3);
+  const [rifeGpu, setRifeGpu] = useState(0);
+  const [rifeProgress, setRifeProgress] = useState("");
+  const stopRife = useRef(false);
   const input = useRef<HTMLInputElement>(null);
   const state = useRef({ project, study, clip, onUpdate });
   state.current = { project, study, clip, onUpdate };
@@ -68,6 +82,8 @@ export function SpineMotionStudyPanel({
     generationRef.current += 1;
     setLoadingImage(false);
     setPanelError("");
+    setRifeProgress("");
+    stopRife.current = true;
     return () => { generationRef.current += 1; };
   }, [project.id, study?.id, project.parts, project.sourceImage, clip]);
   if (!open || !study) return null;
@@ -105,6 +121,7 @@ export function SpineMotionStudyPanel({
     // Capture the requested time and targets before waiting for file decoding or inference.
     const frame = captureSpinePose(clip, project.parts, poseTime, name, source);
     setLoadingImage(true);
+    setRifeProgress("");
     setPanelError("");
     try {
       const data = await load();
@@ -142,6 +159,53 @@ export function SpineMotionStudyPanel({
   };
   const neighbors = spinePoseImageNeighbors(study, poseTime);
   const canGenerateBetween = neighbors.length === 2 && !study.frames.some((frame) => Math.abs(frame.time - poseTime) < 0.0005);
+  const interpolatePixels = async () => {
+    if (busy || loadingImage) return;
+    const request = ++generationRef.current;
+    const current = () => request === generationRef.current && state.current.project.id === project.id &&
+      state.current.project.parts === project.parts && state.current.project.sourceImage === project.sourceImage &&
+      state.current.clip === clip && state.current.study?.id === study.id;
+    setLoadingImage(true); setPanelError(""); stopRife.current = false;
+    const generated: SpinePoseFrame[] = [];
+    try {
+      const plan = planSpinePixelFrames(study, poseTime, rifeCount);
+      if (!spinePixelPlanMatches(plan, study)) throw new Error(tr("参考姿态已改变，请重新选择区间", "Reference poses changed; select the interval again."));
+      try {
+        localStorage.setItem("levelup-spine-rife-executable", rifeExecutable.trim());
+        localStorage.setItem("levelup-spine-rife-model", rifeModel.trim());
+      } catch { /* Settings persistence does not block inference. */ }
+      const inputs = await prepareSpinePixelInputs(plan);
+      const [first, last] = plan.endpoints;
+      for (const at of plan.times) {
+        if (!current()) return;
+        if (stopRife.current) break;
+        if (!spinePixelPlanMatches(plan, state.current.study!))
+          throw new Error(tr("端点或区间已改变，补帧结果未写入", "The endpoints or interval changed; frames were not added."));
+        setRifeProgress(tr(`本地补帧 ${generated.length + 1} / ${plan.times.length}`, `Local interpolation ${generated.length + 1} / ${plan.times.length}`));
+        const fraction = (at - first.time) / (last.time - first.time);
+        const image = await interpolateSpinePixels({ executable: rifeExecutable.trim(), modelDirectory: rifeModel.trim(),
+          first: inputs.first, last: inputs.last, fraction, gpu: rifeGpu });
+        if (!current()) return;
+        generated.push({ ...captureSpinePose(clip, project.parts, at, `RIFE ${at.toFixed(3)}s`, "reference"),
+          image, imageWidth: inputs.width, imageHeight: inputs.height, fitStatus: "review",
+          targets: Object.fromEntries(project.parts.map(p => [p.id, interpolateSpineTargets(
+            first.targets[p.id] ?? {rotation:0,bend:0,x:0,y:0}, last.targets[p.id] ?? {rotation:0,bend:0,x:0,y:0}, fraction)])),
+          notes: `RIFE v4.6 RGB reference at ${at}s between ${first.time}s and ${last.time}s. Initial bone targets interpolate endpoint targets; not inferred from pixels. Review and fit before applying.`,
+        });
+      }
+      if (!current()) return;
+      const latest = state.current.study!;
+      if (!spinePixelPlanMatches(plan, latest))
+        throw new Error(tr("端点或区间已改变，补帧结果未写入", "The endpoints or interval changed; frames were not added."));
+      const frames = [...latest.frames, ...generated].sort((a,b) => a.time - b.time);
+      if (frames.length > SPINE_LIMITS.poseFrames || frames.reduce((n,f) => n + (f.image?.length ?? 0), 0) > SPINE_LIMITS.poseImageBytes)
+        throw new Error(tr("补帧超过工程姿态图限制，请减少帧数", "The interpolated images exceed study limits; reduce the frame count."));
+      if (generated.length) state.current.onUpdate({ ...latest, frames, updatedAt: Date.now() });
+      setRifeProgress(tr(`${stopRife.current ? "已停止；" : ""}已添加 ${generated.length} 张 RIFE 参考图，请识别或微调并审阅骨骼目标。`, `${stopRife.current ? "Stopped. " : ""}Added ${generated.length} RIFE reference images. Infer or refine and review their bone targets.`));
+    } catch (error) {
+      if (current()) { setPanelError(`${error instanceof Error ? error.message : String(error)}${generated.length ? tr("；本次批次未写入，可重新生成。", "; this batch was not added; you can retry.") : ""}`); setRifeProgress(""); }
+    } finally { if (current()) setLoadingImage(false); }
+  };
   const updateFrame = (id: string, patch: Partial<SpinePoseFrame>) =>
     updateFrames(study.frames.map((frame) => (frame.id === id ? { ...frame, ...patch } : frame)));
   const updateTarget = (
@@ -259,6 +323,22 @@ export function SpineMotionStudyPanel({
             }}
           />
         </div>
+        <details>
+          <summary>{tr("本地像素补帧（RIFE）", "Local pixel interpolation (RIFE)")}</summary>
+          <p className="spine-hint">{tr("在前后姿态之间生成 1、3 或 7 张参考图，最长边 512 像素。透明区域合成浅灰背景；原有纯色背景保留。适合小幅连续运动，生成后请识别或微调骨骼目标并审阅。", "Generate 1, 3 or 7 reference images between neighboring poses, up to 512 px. Transparent areas become light gray; existing solid backgrounds remain. Best for small continuous motions. Infer or refine bone targets and review the results.")}</p>
+          <label className="spine-label">{tr("RIFE 程序路径", "RIFE executable path")}<input aria-label={tr("RIFE 程序路径", "RIFE executable path")} value={rifeExecutable} disabled={loadingImage} onChange={e=>setRifeExecutable(e.target.value)} placeholder="C:\\Tools\\rife-ncnn-vulkan.exe" /></label>
+          <label className="spine-label">{tr("rife-v4.6 模型目录", "rife-v4.6 model directory")}<input aria-label={tr("rife-v4.6 模型目录", "rife-v4.6 model directory")} value={rifeModel} disabled={loadingImage} onChange={e=>setRifeModel(e.target.value)} placeholder="C:\\Tools\\rife-v4.6" /></label>
+          <div className="spine-motion-toolbar">
+            <label className="spine-label">{tr("补帧数量", "Intermediate frames")}<select aria-label={tr("补帧数量", "Intermediate frames")} value={rifeCount} disabled={loadingImage} onChange={e=>setRifeCount(Number(e.target.value))}>{[1,3,7].map(n=><option key={n} value={n}>{n}</option>)}</select></label>
+            <label className="spine-label">{tr("GPU 编号（-1 为 CPU）", "GPU index (-1 for CPU)")}<input type="number" min={-1} max={7} step={1} value={rifeGpu} disabled={loadingImage} onChange={e=>setRifeGpu(Math.max(-1,Math.min(7,Math.trunc(e.target.valueAsNumber || 0))))} /></label>
+          </div>
+          <div className="spine-button-row">
+            <button disabled={busy || loadingImage || !isDesktop() || neighbors.length !== 2 || !rifeExecutable.trim() || !rifeModel.trim()} onClick={()=>void interpolatePixels()}><Film size={14}/>{tr("本地生成参考帧", "Generate local reference frames")}</button>
+            {loadingImage && rifeProgress && <button onClick={()=>{stopRife.current=true;setRifeProgress(tr("当前帧完成后停止，保留本批已生成帧", "Stop after the current frame; retain completed frames in this batch."));}}>{tr("停止后续补帧", "Stop subsequent frames")}</button>}
+          </div>
+          {!isDesktop() && <p className="spine-hint">{tr("本地 RIFE 请使用桌面版", "Local RIFE requires the desktop app")}</p>}
+          {rifeProgress && <p className="spine-hint" role="status">{rifeProgress}</p>}
+        </details>
         {panelError && <p className="spine-layer-error" role="alert">{panelError}</p>}
         {!study.frames.length ? (
           <div className="spine-motion-empty">
@@ -306,8 +386,8 @@ export function SpineMotionStudyPanel({
             setPanelError("");
           }} />}
         <div className="spine-motion-footer">
-          <button disabled={busy || !hasTwoDistinctTimes} onClick={() => onApply(study, false)}><Film size={14} /> {tr("插帧为新动作", "Interpolate as new action")}</button>
-          <button className="primary" disabled={busy || !hasTwoDistinctTimes} onClick={() => onApply(study, true)}><Check size={14} /> {tr("覆盖当前动作", "Replace current action")}</button>
+          <button disabled={busy || loadingImage || !hasTwoDistinctTimes} onClick={() => onApply(study, false)}><Film size={14} /> {tr("插帧为新动作", "Interpolate as new action")}</button>
+          <button className="primary" disabled={busy || loadingImage || !hasTwoDistinctTimes} onClick={() => onApply(study, true)}><Check size={14} /> {tr("覆盖当前动作", "Replace current action")}</button>
         </div>
       </div>
     </div>

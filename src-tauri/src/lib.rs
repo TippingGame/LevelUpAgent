@@ -25,6 +25,7 @@ mod sandbox;
 mod skill;
 mod spine;
 mod spine_comfy;
+mod spine_rife;
 mod subagent;
 mod text_encoding;
 mod theme;
@@ -12119,6 +12120,7 @@ pub fn run() {
             export_writing_file,
             spine::export_spine_archive,
             spine_comfy::spine_comfy_request,
+            spine_rife::spine_rife_frame,
             export_conversation_file,
             read_conversation_file,
             open_local_directory,

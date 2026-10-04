@@ -1504,8 +1504,8 @@ export function SpineStudio({
             </div>
             <p className="spine-hint">
               {tr(
-                "预设生成骨骼曲线；可在右侧编辑关键帧，或在姿态研究中从图片识别骨骼目标。像素补帧尚未接入。",
-                "Presets generate bone curves. Edit keys in the inspector or infer targets from images in the pose study. Pixel interpolation is not connected yet.",
+                "预设生成骨骼曲线；可在右侧编辑关键帧，或在姿态研究中生成 RIFE 参考帧、识别并微调骨骼目标。",
+                "Presets generate bone curves. Edit keys in the inspector, or generate RIFE reference frames and infer or refine bone targets in the pose study.",
               )}
             </p>
           </div>

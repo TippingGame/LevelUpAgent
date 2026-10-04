@@ -22,6 +22,13 @@ export const spineComfyRequest: SpineComfyTransport = async (
   });
 };
 
+export async function interpolateSpinePixels(request: {
+  executable: string; modelDirectory: string; first: string; last: string; fraction: number; gpu: number;
+}): Promise<string> {
+  if (!isDesktop()) throw new Error("本地 RIFE 请使用桌面版 / Local RIFE requires the desktop app");
+  return invoke<string>("spine_rife_frame", { request });
+}
+
 export async function saveSpineArchive(
   bytes: Uint8Array,
   name: string,
