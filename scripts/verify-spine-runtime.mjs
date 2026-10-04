@@ -1,6 +1,6 @@
 // Optional compatibility test. The official runtime is supplied by the developer,
 // compiled in a disposable folder, and is never included in the application bundle.
-// Usage: node scripts/verify-spine-runtime.mjs <spine-runtimes/spine-ts/spine-core/src>
+// Usage: node scripts/verify-spine-runtime.mjs <spine-runtimes/spine-ts/spine-core/src> [project.json] [export-directory]
 import assert from "node:assert/strict";
 import {
   mkdtempSync,
@@ -48,7 +48,7 @@ try {
   const runtime = await import(pathToFileURL(join(output, "index.js")).href);
   const png =
     "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==";
-  const project = studio.addSpineParts(
+  let project = studio.addSpineParts(
     studio.newSpineProject("compatibility"),
     ["arm-right", "head", "leg-left", "body", "arm-left", "leg-right"].map(
       (role) => studio.createSpinePart(role, png, 1, 1, role),
@@ -74,19 +74,30 @@ try {
       ],
     },
   });
-  const atlas = new runtime.TextureAtlas(
-    studio.spineAtlasText(studio.packSpineAtlas(project.parts)),
-  );
+  if (process.argv[3]) project = studio.validateSpineProject(JSON.parse(readFileSync(resolve(process.argv[3]), "utf8")));
+  let atlasText = studio.spineAtlasText(studio.packSpineAtlas(project.parts));
+  let skeletonJson = studio.compileSpineProject(project);
+  if (process.argv[4]) {
+    const exported = resolve(process.argv[4]);
+    const actualJson = JSON.parse(readFileSync(join(exported, "skeleton.json"), "utf8"));
+    const actualAtlas = readFileSync(join(exported, "skeleton.atlas"), "utf8");
+    assert.deepEqual(actualJson, skeletonJson, "Exported skeleton matches the saved editable project");
+    assert.equal(actualAtlas, atlasText, "Exported atlas matches project packing");
+    skeletonJson = actualJson;
+    atlasText = actualAtlas;
+  }
+  const atlas = new runtime.TextureAtlas(atlasText);
   for (const page of atlas.pages)
     page.setTexture(
       new runtime.FakeTexture({ width: page.width, height: page.height }),
     );
   const data = new runtime.SkeletonJson(
     new runtime.AtlasAttachmentLoader(atlas),
-  ).readSkeletonData(studio.compileSpineProject(project));
-  assert.equal(data.bones.length, 13);
-  assert.equal(data.animations.length, 4);
-  assert.equal(data.slots.length, 6);
+  ).readSkeletonData(skeletonJson);
+  assert.equal(data.bones.length, 1 + project.parts.length * 2);
+  assert.equal(data.animations.length, project.clips.length);
+  assert.equal(data.slots.length, project.parts.length);
+  assert.deepEqual(data.slots.map((slot) => slot.name), project.parts.map((part) => part.id));
   const skeleton = new runtime.Skeleton(data);
   let maximumError = 0,
     samples = 0;

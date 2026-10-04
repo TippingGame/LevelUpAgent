@@ -11,6 +11,55 @@ import {
 } from "./spine";
 export type { SpineMotionStudy } from "./spine";
 
+export interface SpinePoseInference {
+  summary: string;
+  targets: Record<string, SpinePoseTarget>;
+  uncertain: string[];
+}
+
+/** Validate a vision model's complete target pose before it can enter the editable study. */
+export function parseSpinePoseInference(text: string, parts: SpinePart[]): SpinePoseInference {
+  const source = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  let value: unknown;
+  try { value = JSON.parse(source); } catch { throw new Error("Pose analysis did not return valid JSON."); }
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("Pose analysis must be a JSON object.");
+  const result = value as Record<string, unknown>;
+  if (typeof result.summary !== "string" || !result.summary.trim() || result.summary.length > 1500 ||
+      !result.targets || typeof result.targets !== "object" || Array.isArray(result.targets) ||
+      !Array.isArray(result.uncertain))
+    throw new Error("Pose analysis is missing its summary, targets or uncertainty list.");
+  const ids = new Set(parts.map((part) => part.id));
+  const targets = result.targets as Record<string, unknown>;
+  if (Object.keys(targets).length !== ids.size || Object.keys(targets).some((id) => !ids.has(id)))
+    throw new Error("Pose analysis must contain every current part exactly once.");
+  for (const id of ids) {
+    const target = targets[id];
+    if (!target || typeof target !== "object" || Array.isArray(target))
+      throw new Error(`Invalid pose target for ${id}.`);
+    const fields = target as Record<string, unknown>;
+    if (Object.keys(fields).length !== 4 ||
+        !["rotation", "bend"].every((key) => typeof fields[key] === "number" && Number.isFinite(fields[key]) && Math.abs(fields[key]) <= 360) ||
+        !["x", "y"].every((key) => typeof fields[key] === "number" && Number.isFinite(fields[key]) && Math.abs(fields[key]) <= 1000))
+      throw new Error(`Pose target for ${id} needs bounded rotation, bend, x and y.`);
+  }
+  if (result.uncertain.length > ids.size || result.uncertain.some((id) => typeof id !== "string" || !ids.has(id)) ||
+      new Set(result.uncertain).size !== result.uncertain.length)
+    throw new Error("Pose analysis has unknown or duplicate uncertain parts.");
+  return result as unknown as SpinePoseInference;
+}
+
+export function acceptSpinePoseInference(frame: SpinePoseFrame, inference: SpinePoseInference): SpinePoseFrame {
+  const note = `Pose analysis: ${inference.summary}${inference.uncertain.length ? ` Uncertain part IDs: ${inference.uncertain.join(", ")}.` : ""}`;
+  return {
+    ...frame,
+    targets: inference.targets,
+    fitStatus: "review",
+    fitError: undefined,
+    notes: [frame.notes, note].filter(Boolean).join("\n").slice(0, 2000),
+  };
+}
+
 const motionId = (prefix: string) =>
   `${prefix}_${crypto.randomUUID().replace(/-/g, "")}`;
 

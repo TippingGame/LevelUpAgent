@@ -56,7 +56,7 @@ try {
   const targetInputs = firstCard.locator('.spine-number input[type="number"]');
   await targetInputs.nth(0).fill("95");
   await targetInputs.nth(1).fill("12");
-  await firstCard.getByRole("button", { name: "拟合" }).click();
+  await firstCard.getByRole("button", { name: "确认目标" }).click();
   assert.match(await firstCard.locator(".spine-pose-meta").innerText(), /applied|拟合/);
 
   const posePng = Buffer.from(

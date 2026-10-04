@@ -133,6 +133,19 @@ export class SpineRenderer {
     );
     gl.drawElements(gl.TRIANGLES, triangles.length, gl.UNSIGNED_SHORT, 0);
   }
+  readPixels(width: number, height: number): Uint8ClampedArray {
+    const pixels = new Uint8Array(width * height * 4);
+    this.gl.readPixels(0, 0, width, height, this.gl.RGBA, this.gl.UNSIGNED_BYTE, pixels);
+    const topDown = new Uint8ClampedArray(pixels.length);
+    for (let y = 0; y < height; y++)
+      topDown.set(pixels.subarray((height - y - 1) * width * 4, (height - y) * width * 4), y * width * 4);
+    for (let i = 0; i < topDown.length; i += 4) {
+      const alpha = topDown[i + 3];
+      if (alpha > 0 && alpha < 255)
+        for (let c = 0; c < 3; c++) topDown[i + c] = topDown[i + c] * 255 / alpha;
+    }
+    return topDown;
+  }
   dispose() {
     const gl = this.gl;
     for (const entry of this.textures.values()) gl.deleteTexture(entry.texture);

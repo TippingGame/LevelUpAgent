@@ -158,6 +158,43 @@
   background: #e0f2fe;
   border-radius: 8px;
 }
+.spine-source,
+.spine-assistant {
+  display: grid;
+  gap: 9px;
+  margin: 16px 0;
+  padding: 12px 0;
+  border-top: 1px solid var(--spine-line);
+}
+.spine-source .spine-section-title,
+.spine-assistant .spine-section-title { margin: 0; }
+.spine-source-preview {
+  display: block;
+  width: 100%;
+  max-height: 180px;
+  object-fit: contain;
+  background: repeating-conic-gradient(#deebf4 0% 25%, #f4faff 0% 50%) 0 0 / 20px 20px;
+  border: 1px solid var(--spine-line);
+  border-radius: 6px;
+}
+.spine-source-history {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+  max-height: 170px;
+  overflow: auto;
+}
+.spine-source-history button { padding: 2px; aspect-ratio: 1; }
+.spine-source-history img { width: 100%; height: 100%; object-fit: contain; }
+.spine-assistant-messages { display: grid; gap: 7px; max-height: 230px; overflow: auto; }
+.spine-assistant-messages p { padding: 8px; background: #eaf5fc; border-radius: 5px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.spine-assistant-messages p.assistant { background: #f0f4f1; }
+.spine-assistant-messages strong { display: block; margin-bottom: 3px; }
+.spine-assistant-proposal { display: grid; gap: 7px; padding: 8px; border: 1px solid #8fc8e8; border-radius: 6px; }
+.spine-assistant-drafts { display: grid; gap: 0; max-height: 190px; overflow: auto; }
+.spine-assistant-drafts > div { display: grid; gap: 2px; padding: 7px 0; border-bottom: 1px solid var(--spine-line); overflow-wrap: anywhere; }
+.spine-assistant-drafts strong { margin: 0; font-size: 12px; }
+.spine-assistant-drafts small { font-size: 11px; line-height: 1.35; }
 .spine-studio .spine-comfy-jobs {
   display: grid;
   gap: 10px;
@@ -815,6 +852,10 @@
 .spine-motion-actions button {
   min-height: 32px;
 }
+.spine-pose-references { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0; }
+.spine-pose-references figure { margin: 0; }
+.spine-pose-references img { width: 96px; height: 96px; object-fit: contain; background: #eaf4fc; border-radius: 8px; }
+.spine-pose-references figcaption { font-size: 12px; margin-top: 4px; }
 .spine-pose-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -914,9 +955,46 @@
   flex-wrap: wrap;
   padding-top: 16px;
 }
+.spine-pose-assistant {
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid #7dd3fc;
+  border-radius: 8px;
+  background: #f0f9ff;
+}
+.spine-pose-assistant .spine-section-title { justify-content: space-between; }
+.spine-pose-assistant h3 { margin: 0; color: #075985; font-size: 13px; }
+.spine-pose-assistant > select, .spine-pose-assistant > textarea { width: 100%; margin: 8px 0; }
+.spine-pose-review-images { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.spine-pose-review-images figure { min-width: 0; margin: 0; }
+.spine-pose-review-images figcaption { color: #075985; font-size: 11px; margin-bottom: 6px; }
+.spine-pose-review-images img { width: 100%; height: 300px; object-fit: contain; background: #e8f2f8; }
+.spine-pose-review-images .spine-canvas-host { height: 300px; min-height: 300px; }
+.spine-redraw-review .spine-pose-review-images { margin-top: 14px; }
+.spine-redraw-timeline { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+.spine-redraw-timeline input { flex: 1; min-width: 0; }
+.spine-redraw-timeline span { flex-shrink: 0; color: #075985; font-size: 12px; }
+.spine-pose-comparison { margin-top: 12px; }
+.spine-pose-comparison-head { display: flex; justify-content: space-between; gap: 10px; color: #075985; font-size: 11px; }
+.spine-pose-comparison-stage { position: relative; width: min(100%, 300px); aspect-ratio: 1; margin: 8px auto; background: repeating-conic-gradient(#e3f0f7 0% 25%, #f8fcff 0% 50%) 0 0 / 16px 16px; }
+.spine-pose-comparison-stage img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.spine-pose-comparison-control { display: flex; align-items: center; gap: 12px; font-size: 11px; color: #075985; }
+.spine-pose-comparison-control input { flex: 1; min-width: 0; }
+.spine-pose-comparison .spine-hint { margin: 6px 0 0; }
+.spine-pose-meta { flex-wrap: wrap; }
+.spine-studio fieldset.spine-pose-fit { min-width: 0; border: 1px solid #bae6fd; border-radius: 8px; margin: 14px 0; padding: 10px; }
+.spine-pose-fit legend { color: #075985; font-size: 12px; }
+.spine-pose-fit-parts { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-bottom: 10px; }
+.spine-pose-fit label { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; white-space: nowrap; }
+.spine-studio .spine-pose-fit input[type="checkbox"] { flex: 0 0 14px; width: 14px; height: 14px; min-height: 0; margin: 0; padding: 0; accent-color: #0284c7; }
+.spine-pose-fit .spine-button-row { flex-wrap: wrap; align-items: center; gap: 12px; }
+.spine-pose-fit .spine-button-row > button { flex: 0 1 auto; min-width: 140px; }
+.spine-studio .spine-pose-fit select { width: auto; }
+.spine-pose-fit-result { background: #f0f9ff; border-radius: 8px; padding: 10px; font-size: 12px; }
 @media (max-width: 760px) {
   .spine-motion-toolbar,
-  .spine-pose-list {
+  .spine-pose-list,
+  .spine-pose-review-images {
     grid-template-columns: minmax(0, 1fr);
   }
   .spine-motion-dialog {

@@ -19,6 +19,7 @@ import {
 } from "../lib/spineComfyStorage";
 import { prepareSpineLayers } from "../lib/spineLayerAssets";
 import type { PreparedSpineLayers } from "../lib/spineLayers";
+import type { SpineSourceImage } from "../lib/spineSource";
 
 const initialConfig: SpineComfyConfig = {
   endpoint: "http://127.0.0.1:8188",
@@ -52,12 +53,14 @@ export function SpineComfyPanel({
   onClose,
   onReview,
   onPendingCountChange,
+  initialSource,
 }: {
   open: boolean;
   active: boolean;
   onClose: () => void;
   onReview: (layers: PreparedSpineLayers) => void;
   onPendingCountChange: (count: number) => void;
+  initialSource?: SpineSourceImage;
 }) {
   const [config, setConfig] = useState(initialConfig),
     [inspection, setInspection] =
@@ -132,6 +135,9 @@ export function SpineComfyPanel({
   useEffect(() => {
     if (open && active) close.current?.focus();
   }, [open, active]);
+  useEffect(() => {
+    if (open && initialSource) setSource({ name: initialSource.name, image: initialSource.image });
+  }, [open, initialSource]);
   const run = async (action: () => Promise<void>) => {
     if (lock.current) return;
     lock.current = true;

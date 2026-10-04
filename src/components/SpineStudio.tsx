@@ -18,6 +18,7 @@ import {
   Square,
   Trash2,
   Upload,
+  WandSparkles,
   X,
 } from "lucide-react";
 import { CreativeStudioHeader } from "./CreativeStudioHeader";
@@ -25,12 +26,16 @@ import { SpineCanvas } from "./SpineCanvas";
 import { SpineLayerImport } from "./SpineLayerImport";
 import { SpineComfyPanel } from "./SpineComfyPanel";
 import { SpineMotionStudyPanel } from "./SpineMotionStudyPanel";
+import { spinePoseImagePrompt, spinePoseImageReferencesMatch, type SpinePoseImageRequest } from "../lib/spinePoseGeneration";
+import { SpineAssistantPanel } from "./SpineAssistantPanel";
+import { SpineRedrawReview } from "./SpineRedrawReview";
 import type { PreparedSpineLayers } from "../lib/spineLayers";
 import { tr } from "../lib/i18n";
 import {
   generateMedia,
   getMediaCatalog,
   importAttachments,
+  importClipboardImages,
   listMediaAssets,
   mediaAssetUrl,
   selectImageReferences,
@@ -71,8 +76,11 @@ import {
   saveSpineProject,
   type SpineProjectSummary,
 } from "../lib/spineStorage";
-import { runSpinePartGeneration } from "../lib/spineGeneration";
+import { runSpinePartGeneration, spineImageBackgroundPrompt } from "../lib/spineGeneration";
 import { saveSpineArchive } from "../lib/spineBridge";
+import { cropSpineSourceReference, prepareSpineGeneratedPart, prepareSpineSource, removeSpineSolidBackground } from "../lib/spineSource";
+import { applySpineAssistantProposal, createSpinePlannedPart, orderSpinePlannedParts, plannedSpinePartId, validateSpinePartPlan, type SpineNewPartDraft } from "../lib/spineAssistant";
+import { spineAssistantImageFile } from "../lib/spineAssistantImages";
 import {
   applySpineStudy,
   createSpineMotionStudy,
@@ -176,6 +184,10 @@ export function SpineStudio({
     [modelKey, setModelKey] = useState("");
   const [references, setReferences] = useState<ImageAttachment[]>([]),
     [generationRole, setGenerationRole] = useState<SpinePart["role"]>("body");
+  const [sourceHistory, setSourceHistory] = useState<MediaAsset[] | null>(null),
+    [backgroundTolerance, setBackgroundTolerance] = useState(46);
+  const [redrawPrompt, setRedrawPrompt] = useState("");
+  const [redrawCandidate, setRedrawCandidate] = useState<{ base: SpineProject; part: SpinePart; opaque: boolean }>();
   const [busy, setBusy] = useState(false),
     [progress, setProgress] = useState(""),
     [error, setError] = useState(""),
@@ -191,13 +203,17 @@ export function SpineStudio({
     [motionOpen, setMotionOpen] = useState(false);
   const partsInput = useRef<HTMLInputElement>(null),
     projectInput = useRef<HTMLInputElement>(null),
-    replaceInput = useRef<HTMLInputElement>(null);
+    replaceInput = useRef<HTMLInputElement>(null),
+    sourceInput = useRef<HTMLInputElement>(null),
+    sourceReference = useRef<{ image: string; attachment: ImageAttachment } | undefined>(undefined);
   const projectRef = useRef(project),
     undo = useRef<SpineProject[]>([]),
     stop = useRef(false),
     mounted = useRef(true),
     busyRef = useRef(false);
   projectRef.current = project;
+  useEffect(() => setRedrawPrompt(""), [selected, project?.id]);
+  useEffect(() => setRedrawCandidate(undefined), [selected, project?.id, project?.parts, project?.sourceImage]);
   const model = selectStudioMediaModel(models, modelKey),
     part = project?.parts.find((p) => p.id === selected),
     clip = project?.clips.find((c) => c.id === clipId);
@@ -231,6 +247,8 @@ export function SpineStudio({
     setError("");
     setNotice("");
     setReferences([]);
+    setSourceHistory(null);
+    sourceReference.current = undefined;
   }, []);
   const persist = useCallback(async (snapshot: SpineProject) => {
     await saveSpineProject(snapshot);
@@ -438,6 +456,32 @@ export function SpineStudio({
             ),
       );
     });
+  const setSourceImage = async (url: string, name: string, autoMatte = false) => {
+    let sourceImage = await prepareSpineSource(url, name);
+    if (autoMatte && (await normalizeSpineImage(sourceImage.image)).opaque) {
+      try { sourceImage = await removeSpineSolidBackground(sourceImage, 60); }
+      catch { /* Preserve the generated source when its backdrop is not a solid screen. */ }
+    }
+    update((p) => ({ ...p, sourceImage, rigPartPlan: undefined }));
+    setSourceHistory(null);
+    sourceReference.current = undefined;
+    setNotice(tr("整图已保存到当前工程", "Source image saved in this project"));
+  };
+  const generateSource = () => run(async () => {
+    if (!model || !project) return;
+    setProgress(tr("正在生成整图…", "Generating source image…"));
+    const result = await generateMedia({
+      kind: "image", profileId: model.profileId, model: model.id, protocol: model.protocol,
+      prompt: `${project.prompt.trim() || "A stylized character or object"}. Single full subject, neutral pose, centered, entire silhouette visible. Clean 2D animation-ready art. No text, no contact sheet. ${spineImageBackgroundPrompt(model.id)}`,
+      count: 1, size: "auto", outputFormat: "png",
+      background: !model.id.includes("gpt-image-2") && !imageModelCapabilities(model.id).minimax ? "transparent" : "auto",
+      referenceAttachmentIds: [],
+    });
+    const asset = result.assets.find((a) => a.kind === "image" && a.status === "completed" && a.filePath);
+    const url = asset ? mediaAssetUrl(asset) : undefined;
+    if (!url) throw new Error(result.errors.join("\n") || tr("生图未返回图片", "Image model returned no image"));
+    await setSourceImage(url, asset?.fileName ?? "generated-source.png", true);
+  });
   const generate = async (all: boolean) =>
     run(async () => {
       if (!project || !model) return;
@@ -470,8 +514,19 @@ export function SpineStudio({
             ),
           ),
         generate: async (role) => {
-          const prompt = `Create ONE isolated 2D skeletal-animation sprite part: ${role === "other" ? "the part described below" : role}. Left/right are VIEWER sides. Character design: ${project.prompt.trim() || "a friendly stylized robot"}. ${references.length ? "Reference Image 1 defines the character identity, palette, proportions and costume. Other references provide design details; preserve consistency." : "Use a consistent clean game-art design."} Show only this detached part, front view, neutral pose; arms and legs point down. Complete all hidden/overlapping ends for rigging. Center the entire part with a small transparent margin on a transparent RGBA background. No floor, shadows, text, border, contact sheet or other body parts. Keep clean antialiased alpha. Output one PNG.`;
+          const prompt = `Create ONE isolated 2D skeletal-animation sprite part: ${role === "other" ? "the part described below" : role}. Left/right are VIEWER sides. Subject design: ${project.prompt.trim() || "match the attached source image"}. ${references.length || project.sourceImage ? "Reference Image 1 defines the subject identity, palette, proportions and materials. Preserve consistency with it." : "Use a consistent clean game-art design."} Show only this detached part, neutral pose. Complete hidden and overlapping ends for rigging. No floor, text, border, contact sheet or other parts. ${spineImageBackgroundPrompt(model.id, "single part")}`;
           const capabilities = imageModelCapabilities(model.id);
+          let effectiveReferences = references;
+          if (!effectiveReferences.length && project.sourceImage && isDesktop()) {
+            if (sourceReference.current?.image !== project.sourceImage.originalImage) {
+              const bytes = Uint8Array.from(atob(project.sourceImage.originalImage.split(",")[1]), (char) => char.charCodeAt(0));
+              const file = new File([bytes], "spine-source.png", { type: "image/png" });
+              const [attachment] = await importClipboardImages([file]);
+              if (!attachment) throw new Error(tr("整图参考未能导入", "Could not attach source image"));
+              sourceReference.current = { image: project.sourceImage.originalImage, attachment };
+            }
+            effectiveReferences = [sourceReference.current.attachment];
+          }
           const result = await generateMedia({
             kind: "image",
             profileId: model.profileId,
@@ -485,7 +540,7 @@ export function SpineStudio({
               !model.id.includes("gpt-image-2") && !capabilities.minimax
                 ? "transparent"
                 : "auto",
-            referenceAttachmentIds: references.map((r) => r.id),
+            referenceAttachmentIds: effectiveReferences.map((r) => r.id),
           });
           const asset = result.assets.find(
               (a) =>
@@ -501,7 +556,7 @@ export function SpineStudio({
                   "No completed image returned. Finished parts are retained; retry missing parts.",
                 ),
             );
-          const data = await normalizeSpineImage(url);
+          const data = await prepareSpineGeneratedPart(url);
           return {
             part: createSpinePart(
               roleName(role),
@@ -537,6 +592,108 @@ export function SpineStudio({
           ),
         );
     });
+  const generatePlannedParts = async (drafts: SpineNewPartDraft[]) => run(async () => {
+    const current = projectRef.current;
+    if (!current || !model) throw new Error(tr("请先选择生图模型", "Select an image model first"));
+    validateSpinePartPlan(current, drafts);
+    const pending = drafts.filter((draft) => !current.parts.some((part) => part.id === plannedSpinePartId(draft.key, current.rigPartPlan?.id)));
+    if (!pending.length) {
+      setNotice(tr("草案中的部件都已生成", "All planned parts are already generated"));
+      return;
+    }
+    const source = current.sourceImage!;
+    let workingProject = current;
+    if (sourceReference.current?.image !== source.image) {
+      const bytes = Uint8Array.from(atob(source.image.split(",")[1]), (char) => char.charCodeAt(0));
+      const [attachment] = await importClipboardImages([new File([bytes], "spine-source.png", { type: "image/png" })]);
+      if (!attachment) throw new Error(tr("整图参考未能导入", "Could not attach source image"));
+      sourceReference.current = { image: source.image, attachment };
+    }
+    const { completed, opaque } = await runSpinePartGeneration({
+      project: current,
+      roles: pending,
+      shouldStop: () => stop.current || !mounted.current,
+      onProgress: ({ role, index, total }) => setProgress(tr(
+        `正在生成 ${role.name} · ${index}/${total}`,
+        `Generating ${role.name} · ${index}/${total}`,
+      )),
+      generate: async (draft) => {
+        const crop = await cropSpineSourceReference(source, draft);
+        const cropBytes = Uint8Array.from(atob(crop.split(",")[1]), (char) => char.charCodeAt(0));
+        const [detail] = await importClipboardImages([new File([cropBytes], `${draft.key}-detail.png`, { type: "image/png" })]);
+        if (!detail) throw new Error(tr("局部参考未能导入", "Could not attach detail reference"));
+        const prompt = `Create exactly ONE isolated sprite layer for an editable 2D skeletal animation. Subject: ${current.prompt.trim() || current.name}. Layer name: ${draft.name}. Layer description: ${draft.description}. Reference Image 1 is the complete source subject and defines identity, materials, palette and style. Reference Image 2 is the target region cropped from that source. Target bounds in the full source are left ${Math.round(draft.left * 100)}%, top ${Math.round(draft.top * 100)}%, right ${Math.round(draft.right * 100)}%, bottom ${Math.round(draft.bottom * 100)}%. Preserve the source design and neutral setup pose. Draw only this layer, with occluded attachment ends completed plausibly for rigging. Do not include adjacent layers, the whole subject, a contact sheet, text or a floor. ${spineImageBackgroundPrompt(model.id, "single part")}`;
+        const result = await generateMedia({
+          kind: "image", profileId: model.profileId, model: model.id, protocol: model.protocol,
+          prompt, count: 1, size: "auto", outputFormat: "png",
+          background: !model.id.includes("gpt-image-2") && !imageModelCapabilities(model.id).minimax ? "transparent" : "auto",
+          referenceAttachmentIds: [sourceReference.current!.attachment.id, detail.id, ...references.map((item) => item.id)],
+        });
+        const asset = result.assets.find((item) => item.kind === "image" && item.status === "completed" && item.filePath);
+        const url = asset ? mediaAssetUrl(asset) : undefined;
+        if (!url) throw new Error(result.errors.join("\n") || result.assets.find((item) => item.error)?.error || `No image returned for ${draft.name}.`);
+        const data = await prepareSpineGeneratedPart(url);
+        return { part: createSpinePlannedPart(workingProject, draft, data.image, data.width, data.height), opaque: data.opaque };
+      },
+      checkpoint: async (incoming) => {
+        workingProject = validateSpineProject({
+          ...workingProject, parts: orderSpinePlannedParts([...workingProject.parts, incoming], drafts, current.rigPartPlan?.id), updatedAt: Date.now(),
+        });
+        if (!mounted.current || projectRef.current?.id !== current.id) {
+          await saveSpineProject(workingProject);
+          return;
+        }
+        update((project) => ({ ...project, parts: orderSpinePlannedParts([...project.parts, incoming], drafts, current.rigPartPlan?.id) }));
+        setSelected(incoming.id);
+        setSetup(true);
+        setPlaying(false);
+        if (projectRef.current) await persist(projectRef.current);
+      },
+    });
+    if (mounted.current) setNotice(tr(
+      `已生成 ${completed} 个部件。${opaque ? "部分背景未能自动抠除，请检查贴图。" : ""}可继续在会话中调整骨骼和动作。`,
+      `Generated ${completed} parts. ${opaque ? "Some backgrounds need manual cleanup. " : ""}Continue refining bones and motion in chat.`,
+    ));
+  });
+  const redrawPart = () => run(async () => {
+    const current = projectRef.current;
+    const target = current?.parts.find((item) => item.id === selected);
+    if (!current?.sourceImage || !target || !model || !redrawPrompt.trim()) return;
+    const draft = current.rigPartPlan?.drafts.find((item) => plannedSpinePartId(item.key, current.rigPartPlan?.id) === target.id);
+    const source = current.sourceImage;
+    const images = [source.image, ...(draft ? [await cropSpineSourceReference(source, draft)] : []), target.image];
+    const attachments = await importClipboardImages(images.map((image, index) => {
+      const bytes = Uint8Array.from(atob(image.split(",")[1]), (char) => char.charCodeAt(0));
+      return new File([bytes], `redraw-reference-${index + 1}.png`, { type: "image/png" });
+    }));
+    if (attachments.length !== images.length) throw new Error(tr("重绘参考图未能附加", "Could not attach redraw references"));
+    setProgress(tr(`正在重绘 ${target.name}`, `Redrawing ${target.name}`));
+    const result = await generateMedia({
+      kind: "image", profileId: model.profileId, model: model.id, protocol: model.protocol,
+      prompt: `Create exactly ONE isolated replacement sprite layer for an editable 2D skeletal animation. Layer: ${target.name}. Reference Image 1 is the complete source and fixes identity, color, style and setup pose.${draft ? ` Reference Image 2 is its target region. Original layer description: ${draft.description}.` : ""} Reference Image ${images.length} is the CURRENT isolated texture to edit. Preserve its unaffected details, orientation and silhouette proportions; correct only the requested defects, without adding adjacent layers. The following correction takes priority over the original layer description: ${redrawPrompt.trim()}. Keep only the requested detached layer; complete hidden attachment ends. Preserve the source's scale proportions and orientation; no other body parts, text, floor or contact sheet. ${spineImageBackgroundPrompt(model.id, "single part")}`,
+      count: 1, size: "auto", outputFormat: "png",
+      background: !model.id.includes("gpt-image-2") && !imageModelCapabilities(model.id).minimax ? "transparent" : "auto",
+      referenceAttachmentIds: attachments.map((item) => item.id),
+    });
+    const asset = result.assets.find((item) => item.kind === "image" && item.status === "completed" && item.filePath);
+    const url = asset ? mediaAssetUrl(asset) : undefined;
+    if (!url) throw new Error(result.errors.join("\n") || result.assets.find((item) => item.error)?.error || tr("模型未返回重绘贴图", "No replacement texture returned"));
+    const data = await prepareSpineGeneratedPart(url);
+    if (!mounted.current || projectRef.current?.id !== current.id || projectRef.current.parts !== current.parts || projectRef.current.sourceImage !== current.sourceImage) return;
+    setPlaying(false);
+    setRedrawCandidate({ base: current, part: { ...target, image: data.image, imageWidth: data.width, imageHeight: data.height }, opaque: data.opaque });
+  });
+  const applyRedraw = () => run(async () => {
+    const candidate = redrawCandidate, current = projectRef.current;
+    if (!candidate || !current || current.id !== candidate.base.id || current.parts !== candidate.base.parts || current.sourceImage !== candidate.base.sourceImage) {
+      setRedrawCandidate(undefined);
+      throw new Error(tr("工程已改变，请重新生成重绘结果", "The project changed; generate a new replacement"));
+    }
+    update((project) => ({ ...project, parts: project.parts.map((item) => item.id === candidate.part.id ? candidate.part : item) }));
+    setRedrawCandidate(undefined);
+    if (projectRef.current) await persist(projectRef.current);
+    setNotice(tr(`已替换 ${candidate.part.name} 的贴图，骨骼和动作保持；可撤销。`, `Replaced ${candidate.part.name}'s texture, preserving rig and motion. Undo is available.`));
+  });
   const generateMotion = (preset: "idle" | "wave" | "walk") => {
     if (!project?.parts.length || project.clips.length >= SPINE_LIMITS.clips)
       return;
@@ -573,15 +730,31 @@ export function SpineStudio({
       ),
     }));
   };
-  const generatePoseImage = async () => {
+  const generatePoseImage = async (request: SpinePoseImageRequest) => {
     if (!model) throw new Error(tr("请先配置生图模型", "Configure an image model first."));
+    const current = projectRef.current;
+    const study = current?.motionStudies?.find((item) => item.id === request.studyId);
+    if (!current || !study || !spinePoseImageReferencesMatch(request, study))
+      throw new Error(tr("姿态研究已改变，请重新生成", "The pose study changed; generate again."));
     const capabilities = imageModelCapabilities(model.id);
+    const images = [
+      ...(current.sourceImage ? [{image: current.sourceImage.image, name: "spine-source.png"}] : []),
+      ...request.neighbors.map((frame) => ({image: frame.image!, name: `spine-pose-${frame.time < request.time ? "previous" : "next"}-${frame.time}s.png`})),
+    ];
+    const attached = await importClipboardImages(images.map(spineAssistantImageFile));
+    if (attached.length !== images.length) throw new Error(tr("姿态参考图未能完整附加", "Could not attach every pose reference"));
+    const latest = projectRef.current;
+    const latestStudy = latest?.motionStudies?.find((item) => item.id === request.studyId);
+    if (!mounted.current || latest?.id !== current.id || latest.parts !== current.parts || latest.sourceImage !== current.sourceImage ||
+      latest.clips !== current.clips || !latestStudy || !spinePoseImageReferencesMatch(request, latestStudy))
+      throw new Error(tr("参考上下文已改变，请重新生成", "The reference context changed; generate again."));
+    const effectiveReferences = [...attached, ...references];
     const result = await generateMedia({
       kind: "image",
       profileId: model.profileId,
       model: model.id,
       protocol: model.protocol,
-      prompt: `Create one clean 2D character key pose for skeletal animation. Character: ${project?.prompt.trim() || "a friendly stylized robot"}. Show the full character in a clear readable action pose, preserve the identity and palette from the reference images, transparent or simple plain background, no text, no contact sheet. This is a pose reference, not a final texture.`,
+      prompt: `${spinePoseImagePrompt(current, request)} ${spineImageBackgroundPrompt(model.id)}`,
       count: 1,
       size: "auto",
       outputFormat: "png",
@@ -589,17 +762,17 @@ export function SpineStudio({
         !model.id.includes("gpt-image-2") && !capabilities.minimax
           ? "transparent"
           : "auto",
-      referenceAttachmentIds: references.map((r) => r.id),
+      referenceAttachmentIds: effectiveReferences.map((r) => r.id),
     });
     const asset = result.assets.find((item) => item.kind === "image" && item.status === "completed" && item.filePath);
     const url = asset ? mediaAssetUrl(asset) : undefined;
     if (!url) throw new Error(result.errors.join("\n") || tr("生图模型没有返回姿态图", "The image model returned no pose image."));
-    return normalizeSpineImage(url);
+    return prepareSpineSource(url, `pose-${request.time}s.png`);
   };
-  const runGeneratePoseImage = async () => {
+  const runGeneratePoseImage = async (request: SpinePoseImageRequest) => {
     let generated: Awaited<ReturnType<typeof generatePoseImage>> | undefined;
     await run(async () => {
-      generated = await generatePoseImage();
+      generated = await generatePoseImage(request);
     });
     if (!generated)
       throw new Error(tr("姿态图生成失败", "Pose image generation failed."));
@@ -739,6 +912,22 @@ export function SpineStudio({
         }
       />
       <input
+        ref={sourceInput}
+        type="file"
+        accept="image/png,image/jpeg,image/webp"
+        hidden
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          event.target.value = "";
+          if (file) void run(async () => {
+            if (file.size > 16 * 1024 * 1024) throw new Error("Source image exceeds 16 MiB.");
+            const url = URL.createObjectURL(file);
+            try { await setSourceImage(url, file.name); }
+            finally { URL.revokeObjectURL(url); }
+          });
+        }}
+      />
+      <input
         ref={partsInput}
         type="file"
         accept="image/png,image/jpeg,image/webp"
@@ -843,6 +1032,23 @@ export function SpineStudio({
                     ? tr("正在读取工程…", "Loading projects…")
                     : tr("正在保存…", "Saving…")}
             </div>
+            <section className="spine-source">
+              <div className="spine-section-title"><ImagePlus size={16} /><h2>{tr("整图素材", "Source image")}</h2></div>
+              {project?.sourceImage && <img className="spine-source-preview" src={project.sourceImage.image} alt={project.sourceImage.name} />}
+              <div className="spine-button-row">
+                <button onClick={() => sourceInput.current?.click()}><Upload size={14} />{tr("上传整图", "Upload image")}</button>
+                <button disabled={!model} onClick={() => void generateSource()}><Sparkles size={14} />{tr("生成整图", "Generate image")}</button>
+                <button disabled={!isDesktop()} onClick={() => void run(async () => setSourceHistory((await listMediaAssets("image", 24)).assets.filter((asset) => asset.status === "completed" && asset.filePath)))}><Eye size={14} />{tr("生图历史", "History")}</button>
+              </div>
+              {sourceHistory && <div className="spine-source-history">{sourceHistory.map((asset) => <button key={asset.id} title={asset.prompt} onClick={() => void run(async () => { const url = mediaAssetUrl(asset); if (url) await setSourceImage(url, asset.fileName ?? asset.id); })}><img src={mediaAssetUrl(asset)} alt={asset.prompt} /></button>)}</div>}
+              {project?.sourceImage && <>
+                <label className="spine-label">{tr("背景容差", "Background tolerance")} {backgroundTolerance}<input type="range" min={10} max={100} value={backgroundTolerance} onChange={(event) => setBackgroundTolerance(Number(event.target.value))} /></label>
+                <div className="spine-button-row">
+                  <button onClick={() => void run(async () => { const next = await removeSpineSolidBackground(project.sourceImage!, backgroundTolerance); update((p) => ({ ...p, sourceImage: next })); })}><WandSparkles size={14} />{tr("去纯色背景", "Remove solid background")}</button>
+                  <button onClick={() => update((p) => ({ ...p, sourceImage: { ...p.sourceImage!, image: p.sourceImage!.originalImage } }))}><RotateCcw size={14} />{tr("还原", "Restore")}</button>
+                </div>
+              </>}
+            </section>
             <button
               className="spine-wide"
               onClick={() => partsInput.current?.click()}
@@ -903,14 +1109,14 @@ export function SpineStudio({
                 {tr("用生图工作流生成部件", "Generate parts with image models")}
               </summary>
               <label className="spine-label">
-                {tr("角色描述", "Character description")}
+                {tr("角色或物体描述", "Character or object description")}
                 <textarea
                   maxLength={10000}
                   rows={3}
                   value={project?.prompt ?? ""}
                   placeholder={tr(
-                    "角色外观、画风、配色、服装…",
-                    "Appearance, style, palette, outfit…",
+                    "角色或物体的外观、画风、配色、材质…",
+                    "Character or object appearance, style, palette, materials…",
                   )}
                   onChange={(e) =>
                     update((p) => ({ ...p, prompt: e.target.value }))
@@ -1007,6 +1213,19 @@ export function SpineStudio({
               </p>
             </details>
           </fieldset>
+          {project && <SpineAssistantPanel project={project} clip={clip} time={time} onUpdate={update}
+            canGenerate={!!model && !!project.sourceImage && !busy}
+            onGenerate={generatePlannedParts}
+            onApply={(proposal) => {
+            const current = projectRef.current;
+            if (!current) return;
+            const next = applySpineAssistantProposal(current, proposal);
+            update(() => next);
+            const proposedClip = next.clips.find((item) => item.name === proposal.clips?.[0]?.name);
+            if (proposedClip) { setClipId(proposedClip.id); setTime(0); }
+            setSetup(false);
+            setPlaying(false);
+          }} />}
         </aside>
         <main className="spine-stage">
           <div className="spine-stage-toolbar">
@@ -1285,8 +1504,8 @@ export function SpineStudio({
             </div>
             <p className="spine-hint">
               {tr(
-                "预设生成骨骼曲线；在右侧编辑当前时间的关键帧。像素补帧和 AI 姿态拟合尚未接入。",
-                "Presets generate bone curves. Edit keys at the current time in the inspector. Pixel interpolation and AI pose fitting are not connected yet.",
+                "预设生成骨骼曲线；可在右侧编辑关键帧，或在姿态研究中从图片识别骨骼目标。像素补帧尚未接入。",
+                "Presets generate bone curves. Edit keys in the inspector or infer targets from images in the pose study. Pixel interpolation is not connected yet.",
               )}
             </p>
           </div>
@@ -1576,6 +1795,13 @@ export function SpineStudio({
                 )
               )}
               <h3>{tr("贴图与绘制顺序", "Texture & draw order")}</h3>
+              <label className="spine-label">{tr("单件重绘要求", "Part redraw instructions")}
+                <textarea aria-label={tr("单件重绘要求", "Part redraw instructions")} value={redrawPrompt} maxLength={2000} onChange={(event) => setRedrawPrompt(event.target.value)}
+                  placeholder={tr("例如：身体只保留无袖衣身与裙摆，删除两侧袖子", "For example: keep only the sleeveless torso and skirt; remove both sleeves")} />
+              </label>
+              <button className="spine-wide" disabled={!model || !project?.sourceImage || !redrawPrompt.trim()} onClick={() => void redrawPart()}>
+                <Sparkles size={14} />{tr("重绘当前部件", "Redraw selected part")}
+              </button>
               <button
                 className="spine-wide"
                 onClick={() => replaceInput.current?.click()}
@@ -1583,6 +1809,16 @@ export function SpineStudio({
                 <ImagePlus size={14} />
                 {tr("替换贴图", "Replace texture")}
               </button>
+              <button className="spine-wide" onClick={() => void run(async () => {
+                const cutout = await removeSpineSolidBackground({
+                  name: part.name, image: part.image, originalImage: part.image,
+                  width: part.imageWidth, height: part.imageHeight,
+                }, backgroundTolerance);
+                const data = await normalizeSpineImage(cutout.image);
+                update((current) => ({ ...current, parts: current.parts.map((item) => item.id === part.id
+                  ? { ...item, image: data.image, imageWidth: data.width, imageHeight: data.height } : item) }));
+                setNotice(tr("已去除纯色背景；可用撤销恢复原贴图", "Solid background removed; Undo restores the previous texture"));
+              })}><WandSparkles size={14} />{tr("去纯色背景", "Remove solid background")}</button>
               <div className="spine-button-row">
                 <button
                   disabled={project?.parts[0].id === part.id}
@@ -1631,6 +1867,7 @@ export function SpineStudio({
       <SpineComfyPanel
         open={comfyOpen}
         active={active}
+        initialSource={project?.sourceImage}
         onClose={() => setComfyOpen(false)}
         onReview={(initial) => setLayerImport({ initial })}
         onPendingCountChange={setComfyPending}
@@ -1704,6 +1941,8 @@ export function SpineStudio({
           )}
         </div>
       )}
+      {redrawCandidate && project && <SpineRedrawReview parts={project.parts} replacement={redrawCandidate.part} clip={clip}
+        opaque={redrawCandidate.opaque} onApply={() => void applyRedraw()} onClose={() => setRedrawCandidate(undefined)} />}
       {history && (
         <div className="spine-modal-backdrop" onClick={() => setHistory(null)}>
           <div

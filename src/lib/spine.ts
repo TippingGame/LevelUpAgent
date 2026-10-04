@@ -71,6 +71,22 @@ export interface SpineMotionStudy {
   createdAt: number;
   updatedAt: number;
 }
+export interface SpineNewPartDraft {
+  key: string;
+  name: string;
+  description: string;
+  role: SpinePart["role"];
+  parent: string | null;
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+  pivotX: number;
+  pivotY: number;
+  flexibility: number;
+  /** Back-to-front layer rank, independent of parent-first generation order. */
+  drawOrder?: number;
+}
 export interface SpineProject {
   format: "levelup-spine";
   version: 1;
@@ -80,6 +96,25 @@ export interface SpineProject {
   parts: SpinePart[];
   clips: SpineClip[];
   prompt: string;
+  sourceImage?: {
+    id?: string;
+    name: string;
+    image: string;
+    originalImage: string;
+    width: number;
+    height: number;
+  };
+  rigPartPlan?: {
+    id?: string;
+    sourceId: string;
+    drafts: SpineNewPartDraft[];
+  };
+  rigConversation?: Array<{
+    id: string;
+    role: "user" | "assistant";
+    content: string;
+    createdAt: number;
+  }>;
   motionStudies?: SpineMotionStudy[];
   layerImport?: {
     sourceName: string;
@@ -108,6 +143,37 @@ export const SPINE_ROLES = [
   "leg-right",
   "other",
 ] as const;
+export const plannedSpinePartId = (key: string, planId?: string) => planId ? `${planId}_${key}` : `plan_${key}`;
+export function validateSpinePartPlan(project: SpineProject, drafts: unknown, planId = project.rigPartPlan?.id): SpineNewPartDraft[] {
+  if (!project.sourceImage) throw new Error("A source image is required to plan new parts.");
+  if (!Array.isArray(drafts) || !drafts.length || drafts.length > SPINE_LIMITS.parts)
+    throw new Error("Part plan must contain 1–24 parts.");
+  const existing = new Set(project.parts.map((part) => part.id));
+  const keys = new Set<string>();
+  const unit = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+  for (const value of drafts) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid planned part.");
+    const part = value as Record<string, unknown>;
+    const allowed = new Set(["key", "name", "description", "role", "parent", "left", "top", "right", "bottom", "pivotX", "pivotY", "flexibility", "drawOrder"]);
+    if (Object.keys(part).some((field) => !allowed.has(field)) ||
+      typeof part.key !== "string" || !/^[a-z][a-z0-9_-]{0,39}$/.test(part.key) || keys.has(part.key) ||
+      typeof part.name !== "string" || !part.name.trim() || part.name.length > 160 ||
+      typeof part.description !== "string" || !part.description.trim() || part.description.length > 600 ||
+      !(SPINE_ROLES as readonly unknown[]).includes(part.role) ||
+      (part.parent !== null && (typeof part.parent !== "string" ||
+        (!existing.has(part.parent) && !keys.has(part.parent)))) ||
+      !unit(part.left) || !unit(part.top) || !unit(part.right) || !unit(part.bottom) ||
+      Number(part.right) - Number(part.left) < 0.005 || Number(part.bottom) - Number(part.top) < 0.005 ||
+      !unit(part.pivotX) || !unit(part.pivotY) || !unit(part.flexibility) ||
+      (part.drawOrder !== undefined && (typeof part.drawOrder !== "number" || !Number.isInteger(part.drawOrder) || part.drawOrder < 0 || part.drawOrder >= SPINE_LIMITS.parts)))
+      throw new Error(`Invalid planned part ${String(part.key ?? "")}: bounds, parent or fields.`);
+    keys.add(part.key);
+  }
+  const missing = drafts.filter((part: SpineNewPartDraft) => !existing.has(plannedSpinePartId(part.key, planId))).length;
+  if (project.parts.length + missing > SPINE_LIMITS.parts)
+    throw new Error("Part plan exceeds the 24-part project limit.");
+  return drafts as SpineNewPartDraft[];
+}
 export const ZERO_POSE: SpineKey = {
   time: 0,
   rotation: 0,
@@ -236,6 +302,27 @@ export function validateSpineProject(value: unknown): SpineProject {
     value.prompt.length > 10000
   )
     return fail("metadata");
+  if (value.sourceImage !== undefined) {
+    const source = value.sourceImage;
+    if (!obj(source) || !str(source.name) ||
+      (source.id !== undefined && !safeId(source.id)) ||
+      !num(source.width, 1, 2048) || !Number.isInteger(source.width) ||
+      !num(source.height, 1, 2048) || !Number.isInteger(source.height) ||
+      source.width * source.height > 32 * 1024 * 1024 ||
+      ![source.image, source.originalImage].every((image) =>
+        typeof image === "string" && image.length <= 12 * 1024 * 1024 &&
+        /^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/.test(image)))
+      return fail("source image");
+  }
+  if (value.rigConversation !== undefined) {
+    if (!Array.isArray(value.rigConversation) || value.rigConversation.length > 80 ||
+      value.rigConversation.some((message) =>
+        !obj(message) || !safeId(message.id) ||
+        !["user", "assistant"].includes(message.role as string) ||
+        typeof message.content !== "string" || message.content.length > 12000 ||
+        !num(message.createdAt, 0, Number.MAX_SAFE_INTEGER)))
+      return fail("rig conversation");
+  }
   if (
     !Array.isArray(value.parts) ||
     value.parts.length > SPINE_LIMITS.parts ||
@@ -243,9 +330,23 @@ export function validateSpineProject(value: unknown): SpineProject {
     value.clips.length > SPINE_LIMITS.clips
   )
     return fail("part/clip limit");
+  if (value.rigPartPlan !== undefined) {
+    const plan = value.rigPartPlan;
+    if (!obj(plan) || Object.keys(plan).some((key) => !["id", "sourceId", "drafts"].includes(key)) ||
+      (plan.id !== undefined && (!safeId(plan.id) || plan.id.length > 100)) ||
+      !safeId(plan.sourceId) || !value.sourceImage ||
+      (value.sourceImage as NonNullable<SpineProject["sourceImage"]>).id !== plan.sourceId)
+      return fail("rig part plan source");
+    try { validateSpinePartPlan(value as unknown as SpineProject, plan.drafts); }
+    catch { return fail("rig part plan"); }
+  }
   const ids = new Set<string>(),
     boneNames = new Set(["root"]);
   let bytes = 0;
+  if (value.sourceImage) {
+    const source = value.sourceImage as NonNullable<SpineProject["sourceImage"]>;
+    bytes += source.image.length + source.originalImage.length;
+  }
   if (value.layerImport !== undefined) {
     const source = value.layerImport;
     if (

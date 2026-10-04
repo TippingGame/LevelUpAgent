@@ -91,6 +91,13 @@ export async function readSpineImageFile(file: File) {
 }
 export async function verifySpineProjectImages(project: SpineProject) {
   validateSpineProject(project);
+  if (project.sourceImage) {
+    for (const source of [project.sourceImage.image, project.sourceImage.originalImage]) {
+      const image = await loadSpineImage(source);
+      if (image.naturalWidth !== project.sourceImage.width || image.naturalHeight !== project.sourceImage.height)
+        throw new Error("Source image dimensions do not match project metadata.");
+    }
+  }
   for (const part of project.parts) {
     const image = await loadSpineImage(part.image);
     if (
@@ -141,6 +148,11 @@ export async function exportSpineArchive(project: SpineProject) {
       ),
     },
   ];
+  if (project.sourceImage) {
+    files.push({ name: "sources/source.png", data: pngBytes(project.sourceImage.originalImage) });
+    if (project.sourceImage.image !== project.sourceImage.originalImage)
+      files.push({ name: "sources/source-cutout.png", data: pngBytes(project.sourceImage.image) });
+  }
   for (const part of project.parts)
     files.push({ name: `images/${part.id}.png`, data: pngBytes(part.image) });
   if (project.layerImport && project.parts.some((p) => p.layerSource)) {

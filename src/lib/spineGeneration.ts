@@ -1,18 +1,24 @@
 import { SPINE_LIMITS, type SpinePart, type SpineProject } from "./spine";
 
-export interface SpineGenerationProgress {
-  role: SpinePart["role"];
+export function spineImageBackgroundPrompt(modelId: string, subject = "complete subject") {
+  return /(?:^|\/)gpt-image-2(?:$|[.-])/i.test(modelId.trim())
+    ? `Center the ${subject} with a small margin on a flat, uniform pure green (#00FF00) background. Keep the green uninterrupted around its silhouette, with no shadows, gradient, texture or extra marks. The green will be removed after generation. Output one PNG.`
+    : `Center the ${subject} with a small margin on a genuinely transparent RGBA background. Keep clean antialiased alpha. Output one PNG.`;
+}
+
+export interface SpineGenerationProgress<T = SpinePart["role"]> {
+  role: T;
   index: number;
   total: number;
 }
 /** One provider request at a time; checkpoint each completed part before proceeding. */
-export async function runSpinePartGeneration(options: {
+export async function runSpinePartGeneration<T = SpinePart["role"]>(options: {
   project: SpineProject;
-  roles: SpinePart["role"][];
+  roles: T[];
   shouldStop: () => boolean;
-  onProgress: (progress: SpineGenerationProgress) => void;
+  onProgress: (progress: SpineGenerationProgress<T>) => void;
   generate: (
-    role: SpinePart["role"],
+    role: T,
   ) => Promise<{ part: SpinePart; opaque: boolean }>;
   checkpoint: (part: SpinePart) => Promise<void>;
 }) {
