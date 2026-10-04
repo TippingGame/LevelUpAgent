@@ -6877,7 +6877,7 @@ function ChangeSetSummary({
             <span className="change-set-file-path" title={file.path}>{file.path}</span>
             <small className="change-set-file-counts">
               {(file.additions != null || file.deletions != null) && (
-                <><span className="positive">+{file.additions ?? 0}</span><span className="negative">-{file.deletions ?? 0}</span></>
+                <><span className="line-additions">+{file.additions ?? 0}</span><span className="line-deletions">-{file.deletions ?? 0}</span></>
               )}
             </small>
           </button>
@@ -8061,7 +8061,7 @@ function ChangeInspectorPanel({
                     <span className="change-review-path" title={file.path}>{file.path}</span>
                     <small className="change-review-counts">
                       {(file.additions != null || file.deletions != null) && (
-                        <><span className="positive">+{file.additions ?? 0}</span><span className="negative">-{file.deletions ?? 0}</span></>
+                        <><span className="line-additions">+{file.additions ?? 0}</span><span className="line-deletions">-{file.deletions ?? 0}</span></>
                       )}
                     </small>
                   </button>
