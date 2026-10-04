@@ -6612,6 +6612,18 @@ function isToolActivityMessage(item: AgentMessage) {
   return item.role === "tool" || (item.role === "assistant" && item.toolCalls.length > 0);
 }
 
+function assistantSummaryPreview(items: AgentMessage[]) {
+  const content = [...items]
+    .reverse()
+    .find((item) => item.role === "assistant" && !item.status && item.content.trim())
+    ?.content
+    .trim()
+    .replace(/^#+\s*/gm, "")
+    .replace(/\s+/g, " ");
+  if (!content) return "";
+  return content.length > 220 ? `${content.slice(0, 220)}…` : content;
+}
+
 function MessageRow({ item, onEdit }: { item: AgentMessage; onEdit: (content: string) => void }) {
   return (
     <article className={`message user ${item.isError ? "error" : ""}`}>
@@ -6692,6 +6704,7 @@ function AssistantMessageGroup({
   const identityModelName = identity?.modelName?.trim();
   const providerBrand = brandForMessage(identityModelName ?? "", identity?.providerBrand);
   const modelName = identityModelName || providerBrandLabel(providerBrand);
+  const answerPreview = assistantSummaryPreview(items);
   const renderedSegments = items.map((item, index) => {
     if (!isToolActivityMessage(item)) {
       return (
@@ -6760,7 +6773,8 @@ function AssistantMessageGroup({
         {collapsible ? (
           <details className="assistant-turn-details" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
             <summary className="assistant-turn-summary" aria-label={open ? tr("收起本轮记录", "Collapse this turn") : tr("展开本轮记录", "Expand this turn")}>
-              <span>{tr("用时", "Time")} {durationMs != null ? formatDuration(durationMs) : tr("未知", "unknown")}</span>
+              <span className="assistant-turn-duration">{tr("用时", "Time")} {durationMs != null ? formatDuration(durationMs) : tr("未知", "unknown")}</span>
+              {answerPreview && <span className="assistant-turn-preview" title={answerPreview}>· {answerPreview}</span>}
               <ChevronRight className="assistant-turn-chevron" size={15} />
             </summary>
             <div className="assistant-turn-details-content">
@@ -6814,6 +6828,12 @@ function ChangeSetSummary({
     ? changeSet.files
     : changeSet.files.slice(0, canToggle ? 2 : 3);
   const hiddenCount = filesExpanded ? 0 : Math.max(0, changeSet.files.length - visibleFiles.length);
+  const fileCountsLabel = [
+    counts.added ? tr(`新增 ${counts.added}`, `${counts.added} added`) : "",
+    counts.modified ? tr(`修改 ${counts.modified}`, `${counts.modified} modified`) : "",
+    counts.deleted ? tr(`删除 ${counts.deleted}`, `${counts.deleted} deleted`) : "",
+    counts.renamed ? tr(`重命名 ${counts.renamed}`, `${counts.renamed} renamed`) : "",
+  ].filter(Boolean).join(" · ") || tr("未修改文件", "No files changed");
   const statusLabel = changeSet.status === "completed"
     ? tr("本轮变更", "Turn changes")
     : changeSet.status === "failed"
@@ -6827,14 +6847,16 @@ function ChangeSetSummary({
         <span className="change-set-summary-icon"><FileCode2 size={16} /></span>
         <span>
           <strong>{statusLabel}</strong>
-          <small>{changeSet.files.length === 0
-            ? tr("未修改文件", "No files changed")
-            : [
-                counts.added ? tr(`新增 ${counts.added}`, `${counts.added} added`) : "",
-                counts.modified ? tr(`修改 ${counts.modified}`, `${counts.modified} modified`) : "",
-                counts.deleted ? tr(`删除 ${counts.deleted}`, `${counts.deleted} deleted`) : "",
-                counts.renamed ? tr(`重命名 ${counts.renamed}`, `${counts.renamed} renamed`) : "",
-              ].filter(Boolean).join(" · ")}{(lineCounts.additions || lineCounts.deletions) ? ` · ${tr(`+${lineCounts.additions} -${lineCounts.deletions}`, `+${lineCounts.additions} -${lineCounts.deletions}`)}` : ""}</small>
+          <small className="change-set-summary-stats">
+            <span className="change-set-summary-file-counts">{fileCountsLabel}</span>
+            {(lineCounts.additions || lineCounts.deletions) ? (
+              <span className="change-set-summary-line-counts">
+                <span aria-hidden="true">·</span>
+                <span className="line-additions">+{lineCounts.additions}</span>
+                <span className="line-deletions">-{lineCounts.deletions}</span>
+              </span>
+            ) : null}
+          </small>
           {changeSet.snapshotTruncated && (
             <small className="change-set-summary-warning">
               {tr("目录较大，仅显示已扫描范围", "Large folder; showing the scanned range only")}
@@ -6851,7 +6873,7 @@ function ChangeSetSummary({
             type="button"
             onClick={() => onReviewFile(file)}
           >
-            <span className={`file-change-kind ${file.kind}`}>{fileChangeKindLabel(file.kind)}</span>
+            <span className={`file-change-kind ${file.kind}`} title={fileChangeKindDescription(file.kind)}>{fileChangeKindLabel(file.kind)}</span>
             <span className="change-set-file-path" title={file.path}>{file.path}</span>
             <small className="change-set-file-counts">
               {(file.additions != null || file.deletions != null) && (
@@ -8035,7 +8057,7 @@ function ChangeInspectorPanel({
                     aria-expanded={expanded}
                     onClick={() => onReviewFile(file)}
                   >
-                    <span className={`file-change-kind ${file.kind}`}>{fileChangeKindLabel(file.kind)}</span>
+                    <span className={`file-change-kind ${file.kind}`} title={fileChangeKindDescription(file.kind)}>{fileChangeKindLabel(file.kind)}</span>
                     <span className="change-review-path" title={file.path}>{file.path}</span>
                     <small className="change-review-counts">
                       {(file.additions != null || file.deletions != null) && (
@@ -8235,6 +8257,13 @@ function fileChangeKindLabel(kind: ConversationFileChange["kind"]) {
   if (kind === "deleted") return "D";
   if (kind === "renamed") return "R";
   return "M";
+}
+
+function fileChangeKindDescription(kind: ConversationFileChange["kind"]) {
+  if (kind === "added") return tr("新增文件", "Added file");
+  if (kind === "deleted") return tr("删除文件", "Deleted file");
+  if (kind === "renamed") return tr("重命名文件", "Renamed file");
+  return tr("修改文件", "Modified file");
 }
 
 function changeSetStatusLabel(status: ConversationChangeStatus) {
