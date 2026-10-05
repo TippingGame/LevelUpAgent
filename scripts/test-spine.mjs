@@ -86,6 +86,63 @@ test("weighted meshes compile into Spine 4.2 with topological bones and independ
       }
   }
 });
+
+test("four skin directions anchor the pivot and opposing side while deforming the selected edge", () => {
+  for (const skinDirection of ["down", "up", "left", "right"]) {
+    const part = { ...createSpinePart("cloth", png, 1, 1, "other"),
+      width: 120, height: 160, pivotX: 0.5, pivotY: 0.5, flexibility: 0.8, skinDirection };
+    const mesh = spinePartMesh(part);
+    const indexAt = (u, v) => mesh.weights.findIndex((_, i) => mesh.uvs[2 * i] === u && mesh.uvs[2 * i + 1] === v);
+    const edges = { down: [0.5, 1], up: [0.5, 0], left: [0, 0.5], right: [1, 0.5] };
+    const [u, v] = edges[skinDirection];
+    const edge = indexAt(u, v), opposite = indexAt(1 - u, 1 - v), pivot = indexAt(0.5, 0.5);
+    assert.equal(mesh.weights[edge], 0.8);
+    assert.equal(mesh.weights[opposite], 0);
+    assert.equal(mesh.weights[pivot], 0);
+    const setup = spineWorldVertices(part, spineWorldPose([part]));
+    const clip = { tracks: { [part.id]: [{ ...ZERO_POSE, tipX: 20, tipY: 10, scaleX: 1.2, scaleY: 0.8 }] } };
+    const deformed = spineWorldVertices(part, spineWorldPose([part], clip));
+    for (const index of [opposite, pivot])
+      assert.deepEqual(deformed.slice(index * 2, index * 2 + 2), setup.slice(index * 2, index * 2 + 2));
+    assert.notDeepEqual(deformed.slice(edge * 2, edge * 2 + 2), setup.slice(edge * 2, edge * 2 + 2));
+  }
+  const part = createSpinePart("legacy", png, 1, 1, "body");
+  assert.deepEqual(spinePartMesh(part), spinePartMesh({ ...part, skinDirection: "down" }));
+});
+
+test("deformation interpolation uses neutral defaults, stepped curves and bounded persisted channels", () => {
+  const keys = [{ ...ZERO_POSE }, { ...ZERO_POSE, time: 2, scaleX: 1.4, scaleY: 0.6, tipX: 40, tipY: -20 }];
+  const middle = sampleSpineKeys(keys, 1);
+  assert.deepEqual([middle.scaleX, middle.scaleY, middle.tipX, middle.tipY], [1.2, 0.8, 20, -10]);
+  const stepped = sampleSpineKeys([{ ...keys[0], curve: "stepped" }, keys[1]], 1);
+  assert.deepEqual([stepped.scaleX, stepped.scaleY, stepped.tipX, stepped.tipY], [1, 1, 0, 0]);
+  const project = fixture(), part = project.parts[0];
+  project.clips = [{ id: "deform", name: "deform", duration: 2, tracks: { [part.id]: keys } }];
+  const timeline = compileSpineProject(project).animations.deform.bones[`${part.id}_bend`];
+  assert.deepEqual(timeline.scale, [{ time: 0, x: 1, y: 1 }, { time: 2, x: 1.4, y: 0.6 }]);
+  assert.deepEqual(timeline.translate, [{ time: 0, x: 0, y: 0 }, { time: 2, x: 40, y: -20 }]);
+  for (const [field, invalid] of [["scaleX", 0], ["scaleY", 2.01], ["tipX", 1001], ["tipY", NaN]]) {
+    const bad = structuredClone(project);
+    bad.clips[0].tracks[part.id][0][field] = invalid;
+    assert.throws(() => validateSpineProject(bad), /deformation/);
+  }
+});
+
+test("flexible presets change mesh shape, keep rigid parts rigid, and close every channel at the loop", () => {
+  const flexible = { ...createSpinePart("cloth", png, 1, 1, "other"), flexibility: 0.9, skinDirection: "right" };
+  const rigid = { ...createSpinePart("case", png, 1, 1, "other"), flexibility: 0 };
+  for (const preset of ["breathe", "spring", "ripple"]) {
+    const clip = generateSpineClip([flexible, rigid], preset);
+    const keys = clip.tracks[flexible.id];
+    assert.deepEqual({ ...keys.at(-1), time: 0 }, keys[0]);
+    const shape = time => {
+      const points = spineWorldVertices(flexible, spineWorldPose([flexible, rigid], clip, time));
+      return points.map((value, i) => value - points[i % 2]);
+    };
+    assert.notDeepEqual(shape(0.5), shape(0), preset);
+    assert.ok(clip.tracks[rigid.id].every(k => !k.bend && k.scaleX === undefined && k.scaleY === undefined && k.tipX === undefined && k.tipY === undefined));
+  }
+});
 test("setup mesh and inherited parent animation preserve editable geometry", () => {
   const p = fixture(),
     body = p.parts[1],

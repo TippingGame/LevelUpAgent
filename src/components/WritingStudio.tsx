@@ -600,6 +600,9 @@ export function WritingStudio({
           surface: "writing",
         }),
         reasoningEffortForProfile(writingRunProfile, reasoningEffort),
+        () => setCompletion((current) => completionEpochRef.current === epoch && current?.id === previewId
+          ? { ...current, text: "" }
+          : current),
       );
       if (completionEpochRef.current !== epoch || operationRef.current !== operationId) return;
       operationRef.current = undefined;
@@ -983,6 +986,13 @@ export function WritingStudio({
           surface: "writing",
         }),
         reasoningEffortForProfile(writingRunProfile, reasoningEffort),
+        () => {
+          if (goalEpochRef.current !== epoch || goalOperationRef.current !== operationId) return;
+          streamed = "";
+          setGoalRun((current) => current?.goalId === view.goalId && current.stepId === view.stepId
+            ? { ...current, preview: "" }
+            : current);
+        },
       );
       if (goalEpochRef.current !== epoch || goalOperationRef.current !== operationId) return undefined;
       goalOperationRef.current = undefined;

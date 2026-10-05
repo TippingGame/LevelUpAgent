@@ -537,7 +537,7 @@ export interface ConfigWriteResult {
 }
 
 export interface AgentStreamEvent {
-  kind: "stream_opened" | "non_stream_response" | "content_delta" | "provider_reconnecting" | "provider_reconnected";
+  kind: "stream_opened" | "non_stream_response" | "content_delta" | "content_reset" | "provider_reconnecting" | "provider_reconnected";
   delta?: string;
   retryAttempt?: number;
   maxRetryAttempts?: number;

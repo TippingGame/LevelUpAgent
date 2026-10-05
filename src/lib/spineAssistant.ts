@@ -2,7 +2,7 @@ import { SPINE_LIMITS, createSpinePart, plannedSpinePartId, validateSpinePartPla
 export { plannedSpinePartId, validateSpinePartPlan };
 export type { SpineNewPartDraft };
 
-type PartChange = Partial<Pick<SpinePart, "name" | "parent" | "role" | "x" | "y" | "width" | "height" | "pivotX" | "pivotY" | "flexibility">> & { id: string };
+type PartChange = Partial<Pick<SpinePart, "name" | "parent" | "role" | "x" | "y" | "width" | "height" | "pivotX" | "pivotY" | "flexibility" | "skinDirection">> & { id: string };
 export interface SpineAssistantProposal {
   reply: string;
   parts?: PartChange[];
@@ -33,6 +33,7 @@ export function createSpinePlannedPart(project: SpineProject, draft: SpineNewPar
     x: (source.width * (draft.left + (draft.right - draft.left) * draft.pivotX) - source.width / 2) * scale,
     y: source.height * (1 - draft.top - (draft.bottom - draft.top) * draft.pivotY) * scale,
     width, height, pivotX: draft.pivotX, pivotY: draft.pivotY, flexibility: draft.flexibility,
+    skinDirection: draft.skinDirection,
   };
 }
 
@@ -58,7 +59,7 @@ export function applySpineAssistantProposal(project: SpineProject, proposal: Spi
   for (const change of proposal.parts ?? []) {
     if (!change || typeof change !== "object" || !ids.has(change.id) || changes.has(change.id))
       throw new Error("Rig proposal refers to an unknown or duplicate part.");
-    const allowed = new Set(["id", "name", "parent", "role", "x", "y", "width", "height", "pivotX", "pivotY", "flexibility"]);
+    const allowed = new Set(["id", "name", "parent", "role", "x", "y", "width", "height", "pivotX", "pivotY", "flexibility", "skinDirection"]);
     if (Object.keys(change).some((key) => !allowed.has(key))) throw new Error("Rig proposal contains unsupported part fields.");
     changes.set(change.id, change);
   }

@@ -55,9 +55,9 @@ pnpm tauri build
 
 [Architecture](docs/ARCHITECTURE.md) · [Performance](docs/PERFORMANCE.md) · [Codex workflow comparison](docs/REPLACEMENT_AUDIT.md) · [Roadmap](docs/ROADMAP.md) · [Releases](docs/RELEASE.md)
 
-The current release is `1.1.65`. Windows builds lack Authenticode signatures; macOS builds use ad-hoc signing and are not notarized. Platform verification limits are documented in the [1.1.65 release notes](docs/RELEASE_1.1.65.md).
+The current release is `1.1.66`. Windows builds lack Authenticode signatures; macOS builds use ad-hoc signing and are not notarized. Platform verification limits are documented in the [1.1.66 release notes](docs/RELEASE_1.1.66.md).
 
-See the [1.1.65 release notes](docs/RELEASE_1.1.65.md) for features, publication status, and verification. Earlier local test builds remain documented in the [build history](docs/VERSION_1.1.65.md).
+Version `1.1.66` fixes isolated subagent misuse in pet hatching and theme generation, and reconnects interrupted conversation streams. See the [release notes](docs/RELEASE_1.1.66.md) for verification. Earlier local test builds remain documented in the [build history](docs/VERSION_1.1.65.md).
 
 ## License
 

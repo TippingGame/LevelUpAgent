@@ -658,47 +658,99 @@ pub async fn fetch_gateway_diagnostics(
 }
 
 pub fn is_retryable_provider_error(error: &str) -> bool {
-    if error.contains("REQUEST_CANCELLED") {
-        return false;
-    }
-    if ["400 Bad Request", "422 Unprocessable Entity"]
-        .iter()
-        .any(|status| error.contains(status))
-    {
-        return false;
-    }
-    error.contains("Connection failed")
-        || error.contains("timed out")
-        || error.contains("Could not read provider response")
-        || error.contains("Invalid SSE stream")
-        || error.contains(PROVIDER_STREAM_INTERRUPTED)
-        || error.to_ascii_lowercase().contains("stream_read_error")
-        || error.contains("Invalid provider response")
-        || error.contains("Base URL is invalid")
-        || [
-            "401 ", "403 ", "404 ", "408 ", "409 ", "429 ", "500 ", "502 ", "503 ", "504 ", "524 ",
-        ]
-        .iter()
-        .any(|status| error.contains(status))
+    provider_error_retry(error) != ProviderErrorRetry::Never
 }
 
 pub fn is_reconnectable_provider_error(error: &str) -> bool {
-    if error.contains("REQUEST_CANCELLED")
-        || ["400 Bad Request", "422 Unprocessable Entity"]
-            .iter()
-            .any(|status| error.contains(status))
+    provider_error_retry(error) == ProviderErrorRetry::Reconnect
+}
+
+#[derive(PartialEq, Eq)]
+enum ProviderErrorRetry {
+    Never,
+    Failover,
+    Reconnect,
+}
+
+fn provider_error_retry(error: &str) -> ProviderErrorRetry {
+    let normalized = error.to_ascii_lowercase();
+    // Explicit cancellation and permanent failures take priority over gateway
+    // wrappers such as "stream disconnected before completion".
+    if [
+        "request_cancelled",
+        "request_steer",
+        "insufficient_quota",
+        "billing_hard_limit_reached",
+        "context_length_exceeded",
+        "max_output_tokens",
+        "content_filter",
+        "invalid_request_error",
+        "levelup_tool_calling_unsupported",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
     {
-        return false;
+        return ProviderErrorRetry::Never;
     }
-    error.contains("Connection failed")
-        || error.to_ascii_lowercase().contains("timed out")
-        || error.contains("Could not read provider response")
-        || error.contains("Invalid SSE stream")
-        || error.contains(PROVIDER_STREAM_INTERRUPTED)
-        || error.to_ascii_lowercase().contains("stream_read_error")
-        || ["408 ", "429 ", "500 ", "502 ", "503 ", "504 ", "524 "]
-            .iter()
-            .any(|status| error.contains(status))
+    // Read status only from our adapter's status prefix, not arbitrary numbers
+    // in a provider message or request ID. Preserve failover for bad credentials.
+    if let Some(status) = normalized
+        .strip_prefix("provider returned ")
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|status| status.trim_end_matches(':').parse::<u16>().ok())
+    {
+        return match status {
+            401 | 403 | 404 => ProviderErrorRetry::Failover,
+            408 | 409 | 425 | 429 | 500..=599 => ProviderErrorRetry::Reconnect,
+            400..=499 => ProviderErrorRetry::Never,
+            _ => ProviderErrorRetry::Never,
+        };
+    }
+    if [
+        "authentication_error",
+        "permission_error",
+        "invalid_api_key",
+        "model_not_found",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+    {
+        return ProviderErrorRetry::Failover;
+    }
+    if normalized.contains("connection failed")
+        || normalized.contains("timed out")
+        || normalized.contains("could not read provider response")
+        || normalized.contains("invalid sse stream")
+        || normalized.contains("provider stream ended before completion")
+        || [
+            "stream_read_error",
+            "stream disconnected before completion",
+            "upstream request failed",
+            "upstream_error",
+            "server_error",
+            "overloaded_error",
+            "api_error",
+            "service_unavailable",
+            "rate_limit_error",
+            "rate_limit_exceeded",
+            "too_many_requests",
+            "request_timeout",
+            "deadline_exceeded",
+            "connection reset",
+            "connection closed",
+            "unexpected eof",
+        ]
+        .iter()
+        .any(|marker| normalized.contains(marker))
+    {
+        return ProviderErrorRetry::Reconnect;
+    }
+    if normalized.contains("invalid provider response")
+        || normalized.contains("base url is invalid")
+    {
+        return ProviderErrorRetry::Failover;
+    }
+    ProviderErrorRetry::Never
 }
 
 pub fn annotate_tool_compatibility_error(error: String, request: &AgentTurnRequest) -> String {
@@ -871,9 +923,7 @@ where
             completed = true;
             break;
         }
-        let value: Value = serde_json::from_str(&event.data)
-            .map_err(|error| format!("Invalid stream event: {error}"))?;
-        check_stream_error(&value)?;
+        let value = parse_stream_event(&event.data, &event.event)?;
         if let Some(delta) = value
             .pointer("/choices/0/delta/reasoning_content")
             .and_then(Value::as_str)
@@ -1010,9 +1060,7 @@ where
             completed = true;
             break;
         }
-        let value: Value = serde_json::from_str(&event.data)
-            .map_err(|error| format!("Invalid stream event: {error}"))?;
-        check_stream_error(&value)?;
+        let value = parse_stream_event(&event.data, &event.event)?;
         let event_type = value
             .get("type")
             .and_then(Value::as_str)
@@ -1164,9 +1212,7 @@ where
             next_stream_item(&mut stream, &cancellation, idle_timeout, &mut activity_rx).await?;
         let Some(event) = next else { break };
         let event = event.map_err(|error| format!("Invalid SSE stream: {error}"))?;
-        let value: Value = serde_json::from_str(&event.data)
-            .map_err(|error| format!("Invalid stream event: {error}"))?;
-        check_stream_error(&value)?;
+        let value = parse_stream_event(&event.data, &event.event)?;
         let event_type = value
             .get("type")
             .and_then(Value::as_str)
@@ -1348,9 +1394,7 @@ where
             completed = true;
             break;
         }
-        let value: Value = serde_json::from_str(&event.data)
-            .map_err(|error| format!("Invalid stream event: {error}"))?;
-        check_stream_error(&value)?;
+        let value = parse_stream_event(&event.data, &event.event)?;
         if value
             .pointer("/candidates/0/finishReason")
             .and_then(Value::as_str)
@@ -1885,6 +1929,7 @@ fn parse_openai_chat_value(
     value: &Value,
     request_id: Option<String>,
 ) -> Result<AgentTurnResponse, String> {
+    check_stream_error(value)?;
     let message = value
         .pointer("/choices/0/message")
         .ok_or_else(|| "Provider returned no assistant message".to_owned())?;
@@ -1914,6 +1959,7 @@ fn parse_openai_responses_value(
     value: &Value,
     request_id: Option<String>,
 ) -> Result<AgentTurnResponse, String> {
+    check_stream_error(value)?;
     let output = value
         .get("output")
         .and_then(Value::as_array)
@@ -2016,6 +2062,7 @@ fn parse_anthropic_value(
     value: &Value,
     request_id: Option<String>,
 ) -> Result<AgentTurnResponse, String> {
+    check_stream_error(value)?;
     let blocks = value
         .get("content")
         .and_then(Value::as_array)
@@ -2186,6 +2233,28 @@ fn ensure_success_status(response: &reqwest::Response) -> Result<(), String> {
     }
 }
 
+fn parse_stream_event(data: &str, event_type: &str) -> Result<Value, String> {
+    let mut value: Value = serde_json::from_str(data).map_err(|error| {
+        if error.is_eof() {
+            format!("{PROVIDER_STREAM_INTERRUPTED}: {error}")
+        } else {
+            format!("Invalid stream event: {error}")
+        }
+    })?;
+    // Some compatible gateways carry the error type only in the SSE header.
+    if value.get("type").is_none()
+        && value.is_object()
+        && matches!(
+            event_type,
+            "error" | "response.failed" | "response.incomplete"
+        )
+    {
+        value["type"] = json!(event_type);
+    }
+    check_stream_error(&value)?;
+    Ok(value)
+}
+
 fn check_stream_error(value: &Value) -> Result<(), String> {
     let error = value
         .get("error")
@@ -2198,7 +2267,11 @@ fn check_stream_error(value: &Value) -> Result<(), String> {
     let is_error = matches!(
         value.get("type").and_then(Value::as_str),
         Some("error" | "response.failed" | "response.incomplete")
-    ) || error.is_some();
+    ) || error.is_some()
+        || matches!(
+            value.get("status").and_then(Value::as_str),
+            Some("failed" | "incomplete")
+        );
     if !is_error {
         return Ok(());
     }
@@ -2213,9 +2286,21 @@ fn check_stream_error(value: &Value) -> Result<(), String> {
         .unwrap_or("Provider stream failed");
     let code = error
         .and_then(|error| error.get("code"))
+        .filter(|code| !code.is_null())
+        .or_else(|| error.and_then(|error| error.get("type")))
         .or_else(|| value.get("code"))
         .or_else(|| value.pointer("/response/incomplete_details/reason"))
-        .and_then(Value::as_str);
+        .or_else(|| value.pointer("/incomplete_details/reason"))
+        .map(|code| {
+            code.as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| code.to_string())
+        });
+    if let Some(status) = code.as_deref().and_then(|code| code.parse::<u16>().ok())
+        && (400..600).contains(&status)
+    {
+        return Err(format!("Provider returned {status}: {detail}"));
+    }
     Err(match code {
         Some(code) if code != detail => format!("Provider stream failed [{code}]: {detail}"),
         _ => detail.to_owned(),
@@ -2723,7 +2808,7 @@ fn system_prompt_with_omission(request: &AgentTurnRequest, omission: &ContextOmi
     }
     let theme_generation = theme_generation_bootstrapped(&request.messages);
     if theme_generation && request.allow_outside_workspace {
-        prompt.push_str("\n\nTheme generation mode (Full permission)\nUse the normal tool catalog and host permission policy, including file reads/edits, shell commands, browser, Skills, and configured external tools when needed for this task. Older workflow text recommending direct write_file or avoiding reads is workflow advice, not a permission restriction. The final package must still use the exact application target and pass CSS/layout/package validation before import. Reuse prepared reference assets; generate additional media only if needed by the user's request. Auxiliary tool calls do not imply the package is complete.");
+        prompt.push_str("\n\nTheme generation mode (Full permission)\nUse the normal tool catalog and host permission policy, including file reads/edits, shell commands, browser, Skills, and configured external tools when needed for this task. Do not call delegate_task or apply_subagent_patch: isolated child Agents are file-only and cannot generate images or inspect returned pixels, while the parent session owns the host media and validation workflow. Older workflow text recommending direct write_file or avoiding reads is workflow advice, not a permission restriction. The final package must still use the exact application target and pass CSS/layout/package validation before import. Reuse prepared reference assets; generate additional media only if needed by the user's request. Auxiliary tool calls do not imply the package is complete.");
     } else if theme_generation {
         prompt.push_str("\n\nTheme generation mode\nLevelUpAgent already attached the packaged customize-levelup-layout instructions and layout reference once. This task exposes only write_file: Skill, media generation, delegation, shell, browsing, and other tools are intentionally unavailable. Attached reference images are visual evidence only; analyze them directly and express the result with scoped CSS. Never generate replacement images or raster assets. Write the requested theme package directly to the exact application-provided target.");
     }
@@ -2822,7 +2907,7 @@ fn system_prompt_with_omission(request: &AgentTurnRequest, omission: &ContextOmi
         }
     }
     if request.hatch && request.allow_outside_workspace {
-        prompt.push_str("\n\nHatch execution mode (Full permission)\nThe application has prepared the canonical run and attached the bundled workflow. Use all normally available tools, files, directories, and shell commands as needed. Earlier workflow restrictions on reading files, Skills, or running auxiliary commands do not override Full permission. Prefer the existing run and avoid unnecessary repeated status checks or preparation. generate_images automatically loads the pending job's prompt and references. Record generated sources using record_imagegen_result.py; source provenance, manifest job identity, and final package validation still apply. File reads and diagnostic commands are legitimate intermediate steps, not hatch completion.");
+        prompt.push_str("\n\nHatch execution mode (Full permission)\nThe application has prepared the canonical run and attached the bundled workflow. Use all normally available tools, files, directories, and shell commands as needed. Do not call delegate_task or apply_subagent_patch: isolated child Agents are file-only and cannot generate images or inspect returned pixels, while this parent session owns the host image-generation and visual-validation workflow. Earlier workflow restrictions on reading files, Skills, or running auxiliary commands do not override Full permission. A dirty user workspace is not a reason to ask for a commit or stash. Prefer the existing run and avoid unnecessary repeated status checks or preparation. generate_images automatically loads the pending job's prompt and references. Record generated sources using record_imagegen_result.py; source provenance, manifest job identity, and final package validation still apply. File reads and diagnostic commands are legitimate intermediate steps, not hatch completion.");
     } else if request.hatch {
         if hatch_skill_read {
             prompt.push_str(
@@ -3752,6 +3837,8 @@ mod tests {
             PROVIDER_STREAM_INTERRUPTED,
             "stream_read_error",
             "Provider stream failed [stream_read_error]: upstream disconnected",
+            "stream disconnected before completion: Upstream request failed",
+            "Upstream request failed",
             "Invalid provider response",
             "Base URL is invalid",
         ] {
@@ -3780,6 +3867,8 @@ mod tests {
             PROVIDER_STREAM_INTERRUPTED,
             "stream_read_error",
             "Provider stream failed [stream_read_error]: upstream disconnected",
+            "stream disconnected before completion: Upstream request failed",
+            "Upstream request failed",
         ] {
             assert!(is_reconnectable_provider_error(error), "{error}");
         }
@@ -3817,6 +3906,94 @@ mod tests {
         let error = check_stream_error(&json!({ "type": "response.incomplete", "response": { "incomplete_details": { "reason": "max_output_tokens" } } })).unwrap_err();
         assert!(error.contains("max_output_tokens"));
         assert!(!is_reconnectable_provider_error(&error));
+    }
+
+    #[test]
+    fn provider_retry_classification_handles_status_codes_and_permanent_wrapped_errors() {
+        for status in [
+            408, 409, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 529,
+        ] {
+            let error = format!("Provider returned {status}: temporarily unavailable");
+            assert!(is_reconnectable_provider_error(&error), "{error}");
+            assert!(is_retryable_provider_error(&error), "{error}");
+        }
+        for error in [
+            "STREAM DISCONNECTED BEFORE COMPLETION: Upstream request failed",
+            "Provider stream failed [overloaded_error]: Overloaded",
+            "Provider stream failed [server_error]: try later",
+            "Provider stream failed [rate_limit_exceeded]: try later",
+            "Provider stream failed [upstream_error]: unavailable",
+        ] {
+            assert!(is_reconnectable_provider_error(error), "{error}");
+            assert!(is_retryable_provider_error(error), "{error}");
+        }
+        for error in [
+            "REQUEST_CANCELLED: stream disconnected before completion",
+            "REQUEST_STEER: Upstream request failed",
+            "Provider returned 400: Upstream request failed",
+            "Provider returned 422: stream disconnected before completion",
+            "Provider returned 429: insufficient_quota",
+            "stream disconnected before completion: context_length_exceeded",
+            "stream disconnected before completion: max_output_tokens",
+            "stream disconnected before completion: content_filter",
+            "stream disconnected before completion: invalid_request_error",
+            "Invalid stream event: expected value at line 1 column 1",
+            "Unsupported field, request ID 503 abc",
+        ] {
+            assert!(!is_reconnectable_provider_error(error), "{error}");
+            assert!(!is_retryable_provider_error(error), "{error}");
+        }
+        for error in [
+            "Provider returned 401: Upstream request failed",
+            "Provider returned 403: stream disconnected before completion",
+            "Provider stream failed [authentication_error]: Upstream request failed",
+        ] {
+            assert!(!is_reconnectable_provider_error(error), "{error}");
+            assert!(is_retryable_provider_error(error), "{error}");
+        }
+    }
+
+    #[test]
+    fn stream_errors_preserve_anthropic_types_numeric_codes_and_sse_event_names() {
+        for payload in [
+            r#"{"error":{"message":"stream disconnected before completion: Upstream request failed"}}"#,
+            r#"{"error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+            r#"{"error":{"code":503,"message":"Service unavailable"}}"#,
+            r#"{"code":"server_error","message":"Try later"}"#,
+            r#"{"delta":"truncated"#,
+        ] {
+            let error = parse_stream_event(payload, "error").unwrap_err();
+            assert!(is_reconnectable_provider_error(&error), "{error}");
+        }
+        let error = parse_stream_event(
+            r#"{"error":{"code":401,"message":"Upstream request failed"}}"#,
+            "error",
+        )
+        .unwrap_err();
+        assert!(!is_reconnectable_provider_error(&error));
+        assert!(is_retryable_provider_error(&error));
+    }
+
+    #[test]
+    fn json_error_responses_are_not_accepted_as_empty_successes() {
+        for value in [
+            json!({"error": {"message": "Upstream request failed"}}),
+            json!({"status": "failed", "error": {"code": "server_error", "message": "Try later"}}),
+        ] {
+            for result in [
+                parse_openai_chat_value(&value, None),
+                parse_openai_responses_value(&value, None),
+                parse_anthropic_value(&value, None),
+                parse_gemini_value(&value, None),
+            ] {
+                assert!(is_reconnectable_provider_error(&result.unwrap_err()));
+            }
+        }
+        let value =
+            json!({"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}});
+        assert!(!is_reconnectable_provider_error(
+            &parse_openai_responses_value(&value, None).unwrap_err()
+        ));
     }
 
     #[tokio::test]

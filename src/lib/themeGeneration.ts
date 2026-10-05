@@ -97,8 +97,8 @@ export function themeGenerationBootstrap(guidance: string, relativePath: string,
     THEME_GENERATION_BOOTSTRAP_MARKER,
     `${THEME_GENERATION_TARGET_MARKER} ${relativePath}`,
     fullAccess ? (locale === "zh-CN"
-      ? "应用已附加主题规范和布局参考。完全权限下可按任务需要读取文件、使用工具和执行命令；规范中的直接写入建议不限制这些权限。最终主题包仍必须通过应用校验。"
-      : "The application attached theme instructions and layout references. Full permission permits task-relevant file access, tools, and commands. Direct-write recommendations do not restrict these permissions. The final package must still pass application validation.") : locale === "zh-CN"
+      ? "应用已附加主题规范和布局参考。完全权限下可按任务需要读取文件、使用工具和执行命令；但不要调用 delegate_task 或 apply_subagent_patch，隔离子代理无法使用宿主媒体能力或检查返回像素。规范中的直接写入建议不限制其他权限。最终主题包仍必须通过应用校验。"
+      : "The application attached theme instructions and layout references. Full permission permits task-relevant file access, tools, and commands, but do not call delegate_task or apply_subagent_patch: isolated child Agents cannot use the host media tools or inspect returned pixels. Direct-write recommendations do not restrict other permissions. The final package must still pass application validation.") : locale === "zh-CN"
       ? "这是 LevelUpAgent 为本次主题生成一次性加载的内置规范及其布局参考。后续轮次直接使用这些内容，不要调用任何 Skill 读取工具，不要在临时工作区查找 Skill 文件，也不要执行规范中提到的源码仓库验证脚本；应用会在自动导入时执行最终校验。"
       : "LevelUpAgent has loaded the packaged theme instructions and layout reference exactly once for this generation task. Use this attached content in later turns. Do not call any Skill-reading tool, search the temporary workspace for Skill files, or run source-repository validator scripts mentioned by the generic workflow; the app performs final validation during automatic import.",
     instructions,
@@ -107,8 +107,8 @@ export function themeGenerationBootstrap(guidance: string, relativePath: string,
 
 export function themeGenerationBootstrapAcknowledgement(locale: AppLocale, fullAccess = false) {
   if (fullAccess) return locale === "zh-CN"
-    ? "规范已加载。我会按任务需要使用完全权限下的工具，复用已有素材，并交付通过校验的主题包。"
-    : "Instructions loaded. I will use the tools available under Full permission as needed, reuse prepared assets, and deliver a validated theme package.";
+    ? "规范已加载。我会按任务需要使用完全权限下的工具，复用已有素材；主题生成由当前会话完成，不调用隔离子代理，并交付通过校验的主题包。"
+    : "Instructions loaded. I will use the tools available under Full permission as needed, reuse prepared assets, keep generation in this parent session without isolated subagents, and deliver a validated theme package.";
   return locale === "zh-CN"
     ? "主题生成规范和布局参考已经加载。应用需要的图片素材也会预先准备好；我只会直接写入目标主题包，不再读取 Skill，也不会生成新的图片。"
     : "The theme instructions and layout reference are loaded. The app will also prepare any requested image asset in advance. I will only write the target theme package, without rereading the Skill or generating new images.";
@@ -148,6 +148,7 @@ export function themeGenerationPrompt(relativePath: string, options: ThemeGenera
     return [
       "请在当前工作区完成一次“生成主题”任务。",
       "用户的视觉要求：" + request,
+      "由当前会话完成主题生成；不要调用 delegate_task 或 apply_subagent_patch，隔离子代理没有宿主媒体生成及像素检查能力，也不应要求用户为本任务提交或暂存无关工作区改动。",
       "用户选择的视觉参数：" + preferences,
       referenceGuidance,
       backgroundGuidance,
@@ -164,6 +165,7 @@ export function themeGenerationPrompt(relativePath: string, options: ThemeGenera
   return [
     "Complete a “generate theme” task in the current workspace.",
     "Visual brief: " + request,
+    "Keep theme generation in this parent session. Do not call delegate_task or apply_subagent_patch: isolated child Agents cannot use host media generation or inspect pixels. Do not ask the user to commit or stash unrelated workspace changes for this task.",
     "Selected visual parameters: " + preferences,
     referenceGuidance,
     backgroundGuidance,

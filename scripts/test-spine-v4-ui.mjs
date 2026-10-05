@@ -33,6 +33,7 @@ try {
   await button("打开创作空间").click();
   await page.getByRole("tab", { name: "Spine", exact: true }).click();
   await saved();
+  await page.getByRole("tab", { name: "素材", exact: true }).click();
   await page.locator('input[type="file"][accept="image/png,image/jpeg,image/webp"]').first().setInputFiles(source);
   await page.locator(".spine-source-preview").waitFor();
   await saved();

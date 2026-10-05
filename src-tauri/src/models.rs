@@ -331,6 +331,15 @@ impl AgentStreamEvent {
         }
     }
 
+    pub fn content_reset() -> Self {
+        Self {
+            kind: "content_reset".to_owned(),
+            delta: None,
+            retry_attempt: None,
+            max_retry_attempts: None,
+        }
+    }
+
     pub fn provider_reconnecting(retry_attempt: u32, max_retry_attempts: u32) -> Self {
         Self {
             kind: "provider_reconnecting".to_owned(),

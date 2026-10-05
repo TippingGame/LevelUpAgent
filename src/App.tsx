@@ -2809,6 +2809,9 @@ function App() {
             ...assistantMessageIdentity(runProfile),
           })];
           commitThread(projectedThread(projected));
+        } else if (event.kind === "assistant_reset") {
+          settleStreamingAssistant(false);
+          commitThread(projectedThread(projected), false);
         } else if (event.kind === "assistant_delta") {
           const payload = event.payload as { delta?: unknown };
           if (typeof payload.delta !== "string" || payload.delta.length === 0) return;
@@ -3688,6 +3691,13 @@ function App() {
           skills: armorModeSkills,
         }),
         reasoningEffortForProfile(runProfile, effectiveReasoningEffort),
+        () => {
+          cancelStreamingFrame();
+          streamedContentParts = [];
+          pendingStreamDeltas = [];
+          pendingStreamChars = 0;
+          commitStreamingSnapshot();
+        },
       );
       cancelStreamingFrame();
       flushStreamingDelta();
@@ -11109,7 +11119,7 @@ function petHatchGenerationPrompt(
     `Application-owned preparation command, executed before the first provider turn (the provider must not repeat it):\n${prepareCommand}`,
     `Status command, available when needed:\n${statusCommand}`,
     `Managed reference attachment IDs: ${referenceIds.join(", ") || "none"}. Pass all listed IDs to the base generate_images call. The chroma key is ${HATCH_DEFAULT_CHROMA_KEY}.`,
-    "The application loads the bundled Skill and prepares the run before your first turn. Prefer continuing existing outputs. Select a pending hatchJobId and call generate_images with hatchRunDir; the adapter loads the job prompt and reference images automatically. Record hatchSourcePaths through record_imagegen_result.py. Use the approved mirror script when appropriate, finalize_pet_run.py for validation and packaging, and queue_pet_repairs.py for repairs. Auxiliary reads, diagnostics, and other tool calls are allowed when needed. Never fabricate generated source provenance or claim unvalidated outputs are complete.",
+    "The application loads the bundled Skill and prepares the run before your first turn. Keep every visual generation and pixel inspection in this parent session: do not call delegate_task or apply_subagent_patch, because isolated child Agents are file-only and cannot use image generation or view returned pixels. Prefer continuing existing outputs. Select a pending hatchJobId and call generate_images with hatchRunDir; the adapter loads the job prompt and reference images automatically. Record hatchSourcePaths through record_imagegen_result.py. Use the approved mirror script when appropriate, finalize_pet_run.py for validation and packaging, and queue_pet_repairs.py for repairs. Auxiliary reads, diagnostics, and other tool calls are allowed when needed. Never fabricate generated source provenance or claim unvalidated outputs are complete.",
     `Keep a visible progress checklist. The final package belongs under ${request.environment.packageDirectory}/<pet-slug>/pet.json and spritesheet.webp. Verify the package before completing the Goal. ${locale === "zh-CN" ? "最终摘要使用中文。" : "Write the final summary in English."} End with PET_PACKAGE_DIR=<absolute package directory>.`,
   ].join("\n\n");
   return [

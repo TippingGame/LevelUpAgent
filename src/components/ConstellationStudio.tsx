@@ -1496,6 +1496,11 @@ function ConstellationStudioInner({
             surface: "constellation",
           }),
           reasoningEffortForProfile(profile, reasoningEffort),
+          () => {
+            if (runEpochRef.current !== epoch) return;
+            streamed = "";
+            updateRuntimeOutput(node.id, { text: { type: "text", text: "", createdAt: Date.now() } }, "running");
+          },
         );
         const text = (streamed || response.content).trim();
         if (!text) throw new Error(tr("写作模型没有返回正文", "The writing model returned no content"));

@@ -56,8 +56,12 @@ test("Full theme prompts permit preparatory tools while preserving package valid
     assert.doesNotMatch(prompt, /Do not list or read|不要先浏览或读取|不得调用图片、视频或音频生成工具/);
     assert.match(prompt, /schemaVersion/);
     assert.match(prompt, locale === "zh-CN" ? /第一次通过应用校验/ : /target passes application validation/);
+    assert.match(prompt, /delegate_task/);
+    assert.match(prompt, /apply_subagent_patch/);
     const bootstrap = themeGenerationBootstrap("theme rules", "test.levelup-theme", locale, true);
     assert.doesNotMatch(bootstrap, /Do not call any Skill-reading tool|不要调用任何 Skill 读取工具/);
+    assert.match(bootstrap, /delegate_task/);
+    assert.match(bootstrap, /apply_subagent_patch/);
   }
 });
 

@@ -54,7 +54,8 @@ try {
       (role) => studio.createSpinePart(role, png, 1, 1, role),
     ),
   );
-  project.clips = ["idle", "wave", "walk"].map((name) =>
+  project.parts = project.parts.map((part, i) => ({ ...part, flexibility: 0.8, skinDirection: ["down", "up", "left", "right"][i % 4] }));
+  project.clips = ["idle", "wave", "walk", "breathe", "spring", "ripple"].map((name) =>
     studio.generateSpineClip(project.parts, name),
   );
   const head = project.parts.find((p) => p.role === "head"),
@@ -65,8 +66,8 @@ try {
     duration: 2,
     tracks: {
       [head.id]: [
-        { ...studio.ZERO_POSE, time: 0.125, rotation: 230, curve: "stepped" },
-        { ...studio.ZERO_POSE, time: 1, rotation: -230 },
+        { ...studio.ZERO_POSE, time: 0.125, rotation: 230, scaleX: 1.3, scaleY: 0.7, tipX: 17, tipY: -9, curve: "stepped" },
+        { ...studio.ZERO_POSE, time: 1, rotation: -230, scaleX: 0.6, scaleY: 1.7, tipX: -21, tipY: 15 },
       ],
       [body.id]: [
         { ...studio.ZERO_POSE, rotation: 90, x: 16, y: 22 },

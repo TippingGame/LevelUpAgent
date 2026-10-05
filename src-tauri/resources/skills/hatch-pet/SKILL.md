@@ -218,11 +218,13 @@ Deterministic validation is necessary but not sufficient. Before calling the pet
 
 ## Subagent Row Generation
 
-After the base job has been recorded and `references/canonical-base.png` exists, row-strip visual generation must use subagents unless the user explicitly says not to use subagents for this session. Before row generation, state that subagents are being used and which row jobs are being delegated. If subagents cannot be spawned because the current environment or tool policy blocks them, stop before row-strip generation, explain the blocker, and ask for explicit user direction before continuing sequentially.
+After the base job has been recorded and `references/canonical-base.png` exists, row-strip visual generation normally uses subagents in the standalone Codex workflow. Inside LevelUpAgent, do not use `delegate_task` or `apply_subagent_patch`: those isolated child Agents are file-only and cannot invoke the host image-generation adapter or inspect returned pixels. Generate and inspect row jobs sequentially in the parent LevelUpAgent session instead. A dirty user workspace is not a reason to ask the user to commit or stash unrelated changes.
 
 The parent agent must own the manifest and package writes.
 
-Default flow:
+LevelUpAgent flow: the parent generates `idle` and `running-right` first using `generate_images`, inspects them with `view_image`, records the selected sources, decides whether mirroring is appropriate, and then generates the remaining rows. The parent also owns repairs, finalization, visual QA, and packaging. No Git worktree or isolated child Agent is needed.
+
+The following delegation flow and handoff template apply only to standalone environments with image-capable subagents:
 
 1. Parent runs `prepare_pet_run.py`.
 2. Parent generates and records `base`.
@@ -306,10 +308,10 @@ The secondary fallback requires `OPENAI_API_KEY`.
 - Keep `$imagegen` as the primary generation layer.
 - Keep reference images attached/visible for `$imagegen` whenever the chosen path supports references.
 - Attach the row's `references/layout-guides/<state>.png` image to every row-strip job as a layout-only guide, and do not accept outputs that copy guide pixels.
-- Use subagents for row-strip visual generation after the parent records the base image. The parent may generate the base, but row-strip jobs belong to subagents unless the user explicitly says not to use subagents for this session.
+- In standalone environments, use subagents for row-strip visual generation after the parent records the base image. In LevelUpAgent, the parent session owns every row generation and visual inspection because its host adapter is the only path to image generation and pixel evidence.
 - Generate every normal visual job with `$imagegen`: base plus all row strips that are not explicitly approved `running-left` mirror derivations.
 - Treat only the base job as eligible for prompt-only generation; every row job must attach its listed grounding images.
-- Delegate `running-right` first, then mirror `running-left` only when visual inspection confirms a mirror preserves identity and semantics; otherwise delegate `running-left` as a normal grounded `$imagegen` row.
+- Generate `running-right` first, then mirror `running-left` only when visual inspection confirms a mirror preserves identity and semantics; otherwise generate `running-left` as a normal grounded `$imagegen` row. In LevelUpAgent, these calls stay in the parent session.
 - Never substitute locally drawn, tiled, transformed, or code-generated row strips for missing `$imagegen` outputs.
 - Never manually mutate `imagegen-jobs.json` to claim a visual job completed.
 - Do not rely on generated images for exact atlas geometry; use this skill's deterministic scripts.

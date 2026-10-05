@@ -5,6 +5,11 @@ export interface SpineKey {
   bend: number;
   x: number;
   y: number;
+  /** Local deformation of the weighted end bone; omitted values preserve older projects. */
+  scaleX?: number;
+  scaleY?: number;
+  tipX?: number;
+  tipY?: number;
   curve: "linear" | "stepped";
 }
 export interface SpinePart {
@@ -30,6 +35,7 @@ export interface SpinePart {
   pivotX: number;
   pivotY: number;
   flexibility: number;
+  skinDirection?: "down" | "up" | "left" | "right";
   layerSource?: {
     name: string;
     filename: string;
@@ -47,7 +53,7 @@ export interface SpineClip {
   duration: number;
   tracks: Record<string, SpineKey[]>;
 }
-export type SpinePoseTarget = Pick<SpineKey, "rotation" | "bend" | "x" | "y">;
+export type SpinePoseTarget = Omit<SpineKey, "time" | "curve">;
 export interface SpinePoseFrame {
   id: string;
   name: string;
@@ -84,6 +90,7 @@ export interface SpineNewPartDraft {
   pivotX: number;
   pivotY: number;
   flexibility: number;
+  skinDirection?: SpinePart["skinDirection"];
   /** Back-to-front layer rank, independent of parent-first generation order. */
   drawOrder?: number;
 }
@@ -154,7 +161,7 @@ export function validateSpinePartPlan(project: SpineProject, drafts: unknown, pl
   for (const value of drafts) {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid planned part.");
     const part = value as Record<string, unknown>;
-    const allowed = new Set(["key", "name", "description", "role", "parent", "left", "top", "right", "bottom", "pivotX", "pivotY", "flexibility", "drawOrder"]);
+    const allowed = new Set(["key", "name", "description", "role", "parent", "left", "top", "right", "bottom", "pivotX", "pivotY", "flexibility", "skinDirection", "drawOrder"]);
     if (Object.keys(part).some((field) => !allowed.has(field)) ||
       typeof part.key !== "string" || !/^[a-z][a-z0-9_-]{0,39}$/.test(part.key) || keys.has(part.key) ||
       typeof part.name !== "string" || !part.name.trim() || part.name.length > 160 ||
@@ -165,6 +172,7 @@ export function validateSpinePartPlan(project: SpineProject, drafts: unknown, pl
       !unit(part.left) || !unit(part.top) || !unit(part.right) || !unit(part.bottom) ||
       Number(part.right) - Number(part.left) < 0.005 || Number(part.bottom) - Number(part.top) < 0.005 ||
       !unit(part.pivotX) || !unit(part.pivotY) || !unit(part.flexibility) ||
+      (part.skinDirection !== undefined && !["down", "up", "left", "right"].includes(part.skinDirection as string)) ||
       (part.drawOrder !== undefined && (typeof part.drawOrder !== "number" || !Number.isInteger(part.drawOrder) || part.drawOrder < 0 || part.drawOrder >= SPINE_LIMITS.parts)))
       throw new Error(`Invalid planned part ${String(part.key ?? "")}: bounds, parent or fields.`);
     keys.add(part.key);
@@ -429,6 +437,8 @@ export function validateSpineProject(value: unknown): SpineProject {
       if (!num(p[key], -4000, 4000)) return fail("part position");
     for (const key of ["pivotX", "pivotY", "flexibility"])
       if (!num(p[key], 0, 1)) return fail("pivot/weight");
+    if (p.skinDirection !== undefined && !["down", "up", "left", "right"].includes(p.skinDirection as string))
+      return fail("skin direction");
     if (p.parent !== null && !safeId(p.parent)) return fail("parent identity");
   }
   if (bytes > SPINE_LIMITS.bytes) return fail("images exceed 48 MiB");
@@ -470,6 +480,7 @@ export function validateSpineProject(value: unknown): SpineProject {
           if (!num(k[key], -360, 360)) return fail("key rotation");
         for (const key of ["x", "y"])
           if (!num(k[key], -1000, 1000)) return fail("key translation");
+        if (!validSpineDeformation(k)) return fail("key deformation");
       }
     }
   }
@@ -537,6 +548,7 @@ export function validateSpineProject(value: unknown): SpineProject {
             if (!num(target[key], -360, 360)) return fail("pose target rotation");
           for (const key of ["x", "y"])
             if (!num(target[key], -1000, 1000)) return fail("pose target translation");
+          if (!validSpineDeformation(target)) return fail("pose target deformation");
         }
       }
       if (poseBytes > SPINE_LIMITS.poseImageBytes) return fail("pose images exceed 24 MiB");
@@ -559,9 +571,26 @@ export function sampleSpineKeys(keys: SpineKey[] = [], time: number): SpineKey {
     bend: mix("bend"),
     x: mix("x"),
     y: mix("y"),
+    ...interpolateSpineDeformation(a, b, t),
     curve: a.curve,
   };
 }
+export const SPINE_DEFORMATION_FIELDS = ["scaleX", "scaleY", "tipX", "tipY"] as const;
+export function validSpineDeformation(value: Record<string, unknown>): boolean {
+  return SPINE_DEFORMATION_FIELDS.every((key) => value[key] === undefined ||
+    (typeof value[key] === "number" && Number.isFinite(value[key]) &&
+      (key.startsWith("scale") ? value[key] >= 0.25 && value[key] <= 2 : Math.abs(value[key]) <= 1000)));
+}
+export function interpolateSpineDeformation(a: SpinePoseTarget, b: SpinePoseTarget, t: number): Partial<SpinePoseTarget> {
+  const result: Partial<SpinePoseTarget> = {};
+  for (const key of SPINE_DEFORMATION_FIELDS) {
+    if (a[key] === undefined && b[key] === undefined) continue;
+    const neutral = key.startsWith("scale") ? 1 : 0;
+    result[key] = (a[key] ?? neutral) + ((b[key] ?? neutral) - (a[key] ?? neutral)) * t;
+  }
+  return result;
+}
+export type SpineMotionPreset = "idle" | "wave" | "walk" | "breathe" | "spring" | "ripple";
 export function upsertSpineKey(
   clip: SpineClip,
   partId: string,
@@ -582,7 +611,7 @@ export function upsertSpineKey(
 }
 export function generateSpineClip(
   parts: SpinePart[],
-  preset: "idle" | "wave" | "walk",
+  preset: SpineMotionPreset,
   name = preset as string,
 ): SpineClip {
   const duration = preset === "walk" ? 1 : 2;
@@ -609,6 +638,28 @@ export function generateSpineClip(
         key.rotation = wave * 22 * opposite;
         key.bend = Math.max(0, wave * opposite) * 24;
       }
+      if (["breathe", "spring", "ripple"].includes(preset)) {
+        key.rotation = 0; key.y = 0;
+        if (part.flexibility > 0) {
+          if (preset === "breathe") {
+            const inhale = (1 - Math.cos(phase)) / 2;
+            key.scaleX = 1 + 0.16 * inhale;
+            key.scaleY = 1 + 0.08 * inhale;
+          } else if (preset === "spring") {
+            const squash = Math.cos(phase) - Math.cos(2 * phase);
+            key.scaleY = 1 - 0.16 * squash;
+            key.scaleX = 1 / key.scaleY;
+            key.bend = wave * 8;
+          } else {
+            key.bend = wave * 28;
+            const anchor = spineBendAnchor(part);
+            key.tipX = anchor[1] !== 0 ? Math.sin(2 * phase) * part.width * 0.12 : 0;
+            key.tipY = anchor[0] !== 0 ? Math.sin(2 * phase) * part.height * 0.12 : 0;
+            key.scaleY = 1 + wave * 0.08;
+          }
+        }
+        if (preset === "spring" && !part.parent) key.y = Math.max(0, -wave) * 35;
+      }
       return key;
     });
     tracks[part.id][16] = { ...tracks[part.id][0], time: duration };
@@ -621,6 +672,14 @@ export interface SpineMesh {
   weights: number[];
   triangles: number[];
   hull: number;
+}
+export function spineBendAnchor(part: SpinePart): [number, number] {
+  switch (part.skinDirection ?? "down") {
+    case "up": return [0, part.height * 0.45];
+    case "left": return [-part.width * 0.45, 0];
+    case "right": return [part.width * 0.45, 0];
+    default: return [0, -part.height * 0.45];
+  }
 }
 export function spinePartMesh(part: SpinePart): SpineMesh {
   const n = 4,
@@ -647,17 +706,19 @@ export function spinePartMesh(part: SpinePart): SpineMesh {
       (x / n - part.pivotX) * part.width,
       (part.pivotY - y / n) * part.height,
     ]),
-    weights: points.map(
-      ([, y]) =>
-        part.flexibility *
-        Math.max(0, (y / n - part.pivotY) / Math.max(0.01, 1 - part.pivotY)) **
-          2,
-    ),
+    weights: points.map(([x, y]) => {
+      const direction = part.skinDirection ?? "down";
+      const distance = direction === "up" ? (part.pivotY - y / n) / Math.max(0.01, part.pivotY)
+        : direction === "left" ? (part.pivotX - x / n) / Math.max(0.01, part.pivotX)
+        : direction === "right" ? (x / n - part.pivotX) / Math.max(0.01, 1 - part.pivotX)
+        : (y / n - part.pivotY) / Math.max(0.01, 1 - part.pivotY);
+      return part.flexibility * Math.max(0, distance) ** 2;
+    }),
     triangles,
     hull: n * 4,
   };
 }
-export type SpineTransform = { x: number; y: number; rotation: number };
+export type SpineTransform = { x: number; y: number; rotation: number; scaleX?: number; scaleY?: number };
 export function transformSpinePoint(
   t: SpineTransform,
   x: number,
@@ -666,6 +727,7 @@ export function transformSpinePoint(
   const rad = (t.rotation * Math.PI) / 180,
     cos = Math.cos(rad),
     sin = Math.sin(rad);
+  x *= t.scaleX ?? 1; y *= t.scaleY ?? 1;
   return [t.x + cos * x - sin * y, t.y + sin * x + cos * y];
 }
 export function spineWorldPose(parts: SpinePart[], clip?: SpineClip, time = 0) {
@@ -684,11 +746,13 @@ export function spineWorldPose(parts: SpinePart[], clip?: SpineClip, time = 0) {
     );
     const base = { x, y, rotation: parentTransform.rotation + key.rotation };
     transforms.set(p.id, base);
-    const [bx, by] = transformSpinePoint(base, 0, -p.height * 0.45);
+    const anchor = spineBendAnchor(p);
+    const [bx, by] = transformSpinePoint(base, anchor[0] + (key.tipX ?? 0), anchor[1] + (key.tipY ?? 0));
     transforms.set(`${p.id}_bend`, {
       x: bx,
       y: by,
       rotation: base.rotation + key.bend,
+      scaleX: key.scaleX ?? 1, scaleY: key.scaleY ?? 1,
     });
   }
   return transforms;
@@ -704,8 +768,8 @@ export function spineWorldVertices(
     const a = transformSpinePoint(pose.get(part.id)!, x, y);
     const b = transformSpinePoint(
       pose.get(`${part.id}_bend`)!,
-      x,
-      y + part.height * 0.45,
+      x - spineBendAnchor(part)[0],
+      y - spineBendAnchor(part)[1],
     );
     return [
       a[0] * (1 - weight) + b[0] * weight,
@@ -739,7 +803,8 @@ export function compileSpineProject(project: SpineProject) {
     bones.push({
       name: `${part.id}_bend`,
       parent: part.id,
-      y: -part.height * 0.45,
+      x: spineBendAnchor(part)[0],
+      y: spineBendAnchor(part)[1],
       length: part.height * 0.45,
     });
   }
@@ -759,8 +824,8 @@ export function compileSpineProject(project: SpineProject) {
             y,
             1 - weight,
             base + 1,
-            x,
-            y + part.height * 0.45,
+            x - spineBendAnchor(part)[0],
+            y - spineBendAnchor(part)[1],
             weight,
           ];
     });
@@ -801,6 +866,8 @@ export function compileSpineProject(project: SpineProject) {
       };
       timelines[`${partId}_bend`] = {
         rotate: keys.map((k) => ({ time: k.time, value: k.bend, ...curve(k) })),
+        scale: keys.map((k) => ({ time: k.time, x: k.scaleX ?? 1, y: k.scaleY ?? 1, ...curve(k) })),
+        translate: keys.map((k) => ({ time: k.time, x: k.tipX ?? 0, y: k.tipY ?? 0, ...curve(k) })),
       };
     }
     animations[clip.name] = { bones: timelines };

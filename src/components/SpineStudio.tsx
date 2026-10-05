@@ -8,6 +8,7 @@ import {
   Film,
   Grid2X2,
   ImagePlus,
+  Layers3,
   LoaderCircle,
   Pause,
   Play,
@@ -60,6 +61,7 @@ import {
   validateSpineProject,
   type SpineClip,
   type SpineKey,
+  type SpineMotionPreset,
   type SpinePart,
   type SpineProject,
 } from "../lib/spine";
@@ -182,8 +184,8 @@ export function SpineStudio({
     [zoom, setZoom] = useState(1);
   const [models, setModels] = useState<MediaModelInfo[]>([]),
     [modelKey, setModelKey] = useState("");
-  const [references, setReferences] = useState<ImageAttachment[]>([]),
-    [generationRole, setGenerationRole] = useState<SpinePart["role"]>("body");
+  const [references, setReferences] = useState<ImageAttachment[]>([]);
+  const [assetTab, setAssetTab] = useState<"chat" | "source" | "retouch">("chat");
   const [sourceHistory, setSourceHistory] = useState<MediaAsset[] | null>(null),
     [backgroundTolerance, setBackgroundTolerance] = useState(46);
   const [redrawPrompt, setRedrawPrompt] = useState("");
@@ -482,116 +484,6 @@ export function SpineStudio({
     if (!url) throw new Error(result.errors.join("\n") || tr("生图未返回图片", "Image model returned no image"));
     await setSourceImage(url, asset?.fileName ?? "generated-source.png", true);
   });
-  const generate = async (all: boolean) =>
-    run(async () => {
-      if (!project || !model) return;
-      const roles = all
-        ? SPINE_ROLES.filter(
-            (r) => r !== "other" && !project.parts.some((p) => p.role === r),
-          )
-        : [generationRole];
-      if (!roles.length) {
-        setNotice(
-          tr(
-            "六个基础部件已齐备。可单独生成其他部件。",
-            "All six base parts exist. Generate additional parts individually.",
-          ),
-        );
-        return;
-      }
-      if (project.parts.length + roles.length > SPINE_LIMITS.parts)
-        throw new Error(tr("部件数量将超过 24", "This would exceed 24 parts"));
-      let workingProject = project;
-      const { completed, opaque } = await runSpinePartGeneration({
-        project,
-        roles,
-        shouldStop: () => stop.current || !mounted.current,
-        onProgress: ({ role, index, total }) =>
-          setProgress(
-            tr(
-              `正在生成 ${roleName(role)} · ${index}/${total}`,
-              `Generating ${roleName(role)} · ${index}/${total}`,
-            ),
-          ),
-        generate: async (role) => {
-          const prompt = `Create ONE isolated 2D skeletal-animation sprite part: ${role === "other" ? "the part described below" : role}. Left/right are VIEWER sides. Subject design: ${project.prompt.trim() || "match the attached source image"}. ${references.length || project.sourceImage ? "Reference Image 1 defines the subject identity, palette, proportions and materials. Preserve consistency with it." : "Use a consistent clean game-art design."} Show only this detached part, neutral pose. Complete hidden and overlapping ends for rigging. No floor, text, border, contact sheet or other parts. ${spineImageBackgroundPrompt(model.id, "single part")}`;
-          const capabilities = imageModelCapabilities(model.id);
-          let effectiveReferences = references;
-          if (!effectiveReferences.length && project.sourceImage && isDesktop()) {
-            if (sourceReference.current?.image !== project.sourceImage.originalImage) {
-              const bytes = Uint8Array.from(atob(project.sourceImage.originalImage.split(",")[1]), (char) => char.charCodeAt(0));
-              const file = new File([bytes], "spine-source.png", { type: "image/png" });
-              const [attachment] = await importClipboardImages([file]);
-              if (!attachment) throw new Error(tr("整图参考未能导入", "Could not attach source image"));
-              sourceReference.current = { image: project.sourceImage.originalImage, attachment };
-            }
-            effectiveReferences = [sourceReference.current.attachment];
-          }
-          const result = await generateMedia({
-            kind: "image",
-            profileId: model.profileId,
-            model: model.id,
-            protocol: model.protocol,
-            prompt,
-            count: 1,
-            size: "auto",
-            outputFormat: "png",
-            background:
-              !model.id.includes("gpt-image-2") && !capabilities.minimax
-                ? "transparent"
-                : "auto",
-            referenceAttachmentIds: effectiveReferences.map((r) => r.id),
-          });
-          const asset = result.assets.find(
-              (a) =>
-                a.kind === "image" && a.status === "completed" && a.filePath,
-            ),
-            url = asset ? mediaAssetUrl(asset) : undefined;
-          if (!url)
-            throw new Error(
-              result.errors.join("\n") ||
-                result.assets.find((a) => a.error)?.error ||
-                tr(
-                  "模型未返回可读取的完成图片。已完成部件已保留，可重新生成缺失部件。",
-                  "No completed image returned. Finished parts are retained; retry missing parts.",
-                ),
-            );
-          const data = await prepareSpineGeneratedPart(url);
-          return {
-            part: createSpinePart(
-              roleName(role),
-              data.image,
-              data.width,
-              data.height,
-              role,
-            ),
-            opaque: data.opaque,
-          };
-        },
-        checkpoint: async (incoming) => {
-          workingProject = {
-            ...addSpineParts(workingProject, [incoming]),
-            updatedAt: Date.now(),
-          };
-          if (!mounted.current) {
-            await saveSpineProject(workingProject);
-            return;
-          }
-          update((p) => addSpineParts(p, [incoming]));
-          setSelected(incoming.id);
-          setSetup(true);
-          setPlaying(false);
-          if (projectRef.current) await persist(projectRef.current);
-        },
-      });
-      if (mounted.current)
-        setNotice(
-          tr(
-            `已生成 ${completed} 个部件。${opaque ? "模型输出含不透明背景，需要抠图。" : ""}请检查轮廓和一致性，调整位置后生成动作。`,
-            `Generated ${completed} parts. ${opaque ? "Some outputs are opaque and need background removal. " : ""}Check silhouettes and consistency, align the parts, then generate motion.`,
-          ),
-        );
-    });
   const generatePlannedParts = async (drafts: SpineNewPartDraft[]) => run(async () => {
     const current = projectRef.current;
     if (!current || !model) throw new Error(tr("请先选择生图模型", "Select an image model first"));
@@ -694,15 +586,18 @@ export function SpineStudio({
     if (projectRef.current) await persist(projectRef.current);
     setNotice(tr(`已替换 ${candidate.part.name} 的贴图，骨骼和动作保持；可撤销。`, `Replaced ${candidate.part.name}'s texture, preserving rig and motion. Undo is available.`));
   });
-  const generateMotion = (preset: "idle" | "wave" | "walk") => {
+  const generateMotion = (preset: SpineMotionPreset) => {
     if (!project?.parts.length || project.clips.length >= SPINE_LIMITS.clips)
       return;
     let name = preset as string,
       index = 2;
     while (project.clips.some((c) => c.name === name))
       name = `${preset}-${index++}`;
-    const next = generateSpineClip(project.parts, preset, name);
-    update((p) => ({ ...p, clips: [...p.clips, next] }));
+    const deforming = ["breathe", "spring", "ripple"].includes(preset);
+    const parts = deforming && part ? project.parts.map((item) => item.id === part.id
+      ? { ...item, flexibility: item.flexibility || 0.8 } : item) : project.parts;
+    const next = generateSpineClip(parts, preset, name);
+    update((p) => ({ ...p, parts, clips: [...p.clips, next] }));
     setClipId(next.id);
     setSetup(false);
     setTime(0);
@@ -986,6 +881,7 @@ export function SpineStudio({
             <small>{project?.parts.length ?? 0}/24</small>
           </div>
           <fieldset disabled={busy || !project}>
+            <details className="spine-project-details"><summary>{project?.name ?? tr("本地工程", "Local project")}</summary>
             <label className="spine-label">
               {tr("本地工程", "Local project")}
               <select
@@ -1023,6 +919,7 @@ export function SpineStudio({
                 }))
               }
             />
+            </details>
             <div className="spine-save-state" role="status">
               {saveState === "saved"
                 ? tr("已保存到本机", "Saved on this device")
@@ -1032,97 +929,6 @@ export function SpineStudio({
                     ? tr("正在读取工程…", "Loading projects…")
                     : tr("正在保存…", "Saving…")}
             </div>
-            <section className="spine-source">
-              <div className="spine-section-title"><ImagePlus size={16} /><h2>{tr("整图素材", "Source image")}</h2></div>
-              {project?.sourceImage && <img className="spine-source-preview" src={project.sourceImage.image} alt={project.sourceImage.name} />}
-              <div className="spine-button-row">
-                <button onClick={() => sourceInput.current?.click()}><Upload size={14} />{tr("上传整图", "Upload image")}</button>
-                <button disabled={!model} onClick={() => void generateSource()}><Sparkles size={14} />{tr("生成整图", "Generate image")}</button>
-                <button disabled={!isDesktop()} onClick={() => void run(async () => setSourceHistory((await listMediaAssets("image", 24)).assets.filter((asset) => asset.status === "completed" && asset.filePath)))}><Eye size={14} />{tr("生图历史", "History")}</button>
-              </div>
-              {sourceHistory && <div className="spine-source-history">{sourceHistory.map((asset) => <button key={asset.id} title={asset.prompt} onClick={() => void run(async () => { const url = mediaAssetUrl(asset); if (url) await setSourceImage(url, asset.fileName ?? asset.id); })}><img src={mediaAssetUrl(asset)} alt={asset.prompt} /></button>)}</div>}
-              {project?.sourceImage && <>
-                <label className="spine-label">{tr("背景容差", "Background tolerance")} {backgroundTolerance}<input type="range" min={10} max={100} value={backgroundTolerance} onChange={(event) => setBackgroundTolerance(Number(event.target.value))} /></label>
-                <div className="spine-button-row">
-                  <button onClick={() => void run(async () => { const next = await removeSpineSolidBackground(project.sourceImage!, backgroundTolerance); update((p) => ({ ...p, sourceImage: next })); })}><WandSparkles size={14} />{tr("去纯色背景", "Remove solid background")}</button>
-                  <button onClick={() => update((p) => ({ ...p, sourceImage: { ...p.sourceImage!, image: p.sourceImage!.originalImage } }))}><RotateCcw size={14} />{tr("还原", "Restore")}</button>
-                </div>
-              </>}
-            </section>
-            <button
-              className="spine-wide"
-              onClick={() => partsInput.current?.click()}
-            >
-              <ImagePlus size={15} />
-              {tr("导入 PNG 部件", "Import PNG parts")}
-            </button>
-            <p className="spine-hint">
-              {tr(
-                "使用已分层、补全遮挡的透明部件。名称含 head / body / arm-left 等会自动识别角色。",
-                "Use transparent, complete parts. Names such as head, body and arm-left set their roles automatically.",
-              )}
-            </p>
-            <div className="spine-layer-entry">
-              <button className="spine-wide" onClick={() => setLayerImport({})}>
-                <Upload size={15} />
-                {tr("导入图层清单", "Import layer manifest")}
-              </button>
-              <button className="spine-wide" onClick={() => setComfyOpen(true)}>
-                <Sparkles size={15} />
-                {tr("本地 AI 拆层", "Local AI layers")}
-              </button>
-              <p className="spine-hint">
-                {tr(
-                  "整图 → 拆层 → 骨骼，保留原画布位置。",
-                  "Image → layers → rig, preserving canvas positions.",
-                )}
-              </p>
-            </div>
-            <div
-              className="spine-part-list"
-              role="list"
-              aria-label={tr(
-                "部件图层，后面的部件在上方",
-                "Parts; later parts draw on top",
-              )}
-            >
-              {project?.parts.map((p, index) => (
-                <button
-                  key={p.id}
-                  className={`spine-part${selected === p.id ? " selected" : ""}`}
-                  onClick={() => setSelected(p.id)}
-                >
-                  <span className="spine-part-thumb">
-                    <img src={p.image} alt="" />
-                  </span>
-                  <span>
-                    <strong>{p.name}</strong>
-                    <small>{roleName(p.role)}</small>
-                  </span>
-                  <small>{String(index + 1).padStart(2, "0")}</small>
-                </button>
-              ))}
-            </div>
-            <details className="spine-generate" open>
-              <summary>
-                <Sparkles size={14} />
-                {tr("用生图工作流生成部件", "Generate parts with image models")}
-              </summary>
-              <label className="spine-label">
-                {tr("角色或物体描述", "Character or object description")}
-                <textarea
-                  maxLength={10000}
-                  rows={3}
-                  value={project?.prompt ?? ""}
-                  placeholder={tr(
-                    "角色或物体的外观、画风、配色、材质…",
-                    "Character or object appearance, style, palette, materials…",
-                  )}
-                  onChange={(e) =>
-                    update((p) => ({ ...p, prompt: e.target.value }))
-                  }
-                />
-              </label>
               <label className="spine-label">
                 {tr("生图连接与模型", "Image connection & model")}
                 <select
@@ -1149,6 +955,99 @@ export function SpineStudio({
                   {tr("配置生图连接", "Configure image connection")}
                 </button>
               )}
+          </fieldset>
+          <div className="spine-asset-tabs" role="tablist" aria-label={tr("工作流程", "Workflow")}>
+            {(["chat", "source", "retouch"] as const).map((tab, i) => <button key={tab} role="tab" id={`spine-tab-${tab}`} aria-selected={assetTab === tab} aria-controls={`spine-panel-${tab}`} onClick={() => setAssetTab(tab)}>{[tr("部件与动作", "Rig & motion"), tr("素材", "Sources"), tr("贴图微调", "Retouch")][i]}</button>)}
+          </div>
+          <fieldset disabled={busy || !project} hidden={assetTab !== "source"} id="spine-panel-source" role="tabpanel" aria-labelledby="spine-tab-source">
+            <section className="spine-source">
+              <div className="spine-section-title"><ImagePlus size={16} /><h2>{tr("整图素材", "Source image")}</h2></div>
+              {project?.sourceImage && <img className="spine-source-preview" src={project.sourceImage.image} alt={project.sourceImage.name} />}
+              <div className="spine-button-row">
+                <button onClick={() => sourceInput.current?.click()}><Upload size={14} />{tr("上传整图", "Upload image")}</button>
+                <button disabled={!model} onClick={() => void generateSource()}><Sparkles size={14} />{tr("生成整图", "Generate image")}</button>
+                <button disabled={!isDesktop()} onClick={() => void run(async () => setSourceHistory((await listMediaAssets("image", 24)).assets.filter((asset) => asset.status === "completed" && asset.filePath)))}><Eye size={14} />{tr("生图历史", "History")}</button>
+              </div>
+              {sourceHistory && <div className="spine-source-history">{sourceHistory.map((asset) => <button key={asset.id} title={asset.prompt} onClick={() => void run(async () => { const url = mediaAssetUrl(asset); if (url) await setSourceImage(url, asset.fileName ?? asset.id); })}><img src={mediaAssetUrl(asset)} alt={asset.prompt} /></button>)}</div>}
+              {project?.sourceImage && <>
+                <p className="spine-hint">{tr("下一步：在「部件与动作」发送拆件要求，再生成草案部件。", "Next: describe the parts in Rig & motion, then generate the planned textures.")}</p>
+                <button className="spine-wide primary" onClick={() => setAssetTab("chat")}>{tr("规划拆件与动作", "Plan parts & motion")}</button>
+                <label className="spine-label">{tr("背景容差", "Background tolerance")} {backgroundTolerance}<input type="range" min={10} max={100} value={backgroundTolerance} onChange={(event) => setBackgroundTolerance(Number(event.target.value))} /></label>
+                <div className="spine-button-row">
+                  <button onClick={() => void run(async () => { const next = await removeSpineSolidBackground(project.sourceImage!, backgroundTolerance); update((p) => ({ ...p, sourceImage: next })); })}><WandSparkles size={14} />{tr("去纯色背景", "Remove solid background")}</button>
+                  <button onClick={() => update((p) => ({ ...p, sourceImage: { ...p.sourceImage!, image: p.sourceImage!.originalImage } }))}><RotateCcw size={14} />{tr("还原", "Restore")}</button>
+                </div>
+              </>}
+            </section>
+            <details className="spine-import-options"><summary>{tr("导入分层与本地拆层", "Layer import & local splitting")}</summary>
+            <button
+              className="spine-wide"
+              onClick={() => partsInput.current?.click()}
+            >
+              <ImagePlus size={15} />
+              {tr("导入 PNG 部件", "Import PNG parts")}
+            </button>
+            <p className="spine-hint">
+              {tr(
+                "使用已分层、补全遮挡的透明部件。名称含 head / body / arm-left 等会自动识别角色。",
+                "Use transparent, complete parts. Names such as head, body and arm-left set their roles automatically.",
+              )}
+            </p>
+            <div className="spine-layer-entry">
+              <button className="spine-wide" onClick={() => setLayerImport({})}>
+                <Upload size={15} />
+                {tr("导入图层清单", "Import layer manifest")}
+              </button>
+              <button className="spine-wide" onClick={() => setComfyOpen(true)}>
+                <Sparkles size={15} />
+                {tr("本地 AI 拆层", "Local AI layers")}
+              </button>
+              <p className="spine-hint">
+                {tr(
+                  "本地 AI 拆层需要另行部署 ComfyUI、See-through 和模型。会话规划与部件生图可直接使用已配置的模型连接。",
+                  "Local splitting needs a separate ComfyUI, See-through and model installation. Chat planning and texture generation use your configured model connections.",
+                )}
+              </p>
+            </div>
+            </details>
+          </fieldset>
+          <fieldset disabled={busy || !project} hidden={assetTab !== "retouch"} id="spine-panel-retouch" role="tabpanel" aria-labelledby="spine-tab-retouch">
+            <section className="spine-retouch">
+              <h3>{tr("微调当前贴图", "Refine selected texture")}</h3>
+              <label className="spine-label">{tr("当前部件", "Selected part")}
+                <select aria-label={tr("微调部件", "Part to retouch")} value={selected} onChange={(event) => setSelected(event.target.value)}>
+                  {!project?.parts.length && <option value="">{tr("先在会话中生成部件", "Generate parts in chat first")}</option>}
+                  {project?.parts.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                </select>
+              </label>
+              {part && <img className="spine-retouch-preview" src={part.image} alt={part.name} />}
+              <label className="spine-label">{tr("单件重绘要求", "Part redraw instructions")}
+                <textarea aria-label={tr("单件重绘要求", "Part redraw instructions")} value={redrawPrompt} maxLength={2000} onChange={(event) => setRedrawPrompt(event.target.value)} placeholder={tr("例如：补齐肩部连接，保留原来的配色和轮廓", "For example: complete the shoulder joint, keeping its palette and silhouette")} />
+              </label>
+              <div className="spine-retouch-shortcuts">{[tr("补齐连接处，保持其他细节", "Complete attachment ends; preserve other details"), tr("去掉相邻部件残留，保持比例", "Remove neighboring parts; preserve proportions")].map((text) => <button key={text} onClick={() => setRedrawPrompt(text)}>{text}</button>)}</div>
+              <button className="spine-wide primary" disabled={!part || !model || !project?.sourceImage || !redrawPrompt.trim()} onClick={() => void redrawPart()}><Sparkles size={14} />{tr("重绘当前部件", "Redraw selected part")}</button>
+              <p className="spine-hint">{tr("先对比贴图、装配和动作，再采纳。保留已有骨骼与动作，可撤销。", "Compare texture, assembly and motion before accepting. Keeps the rig and animation; supports undo.")}</p>
+            </section>
+            <details className="spine-generate">
+              <summary>
+                <Sparkles size={14} />
+                {tr("外观描述与补充参考", "Appearance & extra references")}
+              </summary>
+              <label className="spine-label">
+                {tr("角色或物体描述", "Character or object description")}
+                <textarea
+                  maxLength={10000}
+                  rows={3}
+                  value={project?.prompt ?? ""}
+                  placeholder={tr(
+                    "角色或物体的外观、画风、配色、材质…",
+                    "Character or object appearance, style, palette, materials…",
+                  )}
+                  onChange={(e) =>
+                    update((p) => ({ ...p, prompt: e.target.value }))
+                  }
+                />
+              </label>
               <div className="spine-button-row">
                 <button
                   disabled={!isDesktop()}
@@ -1183,38 +1082,13 @@ export function SpineStudio({
                   </button>
                 </div>
               ))}
-              <select
-                aria-label={tr("生成部件类型", "Part to generate")}
-                value={generationRole}
-                onChange={(e) =>
-                  setGenerationRole(e.target.value as SpinePart["role"])
-                }
-              >
-                {SPINE_ROLES.map((r) => (
-                  <option key={r} value={r}>
-                    {roleName(r)}
-                  </option>
-                ))}
-              </select>
-              <div className="spine-button-row">
-                <button disabled={!model} onClick={() => void generate(false)}>
-                  <Sparkles size={13} />
-                  {tr("生成 1 张", "Generate 1")}
-                </button>
-                <button disabled={!model} onClick={() => void generate(true)}>
-                  {tr("补齐六部件", "Fill six parts")}
-                </button>
-              </div>
-              <p className="spine-hint">
-                {tr(
-                  "参考图 1 约束角色身份。补齐最多调用 6 次已配置生图服务；结果需校正，不等同于自动拆层。",
-                  "Reference 1 anchors identity. Fill makes up to six requests to your configured image service. Review and align the outputs; this is not automatic layer decomposition.",
-                )}
-              </p>
             </details>
           </fieldset>
+          <div hidden={assetTab !== "chat"} id="spine-panel-chat" role="tabpanel" aria-labelledby="spine-tab-chat">
+          {!project?.sourceImage && <div className="spine-chat-start"><p className="spine-hint">{tr("先上传整图，再在会话中规划部件、蒙皮和动作。", "Upload a source image, then plan parts, skinning and motion in chat.")}</p><button disabled={busy || !project} onClick={() => sourceInput.current?.click()}><Upload size={14} />{tr("上传整图开始", "Upload to start")}</button></div>}
           {project && <SpineAssistantPanel project={project} clip={clip} time={time} onUpdate={update}
             canGenerate={!!model && !!project.sourceImage && !busy}
+            mediaCatalogRevision={mediaCatalogRevision} externalBusy={busy}
             onGenerate={generatePlannedParts}
             onApply={(proposal) => {
             const current = projectRef.current;
@@ -1226,6 +1100,17 @@ export function SpineStudio({
             setSetup(false);
             setPlaying(false);
           }} />}
+          {!!project?.parts.length && <div className="spine-chat-parts">
+            <div className="spine-section-title"><Layers3 size={16} /><h2>{tr("当前部件", "Current parts")}</h2><small>{project.parts.length}/24</small></div>
+            <div className="spine-part-list" role="list" aria-label={tr("部件图层，后面的部件在上方", "Parts; later parts draw on top")}>
+              {project.parts.map((p, index) => <button key={p.id} disabled={busy} className={`spine-part${selected === p.id ? " selected" : ""}`} onClick={() => setSelected(p.id)}>
+                <span className="spine-part-thumb"><img src={p.image} alt="" /></span>
+                <span><strong>{p.name}</strong><small>{roleName(p.role)}</small></span>
+                <small>{String(index + 1).padStart(2, "0")}</small>
+              </button>)}
+            </div>
+          </div>}
+          </div>
         </aside>
         <main className="spine-stage">
           <div className="spine-stage-toolbar">
@@ -1385,7 +1270,7 @@ export function SpineStudio({
             </div>
             <div className="spine-motion-presets">
               <span>{tr("生成动作", "Generate motion")}</span>
-              {(["idle", "wave", "walk"] as const).map((preset, i) => (
+              {(["idle", "wave", "walk", "breathe", "spring", "ripple"] as const).map((preset, i) => (
                 <button
                   key={preset}
                   disabled={
@@ -1401,6 +1286,9 @@ export function SpineStudio({
                       tr("呼吸待机", "Idle"),
                       tr("挥手", "Wave"),
                       tr("原地行走", "Walk in place"),
+                      tr("弹性呼吸", "Elastic breathing"),
+                      tr("蓄力弹跳", "Squash & jump"),
+                      tr("柔性波动", "Flexible ripple"),
                     ][i]
                   }
                 </button>
@@ -1634,8 +1522,13 @@ export function SpineStudio({
                       "Pivots use normalized image coordinates from the top left. Reparenting preserves setup placement.",
                     )}
                   </p>
+                  <label className="spine-label">{tr("蒙皮延伸方向", "Skin direction")}
+                    <select aria-label={tr("蒙皮延伸方向", "Skin direction")} value={part.skinDirection ?? "down"} onChange={(event) => changePart({ skinDirection: event.target.value as SpinePart["skinDirection"] })}>
+                      {(["down", "up", "left", "right"] as const).map((direction, i) => <option key={direction} value={direction}>{[tr("向下", "Down"), tr("向上", "Up"), tr("向左", "Left"), tr("向右", "Right")][i]}</option>)}
+                    </select>
+                  </label>
                   <label className="spine-label">
-                    {tr("末端骨骼影响权重", "Bend bone weight")} ·{" "}
+                    {tr("蒙皮柔性权重", "Skin flexibility")} ·{" "}
                     {Math.round(part.flexibility * 100)}%
                     <input
                       type="range"
@@ -1650,8 +1543,8 @@ export function SpineStudio({
                   </label>
                   <p className="spine-hint">
                     {tr(
-                      "每个部件 25 个网格顶点、2 根骨骼。末端权重从枢轴向下递增。",
-                      "25 mesh vertices and two bones per part. Bend weight increases downward from the pivot.",
+                      "权重从枢轴沿所选方向递增。弯曲、局部伸缩和末端位移会改变网格形状；0% 为刚性贴图。",
+                      "Weights increase from the pivot in the chosen direction. Bend, local scale and tip offsets deform the mesh; 0% stays rigid.",
                     )}
                   </p>
                 </>
@@ -1709,6 +1602,10 @@ export function SpineStudio({
                         max={360}
                         onChange={(bend) => editKey({ bend })}
                       />
+                      <NumberField label={tr("柔性宽度", "Flex width")} value={key.scaleX ?? 1} min={0.25} max={2} step={0.01} onChange={(scaleX) => editKey({ scaleX })} />
+                      <NumberField label={tr("柔性高度", "Flex height")} value={key.scaleY ?? 1} min={0.25} max={2} step={0.01} onChange={(scaleY) => editKey({ scaleY })} />
+                      <NumberField label={tr("末端位移 X", "Tip offset X")} value={key.tipX ?? 0} min={-1000} max={1000} onChange={(tipX) => editKey({ tipX })} />
+                      <NumberField label={tr("末端位移 Y", "Tip offset Y")} value={key.tipY ?? 0} min={-1000} max={1000} onChange={(tipY) => editKey({ tipY })} />
                       <NumberField
                         label={tr("位移 X", "Offset X")}
                         value={key.x}
@@ -1795,13 +1692,7 @@ export function SpineStudio({
                 )
               )}
               <h3>{tr("贴图与绘制顺序", "Texture & draw order")}</h3>
-              <label className="spine-label">{tr("单件重绘要求", "Part redraw instructions")}
-                <textarea aria-label={tr("单件重绘要求", "Part redraw instructions")} value={redrawPrompt} maxLength={2000} onChange={(event) => setRedrawPrompt(event.target.value)}
-                  placeholder={tr("例如：身体只保留无袖衣身与裙摆，删除两侧袖子", "For example: keep only the sleeveless torso and skirt; remove both sleeves")} />
-              </label>
-              <button className="spine-wide" disabled={!model || !project?.sourceImage || !redrawPrompt.trim()} onClick={() => void redrawPart()}>
-                <Sparkles size={14} />{tr("重绘当前部件", "Redraw selected part")}
-              </button>
+              <button className="spine-wide" onClick={() => setAssetTab("retouch")}><WandSparkles size={14} />{tr("打开贴图微调", "Open texture retouch")}</button>
               <button
                 className="spine-wide"
                 onClick={() => replaceInput.current?.click()}

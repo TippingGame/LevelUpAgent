@@ -1,5 +1,8 @@
 import {
   sampleSpineKeys,
+  interpolateSpineDeformation,
+  SPINE_DEFORMATION_FIELDS,
+  validSpineDeformation,
   SPINE_LIMITS,
   type SpineClip,
   type SpineKey,
@@ -38,7 +41,7 @@ export function parseSpinePoseInference(text: string, parts: SpinePart[]): Spine
     if (!target || typeof target !== "object" || Array.isArray(target))
       throw new Error(`Invalid pose target for ${id}.`);
     const fields = target as Record<string, unknown>;
-    if (Object.keys(fields).length !== 4 ||
+    if (Object.keys(fields).some((key) => !["rotation", "bend", "x", "y", ...SPINE_DEFORMATION_FIELDS].includes(key)) || !validSpineDeformation(fields) ||
         !["rotation", "bend"].every((key) => typeof fields[key] === "number" && Number.isFinite(fields[key]) && Math.abs(fields[key]) <= 360) ||
         !["x", "y"].every((key) => typeof fields[key] === "number" && Number.isFinite(fields[key]) && Math.abs(fields[key]) <= 1000))
       throw new Error(`Pose target for ${id} needs bounded rotation, bend, x and y.`);
@@ -73,6 +76,7 @@ export function poseTargetFromKey(key: SpineKey): SpinePoseTarget {
     bend: key.bend,
     x: key.x,
     y: key.y,
+    ...interpolateSpineDeformation(key, key, 0),
   };
 }
 
@@ -106,6 +110,8 @@ function clampTarget(target: SpinePoseTarget): SpinePoseTarget {
     bend: Math.max(-360, Math.min(360, Number(target.bend) || 0)),
     x: Math.max(-1000, Math.min(1000, Number(target.x) || 0)),
     y: Math.max(-1000, Math.min(1000, Number(target.y) || 0)),
+    ...Object.fromEntries(SPINE_DEFORMATION_FIELDS.filter((key) => target[key] !== undefined).map((key) =>
+      [key, key.startsWith("scale") ? Math.max(0.25, Math.min(2, Number(target[key]) || 1)) : Math.max(-1000, Math.min(1000, Number(target[key]) || 0))])),
   };
 }
 
@@ -156,6 +162,7 @@ export function interpolateSpineTargets(
     bend: from.bend + shortestAngleDelta(from.bend, to.bend) * t,
     x: from.x + (to.x - from.x) * t,
     y: from.y + (to.y - from.y) * t,
+    ...interpolateSpineDeformation(from, to, t),
   };
 }
 

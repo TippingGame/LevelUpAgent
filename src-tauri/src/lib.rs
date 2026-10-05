@@ -1347,7 +1347,12 @@ fn merge_custom_instructions<const N: usize>(parts: [String; N]) -> Option<Strin
 }
 
 fn attach_subagent_tools(request: &mut AgentTurnRequest) {
-    if (request.hatch && !request.allow_outside_workspace)
+    // Hatch and theme-generation runs must keep visual/package work in the
+    // parent session. Isolated child Agents are intentionally file-only: they
+    // cannot call image generation or inspect returned pixels, and creating a
+    // Git worktree would incorrectly require the user's workspace to be clean.
+    if request.hatch
+        || agent::theme_generation_bootstrapped(&request.messages)
         || !matches!(request.mode.as_str(), "agent" | "goal")
         || request.workspace.is_none()
     {
@@ -3942,6 +3947,13 @@ fn harness_assistant_delta_event(
     round: usize,
     event: AgentStreamEvent,
 ) -> Option<crate::harness::types::HarnessRuntimeEvent> {
+    if event.kind == "content_reset" {
+        return Some(crate::harness::types::HarnessRuntimeEvent::transient(
+            operation_id,
+            "assistant_reset",
+            serde_json::json!({ "round": round }),
+        ));
+    }
     if event.kind != "content_delta" {
         return None;
     }
@@ -3984,10 +3996,9 @@ fn is_provider_round_timeout(error: &str) -> bool {
     error.starts_with(PROVIDER_ROUND_TIMEOUT_PREFIX)
 }
 
-fn should_reconnect_provider(error: &str, output_was_emitted: bool, retry_number: u32) -> bool {
+fn should_reconnect_provider(error: &str, retry_number: u32) -> bool {
     agent::is_reconnectable_provider_error(error)
         && !is_provider_round_timeout(error)
-        && !output_was_emitted
         && retry_number < PROVIDER_RECONNECT_RETRIES
 }
 
@@ -4000,14 +4011,8 @@ fn request_has_large_inline_image(request: &AgentTurnRequest) -> bool {
     })
 }
 
-fn should_reconnect_request(
-    error: &str,
-    output_was_emitted: bool,
-    retry_number: u32,
-    has_large_inline_image: bool,
-) -> bool {
-    should_reconnect_provider(error, output_was_emitted, retry_number)
-        && (!has_large_inline_image || retry_number < 1)
+fn should_reconnect_request(error: &str, retry_number: u32, has_large_inline_image: bool) -> bool {
+    should_reconnect_provider(error, retry_number) && (!has_large_inline_image || retry_number < 1)
 }
 
 async fn within_provider_round_timeout<T, F>(
@@ -4286,6 +4291,7 @@ where
     let mut failover_attempts = 0_u32;
     let mut reconnecting = false;
     let mut last_reconnect_attempt = 0_u32;
+    let mut reset_output_before_attempt = false;
     let has_large_inline_image = request_has_large_inline_image(&request);
     'providers: for (index, profile) in candidates.into_iter().enumerate() {
         if index > 0 && provider_is_cooling_down(database, &profile.id)? {
@@ -4341,6 +4347,12 @@ where
             }
         };
         for retry_number in 0..=PROVIDER_RECONNECT_RETRIES {
+            // Replay only the unfinished provider attempt. Tools run after a
+            // completed response; prior tool results remain in the request.
+            // Defer clearing partial output until a retry actually starts.
+            if std::mem::take(&mut reset_output_before_attempt) {
+                on_stream_event(AgentStreamEvent::content_reset());
+            }
             let mut attempt = request.clone();
             attempt.profile = profile.clone();
             let retry_started_at = now_millis();
@@ -4453,12 +4465,8 @@ where
                     let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
                     let output_was_emitted = emitted.load(Ordering::Acquire);
                     let round_timed_out = is_provider_round_timeout(&error);
-                    let will_retry = should_reconnect_request(
-                        &error,
-                        output_was_emitted,
-                        retry_number,
-                        has_large_inline_image,
-                    );
+                    let will_retry =
+                        should_reconnect_request(&error, retry_number, has_large_inline_image);
                     let status = if will_retry {
                         "retrying"
                     } else if error.contains("REQUEST_CANCELLED") {
@@ -4495,6 +4503,7 @@ where
                         return Err(error);
                     }
                     if will_retry {
+                        reset_output_before_attempt = output_was_emitted;
                         reconnecting = true;
                         last_reconnect_attempt = retry_number + 1;
                         on_connection_event(
@@ -4522,9 +4531,7 @@ where
                     }
                     if agent::is_retryable_provider_error(&error) {
                         database.record_provider_failure(&profile.id, &error)?;
-                        if output_was_emitted {
-                            return Err(error);
-                        }
+                        reset_output_before_attempt = output_was_emitted;
                         last_error = error;
                         continue 'providers;
                     }
@@ -5832,6 +5839,7 @@ async fn agent_turn_stream_inner(
     let mut failover_attempts = 0_u32;
     let mut reconnecting = false;
     let mut last_reconnect_attempt = 0_u32;
+    let mut reset_output_before_attempt = false;
     let has_large_inline_image = request_has_large_inline_image(&request);
     'providers: for (index, profile) in candidates.into_iter().enumerate() {
         if index > 0 && provider_is_cooling_down(&database, &profile.id)? {
@@ -5886,6 +5894,9 @@ async fn agent_turn_stream_inner(
             }
         };
         for retry_number in 0..=PROVIDER_RECONNECT_RETRIES {
+            if std::mem::take(&mut reset_output_before_attempt) {
+                let _ = on_event.send(AgentStreamEvent::content_reset());
+            }
             let mut attempt = request.clone();
             attempt.profile = profile.clone();
             let emitted = Arc::new(AtomicBool::new(false));
@@ -6005,12 +6016,8 @@ async fn agent_turn_stream_inner(
                     let output_was_emitted = emitted.load(Ordering::Acquire);
                     let retryable = agent::is_retryable_provider_error(&error);
                     let round_timed_out = is_provider_round_timeout(&error);
-                    let will_retry = should_reconnect_request(
-                        &error,
-                        output_was_emitted,
-                        retry_number,
-                        has_large_inline_image,
-                    );
+                    let will_retry =
+                        should_reconnect_request(&error, retry_number, has_large_inline_image);
                     let status = if will_retry {
                         "retrying"
                     } else if error.contains("REQUEST_CANCELLED") {
@@ -6048,6 +6055,7 @@ async fn agent_turn_stream_inner(
                         break 'providers;
                     }
                     if will_retry {
+                        reset_output_before_attempt = output_was_emitted;
                         reconnecting = true;
                         last_reconnect_attempt = retry_number + 1;
                         let _ = on_event.send(AgentStreamEvent::provider_reconnecting(
@@ -6078,10 +6086,11 @@ async fn agent_turn_stream_inner(
                     if retryable {
                         database.record_provider_failure(&profile.id, &error)?;
                     }
-                    if output_was_emitted || !retryable {
+                    if !retryable {
                         result = Some(Err(error));
                         break 'providers;
                     }
+                    reset_output_before_attempt = output_was_emitted;
                     last_error = error;
                     continue 'providers;
                 }
@@ -7382,6 +7391,8 @@ async fn harness_run_loop(
                             crate::harness::types::PermissionLevel::Full
                         )
                         && !agent::theme_generation_tool_allowed(&call.name);
+                    let isolated_subagent_violation = (request.hatch || theme_generation_mode)
+                        && matches!(call.name.as_str(), "delegate_task" | "apply_subagent_patch");
                     let repeated_skill_read =
                         !matches!(
                             request.permission_level,
@@ -7422,6 +7433,7 @@ async fn harness_run_loop(
                     };
                     let decision = if hatch_tool_error.is_some()
                         || theme_tool_violation
+                        || isolated_subagent_violation
                         || browser_goal_completion_blocked
                     {
                         // This call is never executed. Bypass approval so an
@@ -7593,6 +7605,14 @@ async fn harness_run_loop(
                         logging::write("warn", "hatch", HATCH_TOOL_REPAIR_EVENT, payload);
                         Ok(ToolExecutionResponse {
                             output,
+                            is_error: true,
+                        })
+                    } else if isolated_subagent_violation {
+                        Ok(ToolExecutionResponse {
+                            output: format!(
+                                "Tool '{}' is unavailable during hatch and theme-generation runs. Isolated child Agents are file-only and cannot generate images or inspect returned pixels. Continue in the parent session with the host image-generation and visual-inspection tools.",
+                                call.name
+                            ),
                             is_error: true,
                         })
                     } else if theme_tool_violation {
@@ -9730,6 +9750,16 @@ async fn execute_hatch_command(
 }
 
 fn hatch_tool_policy_error(request: &ToolExecutionRequest) -> Option<&'static str> {
+    if request.hatch
+        && matches!(
+            request.name.as_str(),
+            "delegate_task" | "apply_subagent_patch"
+        )
+    {
+        return Some(
+            "Isolated subagents are unavailable during pet hatching. Continue generation and pixel inspection in the parent session using generate_images and view_image; do not commit or stash unrelated workspace changes.",
+        );
+    }
     if !request.hatch || request.permission_level.as_deref() == Some("full") {
         return None;
     }
@@ -13529,6 +13559,13 @@ mod tests {
         };
         assert!(hatch_tool_policy_error(&request).is_some());
 
+        for permission in ["request", "full", "auto"] {
+            request.permission_level = Some(permission.to_owned());
+            for name in ["delegate_task", "apply_subagent_patch"] {
+                request.name = name.to_owned();
+                assert!(hatch_tool_policy_error(&request).is_some());
+            }
+        }
         request.permission_level = Some("full".to_owned());
         for name in [
             "get_goal",
@@ -14480,7 +14517,6 @@ mod tests {
             for name in [
                 "generate_images",
                 "generate_videos",
-                "delegate_task",
                 "browser_start",
                 "inspect_skill",
                 "start_process",
@@ -14489,6 +14525,48 @@ mod tests {
                     names.iter().any(|tool| tool == name),
                     "missing {name}, hatch={hatch}"
                 );
+            }
+            assert!(!names.iter().any(|tool| tool == "delegate_task"));
+            assert!(!names.iter().any(|tool| tool == "apply_subagent_patch"));
+        }
+    }
+
+    #[test]
+    fn hatch_and_theme_generation_never_expose_isolated_subagents() {
+        for (hatch, messages) in [
+            (true, Vec::new()),
+            (
+                false,
+                vec![AgentMessage {
+                    role: "user".to_owned(),
+                    content: "[LEVELUP_THEME_GENERATION_BOOTSTRAP_COMPLETE]\n[LEVELUP_THEME_GENERATION_TARGET] .levelup/generated-themes/test.levelup-theme".to_owned(),
+                    tool_calls: Vec::new(),
+                    tool_call_id: None,
+                    provider_reasoning_blocks: Vec::new(),
+                    internal: true,
+                    attachments: Vec::new(),
+                }],
+            ),
+        ] {
+            for full_access in [false, true] {
+                let mut request: AgentTurnRequest = serde_json::from_value(serde_json::json!({
+                    "profile": profile("primary", 10, true),
+                    "messages": messages,
+                    "mode": "goal",
+                    "workspace": "workspace",
+                    "hatch": hatch,
+                    "allowOutsideWorkspace": full_access
+                }))
+                .unwrap();
+                attach_subagent_tools(&mut request);
+                assert!(!request.available_tools.iter().any(|tool| matches!(
+                    tool.name.as_str(),
+                    "delegate_task" | "apply_subagent_patch"
+                )));
+                request.hatch = false;
+                request.messages.clear();
+                attach_subagent_tools(&mut request);
+                assert!(request.available_tools.iter().any(|tool| tool.name == "delegate_task"));
             }
         }
     }
@@ -14846,18 +14924,15 @@ mod tests {
     }
 
     #[test]
-    fn provider_reconnect_stops_after_output_or_six_attempts() {
+    fn provider_reconnect_stops_after_six_attempts_or_round_deadline() {
         let timeout = "Provider stream timed out after 30 seconds without activity";
-        assert!(should_reconnect_provider(timeout, false, 0));
-        assert!(!should_reconnect_provider(timeout, true, 0));
+        assert!(should_reconnect_provider(timeout, 0));
         assert!(!should_reconnect_provider(
             timeout,
-            false,
             PROVIDER_RECONNECT_RETRIES
         ));
         assert!(!should_reconnect_provider(
             &provider_round_timeout_error(PROVIDER_ROUND_TIMEOUT),
-            false,
             0
         ));
     }
@@ -14897,9 +14972,9 @@ mod tests {
     #[test]
     fn large_inline_images_only_allow_one_reconnect_attempt() {
         let timeout = "Provider stream timed out after 90 seconds without activity";
-        assert!(should_reconnect_request(timeout, false, 0, true));
-        assert!(!should_reconnect_request(timeout, false, 1, true));
-        assert!(should_reconnect_request(timeout, false, 1, false));
+        assert!(should_reconnect_request(timeout, 0, true));
+        assert!(!should_reconnect_request(timeout, 1, true));
+        assert!(should_reconnect_request(timeout, 1, false));
     }
 
     #[test]
@@ -15083,8 +15158,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_read_errors_reconnect_before_output_and_preserve_partial_output() {
-        for partial_output in [false, true] {
+    async fn provider_stream_failures_reconnect_and_replace_only_unfinished_output() {
+        for (failure, partial_output, recover, cancel) in [
+            (
+                r#"data: {"type":"error","error":{"code":"stream_read_error","message":"upstream disconnected"}}"#,
+                false,
+                true,
+                false,
+            ),
+            (
+                r#"data: {"type":"error","error":{"code":"stream_read_error","message":"upstream disconnected"}}"#,
+                true,
+                true,
+                false,
+            ),
+            (
+                r#"data: {"type":"response.failed","response":{"error":{"message":"stream disconnected before completion: Upstream request failed"}}}"#,
+                false,
+                true,
+                false,
+            ),
+            (
+                r#"data: {"type":"response.failed","response":{"error":{"message":"stream disconnected before completion: Upstream request failed"}}}"#,
+                true,
+                true,
+                false,
+            ),
+            (
+                r#"data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+                true,
+                true,
+                false,
+            ),
+            (
+                r#"data: {"type":"error","error":{"code":503,"message":"Unavailable"}}"#,
+                true,
+                true,
+                false,
+            ),
+            (
+                "event: error\ndata: {\"code\":\"server_error\",\"message\":\"Try later\"}",
+                true,
+                true,
+                false,
+            ),
+            ("", true, true, false),
+            (r#"data: {"delta":"cut off"#, true, true, false),
+            (
+                r#"data: {"error":{"message":"Upstream request failed"}}"#,
+                true,
+                false,
+                false,
+            ),
+            (
+                r#"data: {"error":{"message":"Upstream request failed"}}"#,
+                true,
+                false,
+                true,
+            ),
+        ] {
             let root =
                 std::env::temp_dir().join(format!("levelup-stream-retry-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&root).unwrap();
@@ -15097,12 +15229,14 @@ mod tests {
                     "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
                 );
             }
-            first.push_str("data: {\"type\":\"error\",\"error\":{\"code\":\"stream_read_error\",\"message\":\"upstream disconnected\"}}\n\n");
-            let mut replies = vec![first];
-            if !partial_output {
+            first.push_str(failure);
+            first.push_str("\n\n");
+            let mut replies = vec![first.clone(); if recover || cancel { 1 } else { 6 }];
+            if recover {
                 replies.push("data: {\"type\":\"response.output_text.delta\",\"delta\":\"recovered\"}\n\ndata: {\"type\":\"response.completed\",\"error\":null}\n\n".to_owned());
             }
             let server = thread::spawn(move || {
+                let mut requests = Vec::new();
                 for body in replies {
                     let (mut stream, _) = listener.accept().unwrap();
                     stream
@@ -15127,7 +15261,9 @@ mod tests {
                         }
                     }
                     assert!(content_length <= 32 * 1024);
-                    reader.read_exact(&mut vec![0_u8; content_length]).unwrap();
+                    let mut request = vec![0_u8; content_length];
+                    reader.read_exact(&mut request).unwrap();
+                    requests.push(serde_json::from_slice::<serde_json::Value>(&request).unwrap());
                     drop(reader);
                     let response = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -15135,16 +15271,24 @@ mod tests {
                     );
                     stream.write_all(response.as_bytes()).unwrap();
                 }
+                requests
             });
             let mut profile = profile("stream-retry", 0, false);
             profile.base_url = format!("http://{address}");
             let request: AgentTurnRequest = serde_json::from_value(serde_json::json!({
                 "profile": profile,
-                "messages": [{ "role": "user", "content": "test" }],
-                "mode": "chat"
+                "messages": [
+                    { "role": "user", "content": "test" },
+                    { "role": "assistant", "content": "Inspect first", "toolCalls": [{"id": "completed-call", "name": "list_files", "arguments": {"path": "."}}] },
+                    { "role": "tool", "content": "Preserved completed tool result", "toolCallId": "completed-call" }
+                ],
+                "mode": "agent"
             }))
             .unwrap();
             let mut deltas = String::new();
+            let mut resets = 0;
+            let cancellation = CancellationToken::new();
+            let cancel_on_retry = cancellation.clone();
             let result = run_agent_turn_with_failover_events_inner(
                 &Client::new(),
                 &database,
@@ -15154,26 +15298,47 @@ mod tests {
                 |_| Ok("test-key".to_owned()),
                 true,
                 Duration::from_secs(5),
-                CancellationToken::new(),
-                |_, _, _, _| {},
+                cancellation,
+                |_, _, _, error| {
+                    if cancel && error.is_some() {
+                        cancel_on_retry.cancel();
+                    }
+                },
                 |event| {
+                    if event.kind == "content_reset" {
+                        resets += 1;
+                        deltas.clear();
+                    }
                     if let Some(delta) = event.delta {
                         deltas.push_str(&delta);
                     }
                 },
             )
             .await;
-            server.join().unwrap();
-            if partial_output {
-                assert!(result.unwrap_err().contains("stream_read_error"));
+            let requests = server.join().unwrap();
+            assert!(
+                requests[0]
+                    .to_string()
+                    .contains("Preserved completed tool result")
+            );
+            assert!(requests.iter().all(|request| request == &requests[0]));
+            if cancel {
+                assert!(result.unwrap_err().contains("REQUEST_CANCELLED"));
                 assert_eq!(deltas, "partial");
                 assert_eq!(database.list_provider_requests(10).unwrap().len(), 1);
-            } else {
+                assert_eq!(resets, 0);
+            } else if recover {
                 assert_eq!(result.unwrap().content, "recovered");
                 assert_eq!(deltas, "recovered");
+                assert_eq!(resets, usize::from(partial_output));
                 let logs = database.list_provider_requests(10).unwrap();
                 assert_eq!(logs.len(), 2);
                 assert!(logs.iter().any(|item| item.status == "retrying"));
+            } else {
+                assert!(result.unwrap_err().contains("Upstream request failed"));
+                assert_eq!(deltas, "partial");
+                assert_eq!(resets, 5);
+                assert_eq!(database.list_provider_requests(10).unwrap().len(), 6);
             }
             drop(database);
             std::fs::remove_dir_all(root).unwrap();

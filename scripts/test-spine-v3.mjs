@@ -31,6 +31,18 @@ function fixture() {
   return next;
 }
 
+test("captured and interpolated pose targets retain all deformation channels", () => {
+  const project = fixture(), clip = project.clips[0], id = project.parts[0].id;
+  clip.tracks[id] = [
+    { time: 0, rotation: 0, bend: 0, x: 0, y: 0, curve: "linear" },
+    { time: 2, rotation: 0, bend: 20, x: 0, y: 0, scaleX: 1.4, scaleY: 0.6, tipX: 40, tipY: -20, curve: "linear" },
+  ];
+  const frame = motion.captureSpinePose(clip, project.parts, 1, "deformed", "capture");
+  assert.deepEqual([frame.targets[id].scaleX, frame.targets[id].scaleY, frame.targets[id].tipX, frame.targets[id].tipY], [1.2, 0.8, 20, -10]);
+  const halfway = motion.interpolateSpineTargets(clip.tracks[id][0], clip.tracks[id][1], 0.5);
+  assert.deepEqual([halfway.scaleX, halfway.scaleY, halfway.tipX, halfway.tipY], [1.2, 0.8, 20, -10]);
+});
+
 test("pose generation uses nearest pictured endpoints and rejects occupied or unbounded times", () => {
   const project = fixture(), clip = project.clips[0], study = motion.createSpineMotionStudy(clip);
   const frame = (time, name, image = png) => motion.captureSpinePose(clip, project.parts, time, name, "upload", image ? {image, imageWidth: 1, imageHeight: 1} : undefined);

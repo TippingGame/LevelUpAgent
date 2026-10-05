@@ -854,6 +854,7 @@ export async function agentTurnStream(
   onReconnected?: (retryAttempt?: number) => void,
   customInstructions?: string,
   reasoningEffort: ReasoningEffort = "auto",
+  onReset?: () => void,
 ): Promise<AgentTurnResponse> {
   const cleanMessages = messages.filter((message) => !message.status).map(({ role, content, toolCalls, toolCallId, internal, attachments, providerReasoningBlocks }) => ({
     role,
@@ -867,6 +868,7 @@ export async function agentTurnStream(
   const onEvent = new Channel<AgentStreamEvent>();
   onEvent.onmessage = (event) => {
     if (event.kind === "content_delta" && event.delta) onDelta(event.delta);
+    if (event.kind === "content_reset") onReset?.();
     if (event.kind === "provider_reconnecting") {
       onReconnect?.(event.retryAttempt ?? 1, event.maxRetryAttempts ?? 5);
     }

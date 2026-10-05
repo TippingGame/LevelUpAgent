@@ -17,7 +17,7 @@ const page = await context.newPage();
 const errors = [];
 page.on("pageerror", (error) => errors.push(error.message));
 
-const harness = `<!doctype html><html><head><meta charset="UTF-8"></head><body><div id="root"></div><script type="module">
+const harness = `<!doctype html><html><head><meta charset="UTF-8"><style>html,body,#root{height:100%;margin:0}button,input,textarea,select{font:inherit}</style></head><body><div id="root"></div><script type="module">
   import RefreshRuntime from "/@react-refresh";
   RefreshRuntime.injectIntoGlobalHook(window);
   window.$RefreshReg$ = () => {};
@@ -43,6 +43,8 @@ const harness = `<!doctype html><html><head><meta charset="UTF-8"></head><body><
       if (command === "plugin:dialog|open") return ["user-design.png"];
       if (command === "import_image_attachments") {calls.attachments.user_reference="user-design.png";return [{id:"user_reference",name:"user-design.png",mimeType:"image/png",kind:"image",sizeBytes:1024}];}
       if (command === "import_clipboard_images") { calls.references++; return args.images.map((image,index) => {const id="ref_"+calls.references+"_"+index;calls.attachments[id]=image.name;return { id, name: image.name, mimeType: "image/png", kind: "image", sizeBytes: 1024 };}); }
+      if (command === "agent_turn" && window.failNextChat) { window.failNextChat = false; throw new Error("Injected chat failure"); }
+      if (command === "agent_turn" && window.holdNextChat) { window.holdNextChat = false; return new Promise(resolve => { window.releaseChat = () => resolve({ content: JSON.stringify({reply:"Late cancelled result"}), toolCalls:[] }); }); }
       const motionContext = command === "agent_turn" ? args.request.messages.findLast((message) => message.content.includes("Current request: 摆动"))?.content : undefined;
       if (motionContext) {
         const message = args.request.messages.findLast((message) => message.content.includes("Current request: 摆动"));
@@ -93,11 +95,26 @@ try {
   await page.route("**/spine-plan-harness.html", (route) => route.fulfill({ status: 200, contentType: "text/html", body: harness }));
   await page.goto((process.argv[2] || "http://127.0.0.1:1432") + "/spine-plan-harness.html");
   await page.getByText("已保存到本机", { exact: true }).waitFor();
+  await page.getByRole("tab", { name: "素材", exact: true }).click();
   await page.locator('input[type="file"][accept="image/png,image/jpeg,image/webp"]').first().setInputFiles(source);
   await page.locator(".spine-source-preview").waitFor();
+  await page.getByRole("button", { name: "规划拆件与动作", exact: true }).click();
   await page.getByLabel("骨骼会话模型").waitFor();
+  await page.evaluate(() => { window.holdNextChat = true; });
+  await page.getByRole("textbox", { name: "部件、骨骼或动作需求" }).fill("停止后仍保留这条需求");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await page.waitForFunction(() => typeof window.releaseChat === "function");
+  await page.getByRole("button", { name: "停止等待", exact: true }).click();
+  assert.equal(await page.getByRole("textbox", { name: "部件、骨骼或动作需求" }).inputValue(), "停止后仍保留这条需求");
+  await page.evaluate(() => window.releaseChat());
+  await page.locator(".spine-chat-error").getByRole("button", { name: "关闭提示", exact: true }).click();
+  assert.equal(await page.getByText("Late cancelled result", { exact: true }).count(), 0);
+  await page.evaluate(() => { window.failNextChat = true; });
   await page.getByRole("textbox", { name: "部件、骨骼或动作需求" }).fill("将物体拆为外壳和可摆动组件");
   await page.getByRole("button", { name: "发送", exact: true }).click();
+  await page.getByText("Injected chat failure", { exact: true }).waitFor();
+  assert.equal(await page.getByRole("textbox", { name: "部件、骨骼或动作需求" }).inputValue(), "将物体拆为外壳和可摆动组件");
+  await page.getByRole("button", { name: "重试发送", exact: true }).click();
   await page.getByText("Two editable object parts").waitFor();
   assert.equal(await page.locator(".spine-assistant-drafts > div").count(), 2);
   await page.getByRole("button", { name: "生成草案部件" }).click();
@@ -179,6 +196,8 @@ try {
   assert.match(visualRequests[2].context, /#9=2s/);
   assert.match(visualRequests[0].context, new RegExp("#1=" + motion.parts[0].id));
   assert.match(visualRequests[2].context, new RegExp("#1=" + motion.parts[1].id), "New visual references follow updated layer order");
+  await page.getByRole("tab", { name: "贴图微调", exact: true }).click();
+  await page.locator(".spine-generate summary").click();
   await page.getByRole("button",{name:"参考图 (0/3)",exact:true}).click();
   await page.getByText("1. user-design.png",{exact:true}).waitFor();
   await page.getByRole("button", {name: "姿态研究", exact: true}).click();
@@ -293,6 +312,7 @@ try {
   });
   assert.notEqual(replaced.sourceId, interrupted.sourceId);
   assert.equal(replaced.plan, undefined);
+  await page.getByRole("tab", { name: "部件与动作", exact: true }).click();
   await page.getByRole("textbox", { name: "部件、骨骼或动作需求" }).fill("重新为这张图规划两个部件");
   await page.getByRole("button", { name: "发送", exact: true }).click();
   await page.waitForFunction(() => document.querySelectorAll(".spine-assistant-drafts > div").length === 2);
@@ -309,6 +329,30 @@ try {
   assert.equal(replanned.sourceId, replaced.sourceId);
   assert.deepEqual(replanned.parts.slice(2).map((part) => part.id), [replanned.planId + "_case", replanned.planId + "_swing"]);
   assert.equal(replanned.parts[3].parent, replanned.parts[2].id);
+  await page.getByRole("button", { name: "弹性呼吸", exact: true }).click();
+  await page.getByRole("button", { name: "暂停", exact: true }).click();
+  await page.getByText("已保存到本机", { exact: true }).waitFor();
+  const deformation = await page.evaluate(async () => {
+    const storage = await import("/src/lib/spineStorage.ts");
+    const spine = await import("/src/lib/spine.ts");
+    const project = await storage.loadSpineProject(document.querySelector('select[aria-label="本地工程"]').value);
+    const clip = project.clips.at(-1);
+    const part = project.parts.find(p => clip.tracks[p.id].some(k => k.scaleX > 1));
+    return { name: clip.name, setup: spine.spineWorldVertices(part, spine.spineWorldPose(project.parts, clip, 0)),
+      inhale: spine.spineWorldVertices(part, spine.spineWorldPose(project.parts, clip, 1)) };
+  });
+  assert.match(deformation.name, /breathe/);
+  assert.notDeepEqual(deformation.inhale, deformation.setup);
+  for (const width of [720, 1440]) {
+    await page.setViewportSize({width, height:900});
+    for (const name of ["部件与动作", "素材", "贴图微调"]) {
+      await page.getByRole("tab", {name, exact:true}).click();
+      assert.equal(await page.locator('[role="tabpanel"]:visible').count(), 1);
+      assert.equal(await page.locator(".spine-assets").evaluate(el => el.scrollWidth <= el.clientWidth), true, `${name} sidebar overflow at ${width}`);
+      assert.equal(await page.evaluate(() => document.body.scrollWidth <= innerWidth), true);
+      await page.screenshot({path:resolve(output, `workflow-${width}-${name}.png`)});
+    }
+  }
   assert.deepEqual(errors, []);
   writeFileSync(resolve(output, "v4-plan-ui-result.json"), JSON.stringify({ interrupted, resumed: result, motion, inbetween, replaced, replanned }, null, 2));
   console.log(JSON.stringify({ interrupted, resumed: result, replaced, replanned }, null, 2));
