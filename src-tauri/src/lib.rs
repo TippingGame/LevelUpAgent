@@ -5372,7 +5372,9 @@ async fn prepare_constellation_attachments(
     let storage = attachment_storage(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         local_resources::prepare_constellation_inputs(&storage, &attachments, Path::new(&workspace))
-    }).await.map_err(|error| format!("Could not prepare constellation inputs: {error}"))?
+    })
+    .await
+    .map_err(|error| format!("Could not prepare constellation inputs: {error}"))?
 }
 
 #[tauri::command]

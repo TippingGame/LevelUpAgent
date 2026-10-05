@@ -4608,7 +4608,9 @@ mod tests {
             size_bytes: 12,
             kind: crate::models::AttachmentKind::Image,
             data_base64: Some("aW1hZ2U=".to_owned()),
-            text_content: Some("Editable copy: .levelup-attachments/working-diagram.png".to_owned()),
+            text_content: Some(
+                "Editable copy: .levelup-attachments/working-diagram.png".to_owned(),
+            ),
         });
         let responses = responses_body(&request, false);
         let chat = chat_body(&request, false);

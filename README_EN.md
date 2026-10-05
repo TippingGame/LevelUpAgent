@@ -57,7 +57,7 @@ pnpm tauri build
 
 The current release is `1.0.64`. Windows builds lack Authenticode signatures; macOS builds use ad-hoc signing and are not notarized. Platform verification limits are documented in the release guide.
 
-The current local test version is `1.1.65`, not yet published. Build and verification details are in [the local package notes](docs/VERSION_1.1.65.md).
+See the [1.1.65 release notes](docs/RELEASE_1.1.65.md) for features, publication status, and verification. Earlier local test builds remain documented in the [build history](docs/VERSION_1.1.65.md).
 
 ## License
 

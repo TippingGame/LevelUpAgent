@@ -793,8 +793,13 @@ pub(crate) fn stage_local_file_in_workspace(
     name: &str,
     source: &Path,
 ) -> Result<String, String> {
-    let file = std::fs::File::open(source).map_err(|error| format!("Could not open input file: {error}"))?;
-    if !file.metadata().map_err(|error| error.to_string())?.is_file() {
+    let file = std::fs::File::open(source)
+        .map_err(|error| format!("Could not open input file: {error}"))?;
+    if !file
+        .metadata()
+        .map_err(|error| error.to_string())?
+        .is_file()
+    {
         return Err("Select files rather than folders for editable constellation inputs".into());
     }
     stage_reader_in_workspace(workspace, id, name, "application/octet-stream", file)

@@ -1428,6 +1428,24 @@ mod tests {
         assert!(Path::new(&screenshot).is_file());
         std::fs::remove_file(screenshot).unwrap();
         assert!(manager.close(&session).await.unwrap());
-        std::fs::remove_dir_all(root).unwrap();
+        // Chromium subprocesses may briefly retain profile file handles after
+        // the main process exits, especially on Windows CI runners.
+        let cleanup_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match std::fs::remove_dir_all(&root) {
+                Ok(()) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(error) => {
+                    let transient = error.kind() == std::io::ErrorKind::PermissionDenied
+                        || error.kind() == std::io::ErrorKind::DirectoryNotEmpty
+                        || (cfg!(windows) && error.raw_os_error() == Some(32));
+                    assert!(
+                        transient && std::time::Instant::now() < cleanup_deadline,
+                        "Could not remove isolated browser test profile: {error}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
     }
 }

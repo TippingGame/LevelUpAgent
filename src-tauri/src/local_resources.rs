@@ -323,25 +323,48 @@ pub fn prepare_constellation_inputs(
     let mut seen = HashSet::new();
     let mut prepared = Vec::new();
     for input in inputs {
-        if !seen.insert(&input.id) { continue; }
+        if !seen.insert(&input.id) {
+            continue;
+        }
         attachment::validate_id(&input.id)?;
         let resource = load(storage, &input.id)?;
         let source = match &resource {
             Some(resource) => available_path(resource)?,
             None => storage.join(format!("{}.bin", input.id)),
         };
-        let name = resource.as_ref().map(|item| item.name.as_str()).unwrap_or(&input.name);
+        let name = resource
+            .as_ref()
+            .map(|item| item.name.as_str())
+            .unwrap_or(&input.name);
         // Separate executions may share the default workspace. Each gets its
         // own copy so edits cannot leak into a different conversation or run.
         let id = uuid::Uuid::new_v4().simple().to_string();
         let relative = attachment::stage_local_file_in_workspace(workspace, &id, name, &source)?;
-        let path = workspace.join(relative).canonicalize().map_err(|error| error.to_string())?;
-        let kind = if input.kind == AttachmentKind::Image { AttachmentKind::Image } else { AttachmentKind::File };
-        let mut item = persist(storage, &id, &Resource {
-            size_bytes: std::fs::metadata(&path).map_err(|error| error.to_string())?.len(),
-            path, name: name.to_owned(), kind, managed: false,
-        })?;
-        if item.kind == AttachmentKind::Image { item.mime_type = input.mime_type.clone(); }
+        let path = workspace
+            .join(relative)
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let kind = if input.kind == AttachmentKind::Image {
+            AttachmentKind::Image
+        } else {
+            AttachmentKind::File
+        };
+        let mut item = persist(
+            storage,
+            &id,
+            &Resource {
+                size_bytes: std::fs::metadata(&path)
+                    .map_err(|error| error.to_string())?
+                    .len(),
+                path,
+                name: name.to_owned(),
+                kind,
+                managed: false,
+            },
+        )?;
+        if item.kind == AttachmentKind::Image {
+            item.mime_type = input.mime_type.clone();
+        }
         prepared.push(item);
     }
     Ok(prepared)
@@ -375,18 +398,29 @@ pub fn resolve(storage: &Path, item: &mut ImageAttachment, active: bool) -> Resu
 
 fn working_image(resource: &Resource) -> Result<(String, Vec<u8>), String> {
     let path = available_path(resource)?;
-    if std::fs::metadata(&path).map_err(|error| error.to_string())?.len() > MAX_PASTED_BYTES as u64 {
+    if std::fs::metadata(&path)
+        .map_err(|error| error.to_string())?
+        .len()
+        > MAX_PASTED_BYTES as u64
+    {
         return Err("Image context may be at most 64 MiB".into());
     }
     let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
-    let mime = attachment::detect_image_mime(&bytes).ok_or("The working copy is no longer a supported image")?.to_owned();
+    let mime = attachment::detect_image_mime(&bytes)
+        .ok_or("The working copy is no longer a supported image")?
+        .to_owned();
     Ok((mime, bytes))
 }
 
 /// Resolve a registered local reference through its stored path, never through
 /// a path supplied by a model. This also supports editable constellation copies.
-pub fn read_media_reference(storage: &Path, id: &str) -> Result<Option<attachment::ManagedReference>, String> {
-    let Some(resource) = load(storage, id)? else { return Ok(None); };
+pub fn read_media_reference(
+    storage: &Path,
+    id: &str,
+) -> Result<Option<attachment::ManagedReference>, String> {
+    let Some(resource) = load(storage, id)? else {
+        return Ok(None);
+    };
     let path = available_path(&resource)?;
     attachment::read_local_media_reference(&path).map(Some)
 }
@@ -398,7 +432,12 @@ pub fn preview(storage: &Path, id: &str) -> Result<Option<AttachmentPreview>, St
     let path = available_path(&resource)?;
     if resource.kind == AttachmentKind::Image {
         let (mime_type, bytes) = working_image(&resource)?;
-        return Ok(Some(AttachmentPreview { kind: AttachmentKind::Image, mime_type, data_base64: Some(base64::engine::general_purpose::STANDARD.encode(bytes)), text: None }));
+        return Ok(Some(AttachmentPreview {
+            kind: AttachmentKind::Image,
+            mime_type,
+            data_base64: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+            text: None,
+        }));
     }
     let mut text = display_path(&path);
     if path.is_dir() {
@@ -646,23 +685,40 @@ mod tests {
             paths.push(path);
         }
         let video = fixture.root.join("large.mp4");
-        std::fs::File::create(&video).unwrap().set_len(MAX_PASTED_BYTES as u64 + 1).unwrap();
+        std::fs::File::create(&video)
+            .unwrap()
+            .set_len(MAX_PASTED_BYTES as u64 + 1)
+            .unwrap();
         paths.push(video);
         let inputs = fixture.select(&paths, &[]);
         let mut duplicated = inputs.clone();
         duplicated.push(inputs[0].clone());
-        let prepared = prepare_constellation_inputs(&fixture.storage, &duplicated, &fixture.workspace).unwrap();
+        let prepared =
+            prepare_constellation_inputs(&fixture.storage, &duplicated, &fixture.workspace)
+                .unwrap();
         assert_eq!(prepared.len(), paths.len());
-        let root = fixture.workspace.canonicalize().unwrap().join(".levelup-attachments");
+        let root = fixture
+            .workspace
+            .canonicalize()
+            .unwrap()
+            .join(".levelup-attachments");
         for ((item, input), source) in prepared.iter().zip(&inputs).zip(&paths) {
             assert_ne!(item.id, input.id);
             let copy = load(&fixture.storage, &item.id).unwrap().unwrap();
             assert_eq!(copy.path.parent(), Some(root.as_path()));
             assert_eq!(copy.path.extension(), source.extension());
-            assert_eq!(std::fs::metadata(&copy.path).unwrap().len(), std::fs::metadata(source).unwrap().len());
+            assert_eq!(
+                std::fs::metadata(&copy.path).unwrap().len(),
+                std::fs::metadata(source).unwrap().len()
+            );
             let mut resolved = item.clone();
             assert!(resolve(&fixture.storage, &mut resolved, true).unwrap());
-            assert!(resolved.text_content.unwrap().contains(&display_path(&copy.path).replace('\\', "\\\\")));
+            assert!(
+                resolved
+                    .text_content
+                    .unwrap()
+                    .contains(&display_path(&copy.path).replace('\\', "\\\\"))
+            );
             assert!(resolved.data_base64.is_none());
         }
         let copy = load(&fixture.storage, &prepared[2].id).unwrap().unwrap();
@@ -670,10 +726,15 @@ mod tests {
         assert!(!response.is_error, "{}", response.output);
         assert_eq!(std::fs::read_to_string(&copy.path).unwrap(), "changed");
         assert_eq!(std::fs::read_to_string(&paths[2]).unwrap(), "original");
-        let other = prepare_constellation_inputs(&fixture.storage, &inputs[2..3], &fixture.workspace).unwrap();
+        let other =
+            prepare_constellation_inputs(&fixture.storage, &inputs[2..3], &fixture.workspace)
+                .unwrap();
         let other_copy = load(&fixture.storage, &other[0].id).unwrap().unwrap();
         assert_ne!(copy.path, other_copy.path);
-        assert_eq!(std::fs::read_to_string(other_copy.path).unwrap(), "original");
+        assert_eq!(
+            std::fs::read_to_string(other_copy.path).unwrap(),
+            "original"
+        );
         attachment::delete(&fixture.storage, &prepared[2].id).unwrap();
         assert!(copy.path.exists());
         assert!(load(&fixture.storage, &inputs[2].id).unwrap().is_some());
@@ -687,22 +748,46 @@ mod tests {
         let edited = b"\x89PNG\r\n\x1a\nedited-image";
         std::fs::write(&source, original).unwrap();
         let inputs = fixture.select(std::slice::from_ref(&source), &[]);
-        let prepared = prepare_constellation_inputs(&fixture.storage, &inputs, &fixture.workspace).unwrap();
+        let prepared =
+            prepare_constellation_inputs(&fixture.storage, &inputs, &fixture.workspace).unwrap();
         let mut item = prepared[0].clone();
         let resource = load(&fixture.storage, &item.id).unwrap().unwrap();
         assert_eq!(item.kind, AttachmentKind::Image);
-        assert_eq!(attachment::read_managed_reference(&fixture.storage, &item.id).unwrap().bytes, original);
+        assert_eq!(
+            attachment::read_managed_reference(&fixture.storage, &item.id)
+                .unwrap()
+                .bytes,
+            original
+        );
         // Model context, preview and generation tools must all see the current edit.
         std::fs::write(&resource.path, edited).unwrap();
         resolve(&fixture.storage, &mut item, true).unwrap();
         assert_eq!(item.mime_type, "image/png");
-        assert_eq!(item.data_base64, Some(base64::engine::general_purpose::STANDARD.encode(edited)));
-        assert!(item.text_content.as_ref().unwrap().contains(".levelup-attachments"));
+        assert_eq!(
+            item.data_base64,
+            Some(base64::engine::general_purpose::STANDARD.encode(edited))
+        );
+        assert!(
+            item.text_content
+                .as_ref()
+                .unwrap()
+                .contains(".levelup-attachments")
+        );
         let preview = attachment::preview(&fixture.storage, &item.id, &item.name).unwrap();
         assert_eq!(preview.data_base64, item.data_base64);
-        assert_eq!(attachment::read_managed_reference(&fixture.storage, &item.id).unwrap().bytes, edited);
+        assert_eq!(
+            attachment::read_managed_reference(&fixture.storage, &item.id)
+                .unwrap()
+                .bytes,
+            edited
+        );
         assert_eq!(std::fs::read(&source).unwrap(), original);
-        assert_eq!(attachment::read_managed_reference(&fixture.storage, &inputs[0].id).unwrap().bytes, original);
+        assert_eq!(
+            attachment::read_managed_reference(&fixture.storage, &inputs[0].id)
+                .unwrap()
+                .bytes,
+            original
+        );
         resolve(&fixture.storage, &mut item, false).unwrap();
         assert!(item.data_base64.is_none());
         assert!(item.text_content.unwrap().contains(".levelup-attachments"));

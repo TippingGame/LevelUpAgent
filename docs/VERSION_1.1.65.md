@@ -1,8 +1,10 @@
 # Version 1.1.65: local Windows test package
 
-Date: 2026-10-01. Status: local testing, not published.
+Historical local-build record, starting 2026-10-01. These ordinary local packages
+had no updater signatures. The subsequent GitHub release and its verification
+are tracked separately in [the 1.1.65 release notes](RELEASE_1.1.65.md).
 
-## Scope
+## Original local-build scope (2026-10-01)
 
 - Include the completed constellation project overview and blueprint editor rebuild.
 - Synchronize package.json, Cargo.toml, Cargo.lock and tauri.conf.json to 1.1.65.
