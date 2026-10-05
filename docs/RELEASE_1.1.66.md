@@ -1,6 +1,6 @@
 # LevelUpAgent 1.1.66 发布记录
 
-日期：2026-10-05。当前状态：发布准备中。
+日期：2026-10-05。当前状态：已发布到 GitHub，正式 Release 为 `v1.1.66`，已设为 Latest。
 
 ## 本版内容
 
@@ -28,6 +28,8 @@
 
 原生 Tauri smoke 使用独立应用标识和本地 mock provider，验证工具目录、权限和主题生命周期，不调用真实图片服务，也不改动生产应用数据。没有在本次发布前重新生成完整的摇光残影素材；真实图片生成结果仍取决于配置的图片 Provider。
 
+本次未在用户现有应用上执行覆盖安装或从旧版本完成应用内更新；Linux 实体机安装未验证。macOS 在原生 runner 验证了 DMG 内和模拟复制安装后的应用签名。
+
 Windows updater 使用原有 Tauri 签名配置；它不等同于 Authenticode。macOS 使用 ad-hoc 签名且未公证；Linux 包未做发行版签名。更新清单仅覆盖 Windows。
 
 ## 打包与发布步骤
@@ -40,4 +42,13 @@ Windows updater 使用原有 Tauri 签名配置；它不等同于 Authenticode�
 
 ## 已发布结果
 
-（发布完成后补充构建提交、Actions run、Release 链接、资产校验和公开更新清单验证。）
+- 构建提交：`dc4b3065e72cac9e55674cf5f0c9566b980109a4`，tag：`v1.1.66`。发布于北京时间 2026-10-05 19:21:15，已设为 Latest，非预发布。
+- [发布前 CI](https://github.com/TippingGame/LevelUpAgent/actions/runs/37297299227) 的 Windows、macOS、Linux 三个 job 全部通过。
+- [Release 工作流](https://github.com/TippingGame/LevelUpAgent/actions/runs/37297320357) 成功，四个平台资产均已上传。Apple Silicon 首次在 `hdiutil verify` 遇到 `Resource temporarily unavailable`；仅重跑失败作业后通过，未更改构建提交或 tag。
+- 正式 Release：[github.com/TippingGame/LevelUpAgent/releases/tag/v1.1.66](https://github.com/TippingGame/LevelUpAgent/releases/tag/v1.1.66)。
+- 公开 Release 页面和更新清单均返回 HTTP 200；更新清单版本为 `1.1.66`，与已校验的 Draft 清单逐字一致。
+- 10 个发布资产均已完整下载，本地大小和 SHA-256 与 GitHub digest 一致；Windows EXE/MSI 的 Tauri updater 签名均通过公钥验证，清单中的 URL 和签名与安装包一致。
+- Windows EXE 的归档完整性检查通过，ProductVersion/FileVersion 均为 `1.1.66`。两种 macOS DMG 均完成 runner 上的签名及模拟安装复制校验。
+- 正式 Windows EXE 已同步到 `G:\Work\LevelUpAgent\安装包\LevelUpAgent_1.1.66_Windows_x64-setup.exe`，保留旧版本；已新增 `SHA256_1.1.66.txt` 并更新总清单 `SHA256.txt`。
+- EXE 大小：14,224,017 字节；SHA-256：`3274BF5B8EF7556257CC88E27C14D3943E6AF91D0B7F113DBC7A752DEC4FA9CD`。
+- 资产、签名、原生 smoke、Actions 日志与公开更新清单的验证证据保存在 `G:\Work\LevelUpAgent\research\release-1.1.66-2026-10-05`。
