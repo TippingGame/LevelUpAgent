@@ -1,7 +1,7 @@
 /* Armor Mode skin for every Creative Studio surface.
    App.css already skins the chat workspace and shell. This file covers the
-   alternate workspace views: media (image/video/audio), writing, constellation,
-   plus media preview portals mounted under document.body. */
+   Shared creative-studio rules also cover new studios; component rules below
+   retain the older media, writing and constellation decoration. */
 
 html body .app-shell.armor-mode,
 html body .media-image-lightbox.armor-mode {
@@ -16,7 +16,7 @@ html body .media-image-lightbox.armor-mode {
   --studio-text: #dff8ff;
   --studio-text-strong: #f0fdff;
   --studio-muted: #8bd3e6;
-  --studio-faint: #50879b;
+  --studio-faint: #82b4c4;
   --studio-accent: #22d3ee;
   --studio-accent-2: #a3e635;
   --studio-warning: #fde68a;
@@ -24,7 +24,7 @@ html body .media-image-lightbox.armor-mode {
   --studio-font: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
 }
 
-html body .app-shell.armor-mode :is(.media-studio, .writing-studio, .constellation-studio),
+html body .app-shell.armor-mode .creative-studio,
 html body .media-image-lightbox.armor-mode {
   color-scheme: dark;
   color: var(--studio-text);
@@ -36,13 +36,22 @@ html body .media-image-lightbox.armor-mode {
     linear-gradient(180deg, rgba(2, 6, 23, .98), rgba(6, 13, 24, .96));
 }
 
-html body .app-shell.armor-mode :is(.media-studio, .writing-studio, .constellation-studio) :is(button, input, textarea, select),
+html body .app-shell.armor-mode .creative-studio :is(button, input, textarea, select),
 html body .media-image-lightbox.armor-mode :is(button, input, textarea, select) {
   font-family: inherit;
   accent-color: var(--studio-accent);
 }
 
-html body .app-shell.armor-mode :is(.media-topbar, .writing-topbar, .constellation-topbar) {
+html body .app-shell.armor-mode .creative-studio {
+  --creative-canvas: var(--canvas);
+  --spine-accent: var(--accent);
+}
+
+html body .app-shell.armor-mode .creative-studio-header {
+  --creative-accent: var(--accent);
+}
+
+html body .app-shell.armor-mode :is(.creative-studio-header, .media-topbar, .writing-topbar, .constellation-topbar) {
   border-color: var(--studio-line);
   background: linear-gradient(180deg, rgba(2, 6, 23, .92), rgba(8, 47, 73, .58));
   color: var(--studio-text);

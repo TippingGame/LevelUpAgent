@@ -2398,9 +2398,9 @@ function StoryCanvasInner({ project, selectedId, newNodeType, issues, canUndo, c
     deletable: true,
     selectable: true,
     className: `${connection.kind}${connection.condition ? " conditional" : ""}`,
-    style: { stroke: connection.kind === "choice" ? "#d97706" : "#64748b", strokeWidth: 2.2 },
-    labelStyle: { fill: connection.kind === "choice" ? "#92400e" : "#475569", fontSize: 10, fontWeight: 700 },
-    labelBgStyle: { fill: "rgba(255,255,255,.92)", stroke: connection.kind === "choice" ? "#fed7aa" : "#dbe3e8", strokeWidth: 1 },
+    style: { stroke: connection.kind === "choice" ? "var(--warning-text)" : "var(--muted)", strokeWidth: 2.2 },
+    labelStyle: { fill: connection.kind === "choice" ? "var(--warning-text)" : "var(--text-secondary)", fontSize: 10, fontWeight: 700 },
+    labelBgStyle: { fill: "var(--surface)", stroke: connection.kind === "choice" ? "var(--warning-line)" : "var(--line-strong)", strokeWidth: 1 },
     labelBgPadding: [5, 3],
     labelBgBorderRadius: 5,
     data: {

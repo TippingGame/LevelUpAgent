@@ -187,7 +187,7 @@ test("Armor Mode UI, storage, and request wiring stay connected", () => {
   assert.match(css, /\.app-shell\.armor-mode \.protocol-options \.protocol-option/);
   assert.match(css, /\.app-shell\.armor-mode \.protocol-option-heading em/);
   assert.match(armorStudioCss, /Creative Studio surface/);
-  assert.match(armorStudioCss, /\.app-shell\.armor-mode :is\(\.media-studio, \.writing-studio, \.constellation-studio\)/);
+  assert.match(armorStudioCss, /\.app-shell\.armor-mode \.creative-studio/);
   assert.match(armorStudioCss, /\.media-image-lightbox\.armor-mode/);
   assert.match(armorStudioCss, /\.writing-overlay/);
   assert.match(armorStudioCss, /\.constellation-preview-download/);

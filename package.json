@@ -1,14 +1,15 @@
 {
   "name": "levelup-agent",
   "private": true,
-  "version": "1.1.66",
+  "version": "1.1.67",
   "license": "LGPL-3.0-only",
   "type": "module",
   "packageManager": "pnpm@11.7.0",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "check": "tsc --noEmit && node --test scripts/test-spine.mjs scripts/test-spine-v2.mjs scripts/test-spine-v3.mjs scripts/test-spine-v4.mjs scripts/test-spine-v5.mjs scripts/test-chat-controls.mjs scripts/test-conversation-workflows.mjs scripts/test-conversation-scroll.mjs scripts/test-conversation-export.mjs scripts/test-media-concurrency.mjs scripts/test-media-capabilities.mjs scripts/test-media-references.mjs scripts/test-local-attachments.mjs scripts/test-hatch-progress.mjs scripts/test-model-selection.mjs scripts/test-model-avatars.mjs scripts/test-writing.mjs scripts/test-constellation.mjs scripts/test-pet-autonomy.mjs scripts/test-pet-animation.mjs scripts/test-thread-execution.mjs scripts/test-harness-stream.mjs scripts/test-task-completion.mjs scripts/test-theme-generation.mjs scripts/test-armor-mode.mjs scripts/test-workspace-changes.mjs scripts/test-macos-release.mjs scripts/test-windows-installer.mjs && node scripts/test-release-config.mjs",
+    "check": "tsc --noEmit && pnpm check:appearance && node --test scripts/test-spine.mjs scripts/test-spine-v2.mjs scripts/test-spine-v3.mjs scripts/test-spine-v4.mjs scripts/test-spine-v5.mjs scripts/test-chat-controls.mjs scripts/test-conversation-workflows.mjs scripts/test-conversation-scroll.mjs scripts/test-conversation-export.mjs scripts/test-media-concurrency.mjs scripts/test-media-capabilities.mjs scripts/test-media-references.mjs scripts/test-local-attachments.mjs scripts/test-hatch-progress.mjs scripts/test-model-selection.mjs scripts/test-model-avatars.mjs scripts/test-writing.mjs scripts/test-constellation.mjs scripts/test-pet-autonomy.mjs scripts/test-pet-animation.mjs scripts/test-thread-execution.mjs scripts/test-harness-stream.mjs scripts/test-task-completion.mjs scripts/test-theme-generation.mjs scripts/test-armor-mode.mjs scripts/test-workspace-changes.mjs scripts/test-macos-release.mjs scripts/test-windows-installer.mjs && node scripts/test-release-config.mjs",
+    "check:appearance": "node --test scripts/test-appearance.mjs && node scripts/check-appearance.mjs",
     "bench:persistence": "cargo test --manifest-path src-tauri/Cargo.toml benchmark_long_conversation_persistence -- --ignored --nocapture",
     "build:macos": "bash scripts/build-macos.sh",
     "verify:levelupapi": "node scripts/verify-levelupapi.mjs",
@@ -34,6 +35,8 @@
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
+    "postcss": "8.5.6",
+    "postcss-value-parser": "4.2.0",
     "typescript": "~5.8.3",
     "vite": "^7.0.4"
   }

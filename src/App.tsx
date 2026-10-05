@@ -6772,13 +6772,14 @@ function AssistantMessageGroup({
       />
     </>
   );
+  const avatar = pet ? (
+    <div className="message-avatar pet-message-avatar" title={pet.displayName}>
+      <PetAvatar profile={pet} />
+    </div>
+  ) : <AssistantAvatar key={`${providerBrand}:${modelName}`} brand={providerBrand} modelName={modelName} />;
   return (
     <article className="message assistant assistant-message-group">
-      {pet ? (
-        <div className="message-avatar pet-message-avatar" title={pet.displayName}>
-          <PetAvatar profile={pet} />
-        </div>
-      ) : <AssistantAvatar key={`${providerBrand}:${modelName}`} brand={providerBrand} modelName={modelName} />}
+      {avatar}
       <div className="message-body">
         {collapsible ? (
           <details className="assistant-turn-details" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>

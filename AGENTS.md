@@ -6,3 +6,4 @@
 - Prefer a standalone, scoped `standard` theme. Add a host layout only when CSS cannot provide required semantic structure or real window behavior.
 - A theme must never introduce executable JavaScript, remote CSS/assets, unscoped selectors, credential access, or changes to Agent/provider logic.
 - Theme-related host changes require `pnpm check`, relevant Rust tests, a production build, and real Tauri lifecycle verification proportional to the change.
+- New or changed UI must follow `docs/UI_APPEARANCE.md`: use shared semantic colors, keep the appearance baseline from growing, and verify system light/dark with Armor Mode off/on, including dialogs and hover states.

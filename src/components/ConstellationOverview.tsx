@@ -108,7 +108,7 @@ const ProjectPreview = memo(function ProjectPreview({ graph }: { graph: Constell
   const points = new Map(nodes.map((node) => [node.id, { x: node.position.x - minX + 130, y: node.position.y - minY + 85 }]));
   return <svg viewBox={`-40 -40 ${width + 80} ${height + 80}`} aria-hidden="true">
     {graph?.edges.map((edge) => { const a = points.get(edge.source); const b = points.get(edge.target); return a && b ? <path key={edge.id} d={`M${a.x},${a.y} C${(a.x+b.x)/2},${a.y} ${(a.x+b.x)/2},${b.y} ${b.x},${b.y}`} fill="none" stroke="#8296ba" strokeWidth="5" opacity=".55" /> : null; })}
-    {nodes.map((node) => { const p = points.get(node.id)!; return <g key={node.id}><rect x={p.x-105} y={p.y-55} width="210" height="110" rx="12" fill="#fff" stroke="#cbd5e1" strokeWidth="3" /><circle cx={p.x-80} cy={p.y-30} r="7" fill="#8b5cf6" /><path d={`M${p.x-57},${p.y-30}h110 M${p.x-78},${p.y}h155 M${p.x-78},${p.y+20}h90`} stroke="#94a3b8" strokeWidth="6" opacity=".5" /></g>; })}
+    {nodes.map((node) => { const p = points.get(node.id)!; return <g key={node.id}><rect x={p.x-105} y={p.y-55} width="210" height="110" rx="12" fill="var(--surface)" stroke="var(--line-strong)" strokeWidth="3" /><circle cx={p.x-80} cy={p.y-30} r="7" fill="var(--violet-text)" /><path d={`M${p.x-57},${p.y-30}h110 M${p.x-78},${p.y}h155 M${p.x-78},${p.y+20}h90`} stroke="var(--muted)" strokeWidth="6" opacity=".5" /></g>; })}
   </svg>;
 });
 

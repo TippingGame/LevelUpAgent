@@ -228,7 +228,7 @@ const CONSTELLATION_DEFAULT_EDGE_OPTIONS = {
   interactionWidth: 28,
   reconnectable: true,
 } as const;
-const CONSTELLATION_CONNECTION_STYLE = { stroke: "#7c3aed", strokeWidth: 2.2 } as const;
+const CONSTELLATION_CONNECTION_STYLE = { stroke: "var(--violet-text)", strokeWidth: 2.2 } as const;
 const CONSTELLATION_MIGRATION_MARKER = "levelup-agent.constellation-projects.migrated.v1";
 class ConstellationWaitingError extends Error {}
 
@@ -2093,8 +2093,8 @@ function ConstellationStudioInner({
               colorMode="light"
               proOptions={{ hideAttribution: true }}
             >
-              <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="rgba(147,134,165,.24)" />
-              {!canvasInteracting && <MiniMap nodeColor={constellationMiniMapColor} maskColor="rgba(248,250,252,.78)" pannable zoomable />}
+              <Background variant={BackgroundVariant.Dots} gap={20} size={1} />
+              {!canvasInteracting && <MiniMap nodeColor={constellationMiniMapColor} pannable zoomable />}
               <Controls showInteractive={false} position="bottom-center" />
               <Panel position="top-left" className="constellation-canvas-toolbar">
                 {!leftPanelOpen && <button type="button" onClick={() => setLeftPanelOpen(true)} title={tr("打开节点库", "Open node library")}><ChevronRight size={14} /><LibraryBig size={13} /></button>}
