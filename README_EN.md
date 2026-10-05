@@ -55,7 +55,7 @@ pnpm tauri build
 
 [Architecture](docs/ARCHITECTURE.md) · [Performance](docs/PERFORMANCE.md) · [Codex workflow comparison](docs/REPLACEMENT_AUDIT.md) · [Roadmap](docs/ROADMAP.md) · [Releases](docs/RELEASE.md)
 
-The current release is `1.0.64`. Windows builds lack Authenticode signatures; macOS builds use ad-hoc signing and are not notarized. Platform verification limits are documented in the release guide.
+The current release is `1.1.65`. Windows builds lack Authenticode signatures; macOS builds use ad-hoc signing and are not notarized. Platform verification limits are documented in the [1.1.65 release notes](docs/RELEASE_1.1.65.md).
 
 See the [1.1.65 release notes](docs/RELEASE_1.1.65.md) for features, publication status, and verification. Earlier local test builds remain documented in the [build history](docs/VERSION_1.1.65.md).
 

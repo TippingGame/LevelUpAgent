@@ -1,6 +1,6 @@
 # LevelUpAgent 1.1.65 发布记录
 
-日期：2026-10-05。当前状态：发布前检查通过，待 GitHub CI 与跨平台打包完成后核验并发布。
+日期：2026-10-05。当前状态：已发布到 GitHub，正式 Release 为 `v1.1.65`。
 
 ## 本版内容
 
@@ -39,3 +39,17 @@
 Windows updater 使用原有 Tauri 签名配置；它不等同于 Authenticode。macOS 使用 ad-hoc 签名且未公证；Linux 包未做发行版签名。更新清单仅覆盖 Windows。
 
 本次发布检查不等同于在用户现有应用上实际覆盖安装或从旧版本完成应用内更新。ComfyUI See-through 的真实 GPU 拆层、Spine 编辑器的导入/另存/重开，以及各平台实体机安装仍需单独验收。Spine 官方 4.2 runtime 兼容性和本地 RIFE 推理的既有验证证据见上述工作流审计文档。
+
+## 已发布结果
+
+- 构建提交：`6ffa6b192b4f5855a0c64319477e8a236d50b051`，tag：`v1.1.65`。发布于北京时间 2026-10-05 09:02:59，已设为 Latest，非预发布。
+- [发布前 CI](https://github.com/TippingGame/LevelUpAgent/actions/runs/37248488026) 的 Windows、macOS、Linux 三个 job 全部通过。
+- GitHub Actions Release run `37248857232` 成功，Windows、macOS Apple Silicon、macOS Intel 和 Linux 资产均已上传。
+- 正式 Release：[github.com/TippingGame/LevelUpAgent/releases/tag/v1.1.65](https://github.com/TippingGame/LevelUpAgent/releases/tag/v1.1.65)。
+- 公开更新清单返回 HTTP 200，版本为 `1.1.65`；Windows URL 使用 `Windows_x64` 资产，签名字段非空。
+- 10 个发布资产的本地 SHA-256 与 GitHub digest 一致；Windows EXE/MSI 的 Tauri updater 签名均通过公钥验证。
+- Windows EXE 的归档完整性为 All OK，ProductVersion/FileVersion 均为 1.1.65；两种 macOS DMG 均完成 runner 上的签名及模拟安装复制校验。
+- 正式 Windows EXE 已同步到 `G:\Work\LevelUpAgent\安装包\LevelUpAgent_1.1.65_Windows_x64-setup.exe`。
+- EXE 大小为 14,257,140 字节；两份本地 SHA256 清单各仅保留这一份正式 EXE 的记录。
+- 正式 EXE SHA-256：`8E0AA24651063C5CD0ECB4D8E94A09C3552E9417625170B29D0762B97AB96CFB`。
+- 资产、签名、更新清单和发布动作日志保存在 `G:\Work\LevelUpAgent\research\release-1.1.65-2026-10-05`。
