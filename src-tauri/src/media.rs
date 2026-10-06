@@ -560,6 +560,7 @@ fn classify_media_model(model: &str) -> Vec<(MediaKind, i64)> {
     if !id.contains("video")
         && (id.contains("image")
             || id.contains("seedream")
+            || id.contains("novelai")
             || id.contains("dall-e")
             || is_grok_image_model(&id))
     {
@@ -5112,6 +5113,11 @@ mod tests {
             ("doubao-seedream-4-0-250828", MediaKind::Image),
             ("品牌sEeDrEaM旗舰", MediaKind::Image),
             ("Seedream-video-generation", MediaKind::Video),
+            ("NovelAI", MediaKind::Image),
+            ("provider/NOVELAI-HD", MediaKind::Image),
+            ("novelai-v4", MediaKind::Image),
+            ("品牌nOvElAi旗舰", MediaKind::Image),
+            ("NovelAI-video-generation", MediaKind::Video),
         ];
         let (base_url, server) = mock_sequence_inspecting(
             vec![MockResponse {
