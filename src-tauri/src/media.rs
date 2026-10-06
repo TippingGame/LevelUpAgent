@@ -558,7 +558,10 @@ fn classify_media_model(model: &str) -> Vec<(MediaKind, i64)> {
     let mut kinds = Vec::new();
     // Relays can expose custom image model names; video aliases take precedence.
     if !id.contains("video")
-        && (id.contains("image") || id.contains("dall-e") || is_grok_image_model(&id))
+        && (id.contains("image")
+            || id.contains("seedream")
+            || id.contains("dall-e")
+            || is_grok_image_model(&id))
     {
         kinds.push((MediaKind::Image, image_rank(&id)));
     }
@@ -5104,6 +5107,11 @@ mod tests {
             ("provider/CustomIMAGE-HD", MediaKind::Image),
             ("品牌image旗舰", MediaKind::Image),
             ("image-010-2K", MediaKind::Image),
+            ("Seedream-4.0", MediaKind::Image),
+            ("provider/SEEDREAM-HD", MediaKind::Image),
+            ("doubao-seedream-4-0-250828", MediaKind::Image),
+            ("品牌sEeDrEaM旗舰", MediaKind::Image),
+            ("Seedream-video-generation", MediaKind::Video),
         ];
         let (base_url, server) = mock_sequence_inspecting(
             vec![MockResponse {
