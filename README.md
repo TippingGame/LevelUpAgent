@@ -56,9 +56,9 @@ pnpm tauri build
 
 [架构](docs/ARCHITECTURE.md) · [性能](docs/PERFORMANCE.md) · [Codex 工作流对照](docs/REPLACEMENT_AUDIT.md) · [路线图](docs/ROADMAP.md) · [发布](docs/RELEASE.md)
 
-当前发布版本为 `1.1.67`。Windows 未配置 Authenticode，macOS 使用 ad-hoc 签名、尚未公证。跨平台发布与实体机验证边界见 [1.1.67 发布说明](docs/RELEASE_1.1.67.md)。
+当前发布版本为 `1.1.68`。Windows 未配置 Authenticode，macOS 使用 ad-hoc 签名、尚未公证。跨平台发布与实体机验证边界见 [1.1.68 发布说明](docs/RELEASE_1.1.68.md)。
 
-`1.1.67` 修复创作空间、会话和弹窗的系统深色与一键破甲适配，修正摇光残影聊天头像溢出，并加入新增界面外观检查，详细验证见 [发布说明](docs/RELEASE_1.1.67.md)；此前的本地测试包记录保留在 [构建日志](docs/VERSION_1.1.65.md)。
+`1.1.68` 改进创作空间和星图中的自定义图片模型识别，支持 Seedream、NovelAI 和 Image 名称的大小写不敏感匹配，修复扩展名缺失的图片 URL 处理，并改进侧栏与常规设置的深色模式；详细验证见 [发布说明](docs/RELEASE_1.1.68.md)。此前的本地测试包记录保留在 [构建日志](docs/VERSION_1.1.65.md)。
 
 ## 许可
 

@@ -55,9 +55,9 @@ pnpm tauri build
 
 [Architecture](docs/ARCHITECTURE.md) · [Performance](docs/PERFORMANCE.md) · [Codex workflow comparison](docs/REPLACEMENT_AUDIT.md) · [Roadmap](docs/ROADMAP.md) · [Releases](docs/RELEASE.md)
 
-The current release is `1.1.67`. Windows builds lack Authenticode signatures; macOS builds use ad-hoc signing and are not notarized. Platform verification limits are documented in the [1.1.67 release notes](docs/RELEASE_1.1.67.md).
+The current release is `1.1.68`. Windows builds lack Authenticode signatures; macOS builds use ad-hoc signing and are not notarized. Platform verification limits are documented in the [1.1.68 release notes](docs/RELEASE_1.1.68.md).
 
-Version `1.1.67` fixes system dark mode and Armor Mode across creative spaces, conversations and dialogs, contains pet chat avatars within their frames, and adds an appearance guard for new UI. See the [release notes](docs/RELEASE_1.1.67.md) for verification. Earlier local test builds remain documented in the [build history](docs/VERSION_1.1.65.md).
+Version `1.1.68` improves custom image model discovery in Creative Studio and Constellation, matches Seedream, NovelAI, and Image names case-insensitively, handles image URLs without extensions, and improves dark mode in the sidebar and general settings. See the [release notes](docs/RELEASE_1.1.68.md) for verification. Earlier local test builds remain documented in the [build history](docs/VERSION_1.1.65.md).
 
 ## License
 
