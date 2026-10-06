@@ -1261,6 +1261,12 @@ async fn call_imagen_image(
 
 fn parse_image_sources(value: &Value) -> Result<Vec<BlobSource>, String> {
     let mut sources = Vec::new();
+    // Images API data entries are image outputs even when their URLs have no extension.
+    if let Some(items) = value.get("data").and_then(Value::as_array) {
+        for item in items {
+            push_blob_source(&mut sources, item, None, true);
+        }
+    }
     collect_image_sources(value, &mut sources, 0, false);
     deduplicate_image_sources(&mut sources);
     if sources.is_empty() {
@@ -3366,6 +3372,7 @@ mod tests {
         let parsed = parse_image_sources(&openai).unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].revised_prompt.as_deref(), Some("better"));
+
         let gemini = json!({"candidates": [{"content": {"parts": [{"inlineData": {"mimeType": "image/png", "data": "aGVsbG8="}}]}}]});
         let parsed = parse_image_sources(&gemini).unwrap();
         assert_eq!(parsed.len(), 1);
@@ -3404,6 +3411,36 @@ mod tests {
         );
         let mixed = b"{\"error\":{\"message\":\"Upstream request failed\"}}event: error\ndata: {\"error\":{\"message\":\"Upstream request failed\"}}";
         assert_eq!(provider_error_detail(mixed), "Upstream request failed");
+    }
+
+    #[test]
+    fn accepts_extensionless_image_urls_without_collecting_metadata_urls() {
+        let url = "https://cdn.example.com/download/123?signature=example";
+        let payload = json!({
+            "created": 1710000000,
+            "data": [
+                {"url": url, "revised_prompt": "Refined"},
+                {"url": "https://cdn.example.com/output.png"},
+                {"b64_json": "aGVsbG8=", "url": url}
+            ],
+            "metadata": {"data": [{"url": "https://example.com/status/123"}]}
+        });
+        let sources = parse_image_sources(&payload).unwrap();
+        assert_eq!(sources.len(), 3);
+        assert_eq!(sources[0].url.as_deref(), Some(url));
+        assert_eq!(sources[0].revised_prompt.as_deref(), Some("Refined"));
+        assert_eq!(sources[2].base64.as_deref(), Some("aGVsbG8="));
+
+        for payload in [
+            json!({"data": {"url": "https://example.com/status/123"}}),
+            json!({"data": [], "metadata": {"url": "https://example.com/status/123"}}),
+            json!({"metadata": {"data": [{"url": "https://example.com/status/123"}]}}),
+        ] {
+            assert!(matches!(
+                parse_image_sources(&payload),
+                Err(message) if message == "The provider returned no image output"
+            ));
+        }
     }
 
     #[test]
@@ -3606,6 +3643,69 @@ mod tests {
         server.join().unwrap();
         drop(database);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn openai_generations_and_edits_download_extensionless_image_urls() {
+        let png = b"\x89PNG\r\n\x1a\nmock-image";
+        let reference = ManagedReference {
+            file_name: "reference.png".to_owned(),
+            mime_type: "image/png".to_owned(),
+            bytes: png.to_vec(),
+            kind: AttachmentKind::Image,
+        };
+        for references in [&[][..], std::slice::from_ref(&reference)] {
+            let (download_base, download_server) = mock_sequence_inspecting(
+                vec![MockResponse {
+                    method: "GET",
+                    path: "/download/123?signature=example",
+                    status: 200,
+                    content_type: "application/octet-stream",
+                    body: png.to_vec(),
+                }],
+                |_, bytes| {
+                    assert!(
+                        !String::from_utf8_lossy(bytes)
+                            .to_ascii_lowercase()
+                            .contains("authorization:")
+                    );
+                },
+            );
+            let (base_url, server) = mock_sequence(vec![MockResponse {
+                method: "POST",
+                path: if references.is_empty() {
+                    "/v1/images/generations"
+                } else {
+                    "/v1/images/edits"
+                },
+                status: 200,
+                content_type: "application/json",
+                body: json!({"data": [{
+                    "url": format!("{download_base}/download/123?signature=example"),
+                    "revised_prompt": "Refined"
+                }]})
+                .to_string()
+                .into_bytes(),
+            }]);
+            let mut provider = provider("primary", "gpt-image-2");
+            provider.profile.base_url = base_url;
+            let blobs = call_openai_images(
+                &Client::new(),
+                &provider,
+                "gpt-image-2",
+                &request(MediaKind::Image, 1),
+                references,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(blobs.len(), 1);
+            assert_eq!(blobs[0].bytes, png);
+            assert_eq!(blobs[0].mime_type, "image/png");
+            assert_eq!(blobs[0].revised_prompt.as_deref(), Some("Refined"));
+            server.join().unwrap();
+            download_server.join().unwrap();
+        }
     }
 
     #[tokio::test]
