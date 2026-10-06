@@ -556,13 +556,9 @@ enum VideoPoll {
 fn classify_media_model(model: &str) -> Vec<(MediaKind, i64)> {
     let id = model.to_ascii_lowercase();
     let mut kinds = Vec::new();
-    if id.contains("gpt-image")
-        || id.contains("dall-e")
-        || id.contains("imagen")
-        || (id.contains("gemini") && id.contains("image"))
-        || id.contains("image-generation")
-        || is_minimax_image_model(&id)
-        || is_grok_image_model(&id)
+    // Relays can expose custom image model names; video aliases take precedence.
+    if !id.contains("video")
+        && (id.contains("image") || id.contains("dall-e") || is_grok_image_model(&id))
     {
         kinds.push((MediaKind::Image, image_rank(&id)));
     }
@@ -5095,14 +5091,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn media_catalog_keeps_suffixed_aliases_and_their_routes() {
+    async fn media_catalog_keeps_custom_names_and_their_routes() {
         let ids = [
-            "MiniMax-H3-2K",
-            "MiniMax-H3-Max-2K",
-            "Seedance-2.5-custom",
-            "image-01-live-2K",
-            "grok-imagine-2K",
-            "grok-imagine-video-1.5-2K",
+            ("MiniMax-H3-2K", MediaKind::Video),
+            ("MiniMax-H3-Max-2K", MediaKind::Video),
+            ("Seedance-2.5-custom", MediaKind::Video),
+            ("image-01-live-2K", MediaKind::Image),
+            ("grok-imagine-2K", MediaKind::Image),
+            ("grok-imagine-video-1.5-2K", MediaKind::Video),
+            ("image-to-video-generation", MediaKind::Video),
+            ("Image2Pro", MediaKind::Image),
+            ("provider/CustomIMAGE-HD", MediaKind::Image),
+            ("品牌image旗舰", MediaKind::Image),
+            ("image-010-2K", MediaKind::Image),
         ];
         let (base_url, server) = mock_sequence_inspecting(
             vec![MockResponse {
@@ -5110,9 +5111,10 @@ mod tests {
                 path: "/v1/models",
                 status: 200,
                 content_type: "application/json",
-                body: json!({"data": ids.iter().map(|id| json!({"id": id})).collect::<Vec<_>>()})
-                    .to_string()
-                    .into_bytes(),
+                body:
+                    json!({"data": ids.iter().map(|(id, _)| json!({"id": id})).collect::<Vec<_>>()})
+                        .to_string()
+                        .into_bytes(),
             }],
             |_, _| {},
         );
@@ -5121,13 +5123,8 @@ mod tests {
         let catalog = discover_catalog(&Client::new(), &[provider.clone()], "relay").await;
         assert!(catalog.errors.is_empty());
         assert_eq!(catalog.models.len(), ids.len());
-        for id in ids {
+        for (id, expected) in ids {
             let model = catalog.models.iter().find(|model| model.id == id).unwrap();
-            let expected = if id.starts_with("image-") || id == "grok-imagine-2K" {
-                MediaKind::Image
-            } else {
-                MediaKind::Video
-            };
             assert_eq!(model.kind, expected);
             let mut request = request(expected, 1);
             request.profile_id = Some(provider.profile.id.clone());
@@ -5140,11 +5137,13 @@ mod tests {
         for id in [
             "MiniMax-H30-2K",
             "Seedance-20-2K",
-            "image-010-2K",
             "gpt-6-2K",
+            "imagine",
+            "provider/CustomIMAGINE-HD",
         ] {
             assert!(classify_media_model(id).is_empty(), "{id}");
         }
+        assert!(!is_minimax_image_model("image-010-2K"));
         assert_eq!(
             video_rank("minimax-h3-max-2k"),
             video_rank("minimax-h3-max")
