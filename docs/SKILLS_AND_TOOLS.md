@@ -15,6 +15,17 @@ Character-limited excerpts report the actual included range and identify a
 partially read line. Unparameterized reads keep the existing behavior.
 Directory walks and content searches run on the host blocking pool.
 
+`web_fetch` preserves upstream HTTP status and error details, including Cloudflare
+challenge hints. Successful pages use an HTML5 parser and return partial content
+with an explicit truncation notice if the 16 MiB download budget is exceeded;
+`max_chars` separately limits the extracted text. `web_search` sends domain
+constraints to Bing as `site:` terms and verifies the returned hosts.
+
+`view_image` and `browser_screenshot` keep every image from the latest tool-call
+batch, including batches larger than four images. Older image pixels are limited
+to the remaining recent-image budget and explicitly marked when omitted; reopen
+an older image when its pixels are needed. Each image still has an 8 MiB limit.
+
 New installations default to `agent` permission. It automatically permits file
 writes/edits, delegation, and commands that pass the heuristic risk filter.
 Use `request` for per-action side-effect approvals. Existing choices persist.

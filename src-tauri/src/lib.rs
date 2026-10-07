@@ -69,13 +69,6 @@ const MCP_CREDENTIAL_PREFIX: &str = "mcp:";
 const MAX_PENDING_CONFIRMATIONS: usize = 128;
 const PROVIDER_RECONNECT_RETRIES: u32 = 5;
 const LARGE_INLINE_IMAGE_BYTES: u64 = 4 * 1024 * 1024;
-const PROVIDER_ROUND_TIMEOUT: Duration = Duration::from_secs(240);
-const LONG_PROVIDER_ROUND_TIMEOUT: Duration = Duration::from_secs(360);
-// The relay can legitimately wait up to 30 minutes for an Anthropic first
-// response. Keep a small client-side margin so it can fail over or return the
-// upstream error instead of being cancelled at the same deadline.
-const REASONING_PROVIDER_ROUND_TIMEOUT: Duration = Duration::from_secs(1_860);
-const PROVIDER_ROUND_TIMEOUT_PREFIX: &str = "Provider round timed out";
 const EMPTY_POST_TOOL_RESPONSE_RETRIES: usize = 2;
 // Low/medium-effort models sometimes advance the browser workflow one tool per
 // round. Four bounded nudges cover browser_list, server startup, browser startup,
@@ -130,7 +123,7 @@ struct BrowserPanelCommandRequest {
 
 struct AppState {
     client: Client,
-    stream_client: Client,
+    provider_client: Client,
     media_refreshes: media::MediaRefreshes,
     active_requests: Mutex<HashMap<String, CancellationToken>>,
     harness_turn_cancellations: Mutex<HashMap<String, CancellationToken>>,
@@ -2881,7 +2874,8 @@ async fn run_autonomous_pet_question_formation(
         .try_state::<AppState>()
         .ok_or_else(|| "The Agent runtime is unavailable".to_owned())?;
     let response =
-        run_agent_turn_with_failover(&state.client, &database, request, load_api_key).await?;
+        run_agent_turn_with_failover(&state.provider_client, &database, request, load_api_key)
+            .await?;
     let proposal = parse_autonomous_pet_question_proposal(&response.content)?;
     let manager = app
         .try_state::<pet::PetManager>()
@@ -2938,7 +2932,8 @@ async fn run_autonomous_pet_learning(
     let AutonomousPetAgentRun {
         response,
         web_sources,
-    } = run_bounded_autonomous_pet_agent(&state.client, &database, &dashboard, request).await?;
+    } = run_bounded_autonomous_pet_agent(&state.provider_client, &database, &dashboard, request)
+        .await?;
     let answer = parse_autonomous_pet_learning_answer(&response.content)?;
     let manager = app
         .try_state::<pet::PetManager>()
@@ -3977,29 +3972,8 @@ fn provider_reconnect_delay(retry_number: u32) -> Duration {
     Duration::from_millis(BASE_DELAY_MS.saturating_mul(retry_number.min(5) as u64))
 }
 
-fn effective_provider_round_timeout(request: &AgentTurnRequest, base: Duration) -> Duration {
-    if agent::request_uses_reasoning(request) {
-        base.max(REASONING_PROVIDER_ROUND_TIMEOUT)
-    } else {
-        base
-    }
-}
-
-fn provider_round_timeout_error(timeout: Duration) -> String {
-    format!(
-        "{PROVIDER_ROUND_TIMEOUT_PREFIX} after {} seconds",
-        timeout.as_secs()
-    )
-}
-
-fn is_provider_round_timeout(error: &str) -> bool {
-    error.starts_with(PROVIDER_ROUND_TIMEOUT_PREFIX)
-}
-
 fn should_reconnect_provider(error: &str, retry_number: u32) -> bool {
-    agent::is_reconnectable_provider_error(error)
-        && !is_provider_round_timeout(error)
-        && retry_number < PROVIDER_RECONNECT_RETRIES
+    agent::is_reconnectable_provider_error(error) && retry_number < PROVIDER_RECONNECT_RETRIES
 }
 
 fn request_has_large_inline_image(request: &AgentTurnRequest) -> bool {
@@ -4015,21 +3989,20 @@ fn should_reconnect_request(error: &str, retry_number: u32, has_large_inline_ima
     should_reconnect_provider(error, retry_number) && (!has_large_inline_image || retry_number < 1)
 }
 
-async fn within_provider_round_timeout<T, F>(
-    deadline: Instant,
-    timeout: Duration,
+// Generation waits for an upstream result or explicit cancellation. Retries do
+// not share a wall-clock budget that can cut off a healthy later attempt.
+async fn cancellable_provider_attempt<T, F>(
+    cancellation: &CancellationToken,
     future: F,
 ) -> Result<T, String>
 where
     F: Future<Output = Result<T, String>>,
 {
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
-        return Err(provider_round_timeout_error(timeout));
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => Err("REQUEST_CANCELLED".to_owned()),
+        result = future => result,
     }
-    tokio::time::timeout(remaining, future)
-        .await
-        .map_err(|_| provider_round_timeout_error(timeout))?
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4169,17 +4142,11 @@ fn log_provider_retry_scheduled(
 async fn wait_for_provider_reconnect(
     retry_number: u32,
     cancellation: &CancellationToken,
-    deadline: Instant,
-    round_timeout: Duration,
 ) -> Result<(), String> {
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
-        return Err(provider_round_timeout_error(round_timeout));
-    }
     tokio::select! {
-        _ = tokio::time::sleep(provider_reconnect_delay(retry_number)) => Ok(()),
+        biased;
         _ = cancellation.cancelled() => Err("REQUEST_CANCELLED".to_owned()),
-        _ = tokio::time::sleep(remaining) => Err(provider_round_timeout_error(round_timeout)),
+        _ = tokio::time::sleep(provider_reconnect_delay(retry_number)) => Ok(()),
     }
 }
 
@@ -4254,7 +4221,6 @@ where
         round,
         key_loader,
         false,
-        PROVIDER_ROUND_TIMEOUT,
         CancellationToken::new(),
         on_connection_event,
         |_| {},
@@ -4271,7 +4237,6 @@ async fn run_agent_turn_with_failover_events_inner<F, R, S>(
     round: Option<usize>,
     mut key_loader: F,
     streaming: bool,
-    round_timeout: Duration,
     cancellation: CancellationToken,
     mut on_connection_event: R,
     mut on_stream_event: S,
@@ -4281,8 +4246,6 @@ where
     R: FnMut(&ProviderProfile, u32, u32, Option<&str>),
     S: FnMut(AgentStreamEvent),
 {
-    let round_timeout = effective_provider_round_timeout(&request, round_timeout);
-    let round_deadline = Instant::now() + round_timeout;
     let candidates = provider_candidates(&request);
     request.fallback_profiles.clear();
     let mut last_error =
@@ -4409,8 +4372,7 @@ where
                     agent::run_turn(client, attempt, &api_key).await
                 }
             };
-            let attempt_result =
-                within_provider_round_timeout(round_deadline, round_timeout, attempt_future).await;
+            let attempt_result = cancellable_provider_attempt(&cancellation, attempt_future).await;
             match attempt_result {
                 Ok(mut result) => {
                     let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
@@ -4464,7 +4426,6 @@ where
                     let error = agent::annotate_tool_compatibility_error(error, &request);
                     let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
                     let output_was_emitted = emitted.load(Ordering::Acquire);
-                    let round_timed_out = is_provider_round_timeout(&error);
                     let will_retry =
                         should_reconnect_request(&error, retry_number, has_large_inline_image);
                     let status = if will_retry {
@@ -4499,9 +4460,6 @@ where
                         streaming,
                         &error,
                     );
-                    if round_timed_out {
-                        return Err(error);
-                    }
                     if will_retry {
                         reset_output_before_attempt = output_was_emitted;
                         reconnecting = true;
@@ -4520,13 +4478,7 @@ where
                             retry_number + 1,
                             streaming,
                         );
-                        wait_for_provider_reconnect(
-                            retry_number + 1,
-                            &cancellation,
-                            round_deadline,
-                            round_timeout,
-                        )
-                        .await?;
+                        wait_for_provider_reconnect(retry_number + 1, &cancellation).await?;
                         continue;
                     }
                     if agent::is_retryable_provider_error(&error) {
@@ -5688,7 +5640,8 @@ async fn agent_turn(
             .then(|| request.thread_id.clone())
             .flatten();
         let response =
-            run_agent_turn_with_failover(&state.client, &database, request, load_api_key).await?;
+            run_agent_turn_with_failover(&state.provider_client, &database, request, load_api_key)
+                .await?;
         if let Some(thread_id) = goal_thread {
             database.record_goal_usage(
                 &thread_id,
@@ -5809,13 +5762,6 @@ async fn agent_turn_stream_inner(
     attach_mcp_tools(&database, &manager, &mut request).await?;
     enforce_theme_generation_tool_catalog(&mut request);
     enforce_hatch_tool_catalog(&mut request);
-    let base_round_timeout = if agent::theme_generation_bootstrapped(&request.messages) {
-        LONG_PROVIDER_ROUND_TIMEOUT
-    } else {
-        PROVIDER_ROUND_TIMEOUT
-    };
-    let round_timeout = effective_provider_round_timeout(&request, base_round_timeout);
-    let round_deadline = Instant::now() + round_timeout;
     let goal_thread = (request.mode == "goal")
         .then(|| request.thread_id.clone())
         .flatten();
@@ -5925,7 +5871,7 @@ async fn agent_turn_stream_inner(
                 true,
             );
             let attempt_future = agent::run_turn_stream(
-                &state.stream_client,
+                &state.provider_client,
                 attempt,
                 &api_key,
                 cancellation.clone(),
@@ -5963,8 +5909,7 @@ async fn agent_turn_stream_inner(
                     let _ = event_channel.send(event);
                 },
             );
-            match within_provider_round_timeout(round_deadline, round_timeout, attempt_future).await
-            {
+            match cancellable_provider_attempt(&cancellation, attempt_future).await {
                 Ok(mut response) => {
                     let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
                     database.record_provider_success(&profile.id, latency_ms, index > 0)?;
@@ -6015,7 +5960,6 @@ async fn agent_turn_stream_inner(
                     let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
                     let output_was_emitted = emitted.load(Ordering::Acquire);
                     let retryable = agent::is_retryable_provider_error(&error);
-                    let round_timed_out = is_provider_round_timeout(&error);
                     let will_retry =
                         should_reconnect_request(&error, retry_number, has_large_inline_image);
                     let status = if will_retry {
@@ -6050,10 +5994,6 @@ async fn agent_turn_stream_inner(
                         true,
                         &error,
                     );
-                    if round_timed_out {
-                        result = Some(Err(error));
-                        break 'providers;
-                    }
                     if will_retry {
                         reset_output_before_attempt = output_was_emitted;
                         reconnecting = true;
@@ -6070,13 +6010,8 @@ async fn agent_turn_stream_inner(
                             retry_number + 1,
                             true,
                         );
-                        if let Err(cancelled) = wait_for_provider_reconnect(
-                            retry_number + 1,
-                            &cancellation,
-                            round_deadline,
-                            round_timeout,
-                        )
-                        .await
+                        if let Err(cancelled) =
+                            wait_for_provider_reconnect(retry_number + 1, &cancellation).await
                         {
                             result = Some(Err(cancelled));
                             break 'providers;
@@ -6891,18 +6826,13 @@ async fn harness_run_loop(
             .map_err(|_| "Could not lock harness turn state".to_owned())?
             .insert(operation_id.clone(), turn_cancellation.clone());
         let provider_future = run_agent_turn_with_failover_events_inner(
-            &state.stream_client,
+            &state.provider_client,
             database,
             turn_request,
             Some(&operation_id),
             Some(round),
             load_api_key,
             true,
-            if theme_generation_mode {
-                LONG_PROVIDER_ROUND_TIMEOUT
-            } else {
-                PROVIDER_ROUND_TIMEOUT
-            },
             turn_cancellation.clone(),
             |profile, retry_attempt, max_retry_attempts, error| {
                 let (kind, payload) = if let Some(error) = error {
@@ -8438,7 +8368,7 @@ async fn delegate_task(
     )
     .await?;
     let result = run_isolated_subagent(
-        &state.client,
+        &state.provider_client,
         database,
         request,
         &worktree,
@@ -11903,10 +11833,9 @@ pub fn run() {
         .manage(AppState {
             client: build_http_client(Some(Duration::from_secs(180)))
                 .expect("failed to build HTTP client"),
-            // SSE lifetime is governed by first-response, idle, cancellation,
-            // and provider-round deadlines. A total body deadline would cut
-            // off healthy long-running reasoning streams.
-            stream_client: build_http_client(None).expect("failed to build streaming HTTP client"),
+            // Generation has no response deadline; the upstream response and
+            // explicit cancellation determine when each attempt ends.
+            provider_client: build_http_client(None).expect("failed to build provider HTTP client"),
             media_refreshes: media::MediaRefreshes::default(),
             active_requests: Mutex::new(HashMap::new()),
             harness_turn_cancellations: Mutex::new(HashMap::new()),
@@ -12408,8 +12337,8 @@ mod tests {
         };
         assert!(error.is_timeout(), "{error}");
 
-        let stream_client = build_http_client(None).unwrap();
-        let stream_response = stream_client
+        let provider_client = build_http_client(None).unwrap();
+        let stream_response = provider_client
             .get(delayed_response_body_server(response_delay))
             .send()
             .await
@@ -14924,49 +14853,13 @@ mod tests {
     }
 
     #[test]
-    fn provider_reconnect_stops_after_six_attempts_or_round_deadline() {
-        let timeout = "Provider stream timed out after 30 seconds without activity";
+    fn provider_reconnect_stops_after_six_attempts() {
+        let timeout = "Provider returned 504 Gateway Timeout: upstream timed out";
         assert!(should_reconnect_provider(timeout, 0));
         assert!(!should_reconnect_provider(
             timeout,
             PROVIDER_RECONNECT_RETRIES
         ));
-        assert!(!should_reconnect_provider(
-            &provider_round_timeout_error(PROVIDER_ROUND_TIMEOUT),
-            0
-        ));
-    }
-
-    #[test]
-    fn reasoning_requests_receive_a_round_timeout_beyond_the_relay_limit() {
-        let mut reasoning_profile = profile("reasoning", 10, false);
-        reasoning_profile.model = "claude-opus-4-6".to_owned();
-        reasoning_profile.protocol = models::ProviderProtocol::AnthropicMessages;
-        let request = AgentTurnRequest {
-            profile: reasoning_profile,
-            messages: Vec::new(),
-            mode: "chat".to_owned(),
-            workspace: None,
-            thread_id: None,
-            hatch: false,
-            hatch_skill_loaded: false,
-            available_tools: Vec::new(),
-            available_skills: Vec::new(),
-            goal: None,
-            fallback_profiles: Vec::new(),
-            custom_instructions: None,
-            router_metadata: None,
-            router_events: Vec::new(),
-            hook_contexts: Vec::new(),
-            allow_outside_workspace: false,
-            reasoning_effort: Some("max".to_owned()),
-        };
-
-        assert_eq!(
-            effective_provider_round_timeout(&request, PROVIDER_ROUND_TIMEOUT),
-            REASONING_PROVIDER_ROUND_TIMEOUT
-        );
-        assert!(REASONING_PROVIDER_ROUND_TIMEOUT > Duration::from_secs(1_800));
     }
 
     #[test]
@@ -15082,17 +14975,39 @@ mod tests {
         assert!(metrics.non_stream_response.load(Ordering::Acquire));
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn provider_attempt_waits_for_upstream_beyond_old_round_limits() {
+        let cancellation = CancellationToken::new();
+        let result = cancellable_provider_attempt(&cancellation, async {
+            tokio::time::sleep(Duration::from_secs(3_600)).await;
+            Err::<(), _>("Provider returned 504 Gateway Timeout: upstream detail".to_owned())
+        })
+        .await;
+        assert_eq!(
+            result.unwrap_err(),
+            "Provider returned 504 Gateway Timeout: upstream detail"
+        );
+    }
+
     #[tokio::test]
-    async fn provider_round_budget_interrupts_a_pending_attempt() {
-        let timeout = Duration::from_millis(20);
-        let error = within_provider_round_timeout(
-            Instant::now() + timeout,
-            timeout,
+    async fn cancellation_interrupts_pending_provider_attempts_and_retries() {
+        let cancellation = CancellationToken::new();
+        let cancel = cancellation.clone();
+        let attempt = cancellable_provider_attempt(
+            &cancellation,
             std::future::pending::<Result<(), String>>(),
-        )
-        .await
-        .unwrap_err();
-        assert!(is_provider_round_timeout(&error), "{error}");
+        );
+        let (result, ()) = tokio::join!(attempt, async {
+            tokio::task::yield_now().await;
+            cancel.cancel();
+        });
+        assert_eq!(result.unwrap_err(), "REQUEST_CANCELLED");
+        assert_eq!(
+            wait_for_provider_reconnect(1, &cancellation)
+                .await
+                .unwrap_err(),
+            "REQUEST_CANCELLED"
+        );
     }
 
     fn mock_responses_server(status: &'static str, body: &'static str) -> String {
@@ -15297,7 +15212,6 @@ mod tests {
                 None,
                 |_| Ok("test-key".to_owned()),
                 true,
-                Duration::from_secs(5),
                 cancellation,
                 |_, _, _, error| {
                     if cancel && error.is_some() {

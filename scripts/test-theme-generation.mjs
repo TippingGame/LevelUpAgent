@@ -222,13 +222,11 @@ test("AI backgrounds are generated once by the host before Harness starts", () =
   assert.ok(source.indexOf("await generateMedia") < source.indexOf("harnessStart"));
 });
 
-test("Harness provider turns stream with bounded, cancellable retries", () => {
+test("Harness provider turns stream with cancellable retries and no client wall-clock cutoff", () => {
   const start = rustSource.indexOf("let provider_future = run_agent_turn_with_failover_events_inner(");
   const end = rustSource.indexOf("let response = tokio::select!", start);
   const source = rustSource.slice(start, end);
   assert.ok(start >= 0 && end > start);
-  assert.match(
-    source,
-    /load_api_key,\s*true,\s*if theme_generation_mode\s*\{\s*LONG_PROVIDER_ROUND_TIMEOUT\s*\}\s*else\s*\{\s*PROVIDER_ROUND_TIMEOUT\s*\},\s*turn_cancellation\.clone\(\)/,
-  );
+  assert.match(source, /load_api_key,\s*true,\s*turn_cancellation\.clone\(\)/);
+  assert.doesNotMatch(source, /PROVIDER_ROUND_TIMEOUT|LONG_PROVIDER_ROUND_TIMEOUT/);
 });

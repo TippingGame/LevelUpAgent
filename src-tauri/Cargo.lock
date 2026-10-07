@@ -2317,11 +2317,12 @@ dependencies = [
 
 [[package]]
 name = "levelup-agent"
-version = "1.1.68"
+version = "1.1.69"
 dependencies = [
  "base64 0.22.1",
  "chardetng",
  "chrono",
+ "dom_query",
  "encoding_rs",
  "eventsource-stream",
  "futures-util",

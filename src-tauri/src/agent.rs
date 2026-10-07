@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
 use std::time::Duration;
 
 use eventsource_stream::Eventsource;
@@ -34,43 +35,11 @@ pub const TOOL_CALLING_UNSUPPORTED_MARKER: &str = "[LEVELUP_TOOL_CALLING_UNSUPPO
 const HATCH_BOOTSTRAP_MARKER: &str = "[LEVELUP_HATCH_BOOTSTRAP_COMPLETE]";
 const THEME_GENERATION_BOOTSTRAP_MARKER: &str = "[LEVELUP_THEME_GENERATION_BOOTSTRAP_COMPLETE]";
 const THEME_GENERATION_TARGET_MARKER: &str = "[LEVELUP_THEME_GENERATION_TARGET]";
-const THEME_GENERATION_REQUEST_TIMEOUT_SECS: u64 = 360;
-// Vision requests are sent as inline Base64. A 6 MiB image becomes roughly
-// 8 MiB before JSON framing, and some providers need more than 30 seconds to
-// receive/process that body before emitting the first SSE event. Keep the
-// timeout long enough to avoid reconnecting the same large request repeatedly;
-// the outer provider round timeout still bounds the whole attempt.
-#[cfg(not(test))]
-const PROVIDER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
-#[cfg(test)]
-const PROVIDER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
-#[cfg(not(test))]
-const PROVIDER_REASONING_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
-#[cfg(test)]
-const PROVIDER_REASONING_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
-#[cfg(not(test))]
-const PROVIDER_REASONING_FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(1_860);
-#[cfg(test)]
-const PROVIDER_REASONING_FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(4);
 const PROVIDER_STREAM_INTERRUPTED: &str = "Provider stream ended before completion";
 
-fn turn_request_timeout(request: &AgentTurnRequest) -> Option<std::time::Duration> {
-    theme_generation_bootstrapped(&request.messages)
-        .then(|| std::time::Duration::from_secs(THEME_GENERATION_REQUEST_TIMEOUT_SECS))
-}
-
-fn non_stream_turn_post(client: &Client, url: Url, request: &AgentTurnRequest) -> RequestBuilder {
-    let builder = client.post(url);
-    if let Some(timeout) = turn_request_timeout(request) {
-        builder.timeout(timeout)
-    } else {
-        builder
-    }
-}
-
-// Stream lifetime is bounded by first-response, idle, cancellation, and
-// provider-round deadlines, rather than one absolute response-body deadline.
-fn stream_turn_post(client: &Client, url: Url) -> RequestBuilder {
+// The shared provider client has no response deadline. Stop/steer cancellation
+// remains active while waiting for headers, JSON bodies, or SSE events.
+fn turn_post(client: &Client, url: Url) -> RequestBuilder {
     client.post(url)
 }
 
@@ -111,86 +80,39 @@ fn gemini_auth_if_present(request: RequestBuilder, api_key: &str) -> RequestBuil
     }
 }
 
-fn provider_stream_idle_timeout(request: &AgentTurnRequest) -> Duration {
-    if request_uses_reasoning(request) {
-        PROVIDER_REASONING_STREAM_IDLE_TIMEOUT
-    } else {
-        PROVIDER_STREAM_IDLE_TIMEOUT
-    }
-}
-
-fn provider_first_response_timeout(request: &AgentTurnRequest) -> Duration {
-    if request_uses_reasoning(request) {
-        PROVIDER_REASONING_FIRST_RESPONSE_TIMEOUT
-    } else {
-        PROVIDER_STREAM_IDLE_TIMEOUT
-    }
-}
-
-pub(crate) fn request_uses_reasoning(request: &AgentTurnRequest) -> bool {
-    normalized_reasoning_effort_value(request).is_some_and(|effort| effort != "none")
-}
-
-fn provider_stream_idle_timeout_error(idle_timeout: Duration) -> String {
-    let timeout = if idle_timeout.subsec_millis() == 0 {
-        format!("{} seconds", idle_timeout.as_secs())
-    } else {
-        format!("{} ms", idle_timeout.as_millis())
-    };
-    format!("Provider stream timed out after {timeout} without activity")
-}
-
 async fn send_stream_request(
     request: RequestBuilder,
     cancellation: &CancellationToken,
-    idle_timeout: Duration,
 ) -> Result<Response, String> {
-    let response = tokio::select! {
-        _ = cancellation.cancelled() => return Err("REQUEST_CANCELLED".to_owned()),
-        response = tokio::time::timeout(idle_timeout, request.send()) => response,
-    };
-    response
-        .map_err(|_| provider_stream_idle_timeout_error(idle_timeout))?
-        .map_err(|error| format!("Connection failed: {error}"))
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => Err("REQUEST_CANCELLED".to_owned()),
+        response = request.send() => response.map_err(|error| format!("Connection failed: {error}")),
+    }
 }
 
 async fn stream_response_json(
     response: Response,
     cancellation: &CancellationToken,
-    idle_timeout: Duration,
 ) -> Result<Value, String> {
-    let result = tokio::select! {
-        _ = cancellation.cancelled() => return Err("REQUEST_CANCELLED".to_owned()),
-        result = tokio::time::timeout(idle_timeout, response_json(response)) => result,
-    };
-    result.map_err(|_| provider_stream_idle_timeout_error(idle_timeout))?
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => Err("REQUEST_CANCELLED".to_owned()),
+        result = response_json(response) => result,
+    }
 }
 
 async fn next_stream_item<S>(
     stream: &mut S,
     cancellation: &CancellationToken,
-    idle_timeout: Duration,
-    activity: &mut tokio::sync::watch::Receiver<u64>,
 ) -> Result<Option<S::Item>, String>
 where
     S: Stream + Unpin,
 {
-    let idle = tokio::time::sleep(idle_timeout);
-    tokio::pin!(idle);
-    let mut activity_open = true;
-    loop {
-        tokio::select! {
-            _ = cancellation.cancelled() => return Err("REQUEST_CANCELLED".to_owned()),
-            next = stream.next() => return Ok(next),
-            changed = activity.changed(), if activity_open => {
-                if changed.is_err() {
-                    activity_open = false;
-                } else {
-                    idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
-                }
-            }
-            _ = &mut idle => return Err(provider_stream_idle_timeout_error(idle_timeout)),
-        }
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => Err("REQUEST_CANCELLED".to_owned()),
+        next = stream.next() => Ok(next),
     }
 }
 
@@ -791,7 +713,7 @@ async fn run_gemini_generate_content(
         &request.profile.base_url,
         &format!("/v1beta/models/{model}:generateContent"),
     )?;
-    let response = gemini_auth_if_present(non_stream_turn_post(client, url, &request), api_key)
+    let response = gemini_auth_if_present(turn_post(client, url), api_key)
         .json(&gemini_body(&request))
         .send()
         .await
@@ -809,7 +731,7 @@ async fn run_openai_chat(
     let url = endpoint(&request.profile.base_url, "/v1/chat/completions")?;
     let body = chat_body(&request, false);
 
-    let response = bearer_auth_if_present(non_stream_turn_post(client, url, &request), api_key)
+    let response = bearer_auth_if_present(turn_post(client, url), api_key)
         .json(&body)
         .send()
         .await
@@ -827,7 +749,7 @@ async fn run_openai_responses(
     let url = endpoint(&request.profile.base_url, "/v1/responses")?;
     let body = responses_body(&request, false);
 
-    let response = bearer_auth_if_present(non_stream_turn_post(client, url, &request), api_key)
+    let response = bearer_auth_if_present(turn_post(client, url), api_key)
         .header("OpenAI-Beta", "responses=experimental")
         .json(&body)
         .send()
@@ -846,7 +768,7 @@ async fn run_anthropic_messages(
     let url = endpoint(&request.profile.base_url, "/v1/messages")?;
     let body = anthropic_body(&request, false);
     let response = anthropic_request_headers(
-        anthropic_auth_if_present(non_stream_turn_post(client, url, &request), api_key),
+        anthropic_auth_if_present(turn_post(client, url), api_key),
         &request,
     )
     .json(&body)
@@ -876,37 +798,24 @@ where
     F: FnMut(AgentStreamEvent),
 {
     let url = endpoint(&request.profile.base_url, "/v1/chat/completions")?;
-    let idle_timeout = provider_stream_idle_timeout(&request);
-    let first_response_timeout = provider_first_response_timeout(&request);
     let response = send_stream_request(
-        bearer_auth_if_present(stream_turn_post(client, url), api_key)
-            .json(&chat_body(&request, true)),
+        bearer_auth_if_present(turn_post(client, url), api_key).json(&chat_body(&request, true)),
         &cancellation,
-        first_response_timeout,
     )
     .await?;
     let request_id = header_request_id(&response);
-    if !is_event_stream(&response) {
+    if !response.status().is_success() || !is_event_stream(&response) {
         emit(AgentStreamEvent::non_stream_response());
-        let value = stream_response_json(response, &cancellation, idle_timeout).await?;
+        let value = stream_response_json(response, &cancellation).await?;
         let result = parse_openai_chat_value(&value, request_id)?;
         if !result.content.is_empty() {
             emit(AgentStreamEvent::content(result.content.clone()));
         }
         return Ok(result);
     }
-    ensure_success_status(&response)?;
     emit(AgentStreamEvent::stream_opened());
 
-    let (activity_tx, mut activity_rx) = tokio::sync::watch::channel(0_u64);
-    let mut activity_sequence = 0_u64;
-    let mut stream = response
-        .bytes_stream()
-        .inspect(move |_| {
-            activity_sequence = activity_sequence.wrapping_add(1);
-            activity_tx.send_replace(activity_sequence);
-        })
-        .eventsource();
+    let mut stream = response.bytes_stream().eventsource();
     let mut content = String::new();
     let mut tools: BTreeMap<usize, ToolAccumulator> = BTreeMap::new();
     let mut reasoning_content: Option<String> = None;
@@ -915,8 +824,7 @@ where
     let mut output_tokens = None;
     let mut completed = false;
     loop {
-        let next =
-            next_stream_item(&mut stream, &cancellation, idle_timeout, &mut activity_rx).await?;
+        let next = next_stream_item(&mut stream, &cancellation).await?;
         let Some(event) = next else { break };
         let event = event.map_err(|error| format!("Invalid SSE stream: {error}"))?;
         if event.data.trim() == "[DONE]" {
@@ -1012,38 +920,26 @@ where
     F: FnMut(AgentStreamEvent),
 {
     let url = endpoint(&request.profile.base_url, "/v1/responses")?;
-    let idle_timeout = provider_stream_idle_timeout(&request);
-    let first_response_timeout = provider_first_response_timeout(&request);
     let response = send_stream_request(
-        bearer_auth_if_present(stream_turn_post(client, url), api_key)
+        bearer_auth_if_present(turn_post(client, url), api_key)
             .header("OpenAI-Beta", "responses=experimental")
             .json(&responses_body(&request, true)),
         &cancellation,
-        first_response_timeout,
     )
     .await?;
     let request_id = header_request_id(&response);
-    if !is_event_stream(&response) {
+    if !response.status().is_success() || !is_event_stream(&response) {
         emit(AgentStreamEvent::non_stream_response());
-        let value = stream_response_json(response, &cancellation, idle_timeout).await?;
+        let value = stream_response_json(response, &cancellation).await?;
         let result = parse_openai_responses_value(&value, request_id)?;
         if !result.content.is_empty() {
             emit(AgentStreamEvent::content(result.content.clone()));
         }
         return Ok(result);
     }
-    ensure_success_status(&response)?;
     emit(AgentStreamEvent::stream_opened());
 
-    let (activity_tx, mut activity_rx) = tokio::sync::watch::channel(0_u64);
-    let mut activity_sequence = 0_u64;
-    let mut stream = response
-        .bytes_stream()
-        .inspect(move |_| {
-            activity_sequence = activity_sequence.wrapping_add(1);
-            activity_tx.send_replace(activity_sequence);
-        })
-        .eventsource();
+    let mut stream = response.bytes_stream().eventsource();
     let mut content = String::new();
     let mut tools: BTreeMap<usize, ToolAccumulator> = BTreeMap::new();
     let mut input_tokens = None;
@@ -1052,8 +948,7 @@ where
     let mut reasoning_blocks = BTreeMap::new();
     let mut completed = false;
     loop {
-        let next =
-            next_stream_item(&mut stream, &cancellation, idle_timeout, &mut activity_rx).await?;
+        let next = next_stream_item(&mut stream, &cancellation).await?;
         let Some(event) = next else { break };
         let event = event.map_err(|error| format!("Invalid SSE stream: {error}"))?;
         if event.data.trim() == "[DONE]" {
@@ -1167,40 +1062,28 @@ where
     F: FnMut(AgentStreamEvent),
 {
     let url = endpoint(&request.profile.base_url, "/v1/messages")?;
-    let idle_timeout = provider_stream_idle_timeout(&request);
-    let first_response_timeout = provider_first_response_timeout(&request);
     let response = send_stream_request(
         anthropic_request_headers(
-            anthropic_auth_if_present(stream_turn_post(client, url), api_key),
+            anthropic_auth_if_present(turn_post(client, url), api_key),
             &request,
         )
         .json(&anthropic_body(&request, true)),
         &cancellation,
-        first_response_timeout,
     )
     .await?;
     let request_id = header_request_id(&response);
-    if !is_event_stream(&response) {
+    if !response.status().is_success() || !is_event_stream(&response) {
         emit(AgentStreamEvent::non_stream_response());
-        let value = stream_response_json(response, &cancellation, idle_timeout).await?;
+        let value = stream_response_json(response, &cancellation).await?;
         let result = parse_anthropic_value(&value, request_id)?;
         if !result.content.is_empty() {
             emit(AgentStreamEvent::content(result.content.clone()));
         }
         return Ok(result);
     }
-    ensure_success_status(&response)?;
     emit(AgentStreamEvent::stream_opened());
 
-    let (activity_tx, mut activity_rx) = tokio::sync::watch::channel(0_u64);
-    let mut activity_sequence = 0_u64;
-    let mut stream = response
-        .bytes_stream()
-        .inspect(move |_| {
-            activity_sequence = activity_sequence.wrapping_add(1);
-            activity_tx.send_replace(activity_sequence);
-        })
-        .eventsource();
+    let mut stream = response.bytes_stream().eventsource();
     let mut content = String::new();
     let mut tools: BTreeMap<usize, ToolAccumulator> = BTreeMap::new();
     let mut reasoning_blocks: BTreeMap<usize, Value> = BTreeMap::new();
@@ -1208,8 +1091,7 @@ where
     let mut output_tokens = None;
     let mut completed = false;
     loop {
-        let next =
-            next_stream_item(&mut stream, &cancellation, idle_timeout, &mut activity_rx).await?;
+        let next = next_stream_item(&mut stream, &cancellation).await?;
         let Some(event) = next else { break };
         let event = event.map_err(|error| format!("Invalid SSE stream: {error}"))?;
         let value = parse_stream_event(&event.data, &event.event)?;
@@ -1346,48 +1228,35 @@ where
     F: FnMut(AgentStreamEvent),
 {
     let model = gemini_model_name(&request.profile.model)?;
-    let idle_timeout = provider_stream_idle_timeout(&request);
-    let first_response_timeout = provider_first_response_timeout(&request);
     let url = gemini_endpoint(
         &request.profile.base_url,
         &format!("/v1beta/models/{model}:streamGenerateContent?alt=sse"),
     )?;
     let response = send_stream_request(
-        gemini_auth_if_present(stream_turn_post(client, url), api_key).json(&gemini_body(&request)),
+        gemini_auth_if_present(turn_post(client, url), api_key).json(&gemini_body(&request)),
         &cancellation,
-        first_response_timeout,
     )
     .await?;
     let request_id = header_request_id(&response);
-    if !is_event_stream(&response) {
+    if !response.status().is_success() || !is_event_stream(&response) {
         emit(AgentStreamEvent::non_stream_response());
-        let value = stream_response_json(response, &cancellation, idle_timeout).await?;
+        let value = stream_response_json(response, &cancellation).await?;
         let result = parse_gemini_value(&value, request_id)?;
         if !result.content.is_empty() {
             emit(AgentStreamEvent::content(result.content.clone()));
         }
         return Ok(result);
     }
-    ensure_success_status(&response)?;
     emit(AgentStreamEvent::stream_opened());
 
-    let (activity_tx, mut activity_rx) = tokio::sync::watch::channel(0_u64);
-    let mut activity_sequence = 0_u64;
-    let mut stream = response
-        .bytes_stream()
-        .inspect(move |_| {
-            activity_sequence = activity_sequence.wrapping_add(1);
-            activity_tx.send_replace(activity_sequence);
-        })
-        .eventsource();
+    let mut stream = response.bytes_stream().eventsource();
     let mut content = String::new();
     let mut tool_calls = Vec::new();
     let mut input_tokens = None;
     let mut output_tokens = None;
     let mut completed = false;
     loop {
-        let next =
-            next_stream_item(&mut stream, &cancellation, idle_timeout, &mut activity_rx).await?;
+        let next = next_stream_item(&mut stream, &cancellation).await?;
         let Some(event) = next else { break };
         let event = event.map_err(|error| format!("Invalid SSE stream: {error}"))?;
         if event.data.trim() == "[DONE]" {
@@ -2223,14 +2092,6 @@ fn is_event_stream(response: &reqwest::Response) -> bool {
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.to_ascii_lowercase().contains("text/event-stream"))
-}
-
-fn ensure_success_status(response: &reqwest::Response) -> Result<(), String> {
-    if response.status().is_success() {
-        Ok(())
-    } else {
-        Err(format!("Provider returned {}", response.status()))
-    }
 }
 
 fn parse_stream_event(data: &str, event_type: &str) -> Result<Value, String> {
@@ -3328,7 +3189,7 @@ fn tool_specs() -> Vec<(&'static str, &'static str, Value)> {
         ),
         (
             "view_image",
-            "View a local PNG, JPEG, WebP or GIF (up to 8 MiB). Returns actual image content to your vision context, not just its path. Use this for artwork and contact-sheet visual verification. Paths follow the selected filesystem permission; restricted hatch runs may view images only inside their canonical run directory. Only the four most recent image tool results are attached.",
+            "View a local PNG, JPEG, WebP or GIF (up to 8 MiB). Returns actual image content to your vision context, not just its path. Use this for artwork and contact-sheet visual verification. Paths follow the selected filesystem permission; restricted hatch runs may view images only inside their canonical run directory. All images from the latest image tool batch are attached; older image results may be omitted and must be reopened when needed.",
             json!({"type":"object", "properties":{"path":{"type":"string", "description":TOOL_PATH_DESCRIPTION}}, "required":["path"]}),
         ),
     ]
@@ -3644,7 +3505,7 @@ async fn response_json(response: reqwest::Response) -> Result<Value, String> {
                     .and_then(Value::as_str)
                     .map(str::to_owned)
             })
-            .unwrap_or_else(|| text.chars().take(500).collect());
+            .unwrap_or(text);
         return Err(format!("Provider returned {status}: {detail}"));
     }
     serde_json::from_str(&text).map_err(|error| format!("Invalid provider response: {error}"))
@@ -4330,20 +4191,11 @@ mod tests {
         }];
 
         assert!(theme_generation_bootstrapped(&request.messages));
-        assert_eq!(
-            turn_request_timeout(&request),
-            Some(std::time::Duration::from_secs(360))
-        );
         let client = Client::new();
         let url = Url::parse("https://levelup.example/v1/responses").unwrap();
-        let non_stream_request = non_stream_turn_post(&client, url.clone(), &request)
-            .build()
-            .unwrap();
-        assert_eq!(
-            non_stream_request.timeout().copied(),
-            Some(std::time::Duration::from_secs(360))
-        );
-        let stream_request = stream_turn_post(&client, url).build().unwrap();
+        let non_stream_request = turn_post(&client, url.clone()).build().unwrap();
+        assert_eq!(non_stream_request.timeout().copied(), None);
+        let stream_request = turn_post(&client, url).build().unwrap();
         assert_eq!(stream_request.timeout(), None);
         assert_eq!(
             theme_generation_target(&request.messages).as_deref(),
@@ -4361,15 +4213,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["write_file"]
         );
-    }
-
-    #[test]
-    fn regular_provider_requests_keep_the_client_default_timeout() {
-        let request = test_request(
-            "https://levelup.example".to_owned(),
-            ProviderProtocol::OpenaiResponses,
-        );
-        assert_eq!(turn_request_timeout(&request), None);
     }
 
     #[test]
@@ -5340,6 +5183,14 @@ mod tests {
     }
 
     fn mock_contract_server(response_body: &'static str) -> (String, mpsc::Receiver<String>) {
+        mock_http_response_server("200 OK", "application/json", response_body)
+    }
+
+    fn mock_http_response_server(
+        status: &'static str,
+        content_type: &'static str,
+        response_body: &'static str,
+    ) -> (String, mpsc::Receiver<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let (sender, receiver) = mpsc::channel();
@@ -5379,7 +5230,7 @@ mod tests {
             }
             sender.send(String::from_utf8(request).unwrap()).unwrap();
             let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 response_body.len(),
                 response_body
             );
@@ -6985,12 +6836,12 @@ mod tests {
                     path,
                     Duration::ZERO,
                     vec![(Duration::ZERO, events)],
-                    PROVIDER_STREAM_IDLE_TIMEOUT + Duration::from_secs(1),
+                    Duration::from_secs(2),
                 ),
                 protocol,
             );
             let (result, emitted) =
-                tokio::time::timeout(PROVIDER_STREAM_IDLE_TIMEOUT, collect_stream(request))
+                tokio::time::timeout(Duration::from_secs(1), collect_stream(request))
                     .await
                     .expect("a terminal event must finish without waiting for HTTP EOF");
             assert_eq!(result.content, "complete");
@@ -7121,105 +6972,128 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_response_header_timeout_is_reconnectable() {
-        let request = test_request(
-            mock_timed_sse_server(
-                "/v1/messages",
-                PROVIDER_STREAM_IDLE_TIMEOUT + std::time::Duration::from_millis(150),
-                Vec::new(),
-                std::time::Duration::ZERO,
-            ),
-            ProviderProtocol::AnthropicMessages,
-        );
-        let error = run_turn_stream(
-            &Client::new(),
-            request,
-            "test-key",
-            CancellationToken::new(),
-            |_| {},
-        )
-        .await
-        .unwrap_err();
-        assert!(error.contains("timed out"), "{error}");
-        assert!(is_reconnectable_provider_error(&error), "{error}");
+    async fn delayed_headers_and_silent_streams_wait_for_upstream() {
+        for (header_delay, event_delay) in [
+            (Duration::from_millis(50), Duration::ZERO),
+            (Duration::ZERO, Duration::from_millis(50)),
+        ] {
+            let request = test_request(
+                mock_timed_sse_server(
+                    "/v1/chat/completions",
+                    header_delay,
+                    vec![(event_delay, "data: [DONE]\n\n")],
+                    Duration::ZERO,
+                ),
+                ProviderProtocol::OpenaiChat,
+            );
+            let (result, _) = collect_stream(request).await;
+            assert!(result.content.is_empty());
+        }
     }
 
     #[tokio::test]
-    async fn stream_event_idle_timeout_is_reconnectable() {
-        let request = test_request(
-            mock_timed_sse_server(
-                "/v1/messages",
-                std::time::Duration::ZERO,
-                Vec::new(),
-                PROVIDER_STREAM_IDLE_TIMEOUT + std::time::Duration::from_millis(150),
-            ),
+    async fn every_protocol_preserves_http_error_details_even_with_sse_content_type() {
+        for protocol in [
+            ProviderProtocol::OpenaiChat,
+            ProviderProtocol::OpenaiResponses,
             ProviderProtocol::AnthropicMessages,
+            ProviderProtocol::GeminiGenerateContent,
+        ] {
+            let (url, _capture) = mock_http_response_server(
+                "403 Forbidden",
+                "text/event-stream",
+                "upstream access denied: route disabled",
+            );
+            let error = run_turn_stream(
+                &Client::new(),
+                test_request(url, protocol),
+                "test-key",
+                CancellationToken::new(),
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error,
+                "Provider returned 403 Forbidden: upstream access denied: route disabled"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn delayed_json_body_keeps_upstream_error_and_can_be_cancelled() {
+        let chunks = futures_util::stream::once(async {
+            tokio::time::sleep(Duration::from_secs(3_600)).await;
+            Ok::<_, std::io::Error>(
+                r#"{"error":{"message":"upstream generation deadline exceeded"}}"#,
+            )
+        });
+        let response = http::Response::builder()
+            .status(504)
+            .body(reqwest::Body::wrap_stream(chunks))
+            .unwrap()
+            .into();
+        let error = stream_response_json(response, &CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "Provider returned 504 Gateway Timeout: upstream generation deadline exceeded"
         );
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let captured_events = events.clone();
-        let error = run_turn_stream(
-            &Client::new(),
-            request,
-            "test-key",
-            CancellationToken::new(),
-            move |event| captured_events.lock().unwrap().push(event.kind),
-        )
-        .await
-        .unwrap_err();
-        assert!(error.contains("timed out"), "{error}");
-        assert!(is_reconnectable_provider_error(&error), "{error}");
-        assert_eq!(events.lock().unwrap().as_slice(), ["stream_opened"]);
+
+        let chunks = futures_util::stream::pending::<Result<&'static str, std::io::Error>>();
+        let response = http::Response::new(reqwest::Body::wrap_stream(chunks)).into();
+        let cancellation = CancellationToken::new();
+        let (result, ()) = tokio::join!(stream_response_json(response, &cancellation), async {
+            tokio::time::sleep(Duration::from_secs(3_600)).await;
+            cancellation.cancel();
+        });
+        assert_eq!(result.unwrap_err(), "REQUEST_CANCELLED");
     }
 
     #[tokio::test]
-    async fn reasoning_stream_uses_extended_idle_timeout() {
-        let mut request = test_request(
+    async fn cancellation_interrupts_waiting_for_response_headers() {
+        let request = test_request(
             mock_timed_sse_server(
                 "/v1/chat/completions",
-                std::time::Duration::ZERO,
-                vec![(
-                    PROVIDER_STREAM_IDLE_TIMEOUT + std::time::Duration::from_millis(150),
-                    "data: [DONE]\n\n",
-                )],
-                std::time::Duration::ZERO,
+                Duration::from_secs(1),
+                Vec::new(),
+                Duration::ZERO,
             ),
             ProviderProtocol::OpenaiChat,
         );
-        request.profile.model = "gpt-5.4".to_owned();
-        request.reasoning_effort = Some("high".to_owned());
-        assert_eq!(
-            provider_stream_idle_timeout(&request),
-            PROVIDER_REASONING_STREAM_IDLE_TIMEOUT
+        let cancellation = CancellationToken::new();
+        let client = Client::new();
+        let (result, ()) = tokio::join!(
+            run_turn_stream(&client, request, "test-key", cancellation.clone(), |_| {}),
+            async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                cancellation.cancel();
+            }
         );
-        assert_eq!(
-            provider_first_response_timeout(&request),
-            PROVIDER_REASONING_FIRST_RESPONSE_TIMEOUT
-        );
-
-        let started = std::time::Instant::now();
-        let (result, emitted) = collect_stream(request).await;
-        assert!(started.elapsed() > PROVIDER_STREAM_IDLE_TIMEOUT);
-        assert!(result.content.is_empty());
-        assert!(emitted.is_empty());
+        assert_eq!(result.unwrap_err(), "REQUEST_CANCELLED");
     }
 
-    #[tokio::test]
-    async fn reasoning_first_response_waits_beyond_the_stream_idle_limit() {
-        let mut request = test_request(
-            mock_timed_sse_server(
-                "/v1/chat/completions",
-                PROVIDER_REASONING_STREAM_IDLE_TIMEOUT + std::time::Duration::from_millis(100),
-                vec![(std::time::Duration::ZERO, "data: [DONE]\n\n")],
-                std::time::Duration::ZERO,
-            ),
-            ProviderProtocol::OpenaiChat,
+    #[tokio::test(start_paused = true)]
+    async fn silent_stream_waits_beyond_previous_time_limits_and_remains_cancellable() {
+        let stream = futures_util::stream::once(async {
+            tokio::time::sleep(Duration::from_secs(3_600)).await;
+            "upstream result"
+        });
+        let mut stream = Box::pin(stream);
+        let cancellation = CancellationToken::new();
+        assert_eq!(
+            next_stream_item(&mut stream, &cancellation).await.unwrap(),
+            Some("upstream result")
         );
-        request.profile.model = "gpt-5.4".to_owned();
-        request.reasoning_effort = Some("high".to_owned());
 
-        let (result, emitted) = collect_stream(request).await;
-        assert!(result.content.is_empty());
-        assert!(emitted.is_empty());
+        let mut pending = futures_util::stream::pending::<()>();
+        let cancel = cancellation.clone();
+        let (result, ()) = tokio::join!(next_stream_item(&mut pending, &cancellation), async {
+            tokio::time::sleep(Duration::from_secs(3_600)).await;
+            cancel.cancel();
+        });
+        assert_eq!(result.unwrap_err(), "REQUEST_CANCELLED");
     }
 
     #[tokio::test]
@@ -7291,8 +7165,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sse_comment_activity_resets_the_idle_timeout() {
-        let gap = PROVIDER_STREAM_IDLE_TIMEOUT / 2;
+    async fn sse_comments_do_not_interrupt_waiting_for_a_result() {
+        let gap = Duration::from_millis(25);
         let request = test_request(
             mock_timed_sse_server(
                 "/v1/messages",
@@ -7314,7 +7188,7 @@ mod tests {
         );
         let started = std::time::Instant::now();
         let (result, emitted) = collect_stream(request).await;
-        assert!(started.elapsed() > PROVIDER_STREAM_IDLE_TIMEOUT);
+        assert!(started.elapsed() >= gap * 3);
         assert_eq!(result.content, "kept alive");
         assert_eq!(emitted, "kept alive");
     }

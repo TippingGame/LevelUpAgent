@@ -14,7 +14,11 @@ use serde::Serialize;
 
 use crate::network;
 
-const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_SEARCH_BYTES: usize = 4 * 1024 * 1024;
+// Bound memory used by HTML parsing, but return a useful prefix instead of
+// rejecting a successful page just because its markup is large.
+const MAX_PAGE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_ERROR_BYTES: usize = 16 * 1024;
 const MAX_TEXT_CHARS: usize = 80_000;
 const MAX_RESULTS: usize = 10;
 const MAX_RESULT_FIELD_CHARS: usize = 4_000;
@@ -63,9 +67,10 @@ pub async fn search_results(
         return Err("web_search requires a non-empty query".to_owned());
     }
     let limit = limit.clamp(1, MAX_RESULTS);
+    let search_query = scoped_search_query(query, domains);
     let url = Url::parse_with_params(
         "https://www.bing.com/search",
-        &[("format", "rss"), ("q", query)],
+        &[("format", "rss"), ("q", search_query.as_str())],
     )
     .map_err(|error| format!("Could not build web search URL: {error}"))?;
     let client = public_client(Duration::from_secs(20))?;
@@ -82,9 +87,12 @@ pub async fn search_results(
         .map_err(|error| format!("Web search failed: {error}"))?;
     reject_private_remote(&response)?;
     if !response.status().is_success() {
-        return Err(format!("Web search returned HTTP {}", response.status()));
+        return Err(web_http_error(response, "Web search").await);
     }
-    let bytes = bounded_bytes(response).await?;
+    let (bytes, truncated) = response_prefix(response, MAX_SEARCH_BYTES).await?;
+    if truncated {
+        return Err("Web search response exceeded the local 4 MiB parsing budget".to_owned());
+    }
     let mut results = parse_rss(&bytes)?;
     if !domains.is_empty() {
         results.retain(|item| domains.iter().any(|domain| host_matches(&item.url, domain)));
@@ -114,7 +122,7 @@ pub async fn fetch(_client: &Client, raw_url: &str, max_chars: usize) -> Result<
     validate_public_url(response.url().as_str())?;
     let final_url = response.url().to_string();
     if !response.status().is_success() {
-        return Err(format!("Web fetch returned HTTP {}", response.status()));
+        return Err(web_http_error(response, "Web fetch").await);
     }
     let content_type = response
         .headers()
@@ -122,14 +130,17 @@ pub async fn fetch(_client: &Client, raw_url: &str, max_chars: usize) -> Result<
         .and_then(|value| value.to_str().ok())
         .unwrap_or("")
         .to_ascii_lowercase();
-    let bytes = bounded_bytes(response).await?;
+    let (bytes, download_truncated) = response_prefix(response, MAX_PAGE_BYTES).await?;
     let text = if content_type.contains("html") || looks_like_html(&bytes) {
         strip_html(&String::from_utf8_lossy(&bytes))
     } else {
         String::from_utf8_lossy(&bytes).into_owned()
     };
     let max_chars = max_chars.clamp(1_000, MAX_TEXT_CHARS);
-    let text = truncate(text, max_chars);
+    let mut text = truncate(text, max_chars);
+    if download_truncated {
+        text.push_str("\n… web download truncated at the local 16 MiB memory budget; this is partial page content.");
+    }
     Ok(format!(
         "[UNTRUSTED WEB PAGE]\nURL: {final_url}\nContent-Type: {content_type}\n\n{text}\n\n[END UNTRUSTED WEB PAGE]"
     ))
@@ -164,31 +175,84 @@ fn reject_private_remote(response: &reqwest::Response) -> Result<(), String> {
     Ok(())
 }
 
-async fn bounded_bytes(mut response: reqwest::Response) -> Result<Vec<u8>, String> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
-    {
-        return Err(format!(
-            "Web response is larger than {} MiB",
-            MAX_RESPONSE_BYTES / (1024 * 1024)
-        ));
-    }
+// Never allocate the complete body based on Content-Length. A chunked or
+// unexpectedly large successful response still yields a labelled partial page.
+async fn response_prefix(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<(Vec<u8>, bool), String> {
     let mut bytes = Vec::new();
     while let Some(chunk) = response
         .chunk()
         .await
         .map_err(|error| format!("Could not read web response: {error}"))?
     {
-        if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
-            return Err(format!(
-                "Web response is larger than {} MiB",
-                MAX_RESPONSE_BYTES / (1024 * 1024)
-            ));
+        let remaining = limit.saturating_sub(bytes.len());
+        bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        if chunk.len() > remaining {
+            return Ok((bytes, true));
         }
-        bytes.extend_from_slice(&chunk);
     }
-    Ok(bytes)
+    Ok((bytes, false))
+}
+
+async fn web_http_error(response: reqwest::Response, operation: &str) -> String {
+    let status = response.status();
+    let url = response.url().to_string();
+    let challenge = response
+        .headers()
+        .get("cf-mitigated")
+        .and_then(|value| value.to_str().ok())
+        == Some("challenge");
+    let detail = match response_prefix(response, MAX_ERROR_BYTES).await {
+        Ok((bytes, truncated)) => {
+            let text = if looks_like_html(&bytes) {
+                strip_html(&String::from_utf8_lossy(&bytes))
+            } else {
+                String::from_utf8_lossy(&bytes).into_owned()
+            };
+            let mut text = truncate(text, 2_000);
+            if truncated {
+                text.push_str(" [error body truncated]");
+            }
+            text
+        }
+        Err(error) => format!("Error body unavailable: {error}"),
+    };
+    let hint = if challenge {
+        "\nThe site returned a Cloudflare browser challenge. Use an interactive browser or another source; repeating this fetch will not solve the challenge."
+    } else if matches!(status.as_u16(), 403 | 404) {
+        "\nVerify the URL or use another source; do not repeatedly fetch this unchanged URL."
+    } else {
+        ""
+    };
+    format!(
+        "{operation} returned HTTP {status}\nURL: {url}\n[UNTRUSTED UPSTREAM ERROR]\n{detail}\n[END UNTRUSTED UPSTREAM ERROR]{hint}"
+    )
+}
+
+fn scoped_search_query(query: &str, domains: &[String]) -> String {
+    let sites = domains
+        .iter()
+        .filter_map(|domain| {
+            let domain = domain.trim().trim_start_matches("*.");
+            // Domain filters are hostnames, never free-form search operators.
+            if domain.is_empty()
+                || !domain
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || matches!(c, '.' | '-'))
+            {
+                None
+            } else {
+                Some(format!("site:{domain}"))
+            }
+        })
+        .collect::<Vec<_>>();
+    if sites.is_empty() {
+        query.to_owned()
+    } else {
+        format!("{query} ({})", sites.join(" OR "))
+    }
 }
 
 fn parse_rss(bytes: &[u8]) -> Result<Vec<SearchResult>, String> {
@@ -285,7 +349,10 @@ fn host_matches(raw_url: &str, pattern: &str) -> bool {
         return false;
     };
     let pattern = pattern.trim().trim_start_matches("*.");
-    host.eq_ignore_ascii_case(pattern) || host.ends_with(&format!(".{pattern}"))
+    host.eq_ignore_ascii_case(pattern)
+        || host
+            .to_ascii_lowercase()
+            .ends_with(&format!(".{}", pattern.to_ascii_lowercase()))
 }
 
 fn looks_like_html(bytes: &[u8]) -> bool {
@@ -294,92 +361,13 @@ fn looks_like_html(bytes: &[u8]) -> bool {
 }
 
 fn strip_html(input: &str) -> String {
-    let mut output = String::with_capacity(input.len().min(MAX_TEXT_CHARS * 2));
-    let mut in_tag = false;
-    let mut in_script = false;
-    let mut tag = String::new();
-    let mut entity = String::new();
-    for character in input.chars() {
-        if !entity.is_empty() {
-            if character == ';' {
-                output.push_str(&decode_entity(&entity));
-                entity.clear();
-            } else if entity.len() < 16 {
-                entity.push(character);
-            } else {
-                output.push_str(&entity);
-                entity.clear();
-            }
-            continue;
-        }
-        if character == '&' {
-            entity.push('&');
-            continue;
-        }
-        if character == '<' {
-            in_tag = true;
-            tag.clear();
-            continue;
-        }
-        if in_tag {
-            if tag.len() < 64 {
-                tag.push(character);
-            }
-            if character == '>' {
-                in_tag = false;
-                let tag_name = tag.trim_end_matches('>').trim().to_ascii_lowercase();
-                if tag_name.starts_with("script")
-                    || tag_name.starts_with("style")
-                    || tag_name.starts_with("noscript")
-                {
-                    in_script = true;
-                } else if tag_name.starts_with("/script")
-                    || tag_name.starts_with("/style")
-                    || tag_name.starts_with("/noscript")
-                {
-                    in_script = false;
-                }
-                output.push(' ');
-            }
-            continue;
-        }
-        if in_script {
-            continue;
-        }
-        output.push(if character.is_whitespace() {
-            ' '
-        } else {
-            character
-        });
-        if output.len() > MAX_TEXT_CHARS * 3 {
-            break;
-        }
-    }
-    if !entity.is_empty() {
-        output.push_str(&entity);
-    }
-    let mut normalized = String::new();
-    for word in output.split_whitespace() {
-        if !normalized.is_empty() {
-            normalized.push(' ');
-        }
-        normalized.push_str(word);
-        if normalized.chars().count() >= MAX_TEXT_CHARS {
-            break;
-        }
-    }
-    normalized
-}
-
-fn decode_entity(value: &str) -> String {
-    match value {
-        "&amp" => "&".to_owned(),
-        "&lt" => "<".to_owned(),
-        "&gt" => ">".to_owned(),
-        "&quot" => "\"".to_owned(),
-        "&#39" | "&apos" => "'".to_owned(),
-        _ => value.to_owned(),
-    }
+    // HTML5 parsing handles raw script/style text, quoted attributes, malformed
+    // markup and character entities without leaking code into page content.
+    let document = dom_query::Document::from(input);
+    document
+        .select("script, style, noscript, template")
+        .remove();
+    document.formatted_text().to_string()
 }
 
 fn truncate(value: String, limit: usize) -> String {
@@ -407,6 +395,94 @@ mod tests {
             strip_html("<h1>Hello &amp; world</h1><script>x</script>"),
             "Hello & world"
         );
+    }
+
+    #[test]
+    fn html_scripts_attributes_and_entities_do_not_swallow_article_text() {
+        let page = r#"<script>if(a&&b && a<b){x('<tag>')}</script>
+            <style>a[href*="&"] { display: block }</style>
+            <a href="?a=1&b=2" title="x > y">Visible article</a>
+            <p>&#20013;&#x6587; &nbsp; &amp; &copy;</p>
+            <!-- hidden --><template>not rendered</template>"#;
+        assert_eq!(
+            strip_html(page)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" "),
+            "Visible article 中文 & ©"
+        );
+    }
+
+    #[test]
+    fn domain_constraints_are_sent_to_search_and_checked_on_results() {
+        assert_eq!(
+            scoped_search_query(
+                "release notes",
+                &["*.unrealengine.com".into(), "unity.com".into()]
+            ),
+            "release notes (site:unrealengine.com OR site:unity.com)"
+        );
+        assert!(host_matches("https://docs.unity.com/page", "UNITY.COM"));
+        assert!(!host_matches(
+            "https://unity.com.evil.example/page",
+            "unity.com"
+        ));
+    }
+
+    #[tokio::test]
+    async fn large_successful_pages_return_content_or_an_explicit_partial_result() {
+        let page = format!(
+            "<html><script>{}</script><h1>Release notes</h1></html>",
+            "x".repeat(5 * 1024 * 1024)
+        );
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .header("content-length", page.len())
+                .body(page)
+                .unwrap(),
+        );
+        let (bytes, partial) = response_prefix(response, MAX_PAGE_BYTES).await.unwrap();
+        assert!(!partial);
+        assert_eq!(
+            strip_html(&String::from_utf8_lossy(&bytes)),
+            "Release notes"
+        );
+
+        // A chunked response can exceed the budget without Content-Length.
+        let chunks = futures_util::stream::iter([
+            Ok::<_, std::io::Error>("first"),
+            Ok(" second"),
+            Ok(" third"),
+        ]);
+        let response =
+            reqwest::Response::from(http::Response::new(reqwest::Body::wrap_stream(chunks)));
+        let (bytes, partial) = response_prefix(response, 10).await.unwrap();
+        assert!(partial);
+        assert_eq!(bytes, b"first seco");
+    }
+
+    #[tokio::test]
+    async fn web_http_errors_keep_status_detail_and_challenge_reason() {
+        for (status, detail) in [(403, "Access denied"), (404, "Page moved")] {
+            let response = http::Response::builder()
+                .status(status)
+                .body(detail)
+                .unwrap()
+                .into();
+            let error = web_http_error(response, "Web fetch").await;
+            assert!(error.contains(&format!("HTTP {status}")), "{error}");
+            assert!(error.contains(detail), "{error}");
+            assert!(error.contains("do not repeatedly fetch"), "{error}");
+        }
+        let response = http::Response::builder()
+            .status(403)
+            .header("cf-mitigated", "challenge")
+            .body("Browser verification required")
+            .unwrap()
+            .into();
+        let error = web_http_error(response, "Web fetch").await;
+        assert!(error.contains("Cloudflare browser challenge"), "{error}");
+        assert!(error.contains("Browser verification required"), "{error}");
     }
 
     #[test]

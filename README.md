@@ -56,9 +56,9 @@ pnpm tauri build
 
 [架构](docs/ARCHITECTURE.md) · [性能](docs/PERFORMANCE.md) · [Codex 工作流对照](docs/REPLACEMENT_AUDIT.md) · [路线图](docs/ROADMAP.md) · [发布](docs/RELEASE.md)
 
-当前发布版本为 `1.1.68`。Windows 未配置 Authenticode，macOS 使用 ad-hoc 签名、尚未公证。跨平台发布与实体机验证边界见 [1.1.68 发布说明](docs/RELEASE_1.1.68.md)。
+当前发布版本为 `1.1.69`。Windows 未配置 Authenticode，macOS 使用 ad-hoc 签名、尚未公证。跨平台发布与实体机验证边界见 [1.1.69 发布说明](docs/RELEASE_1.1.69.md)。
 
-`1.1.68` 改进创作空间和星图中的自定义图片模型识别，支持 Seedream、NovelAI 和 Image 名称的大小写不敏感匹配，修复扩展名缺失的图片 URL 处理，并改进侧栏与常规设置的深色模式；详细验证见 [发布说明](docs/RELEASE_1.1.68.md)。此前的本地测试包记录保留在 [构建日志](docs/VERSION_1.1.65.md)。
+`1.1.69` 移除模型生成请求的客户端硬超时，保留上游错误详情，改进大网页读取、HTML 正文提取和搜索域名限制，并修复最新图片批次超过四张时的遗漏；详细验证见 [发布说明](docs/RELEASE_1.1.69.md)。此前的本地测试包记录保留在 [构建日志](docs/VERSION_1.1.65.md)。
 
 ## 许可
 
