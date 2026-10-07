@@ -1,6 +1,6 @@
 # LevelUpAgent 1.1.69 发布记录
 
-日期：2026-10-07。当前状态：本地检查通过，待四平台构建及 Draft 资产核验完成后正式发布。
+日期：2026-10-07。当前状态：已发布到 GitHub，正式 Release 为 `v1.1.69`，已设为 Latest。
 
 ## 本版内容
 
@@ -30,3 +30,16 @@ macOS 由原生 runner 验证 DMG 内及模拟复制安装后的应用签名。
 
 Windows updater 使用原有 Tauri 签名配置，不等同于 Authenticode。macOS 使用 ad-hoc 签名且未公证；
 Linux 包未做发行版签名。自动更新清单仅覆盖 Windows。
+
+## 已发布结果
+
+- 构建提交：`807964d11ecc5e49156c0e949d4280a3a619bfac`，tag：`v1.1.69`。
+- 发布时间：北京时间 2026-10-07 19:23:10，正式发布且已设为 Latest，非预发布。
+- [三平台 CI](https://github.com/TippingGame/LevelUpAgent/actions/runs/37600393933) 全部通过。
+- [四平台 Release 工作流](https://github.com/TippingGame/LevelUpAgent/actions/runs/37600398546) 全部通过。
+- 正式 Release：[LevelUpAgent v1.1.69](https://github.com/TippingGame/LevelUpAgent/releases/tag/v1.1.69)。Windows x64 EXE/MSI、Apple Silicon/Intel DMG、Linux x64 AppImage/DEB/RPM、Windows 签名及更新清单共 10 个资产齐全。
+- 10 个资产均完整下载，大小和 SHA-256 与 GitHub digest 一致；Windows EXE/MSI updater 签名及可信注释签名通过现有公钥验证。
+- 公开 `latest.json` 返回 HTTP 200，版本为 `1.1.69`，URL 和签名均指向本次 Windows 资产；正式发布页也返回 HTTP 200。
+- Windows EXE 的 FileVersion/ProductVersion 均为 `1.1.69`；两个 macOS 包均在原生 runner 完成 DMG 内和模拟复制安装后应用签名验证。
+- 本机安装包：`G:\Work\LevelUpAgent\安装包\LevelUpAgent_1.1.69_Windows_x64-setup.exe`，已保留旧版，并新增 `SHA256_1.1.69.txt`、更新总清单 `SHA256.txt`。
+- EXE 大小：14,461,461 字节；SHA-256：`2E1FA2DC4F75A7347B9F1F9CC0DE2133E2CDD7EFD5170189943536279E57BEF2`。
