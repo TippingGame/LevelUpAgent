@@ -1,6 +1,6 @@
 # LevelUpAgent 1.1.70 发布记录
 
-日期：2026-10-08。当前状态：准备发布，正式发布结果将在完成核验后补充。
+日期：2026-10-09。当前状态：已发布到 GitHub，正式 Release 为 `v1.1.70`，已设为 Latest。
 
 ## 本版内容
 
@@ -25,3 +25,16 @@
 macOS 由原生 runner 验证 DMG 内及模拟复制安装后的应用签名。
 
 Windows updater 签名不等同于 Authenticode。macOS 使用 ad-hoc 签名且未公证；Linux 包未做发行版签名。自动更新清单仅覆盖 Windows。
+
+## 已发布结果
+
+- 构建提交：`9fa7898024faef4ee8cf230977de644411e9915b`，tag：`v1.1.70`。
+- 发布时间：北京时间 2026-10-09 00:32:57，正式发布且已设为 Latest，非预发布。
+- [三平台 CI](https://github.com/TippingGame/LevelUpAgent/actions/runs/37803173487) 全部通过。
+- [四平台 Release 工作流](https://github.com/TippingGame/LevelUpAgent/actions/runs/37803201706) 全部通过。
+- 正式 Release：[LevelUpAgent v1.1.70](https://github.com/TippingGame/LevelUpAgent/releases/tag/v1.1.70)。Windows x64 EXE/MSI、Apple Silicon/Intel DMG、Linux x64 AppImage/DEB/RPM、Windows 签名及更新清单共 10 个资产齐全。
+- 10 个资产均完整下载，大小和 SHA-256 与 GitHub digest 一致；Windows EXE/MSI updater 签名及可信注释签名通过现有公钥验证。
+- 公开 `latest.json` 返回 HTTP 200，版本为 `1.1.70`，URL 和签名均指向本次 Windows 资产；正式发布页返回 HTTP 200。
+- Windows EXE 的 FileVersion/ProductVersion 均为 `1.1.70`；两个 macOS 包均在原生 runner 完成 DMG 内和模拟复制安装后应用签名验证。
+- 本机安装包：`G:\Work\LevelUpAgent\安装包\LevelUpAgent_1.1.70_Windows_x64-setup.exe`，保留旧版，新增 `SHA256_1.1.70.txt` 并更新总清单 `SHA256.txt`。
+- EXE 大小：14,450,900 字节；SHA-256：`C47E64928036FA894AC9C9A3BE6FE4CC4D2357BF1055E5B5459E55A634FCE7AF`。
