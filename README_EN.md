@@ -55,9 +55,9 @@ pnpm tauri build
 
 [Architecture](docs/ARCHITECTURE.md) · [Performance](docs/PERFORMANCE.md) · [Codex workflow comparison](docs/REPLACEMENT_AUDIT.md) · [Roadmap](docs/ROADMAP.md) · [Releases](docs/RELEASE.md)
 
-The current release is `1.1.69`. Windows builds lack Authenticode signatures; macOS builds use ad-hoc signing and are not notarized. Platform verification limits are documented in the [1.1.69 release notes](docs/RELEASE_1.1.69.md).
+The current release is `1.1.70`. Windows builds lack Authenticode signatures; macOS builds use ad-hoc signing and are not notarized. Platform verification limits are documented in the [1.1.70 release notes](docs/RELEASE_1.1.70.md).
 
-Version `1.1.69` removes client hard timeouts for model generation, preserves upstream error details, improves large-page reading, HTML text extraction and search domain restrictions, and includes every image in the latest batch even when it contains more than four. See the [release notes](docs/RELEASE_1.1.69.md) for verification. Earlier local test builds remain documented in the [build history](docs/VERSION_1.1.65.md).
+Version `1.1.70` fixes canvas fitting and panning in the creation workspace image editor, supports holding Space to freely pan the canvas, and displays actual image dimensions aligned to the right of the timestamp in creation history. See the [release notes](docs/RELEASE_1.1.70.md) for verification. Earlier local test builds remain documented in the [build history](docs/VERSION_1.1.65.md).
 
 ## License
 
