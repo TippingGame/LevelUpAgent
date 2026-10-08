@@ -760,14 +760,15 @@
 .constellation-canvas-modal > section > header small { overflow: hidden; color: var(--muted); font-size: .625rem; text-overflow: ellipsis; white-space: nowrap; }
 .constellation-canvas-modal > section > header > button { width: 32px; height: 32px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 8px; background: var(--surface-soft); color: var(--muted); cursor: pointer; }
 
-.constellation-editor-toolbar { min-height: 48px; display: flex; align-items: center; gap: 12px; padding: 6px 10px; border-bottom: 1px solid var(--info-line); background: color-mix(in srgb, var(--surface) 86%, transparent); }
+.constellation-editor-toolbar { min-height: 48px; display: flex; align-items: center; gap: 12px; overflow-x: auto; padding: 6px 10px; border-bottom: 1px solid var(--info-line); background: color-mix(in srgb, var(--surface) 86%, transparent); }
 .canvas-tool-group,
 .canvas-expand-controls,
 .canvas-history-controls,
 .canvas-label-controls,
 .canvas-brush-size { display: flex; align-items: center; }
+.canvas-tool-group, .canvas-expand-controls, .canvas-history-controls, .canvas-label-controls, .canvas-brush-size { flex: 0 0 auto; }
 .canvas-tool-group { gap: 3px; padding: 3px; border-radius: 9px; background: var(--surface-soft); }
-.canvas-tool-group button { height: 30px; display: flex; align-items: center; gap: 4px; padding: 0 8px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font-size: .625rem; cursor: pointer; }
+.canvas-tool-group button { height: 30px; display: flex; align-items: center; gap: 4px; padding: 0 8px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font-size: .625rem; white-space: nowrap; cursor: pointer; }
 .canvas-tool-group button.active { background: var(--surface); color: var(--warning-text); box-shadow: 0 2px 7px rgba(15, 23, 42, .09); }
 .canvas-brush-size { min-width: 145px; gap: 6px; color: var(--muted); font-size: .625rem; }
 .canvas-brush-size input { min-width: 60px; flex: 1; accent-color: #f43f5e; }
@@ -784,20 +785,22 @@
 .canvas-history-controls button { width: 28px; display: grid; place-items: center; padding: 0; }
 .canvas-history-controls button:disabled { opacity: .35; cursor: default; }
 
-.constellation-canvas-stage { position: relative; min-width: 0; min-height: 0; overflow: hidden; display: grid; place-items: center; padding: 26px; background: radial-gradient(circle at center, #263247, #111827 72%); }
-.constellation-canvas-stack { position: relative; max-width: 100%; max-height: 100%; display: inline-block; line-height: 0; border-radius: 3px; box-shadow: 0 20px 70px rgba(0, 0, 0, .4); transform-origin: center; will-change: transform; backface-visibility: hidden; }
-.constellation-canvas-stack canvas { max-width: 100%; max-height: 100%; display: block; border-radius: inherit; touch-action: none; }
+.constellation-canvas-stage { position: relative; min-width: 0; min-height: 0; overflow: hidden; display: grid; place-items: center; padding: 26px; background: radial-gradient(circle at center, #263247, #111827 72%); touch-action: none; user-select: none; }
+.constellation-canvas-stage:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.constellation-canvas-stack { position: absolute; left: 50%; top: 50%; display: block; line-height: 0; border-radius: 3px; box-shadow: 0 20px 70px rgba(0, 0, 0, .4); transform-origin: center; will-change: transform; backface-visibility: hidden; }
+.constellation-canvas-stack canvas { width: 100%; height: 100%; display: block; border-radius: inherit; touch-action: none; }
 .constellation-canvas-stack canvas + canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 .constellation-canvas-stage.tool-mask canvas { cursor: crosshair; }
 .constellation-canvas-stage.tool-erase canvas { cursor: cell; }
 .constellation-canvas-stage.tool-label canvas { cursor: copy; }
-.constellation-canvas-stage.tool-pan canvas { cursor: grab; }
-.constellation-canvas-stage.tool-pan.panning canvas { cursor: grabbing; }
+.constellation-canvas-stage.tool-pan, .constellation-canvas-stage.tool-pan canvas, .constellation-canvas-stage.space-pan, .constellation-canvas-stage.space-pan canvas { cursor: grab; }
+.constellation-canvas-stage.panning, .constellation-canvas-stage.panning canvas { cursor: grabbing; }
 .canvas-loading { display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 8px; color: var(--muted); font-size: .6875rem; }
 .constellation-canvas-modal > section > footer { display: flex; align-items: center; justify-content: flex-end; gap: 7px; padding: 0 12px; border-top: 1px solid var(--info-line); background: color-mix(in srgb, var(--surface) 94%, transparent); }
 .constellation-canvas-modal > section > footer > div { min-width: 0; flex: 1; color: var(--muted); font-size: .625rem; }
+.constellation-canvas-modal > section > footer > div > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .canvas-editor-error { color: var(--danger-text); }
-.constellation-canvas-modal > section > footer > button { height: 33px; display: flex; align-items: center; gap: 5px; padding: 0 11px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); color: var(--text-secondary); font-size: .6875rem; cursor: pointer; }
+.constellation-canvas-modal > section > footer > button { height: 33px; flex: 0 0 auto; display: flex; align-items: center; gap: 5px; padding: 0 11px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); color: var(--text-secondary); font-size: .6875rem; cursor: pointer; }
 .constellation-canvas-modal > section > footer > button.primary { border-color: transparent; background: linear-gradient(135deg, #f59e0b, #f97316); color: #fff; }
 .constellation-canvas-modal > section > footer > button:disabled { opacity: .45; cursor: default; }
 

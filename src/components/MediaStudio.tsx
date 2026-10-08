@@ -1199,6 +1199,8 @@ export function MediaAssetCard({ asset, locale, onDelete, onPreview, onReuse, on
   const [promptCopyStatus, setPromptCopyStatus] = useState<"idle" | "copied" | "error">("idle");
   const [exportFeedback, setExportFeedback] = useState<{ error: boolean; text: string } | null>(null);
   const [videoRatio, setVideoRatio] = useState<number | null>(null);
+  const [loadedImage, setLoadedImage] = useState<{ url: string; width: number; height: number } | null>(null);
+  const imageDimensions = loadedImage?.url === url ? loadedImage : null;
   const canExport = asset.status === "completed" && Boolean(asset.filePath && asset.fileName);
   const canPreview = asset.status === "completed" && asset.kind === "image" && Boolean(url && onPreview);
   const canReuse = asset.status === "completed" && asset.kind === "image" && Boolean(onReuse);
@@ -1207,6 +1209,12 @@ export function MediaAssetCard({ asset, locale, onDelete, onPreview, onReuse, on
   const previewRatio = asset.kind === "video" ? videoRatio ?? mediaAssetAspectRatio(asset) ?? 16 / 9 : 4 / 3;
 
   useEffect(() => setVideoRatio(null), [asset.id]);
+
+  const recordImageDimensions = (image: HTMLImageElement) => {
+    if (url && image.naturalWidth > 0 && image.naturalHeight > 0) {
+      setLoadedImage({ url, width: image.naturalWidth, height: image.naturalHeight });
+    }
+  };
 
   const exportAsset = async () => {
     if (!canExport || exporting) return;
@@ -1259,10 +1267,10 @@ export function MediaAssetCard({ asset, locale, onDelete, onPreview, onReuse, on
       <div className="media-preview" style={{ aspectRatio: previewRatio }}>
         {asset.status === "completed" && url && asset.kind === "image" && (canPreview ? (
           <button className="media-preview-trigger" type="button" onClick={onPreview} aria-label={tr("打开大图预览", "Open large image preview")}>
-            <img src={url} alt={asset.revisedPrompt || asset.prompt} />
+            <img src={url} alt={asset.revisedPrompt || asset.prompt} onLoad={(event) => recordImageDimensions(event.currentTarget)} />
             <span><Maximize2 size={14} />{tr("查看大图", "View large")}</span>
           </button>
-        ) : <img src={url} alt={asset.revisedPrompt || asset.prompt} />)}
+        ) : <img src={url} alt={asset.revisedPrompt || asset.prompt} onLoad={(event) => recordImageDimensions(event.currentTarget)} />)}
         {/* WebView's native download cannot save asset-protocol URLs. Use exportAsset below. */}
         {asset.status === "completed" && url && asset.kind === "video" && <video src={url} controls controlsList="nodownload" preload="metadata" onLoadedMetadata={(event) => {
           const { videoWidth, videoHeight } = event.currentTarget;
@@ -1289,7 +1297,7 @@ export function MediaAssetCard({ asset, locale, onDelete, onPreview, onReuse, on
         </div>
         <div className="media-asset-meta"><span>{asset.model}</span><span>{asset.providerName}</span></div>
         {asset.kind === "video" && (asset.size || asset.seconds) && <div className="media-asset-specs">{asset.size && <span>{asset.size}</span>}{asset.seconds && <span>{asset.seconds}s</span>}</div>}
-        <small><Clock3 size={11} />{new Intl.DateTimeFormat(locale, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(asset.createdAt)}</small>
+        <small className="media-asset-time"><Clock3 size={11} />{new Intl.DateTimeFormat(locale, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(asset.createdAt)}{asset.kind === "image" && imageDimensions && <span>{imageDimensions.width} × {imageDimensions.height}</span>}</small>
         {asset.error && <em title={asset.error}>{mediaErrorSummary(asset.error)}</em>}
         {exportFeedback && <em className={exportFeedback.error ? "media-export-error" : "media-export-success"} title={exportFeedback.text}>{exportFeedback.error ? <CircleAlert size={11} /> : <Check size={11} />}{exportFeedback.text}</em>}
       </div>

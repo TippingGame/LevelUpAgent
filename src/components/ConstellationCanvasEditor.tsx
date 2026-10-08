@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -104,8 +105,11 @@ export function ConstellationCanvasEditor({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
   const [imageSize, setImageSize] = useState({ width: 0, height: 0 });
+  const [fitScale, setFitScale] = useState(1);
   const [view, setView] = useState<CanvasView>({ zoom: 1, x: 0, y: 0 });
   const viewRef = useRef(view);
+  const spaceHeldRef = useRef(false);
+  const [spaceHeld, setSpaceHeld] = useState(false);
   const [panning, setPanning] = useState(false);
   const onCloseRef = useRef(onClose);
   const keyboardActionsRef = useRef<{ undo: () => void; redo: () => void }>({
@@ -133,7 +137,9 @@ export function ConstellationCanvasEditor({
     pendingPanPointRef.current = null;
     if (panFrameRef.current !== null) window.cancelAnimationFrame(panFrameRef.current);
     panFrameRef.current = null;
+    setPanning(false);
     setImageSize({ width: 0, height: 0 });
+    setFitScale(1);
     const restored = restoreCanvasEditorState(source.id, initialState);
     setPadding(restored.padding);
     setStrokes(restored.strokes);
@@ -172,6 +178,19 @@ export function ConstellationCanvasEditor({
       image.onerror = null;
     };
   }, [sourceUrl]);
+
+  useLayoutEffect(() => {
+    const stage = canvasStageRef.current;
+    if (!stage || imageSize.width <= 0 || imageSize.height <= 0) return;
+    const updateFit = () => {
+      const scale = Math.min(1, Math.max(1, stage.clientWidth - 52) / outputSize.width, Math.max(1, stage.clientHeight - 52) / outputSize.height);
+      setFitScale(scale);
+    };
+    updateFit();
+    const observer = new ResizeObserver(updateFit);
+    observer.observe(stage);
+    return () => observer.disconnect();
+  }, [imageSize.height, imageSize.width, outputSize.height, outputSize.width]);
 
   useEffect(() => {
     viewRef.current = view;
@@ -214,14 +233,34 @@ export function ConstellationCanvasEditor({
       }
       const target = event.target as HTMLElement | null;
       if (target?.closest("input, textarea, [contenteditable='true']")) return;
+      if (event.code === "Space" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        event.preventDefault();
+        spaceHeldRef.current = true;
+        setSpaceHeld(true);
+        return;
+      }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
         event.preventDefault();
         if (event.shiftKey) keyboardActionsRef.current.redo();
         else keyboardActionsRef.current.undo();
       }
     };
+    const resetSpace = () => {
+      spaceHeldRef.current = false;
+      setSpaceHeld(false);
+    };
+    const onKeyUp = (event: KeyboardEvent) => { if (event.code === "Space") resetSpace(); };
+    const onVisibilityChange = () => { if (document.hidden) resetSpace(); };
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", resetSpace);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", resetSpace);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, []);
 
   const snapshot = (): EditorSnapshot => ({
@@ -285,23 +324,7 @@ export function ConstellationCanvasEditor({
     drawMaskStrokeSegment(context, active.stroke, previous ?? point, point);
   };
 
-  const constrainView = (candidate: CanvasView) => {
-    const stack = canvasStackRef.current;
-    const stage = canvasStageRef.current;
-    if (!stack || !stage) return { ...candidate, x: 0, y: 0 };
-    const availableWidth = Math.max(1, stage.clientWidth - 52);
-    const availableHeight = Math.max(1, stage.clientHeight - 52);
-    const maxX = Math.max(0, (stack.offsetWidth * candidate.zoom - availableWidth) / 2);
-    const maxY = Math.max(0, (stack.offsetHeight * candidate.zoom - availableHeight) / 2);
-    return {
-      ...candidate,
-      x: Math.min(maxX, Math.max(-maxX, candidate.x)),
-      y: Math.min(maxY, Math.max(-maxY, candidate.y)),
-    };
-  };
-
-  const commitView = (candidate: CanvasView) => {
-    const next = constrainView(candidate);
+  const commitView = (next: CanvasView) => {
     viewRef.current = next;
     applyCanvasView(canvasStackRef.current, next);
     setView(next);
@@ -331,19 +354,19 @@ export function ConstellationCanvasEditor({
 
   const updatePanPosition = (gesture: CanvasPanGesture, point: CanvasPoint) => {
     const current = viewRef.current;
-    const next = constrainView({
+    const next = {
       ...current,
       x: gesture.originX + point.x - gesture.startX,
       y: gesture.originY + point.y - gesture.startY,
-    });
+    };
     viewRef.current = next;
     applyCanvasView(canvasStackRef.current, next);
   };
 
-  const pointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
-    const mapping = pointerMapping(event.currentTarget);
-    if (!mapping) return;
-    if (tool === "pan") {
+  const pointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (imageSize.width <= 0 || activeStrokeRef.current || panGestureRef.current || (event.button !== 0 && event.button !== 1)) return;
+    event.currentTarget.focus({ preventScroll: true });
+    if (tool === "pan" || spaceHeldRef.current || event.button === 1) {
       event.preventDefault();
       event.currentTarget.setPointerCapture(event.pointerId);
       const current = viewRef.current;
@@ -357,6 +380,11 @@ export function ConstellationCanvasEditor({
       setPanning(true);
       return;
     }
+    const canvas = maskCanvasRef.current;
+    if (!canvas || event.target !== canvas) return;
+    const mapping = pointerMapping(canvas);
+    if (!mapping) return;
+    event.preventDefault();
     const point = pointFromClient(event.clientX, event.clientY, mapping);
     event.currentTarget.setPointerCapture(event.pointerId);
     checkpoint();
@@ -386,7 +414,7 @@ export function ConstellationCanvasEditor({
     if (context) drawMaskStrokeSegment(context, stroke, point, point);
   };
 
-  const pointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+  const pointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
     const pan = panGestureRef.current;
     if (pan?.pointerId === event.pointerId) {
       event.preventDefault();
@@ -409,7 +437,7 @@ export function ConstellationCanvasEditor({
     for (const sample of samples) appendActiveStrokePoint(sample.clientX, sample.clientY);
   };
 
-  const pointerUp = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+  const pointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
     const pan = panGestureRef.current;
     if (pan?.pointerId === event.pointerId) {
       if (panFrameRef.current !== null) {
@@ -431,8 +459,9 @@ export function ConstellationCanvasEditor({
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
   };
 
-  const wheelCanvas = (event: React.WheelEvent<HTMLCanvasElement>) => {
+  const wheelCanvas = (event: React.WheelEvent<HTMLDivElement>) => {
     event.preventDefault();
+    if (activeStrokeRef.current || panGestureRef.current) return;
     const stage = canvasStageRef.current;
     if (!stage) return;
     const bounds = stage.getBoundingClientRect();
@@ -518,20 +547,25 @@ export function ConstellationCanvasEditor({
           <div className="canvas-expand-controls"><Expand size={13} /><span>{tr("扩边", "Expand")}</span>{[0, .1, .25, .5].map((value) => <button type="button" className={padding === value ? "active" : ""} onClick={() => changePadding(value)} key={value}>{value === 0 ? tr("无", "None") : `+${Math.round(value * 100)}%`}</button>)}</div>
           <div className="canvas-history-controls"><button type="button" onClick={() => zoomCanvas(viewRef.current.zoom / 1.2)} title={tr("缩小", "Zoom out")}><ZoomOut size={14} /></button><button type="button" onClick={fitCanvas} title={tr("适应窗口", "Fit to window")}><Maximize2 size={14} /></button><button type="button" onClick={() => zoomCanvas(viewRef.current.zoom * 1.2)} title={tr("放大", "Zoom in")}><ZoomIn size={14} /></button><button type="button" disabled={undoStack.length === 0} onClick={undo} title={`${tr("撤销", "Undo")} Ctrl+Z`}><Undo2 size={14} /></button><button type="button" disabled={redoStack.length === 0} onClick={redo} title={`${tr("重做", "Redo")} Ctrl+Shift+Z`}><Redo2 size={14} /></button></div>
         </div>
-        <div ref={canvasStageRef} className={`constellation-canvas-stage tool-${tool}${panning ? " panning" : ""}`}>
+        <div
+          ref={canvasStageRef}
+          className={`constellation-canvas-stage tool-${tool}${spaceHeld ? " space-pan" : ""}${panning ? " panning" : ""}`}
+          tabIndex={0}
+          aria-label={tr("按住空格拖动画布，滚轮缩放", "Hold Space and drag to pan; scroll to zoom")}
+          onPointerDown={pointerDown}
+          onPointerMove={pointerMove}
+          onPointerUp={pointerUp}
+          onPointerCancel={pointerUp}
+          onLostPointerCapture={pointerUp}
+          onWheel={wheelCanvas}
+          onDoubleClick={() => { if (Math.abs(viewRef.current.zoom - 1) < .01) actualSizeCanvas(); else fitCanvas(); }}
+        >
           {!sourceUrl && !error && <div className="canvas-loading"><LoaderCircle className="spin" size={28} /><span>{tr("正在准备画板…", "Preparing canvas…")}</span></div>}
-          <div ref={canvasStackRef} className="constellation-canvas-stack" style={{ transform: canvasViewTransform(view) }}>
+          <div ref={canvasStackRef} className="constellation-canvas-stack" style={{ width: outputSize.width * fitScale, height: outputSize.height * fitScale, visibility: imageSize.width > 0 ? "visible" : "hidden", transform: canvasViewTransform(view) }}>
             <canvas ref={imageCanvasRef} aria-hidden="true" />
             <canvas
               ref={maskCanvasRef}
               aria-label={tr("图片标注与蒙版画布", "Image annotation and mask canvas")}
-              onPointerDown={pointerDown}
-              onPointerMove={pointerMove}
-              onPointerUp={pointerUp}
-              onPointerCancel={pointerUp}
-              onLostPointerCapture={pointerUp}
-              onWheel={wheelCanvas}
-              onDoubleClick={() => { if (Math.abs(viewRef.current.zoom - 1) < .01) actualSizeCanvas(); else fitCanvas(); }}
             />
           </div>
         </div>
@@ -560,7 +594,7 @@ function drawCheckerboard(context: CanvasRenderingContext2D, width: number, heig
 }
 
 function canvasViewTransform(view: CanvasView) {
-  return `translate3d(${view.x}px, ${view.y}px, 0) scale(${view.zoom})`;
+  return `translate3d(calc(-50% + ${view.x}px), calc(-50% + ${view.y}px), 0) scale(${view.zoom})`;
 }
 
 function applyCanvasView(element: HTMLDivElement | null, view: CanvasView) {

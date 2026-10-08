@@ -2830,6 +2830,7 @@ button.detail-row { padding: 0; border: 0; background: transparent; text-align: 
 .media-asset-specs { display: flex; align-items: center; gap: 5px; margin-top: 6px; }
 .media-asset-specs span { padding: 2px 5px; border-radius: 5px; background: rgba(16,185,129,.08); color: #047857; font-family: "SFMono-Regular", Consolas, monospace; font-size: var(--font-compact); }
 .media-asset-content small { display: flex; align-items: center; gap: 4px; margin-top: 8px; color: var(--faint); font-size: var(--font-compact); }
+.media-asset-time > span { margin-left: auto; text-align: right; white-space: nowrap; }
 .media-asset-content em { display: block; margin-top: 7px; color: #be123c; font-size: var(--font-compact); font-style: normal; line-height: 1.4; }
 .media-asset-content > em:not(.media-export-success):not(.media-export-error) { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 4; }
 .media-asset-content .media-export-success, .media-asset-content .media-export-error { display: flex; align-items: center; gap: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
