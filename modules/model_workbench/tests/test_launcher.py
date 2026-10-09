@@ -38,8 +38,16 @@ class WorkbenchTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         (self.root/'lease').touch()
+        self.stop_heartbeat = threading.Event()
+        def heartbeat():
+            while not self.stop_heartbeat.wait(.25):
+                (self.root/'lease').touch()
+        self.heartbeat = threading.Thread(target=heartbeat,daemon=True)
+        self.heartbeat.start()
 
     def tearDown(self):
+        self.stop_heartbeat.set()
+        self.heartbeat.join()
         self.temp.cleanup()
 
     def test_manifest_rejects_incompatible_resources_and_duplicate_parts(self):
@@ -105,6 +113,8 @@ class WorkbenchTest(unittest.TestCase):
 
     def test_missing_or_expired_lease_cancels(self):
         import os
+        self.stop_heartbeat.set()
+        self.heartbeat.join()
         api.check_cancel(self.root)
         os.utime(self.root/'lease',(time.time()-40,time.time()-40))
         with self.assertRaises(api.Cancelled):api.check_cancel(self.root)
@@ -179,7 +189,13 @@ class WorkbenchTest(unittest.TestCase):
             (sysroot/'lib64/crti.o').write_bytes(b'linker-startup')
             (sysroot/'lib').symlink_to('lib64',target_is_directory=True)
         output=self.root/'release'
-        manifest=packager.package(staging,output,api.RESOURCE_VERSION,part_bytes=5000)
+        # macOS /var -> /private/var and other aliased staging paths must
+        # produce component-relative aliases rather than escaping the archive.
+        package_staging=staging
+        if sys.platform!='win32':
+            package_staging=self.root/'aliased-staging'
+            package_staging.symlink_to(staging,target_is_directory=True)
+        manifest=packager.package(package_staging,output,api.RESOURCE_VERSION,part_bytes=5000)
         self.assertTrue(all(len(c['parts'])>1 for c in manifest['components'].values()))
         installed=self.root/'installed';installed.mkdir()
         api.install(self.root,installed,'1.2.3',{'offlineDirectory':str(output)})

@@ -50,7 +50,7 @@ def package(staging, output, version, part_bytes=1_800_000_000, components=None)
                     if not file.resolve().is_relative_to(source.resolve()):
                         raise ValueError('Directory alias escapes component: '+str(relative))
                     directory_links.append({'path':relative.as_posix(),
-                        'target':os.path.relpath(file.resolve(),file.parent).replace('\\','/')})
+                        'target':os.path.relpath(file.resolve(),file.parent.resolve()).replace('\\','/')})
                     continue
                 # conda-unpack references the complete packed Python tree,
                 # including legitimate package data named "downloads" and
