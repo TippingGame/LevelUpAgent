@@ -124,6 +124,7 @@ struct BrowserPanelCommandRequest {
 
 struct AppState {
     client: Client,
+    media_client: Client,
     provider_client: Client,
     media_refreshes: media::MediaRefreshes,
     active_requests: Mutex<HashMap<String, CancellationToken>>,
@@ -5126,7 +5127,7 @@ async fn generate_media_internal(
     let mut failures = Vec::new();
     for selection in &selections {
         match media::generate_batch_with_mask(
-            &state.client,
+            &state.media_client,
             &storage,
             database,
             selection,
@@ -5235,7 +5236,7 @@ async fn refresh_media_asset_internal(
     state
         .media_refreshes
         .refresh(
-            &state.client,
+            &state.media_client,
             &storage,
             database,
             &provider,
@@ -11834,7 +11835,10 @@ pub fn run() {
         .manage(AppState {
             client: build_http_client(Some(Duration::from_secs(180)))
                 .expect("failed to build HTTP client"),
-            // Generation has no response deadline; the upstream response and
+            // Media generation can take several minutes, especially image edits and 4K output.
+            media_client: build_http_client(Some(Duration::from_secs(600)))
+                .expect("failed to build media HTTP client"),
+            // Agent generation has no response deadline; the upstream response and
             // explicit cancellation determine when each attempt ends.
             provider_client: build_http_client(None).expect("failed to build provider HTTP client"),
             media_refreshes: media::MediaRefreshes::default(),
