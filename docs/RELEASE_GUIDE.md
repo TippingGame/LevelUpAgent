@@ -66,6 +66,19 @@ Linux/WSL 必须覆盖真实进程组取消和目录链接恢复，Windows 原�
 
 本文的仓库内同步副本为 `LevelUpAgent/docs/RELEASE_GUIDE.md`，修改发布规范时同时更新两份。
 
+已验证记录：v1.2.71 于 2026-10-09 15:15:28（Asia/Shanghai）正式发布并设为 Latest。
+构建提交 `8aa8fc2d18674a38b2d804720b3029ca30c81d94`，三平台 CI run `37888509630`
+与四平台 Release run `37888569068` 全部成功。10 个应用资产完整下载并通过 SHA-256 / GitHub
+digest 校验，Windows EXE/MSI updater 签名及可信注释签名有效；公开 `latest.json` 返回 200、
+版本为 `1.2.71`。正式 EXE 已同步到本机安装包目录，保留旧版并更新 SHA 清单。
+通用资源 `2026.10.1` 已在固定 `model-workbench-resources` Release 公开，14 个分片共约
+21.7 GiB，分片和完整归档均通过哈希校验，清单最后上传并可公开读取；实际 WSL 启动器读取验证
+通过。该资源 Release 为 prerelease，不抢占应用 Latest。安装和卸载语言以及清理确认通过原生
+NSIS 隔离测试；本次未覆盖现有安装或从旧版执行应用内更新。
+本次同名草稿已核对并归并至 Release ID `407544934`；后续流程通过提交 `d0fe151` 修复，
+相关测试、actionlint 和三平台 CI run `37890851601` 通过，不改变本次应用 tag 或安装包。
+详细记录：`LevelUpAgent/docs/RELEASE_1.2.71.md`；证据：`research/release-1.2.71-2026-10-09`。
+
 已验证记录：v1.1.70 于 2026-10-09 00:32:57（Asia/Shanghai）正式发布并设为 Latest。
 构建提交 `9fa7898024faef4ee8cf230977de644411e9915b`，三平台 CI run `37803173487`
 与四平台 Release run `37803201706` 全部成功。10 个资产 SHA-256 与 GitHub digest 一致，
@@ -385,8 +398,10 @@ https://github.com/TippingGame/LevelUpAgent/actions/workflows/release.yml
 .github/workflows/release.yml
 ```
 
-推送 `vX.Y.Z` tag 后，`create-release` job 先创建 Draft Release；随后 `bundle` job 使用矩阵
-分别运行：
+推送 `vX.Y.Z` tag 后，`create-release` job 先从 Release 列表中创建或复用唯一 Draft，
+不能依赖可能对草稿返回 404 的 tag 查询。所有上传使用该 job 输出的 Release ID，
+避免同名草稿导致四平台资产分散；发现多个同名草稿时应先按 digest 归并，确认资产齐全再重试。
+随后 `bundle` job 使用矩阵分别运行：
 
 | Runner | 架构 | 产物 |
 | --- | --- | --- |

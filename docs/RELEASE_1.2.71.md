@@ -1,6 +1,6 @@
 # LevelUpAgent 1.2.71 发布记录
 
-日期：2026-10-09。状态：发布准备中，正式 tag 为 `v1.2.71`。
+日期：2026-10-09。状态：已发布到 GitHub，正式 Release 为 `v1.2.71`，已设为 Latest。
 
 ## 本版内容
 
@@ -21,6 +21,33 @@
 - GPU 生成验收：RTX 3080 Ti / WSL2，详见 [SD2.1 全流程结果](model-workbench/sd21-pipeline-acceptance.json)。本次通用资源复用相同归档字节，只改变外部分片命名与兼容清单。
 
 本机发布证据：`G:\Work\LevelUpAgent\research\release-1.2.71-2026-10-09`。
+
+## 已发布结果
+
+- 构建提交：`8aa8fc2d18674a38b2d804720b3029ca30c81d94`，tag：`v1.2.71`。
+- 发布时间：北京时间 2026-10-09 15:15:28，正式发布且已设为 Latest，非预发布，Release ID `407544934`。
+- [三平台 CI](https://github.com/TippingGame/LevelUpAgent/actions/runs/37888509630) 和 [四平台 Release 工作流](https://github.com/TippingGame/LevelUpAgent/actions/runs/37888569068) 全部通过。
+- 正式 Release：[LevelUpAgent v1.2.71](https://github.com/TippingGame/LevelUpAgent/releases/tag/v1.2.71)。Windows x64 EXE/MSI、Apple Silicon/Intel DMG、Linux x64 AppImage/DEB/RPM、Windows 签名及更新清单共 10 个资产齐全。
+- 10 个资产均完整下载，大小和 SHA-256 与 GitHub digest 一致；Windows EXE/MSI updater 签名及可信注释签名通过现有公钥验证。
+- 未登录的公开 `latest.json` 返回 HTTP 200，版本为 `1.2.71`，字节与已验签资产内的清单一致，下载 URL 和签名均指向本次 Windows 资产；正式发布页返回 HTTP 200。
+- Windows EXE 的 FileVersion/ProductVersion 均为 `1.2.71`；两个 macOS 包均在原生 runner 完成 DMG 内和模拟复制安装后应用签名验证。
+- 本机安装包：`G:\Work\LevelUpAgent\安装包\LevelUpAgent_1.2.71_Windows_x64-setup.exe`，保留旧版，新增 `SHA256_1.2.71.txt` 并更新总清单 `SHA256.txt`。
+- EXE 大小：14,738,386 字节；SHA-256：`EE2414774D359BB36249660ACE9609C799F2C5A394F4264D6898CC9C57A3931F`。
+
+## 通用 3D 资源发布
+
+- 固定 Release：[3D Workbench Shared Resources](https://github.com/TippingGame/LevelUpAgent/releases/tag/model-workbench-resources)，ID `407535594`，北京时间 2026-10-09 15:12:44 公开。使用 prerelease 并排除 Latest，不影响应用更新渠道。
+- 资源版本 `2026.10.1`，目标 `linux-x64-cu118`，四组件共 14 个分片、23,294,781,440 字节（约 21.7 GiB），加清单共 15 个资产。
+- 本地分片与完整归档 SHA-256 全部通过；所有远端分片的状态、大小及 GitHub digest 与清单一致，清单在分片核验后最后上传。
+- 公开清单下载返回 HTTP 200、字节与本地一致。清单 SHA-256：`B69C6E26BD14477A797FD7AD2808BA04D46A920D95B7C8F08DC9F847B4CE966F`。
+- WSL 启动器使用隔离数据目录从公开地址读取并校验了实际清单。首次网络读取超时，重试成功；未修改现有资源环境。
+- 兼容应用版本继续使用这一资源版本和缓存目录。只有模型或依赖变化时才向同一 Release 追加新资源版本，已公开资产不覆盖。
+
+## 发布流程修复
+
+本次构建产生了两个同名草稿，macOS 和其他平台资产分散。已按大小与 SHA-256 归并至唯一草稿 `407544934`，核对 10 个资产齐全后删除重复的未发布草稿，再公开正式版本。
+
+后续流程已通过提交 `d0fe151a296db2ed9594dacc828bef627048ba83` 修复：从列表识别唯一草稿，拒绝重复草稿或向正式 Release 继续上传，macOS 按选定 Release ID 上传。相关四项流程测试、actionlint 和 [三平台 CI](https://github.com/TippingGame/LevelUpAgent/actions/runs/37890851601) 通过。该提交只改变发布工具，不包含于本次应用构建；已发布 tag 和安装包保持对应上述构建提交。
 
 ## 验证边界
 
