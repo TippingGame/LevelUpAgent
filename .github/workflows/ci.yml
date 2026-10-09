@@ -43,7 +43,9 @@ jobs:
         with:
           python-version: '3.10'
       - name: Test 3D resource installer and job lifecycle
-        run: python -B -m unittest discover -s modules/model_workbench/tests -v
+        run: |
+          python -m pip install pillow==11.1.0
+          python -B -m unittest discover -s modules/model_workbench/tests -v
       - run: pnpm build
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings

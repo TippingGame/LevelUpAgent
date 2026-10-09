@@ -58,9 +58,9 @@ pnpm tauri build
 
 [架构](docs/ARCHITECTURE.md) · [性能](docs/PERFORMANCE.md) · [Codex 工作流对照](docs/REPLACEMENT_AUDIT.md) · [路线图](docs/ROADMAP.md) · [发布](docs/RELEASE.md)
 
-当前发布版本为 `1.2.71`。Windows 未配置 Authenticode，macOS 使用 ad-hoc 签名、尚未公证。跨平台发布与实体机验证边界见 [1.2.71 发布说明](docs/RELEASE_1.2.71.md)。
+当前发布版本为 `1.2.72`。Windows 未配置 Authenticode，macOS 使用 ad-hoc 签名、尚未公证。跨平台发布与实体机验证边界见 [1.2.72 发布说明](docs/RELEASE_1.2.72.md)。
 
-`1.2.71` 新增 TripoSG → SD2.1 独立贴图 → 蒙皮与动画的 3D 工作台，支持固定灰底预览和 GLB/FBX 导出。模型与 CUDA 等大依赖使用固定 Release 的通用资源包，跨应用版本复用。Windows 安装及卸载自适应系统语言，清理个人数据前额外确认。详见 [发布说明](docs/RELEASE_1.2.71.md) 与 [发布规范](docs/RELEASE_GUIDE.md)。
+`1.2.72` 修复 3D 贴图生成后的白模预览，新增与 Spine 共用的参考图抠底、预览、应用与还原，改善白底处理误删浅色脸部和高光的问题。媒体生成可等待最多 10 分钟；模型与 CUDA 等大依赖继续复用固定 Release 的通用资源包。详见 [发布说明](docs/RELEASE_1.2.72.md) 与 [发布规范](docs/RELEASE_GUIDE.md)。
 
 ## 许可
 

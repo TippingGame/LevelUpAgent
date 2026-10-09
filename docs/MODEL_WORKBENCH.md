@@ -88,11 +88,43 @@ node scripts/upload-model-workbench.mjs artifacts/model-workbench/release
 
 ## 生命周期与验证
 
+### 参考图抠底与贴图质量
+
+参考图下方的「参考图抠底」直接复用 Spine 的 `prepareSpineSource` / `removeSpineSolidBackground`：
+可调背景容差、预览、应用和还原原图。它从图片边缘连通区域移除纯色背景，保留包围在主体内部的浅色细节，
+并复用绿幕窄边缘去色处理；不加载额外分割模型。棋盘格用于检查透明区域，应用前应查看轮廓与脸部。
+应用后的 PNG 以独立文件保存在作品目录，原始 `input.png` 及已生成阶段保留。
+后续形状和贴图生成读取同一份已应用参考图；旧作品也可只重新生成贴图。
+
+1.2.71 的旧白底处理按全图亮度阈值直接挖空，可能损坏浅色脸部和头发高光，并残留近白背景。
+自动白底处理已改为只移除边缘连通的近白色区域，贴图阶段也不再复用旧形状任务里受损的抠图。
+2026-10-09 对用户样例做保持网格、中文描述、种子 42、30 步、2K 纹理与低显存策略不变的对照，
+仅更换干净参考图后，脸部严重乱纹明显改善。使用 Spine 实际抠图输出、正式启动器完成贴图约 62.6 秒，
+PyTorch 显存保留峰值 2,354 MiB，网格位置最大偏差为 0。美术质量仍需人工检查，细小接缝及原网格底座未由此修正。
+抠底预览 / 应用 / 还原通过系统浅深色 × 装甲开关和 720px 窗口检查；隔离的正式资源页面在 Windows
+WebView2 中完成真实导入、抠图保存、页面重载与还原原图验证。原生读取的 PNG 与浏览器中的 Spine 输出一致。
+本地验收证据在 `artifacts/model-workbench/texture-quality/`；对照结果不覆盖用户现有作品。
+
 桌面桥接只允许固定的 status / manifest / install / generate 操作。生成进程按阶段隔离，不同时驻留 TripoSG 和 SD2.1。取消终止整个 Linux 工作进程组；桌面进程消失后，心跳租约过期也会停止工作进程。重启后将遗留运行状态显示为中断。
 
-标准检查：`pnpm check`、`pnpm build`、`cargo test --manifest-path src-tauri/Cargo.toml model_workbench --lib`、`python -B -m unittest discover -s modules/model_workbench/tests -v`。Linux / WSL 另外执行进程组取消测试。CI 已接入安装器测试。
+标准检查：`pnpm check`、`pnpm build`、`cargo test --manifest-path src-tauri/Cargo.toml model_workbench --lib`、`python -B -m unittest discover -s modules/model_workbench/tests -v`。图片预处理测试需要 Pillow（CI 使用 11.1.0）；启动器本身仍只依赖标准库。Linux / WSL 另外执行进程组取消测试。CI 已接入安装器测试。
 
 本地验证图片和日志保存在 `artifacts/model-workbench/`。四种外观（系统浅 / 深色 × 装甲关 / 开）的浏览器布局、错误面板和 720px 窗口已检查，另在真实 Tauri 窗口检查创作入口、环境面板及显存 / 内存查询。
+
+### 桌面预览显示白模的排查
+
+已发布的 1.2.71 存在桌面 CSP 配置遗漏：`img-src` 允许 `blob:`，但 `connect-src` 未允许。
+model-viewer 的 GLTFLoader 会把 GLB 内嵌图片转成 blob，再通过 ImageBitmapLoader 的 `fetch()` 读取，
+因此读取被拦截时仍可能报告模型加载完成，却只显示白模。开发服务器下能显示颜色不能代替正式桌面包验证。
+修复在 `connect-src` 中加入 `blob:`，不关闭 CSP；需要重新构建并安装应用才能生效，已有生成结果和通用资源不必重做或重新下载。
+
+回归命令为 `node scripts/test-model-viewer-csp.mjs`，需要可用的 Playwright 和 Chromium；可用
+`MODEL_PLAYWRIGHT_PACKAGE` 指向现有 `playwright/package.json`，`MODEL_BROWSER_EXECUTABLE` 指定浏览器。
+测试使用内存生成的带 UV 和内嵌 PNG 的 GLB，在正式 CSP 下检查贴图确实加载，并用缺失 blob 权限的策略复现白模。
+桌面验收另外使用隔离应用标识、打包的页面、真实 `model3d_artifact` IPC 和 asset 协议，检查贴图加载、
+形状 / 贴图往返切换及 CSP 错误；不应只以模型 `load` 事件作为成功依据。
+2026-10-09 上述浏览器回归与隔离 Windows WebView2 验证通过，实际生成 GLB 的内嵌 2K 贴图已载入，
+反复切换后加载提示消失且无 CSP 错误。该验证确认显示链路，不代表脸部、头发等贴图投影的美术质量达标。
 
 ### 本次端到端验收
 

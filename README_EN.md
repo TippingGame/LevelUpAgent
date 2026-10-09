@@ -55,9 +55,9 @@ pnpm tauri build
 
 [Architecture](docs/ARCHITECTURE.md) · [Performance](docs/PERFORMANCE.md) · [Codex workflow comparison](docs/REPLACEMENT_AUDIT.md) · [Roadmap](docs/ROADMAP.md) · [Releases](docs/RELEASE.md)
 
-The current release is `1.2.71`. Windows builds lack Authenticode signatures; macOS builds use ad-hoc signing and are not notarized. Platform verification limits are documented in the [1.2.71 release notes](docs/RELEASE_1.2.71.md).
+The current release is `1.2.72`. Windows builds lack Authenticode signatures; macOS builds use ad-hoc signing and are not notarized. Platform verification limits are documented in the [1.2.72 release notes](docs/RELEASE_1.2.72.md).
 
-Version `1.2.71` adds a 3D workbench: TripoSG shape generation, separate SD2.1 texturing, rigging and animation, with a neutral gray viewer and GLB/FBX exports. Large model and CUDA resources live in one shared Release and survive app updates. Windows installers and uninstallers follow the current system language; personal-data cleanup requires an extra confirmation. See the [release notes](docs/RELEASE_1.2.71.md) and [publishing guide](docs/RELEASE_GUIDE.md).
+Version `1.2.72` fixes white 3D previews after texturing and reuses Spine’s reference cutout with preview, apply and restore controls. White-background preparation now preserves enclosed pale skin and highlights. Media generation can wait up to 10 minutes; large model and CUDA dependencies continue to use the shared resource Release. See the [release notes](docs/RELEASE_1.2.72.md) and [publishing guide](docs/RELEASE_GUIDE.md).
 
 ## License
 

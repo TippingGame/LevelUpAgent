@@ -132,6 +132,24 @@ class WorkbenchTest(unittest.TestCase):
                 api.generate(self.root,self.root,'1.2.3',{'projectId':ident,'stage':'shape'})
         self.assertEqual(api.read(project/'project.json'),original)
 
+    def test_reference_uses_applied_spine_cutout_and_restores_original(self):
+        project = self.root/'project'
+        (project/'runs/shape').mkdir(parents=True)
+        (project/'input.png').write_bytes(b'original')
+        (project/'runs/shape/reference.png').write_bytes(b'legacy-damaged-cutout')
+        api.write(project/'runs/shape/request.json', {'background':'white'})
+        record = {'stages':{'shape':{'directory':'runs/shape'}}}
+        settings = {'background':'alpha'}
+        self.assertEqual(api.reference_source(project, record, settings), (project/'input.png', 'white'))
+        filename = 'reference-'+'a'*32+'.png'
+        (project/filename).write_bytes(b'cutout')
+        record['reference'] = {'file':filename}
+        self.assertEqual(api.reference_source(project, record, settings), ((project/filename).resolve(), 'alpha'))
+        record['reference']['file'] = '../secret.png'
+        with self.assertRaises(ValueError): api.reference_source(project, record, settings)
+        record.pop('reference')
+        self.assertEqual(api.reference_source(project, record, settings), (project/'input.png', 'white'))
+
     @unittest.skipIf(sys.platform=='win32','Process-group cancellation is Linux/WSL behavior')
     def test_cancel_terminates_worker_process_group(self):
         (self.root/'cancel').touch()

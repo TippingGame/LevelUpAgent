@@ -14,33 +14,16 @@ sys.path[:0] = [str(ROOT/'runtime/vendor/TripoSG'), str(ROOT/'runtime/vendor/Tri
 
 
 def prepare(run, config):
-    import numpy as np
-    import torch
     from PIL import Image
+    from app.image_preparation import prepare_reference
     # Production accepts an explicit cutout; no restricted RMBG model is shipped.
     report(run, 'prepare', 0, '整理参考图')
-    image = Image.open(run/'input_0.png').convert('RGBA')
-    image.thumbnail((2048, 2048))
-    rgba = np.array(image)
-    alpha = rgba[..., 3]
-    if alpha.min() >= 250:
-        # White-background mode is deliberately limited and visible in the UI.
-        if config.get('background') != 'white':
-            raise ValueError('请使用透明 PNG，或选择白底图模式。')
-        alpha = np.where(np.any(rgba[..., :3] < 245, axis=-1), 255, 0).astype('uint8')
-        rgba[..., 3] = alpha
-    ys, xs = np.where(alpha > 8)
-    if not len(xs) or len(xs) >= alpha.size * .99:
-        raise ValueError('没有检测到清晰主体；请先去除背景。')
-    cutout = Image.fromarray(rgba).crop((xs.min(), ys.min(), xs.max()+1, ys.max()+1))
-    side = max(cutout.size)
-    canvas = Image.new('RGBA', (int(side*1.2), int(side*1.2)), (255,255,255,0))
-    canvas.paste(cutout, ((canvas.width-cutout.width)//2, (canvas.height-cutout.height)//2))
+    canvas, preprocessing = prepare_reference(Image.open(run/'input_0.png'), config.get('background', 'alpha'))
     canvas.save(run/'reference.png')
     white = Image.new('RGB', canvas.size, 'white')
     white.paste(canvas, mask=canvas.getchannel('A'))
     white.save(run/'prepared.png')
-    save_json(run/'preprocessing.json', {'method': config.get('background', 'alpha'),
+    save_json(run/'preprocessing.json', {**preprocessing,
         'sourceSha256': hashlib.sha256((run/'input_0.png').read_bytes()).hexdigest()})
     report(run, 'prepare', 1, '参考图已准备')
 

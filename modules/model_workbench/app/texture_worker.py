@@ -101,6 +101,7 @@ def paint(run, config):
     from mvadapter.schedulers.scheduling_shift_snr import ShiftSNRScheduler
     from mvadapter.utils import make_image_grid
     from scripts.inference_ig2mv_sd import preprocess_image
+    from app.image_preparation import prepare_reference
     report(run, 'paint', 0, '载入本地 SD2.1 与 MV-Adapter')
     weights = ROOT/'texture'
     pipe = MVAdapterI2MVSDPipeline.from_pretrained(str(weights/'base'),
@@ -128,7 +129,10 @@ def paint(run, config):
         torch.cuda.empty_cache()
     pipe.cond_encoder.register_forward_hook(offload_condition)
     size = config['viewSize']
-    reference = preprocess_image(Image.open(run/'input_0.png').convert('RGBA'), size, size)
+    cutout, preprocessing = prepare_reference(Image.open(run/'input_0.png'), config.get('referenceBackground', config.get('background', 'alpha')))
+    cutout.save(run/'reference.png')
+    save_json(run/'preprocessing.json', {**preprocessing, 'sourceSha256':sha(run/'input_0.png')})
+    reference = preprocess_image(cutout, size, size)
     reference.save(run/'prepared.png')
     controls = torch.from_numpy(np.load(run/'geometry-controls.npz')['control']).to('cuda')
     def step_callback(pipeline, step, timestep, values):

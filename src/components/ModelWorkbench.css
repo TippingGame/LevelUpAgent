@@ -67,6 +67,11 @@
 .model-joints > label { display: grid; grid-template-columns: 1fr repeat(3, 44px); gap: 3px; align-items: center; font-size: 10px; }
 .model-joints input[type="number"] { padding: 5px 1px; font-size: 10px; }
 .model-viewer-shell { flex: 1; min-height: 220px; min-width: 0; position: relative; display: flex; }
+.model-reference-editor { display: grid; gap: 10px; color: var(--text); }
+.model-reference-editor summary { cursor: pointer; font-size: 12px; }
+.model-reference-editor > :not(summary) { margin-top: 10px; }
+.model-cutout-preview { display: block; width: 100%; height: 200px; object-fit: contain; border: 1px solid var(--line); border-radius: 8px; background: repeating-conic-gradient(var(--surface-soft) 0% 25%, var(--surface) 0% 50%) 0 0 / 20px 20px; }
+.model-reference-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 /* appearance-allow: preview controls use a neutral light-on-dark contrast pair over the fixed modeling backdrop in every theme */
 .model-viewer-stage {
   --text: #f5f5f5; --muted: #e4e4e4; --surface: #333333; --surface-soft: #484848;

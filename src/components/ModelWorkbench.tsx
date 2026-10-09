@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { CreativeStudioHeader } from "./CreativeStudioHeader";
 import { ModelViewer } from "./ModelViewer";
+import { ModelReferenceEditor } from "./ModelReferenceEditor";
 import { tr } from "../lib/i18n";
 import { isDesktop } from "../lib/bridge";
 import { MODEL_COMPONENTS, MODEL_NEEDS, defaultModelJoints, modelArtifact, modelBytes, modelProgress,
@@ -30,6 +31,7 @@ export function ModelWorkbench({ active, onMedia, onWriting, onConstellation, on
   const [joints, setJoints] = useState(defaultModelJoints), [clips, setClips] = useState(["Idle", "Walk", "Wave"]);
   const [skeletonPreset, setSkeletonPreset] = useState("standard");
   const [showJoints, setShowJoints] = useState(true), [inputUrl, setInputUrl] = useState("");
+  const [originalUrl, setOriginalUrl] = useState("");
   const [preview, setPreview] = useState<{ key: string; url: string; error?: string }>();
   const dialog = useRef<HTMLDialogElement>(null), polling = useRef(false), mounted = useRef(true);
   const operation = status?.operation, busy = pending || operation?.status === "running";
@@ -76,12 +78,13 @@ export function ModelWorkbench({ active, onMedia, onWriting, onConstellation, on
       setClips(saved?.clips?.length ? saved.clips : ["Idle", "Walk", "Wave"]);
     } catch { setJoints(defaultModelJoints()); setSkeletonPreset("standard"); }
   }, [selected]);
+  useEffect(() => { setInputUrl(""); setOriginalUrl(""); }, [project?.id]);
   useEffect(() => {
     let ignore = false;
-    setInputUrl("");
-    if (project) void modelArtifact(project.id, "input", "input.png").then((url) => { if (!ignore) setInputUrl(url); }).catch((e) => { if (!ignore) setError(String(e)); });
+    if (project) void Promise.all([modelArtifact(project.id, "input", "input.png"), modelArtifact(project.id, "input", "reference.png", project.reference?.file ?? "original")])
+      .then(([original, current]) => { if (!ignore) { setOriginalUrl(original); setInputUrl(current); } }).catch((e) => { if (!ignore) setError(String(e)); });
     return () => { ignore = true; };
-  }, [project?.id]);
+  }, [project?.id, project?.reference?.file]);
   useEffect(() => {
     let ignore = false;
     if (project && previewStage) void modelArtifact(project.id, previewStage, "model.glb", previewRevision)
@@ -157,6 +160,7 @@ export function ModelWorkbench({ active, onMedia, onWriting, onConstellation, on
         {status?.projects.length ? <label>{tr("作品", "Projects")}<select value={selected} disabled={busy} onChange={(e) => { setSelected(e.target.value); setStage("shape"); }}>
           {status.projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label> : null}
         {inputUrl && <div className="model-reference"><img src={inputUrl} alt={tr("参考图片", "Reference image")}/><span>{project?.name}</span></div>}
+        {project && inputUrl && <ModelReferenceEditor projectId={project.id} originalUrl={originalUrl} currentUrl={inputUrl} busy={busy} onBusy={setPending} onSaved={refresh}/>}
         <div className="model-settings">
           <h3>{stageName(stage)}</h3>
           {stage === "shape" && <><p>{tr("主体完整、背景干净、肢体分开的参考图更适合后续蒙皮。", "Use a complete subject, clean background and separated limbs for easier rigging.")}</p>

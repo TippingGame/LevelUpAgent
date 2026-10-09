@@ -1,5 +1,6 @@
 //! Local 3D studio bridge. The lightweight bootstrap runs in Linux/WSL2;
 //! CUDA, Python, Blender and model weights are versioned Release resources.
+use base64::Engine;
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -31,6 +32,16 @@ fn storage(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .map_err(|e| e.to_string())?
         .join("model-workbench");
     std::fs::create_dir_all(root.join("projects")).map_err(|e| e.to_string())?;
+    // The parent may exist outside MSIX while its newly created child is
+    // redirected. Resolve the child so Rust and WSL see the same data root.
+    let projects = root
+        .join("projects")
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    let root = projects
+        .parent()
+        .ok_or("Invalid 3D storage directory")?
+        .to_path_buf();
     app.asset_protocol_scope()
         .allow_directory(&root, true)
         .map_err(|e| e.to_string())?;
@@ -83,7 +94,9 @@ async fn launcher(app: &tauri::AppHandle, action: &str) -> Result<Command, Strin
     if cfg!(target_os = "macos") || !cfg!(target_arch = "x86_64") {
         return Err("本地 3D 生成目前需要 NVIDIA GPU，支持 Windows WSL2 / Linux x64。".into());
     }
-    let root = linux_path(&storage(app)?).await?;
+    // Resolve Windows app-container redirection before passing a path to WSL.
+    let data = storage(app)?.canonicalize().map_err(|e| e.to_string())?;
+    let root = linux_path(&data).await?;
     let script = linux_path(&module(app)?).await?;
     let mut command = if cfg!(windows) {
         let mut command = Command::new("wsl.exe");
@@ -245,12 +258,86 @@ pub async fn model3d_import(app: tauri::AppHandle, source: String) -> Result<Val
     Ok(project)
 }
 
+fn save_reference(root: &Path, project_id: &str, image: Option<&str>) -> Result<Value, String> {
+    if !valid_id(project_id) {
+        return Err("Invalid project ID".into());
+    }
+    let project = root
+        .join("projects")
+        .join(project_id)
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    if !project.starts_with(root.canonicalize().map_err(|e| e.to_string())?) {
+        return Err("Invalid project path".into());
+    }
+    let metadata = project.join("project.json");
+    let mut record: Value =
+        serde_json::from_slice(&std::fs::read(&metadata).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    if !record.is_object() {
+        return Err("Invalid project record".into());
+    }
+    if let Some(image) = image {
+        if image.len() > 12 * 1024 * 1024 {
+            return Err("Processed PNG exceeds 9 MiB".into());
+        }
+        let encoded = image
+            .strip_prefix("data:image/png;base64,")
+            .ok_or("Expected PNG data URL")?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|_| "Invalid PNG data")?;
+        if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return Err("Expected PNG image".into());
+        }
+        let size = imagesize::blob_size(&bytes).map_err(|_| "Invalid PNG image")?;
+        if size.width < 32 || size.height < 32 || size.width > 2048 || size.height > 2048 {
+            return Err("Invalid reference dimensions".into());
+        }
+        let file = format!("reference-{}.png", uuid::Uuid::new_v4().simple());
+        std::fs::write(project.join(&file), bytes).map_err(|e| e.to_string())?;
+        record["reference"] = json!({"file":file,"method":"spine-solid-background"});
+    } else {
+        record
+            .as_object_mut()
+            .ok_or("Invalid project record")?
+            .remove("reference");
+    }
+    record["updatedAt"] = (chrono::Utc::now().timestamp_millis() as f64 / 1000.0).into();
+    let temporary = project.join(format!("project-{}.tmp", uuid::Uuid::new_v4().simple()));
+    std::fs::write(&temporary, record.to_string()).map_err(|e| e.to_string())?;
+    if let Err(error) = std::fs::rename(&temporary, &metadata) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error.to_string());
+    }
+    Ok(record)
+}
+
+#[tauri::command]
+pub async fn model3d_reference(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, ModelWorkbench>,
+    project_id: String,
+    image: Option<String>,
+) -> Result<Value, String> {
+    if state
+        .busy
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err("请等待当前下载或生成完成。".into());
+    }
+    let _guard = BusyGuard(state.busy.clone());
+    save_reference(&storage(&app)?, &project_id, image.as_deref())
+}
+
 fn artifact(root: &Path, project_id: &str, stage: &str, name: &str) -> Result<PathBuf, String> {
     if !valid_id(project_id)
         || !matches!(stage, "input" | "shape" | "texture" | "rig")
         || !matches!(
             name,
             "input.png"
+                | "reference.png"
                 | "model.glb"
                 | "basecolor.png"
                 | "delivery.zip"
@@ -264,6 +351,12 @@ fn artifact(root: &Path, project_id: &str, stage: &str, name: &str) -> Result<Pa
     let project = root.join("projects").join(project_id);
     let path = if stage == "input" && name == "input.png" {
         project.join(name)
+    } else if stage == "input" && name == "reference.png" {
+        let record: Value = serde_json::from_slice(
+            &std::fs::read(project.join("project.json")).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        project.join(record["reference"]["file"].as_str().unwrap_or("input.png"))
     } else {
         let record: Value = serde_json::from_slice(
             &std::fs::read(project.join("project.json")).map_err(|e| e.to_string())?,
@@ -320,6 +413,43 @@ pub async fn model3d_export(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reference_apply_restore_preserves_original_and_completed_stages() {
+        let root = std::env::temp_dir().join(format!("levelup-reference-{}", uuid::Uuid::new_v4()));
+        let id = "b".repeat(32);
+        let project = root.join("projects").join(&id);
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("input.png"), b"untouched-original").unwrap();
+        let original = json!({"id":id,"stages":{"shape":{"directory":"runs/original"}}});
+        std::fs::write(project.join("project.json"), original.to_string()).unwrap();
+        let image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAN0lEQVR4nO3QQQ0AMAgEwVJlSEMesggq+MwZ2MtEZfc73L+MO0CAAAECBAgQIECAAAECBAgswQBZ8QKQ3gJ+OgAAAABJRU5ErkJggg==";
+        let saved = save_reference(&root, &id, Some(image)).unwrap();
+        assert_eq!(saved["stages"], original["stages"]);
+        let cutout = artifact(&root, &id, "input", "reference.png").unwrap();
+        assert!(
+            cutout
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("reference-")
+        );
+        assert_eq!(
+            std::fs::read(project.join("input.png")).unwrap(),
+            b"untouched-original"
+        );
+        let restored = save_reference(&root, &id, None).unwrap();
+        assert!(restored.get("reference").is_none());
+        assert_eq!(restored["stages"], original["stages"]);
+        assert_eq!(
+            artifact(&root, &id, "input", "reference.png").unwrap(),
+            project.join("input.png").canonicalize().unwrap()
+        );
+        assert!(cutout.exists());
+        assert!(save_reference(&root, "../escape", Some(image)).is_err());
+        assert!(save_reference(&root, &id, Some("data:image/png;base64,broken")).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn artifact_rejects_traversal_and_unknown_files() {
         assert!(artifact(Path::new("."), "../secrets", "shape", "model.glb").is_err());

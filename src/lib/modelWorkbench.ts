@@ -5,6 +5,7 @@ export type ModelComponent = "runtime" | "triposg" | "texture" | "blender";
 export type ModelJoint = [number, number, number];
 export interface ModelProject {
   id: string; name: string; updatedAt: number;
+  reference?: { file: string; method: string };
   stages: Partial<Record<ModelStage, { directory: string; completedAt: number; version: string;
     validation: { triangles?: number; bytes?: number; animations?: number; clips?: string[]; limitations?: string[];
       resources?: { seconds: number; peakTorchReservedMiB: number } } }>>;

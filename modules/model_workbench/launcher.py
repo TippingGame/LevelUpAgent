@@ -476,6 +476,21 @@ def validate_request(request):
     return stage, settings
 
 
+def reference_source(project_path, project, settings):
+    reference = project.get('reference')
+    if reference:
+        filename = reference.get('file', '')
+        if not isinstance(filename, str) or not re.fullmatch(r'reference-[a-f0-9]{32}\.png', filename):
+            raise ValueError('Invalid reference file')
+        path = (project_path/filename).resolve()
+        if not path.is_relative_to(project_path.resolve()) or not path.is_file():
+            raise ValueError('Reference file is missing or outside the project')
+        return path, 'alpha'
+    shape = project.get('stages', {}).get('shape')
+    shape_settings = read(project_path/shape['directory']/'request.json', {}) if shape else {}
+    return project_path/'input.png', shape_settings.get('background', settings['background'])
+
+
 def generate(data, root, version, request):
     stage, settings = validate_request(request)
     if any(not component_ready(root, name) for name in NEEDS[stage]):
@@ -496,14 +511,17 @@ def generate(data, root, version, request):
         raise ValueError('请先完成上一个阶段。')
     run = project_path/'runs'/uuid.uuid4().hex
     run.mkdir(parents=True)
-    shutil.copyfile(project_path/'input.png', run/'input_0.png')
+    # Prefer the applied Spine cutout, otherwise reprocess the untouched image.
+    # Legacy normalized references may have holes in skin and highlights.
+    reference, reference_background = reference_source(project_path, project, settings)
+    shutil.copyfile(reference, run/'input_0.png')
+    settings['referenceBackground'] = reference_background
+    if project.get('reference'):
+        settings['background'] = 'alpha'
     if stage != 'shape':
         source_path = project_path/source['directory']
         shutil.copyfile(source_path/'model.glb', run/'source_mesh.glb')
         settings.update(baseMeshSha256=sha(run/'source_mesh.glb'), sourceJobId=source['directory'])
-        # Preserve the exact normalized reference that produced the shape.
-        shape_source = project_path/project['stages']['shape']['directory']
-        shutil.copyfile(shape_source/'reference.png', run/'input_0.png')
     write(run/'request.json', settings)
     operation(data, kind='generate', stage=stage, projectId=project['id'], run=str(run.relative_to(data)))
     env = runtime_env(root)

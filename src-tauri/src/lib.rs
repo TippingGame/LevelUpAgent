@@ -11997,6 +11997,7 @@ pub fn run() {
             model_workbench::model3d_start,
             model_workbench::model3d_cancel,
             model_workbench::model3d_import,
+            model_workbench::model3d_reference,
             model_workbench::model3d_artifact,
             model_workbench::model3d_export,
             frontend_log,
