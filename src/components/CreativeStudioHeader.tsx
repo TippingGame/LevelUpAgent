@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Bone, BookOpen, Ellipsis, ImagePlus, Star } from "lucide-react";
+import { Bone, Box, BookOpen, Ellipsis, ImagePlus, Star } from "lucide-react";
 import { tr } from "../lib/i18n";
 import "./CreationModeSwitch.css";
 
-type CreativeMode = "media" | "writing" | "constellation" | "spine";
+type CreativeMode = "media" | "writing" | "constellation" | "spine" | "model3d";
 
-export function CreativeStudioHeader({ mode, className = "", subtitle, context, actions, onBrandClick, brandDisabled, onMedia, onWriting, onConstellation, onSpine }: {
+export function CreativeStudioHeader({ mode, className = "", subtitle, context, actions, onBrandClick, brandDisabled, onMedia, onWriting, onConstellation, onSpine, onModel3d }: {
   mode: CreativeMode;
   className?: string;
   subtitle?: ReactNode;
@@ -17,6 +17,7 @@ export function CreativeStudioHeader({ mode, className = "", subtitle, context, 
   onWriting?: () => void;
   onConstellation?: () => void;
   onSpine?: () => void;
+  onModel3d?: () => void;
 }) {
   const [actionsOpen, setActionsOpen] = useState(false);
   const actionsRef = useRef<HTMLDivElement>(null);
@@ -40,6 +41,7 @@ export function CreativeStudioHeader({ mode, className = "", subtitle, context, 
     { id: "writing", label: tr("写作", "Writing"), Icon: BookOpen, onClick: onWriting },
     { id: "constellation", label: tr("星图", "Constellation"), Icon: Star, onClick: onConstellation },
     { id: "spine", label: "Spine", Icon: Bone, onClick: onSpine },
+    { id: "model3d", label: "3D", Icon: Box, onClick: onModel3d },
   ] as const;
   const Icon = modes.find((item) => item.id === mode)!.Icon;
   const brand = <><span className="creative-studio-mark"><Icon size={19} fill={mode === "constellation" ? "currentColor" : "none"} strokeWidth={1.6} /></span><span className="creative-studio-brand-text"><strong>{mode === "constellation" ? tr("星图", "Constellation") : tr("创作空间", "Creative Studio")}</strong><small>{subtitle}</small></span></>;

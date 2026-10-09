@@ -1,0 +1,35 @@
+name: 3D workbench resources
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: model-workbench-resources
+  cancel-in-progress: false
+
+jobs:
+  resources:
+    # Large, prepared CUDA/model directories live on this release host.
+    # Manually run only when the pinned resource set changes, not per app tag.
+    runs-on: [self-hosted, linux, x64, model-workbench]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Test installer and package format
+        run: python -B -m unittest discover -s modules/model_workbench/tests -v
+      - name: Package reusable resources
+        env:
+          MODEL_WORKBENCH_STAGING: ${{ vars.MODEL_WORKBENCH_STAGING }}
+        run: python scripts/package-model-workbench.py --staging "$MODEL_WORKBENCH_STAGING" --output artifacts/model-workbench/release
+      - name: Verify and upload to shared resource Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/upload-model-workbench.mjs artifacts/model-workbench/release

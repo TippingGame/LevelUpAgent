@@ -15,6 +15,7 @@ mod logging;
 mod mcp;
 mod media;
 mod migration;
+mod model_workbench;
 mod models;
 mod network;
 mod pet;
@@ -11844,6 +11845,7 @@ pub fn run() {
             pending_prompt_writes: Mutex::new(HashMap::new()),
             pending_git_rollbacks: Mutex::new(HashMap::new()),
         })
+        .manage(model_workbench::ModelWorkbench::default())
         .manage(mcp::McpManager::default())
         .manage(browser::BrowserManager::default())
         .manage(sandbox::ProcessManager::default())
@@ -11986,6 +11988,13 @@ pub fn run() {
     };
     let app = builder
         .invoke_handler(tauri::generate_handler![
+            model_workbench::model3d_status,
+            model_workbench::model3d_manifest,
+            model_workbench::model3d_start,
+            model_workbench::model3d_cancel,
+            model_workbench::model3d_import,
+            model_workbench::model3d_artifact,
+            model_workbench::model3d_export,
             frontend_log,
             get_app_log_info,
             save_api_key,

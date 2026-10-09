@@ -1,0 +1,60 @@
+{
+  "repo": "VAST-AI/TripoSG",
+  "revision": "2c1c516d22d58db486a058d98d31bb6177344e06",
+  "files": [
+    {
+      "path": "weights/triposg/feature_extractor_dinov2/preprocessor_config.json",
+      "bytes": 436,
+      "sha256": "14e780d86fa1861f8751f868d7f45425b5feb55c38ca26f152ca5097ab30f828",
+      "sourceUrl": "https://huggingface.co/VAST-AI/TripoSG/resolve/2c1c516d22d58db486a058d98d31bb6177344e06/feature_extractor_dinov2/preprocessor_config.json"
+    },
+    {
+      "path": "weights/triposg/image_encoder_dinov2/config.json",
+      "bytes": 1104,
+      "sha256": "8ed81b0d5ffd2c8b2cecd7dc1326d3eefa409bc9d525537b6b2a3c70a992fd02",
+      "sourceUrl": "https://huggingface.co/VAST-AI/TripoSG/resolve/2c1c516d22d58db486a058d98d31bb6177344e06/image_encoder_dinov2/config.json"
+    },
+    {
+      "path": "weights/triposg/image_encoder_dinov2/model.safetensors",
+      "bytes": 1217522888,
+      "sha256": "399fba97a95f22c36834418bc69373364a99af3a1153da1c0fb31db567c92e23",
+      "sourceUrl": "https://huggingface.co/VAST-AI/TripoSG/resolve/2c1c516d22d58db486a058d98d31bb6177344e06/image_encoder_dinov2/model.safetensors"
+    },
+    {
+      "path": "weights/triposg/model_index.json",
+      "bytes": 525,
+      "sha256": "750af638d10fc67a5f43d19ef0a0d1d3d446174e24b73bddd0a49226016c80c2",
+      "sourceUrl": "https://huggingface.co/VAST-AI/TripoSG/resolve/2c1c516d22d58db486a058d98d31bb6177344e06/model_index.json"
+    },
+    {
+      "path": "weights/triposg/scheduler/scheduler_config.json",
+      "bytes": 158,
+      "sha256": "ea7c9b4d502dcaba97cd85291cfd7dbd3c6c82cbc4c775af5c6d9224864279c9",
+      "sourceUrl": "https://huggingface.co/VAST-AI/TripoSG/resolve/2c1c516d22d58db486a058d98d31bb6177344e06/scheduler/scheduler_config.json"
+    },
+    {
+      "path": "weights/triposg/transformer/config.json",
+      "bytes": 191,
+      "sha256": "54ad779e68f9bc7303122cdf291f6db48dec7c67e41d28c05ac359daf914128a",
+      "sourceUrl": "https://huggingface.co/VAST-AI/TripoSG/resolve/2c1c516d22d58db486a058d98d31bb6177344e06/transformer/config.json"
+    },
+    {
+      "path": "weights/triposg/transformer/diffusion_pytorch_model.safetensors",
+      "bytes": 5758280104,
+      "sha256": "9192b5923f7b605b394192809aa2ceb73bf0f4009674d8e3b999b45bb97d4bf2",
+      "sourceUrl": "https://huggingface.co/VAST-AI/TripoSG/resolve/2c1c516d22d58db486a058d98d31bb6177344e06/transformer/diffusion_pytorch_model.safetensors"
+    },
+    {
+      "path": "weights/triposg/vae/config.json",
+      "bytes": 335,
+      "sha256": "2fb6ba9b364d42c9681879dca0f7edcb978f2db974a1ca4b15d28f9b15a5baed",
+      "sourceUrl": "https://huggingface.co/VAST-AI/TripoSG/resolve/2c1c516d22d58db486a058d98d31bb6177344e06/vae/config.json"
+    },
+    {
+      "path": "weights/triposg/vae/diffusion_pytorch_model.safetensors",
+      "bytes": 970685468,
+      "sha256": "a2e667c24927a5a35e5f19fcb4c75890e9399aa966b6db8131d7df733a750c8b",
+      "sourceUrl": "https://huggingface.co/VAST-AI/TripoSG/resolve/2c1c516d22d58db486a058d98d31bb6177344e06/vae/diffusion_pytorch_model.safetensors"
+    }
+  ]
+}

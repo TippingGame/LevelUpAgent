@@ -1,0 +1,105 @@
+{
+  "sd21": {
+    "seed": 42,
+    "steps": 30,
+    "viewSize": 512,
+    "textureSize": 2048,
+    "memoryMode": "sequential",
+    "paintSeconds": 82.7659330368042,
+    "totalStageSeconds": 95.93614149093628,
+    "peakTorchReservedMiB": 2166.0,
+    "metrics": [
+      {
+        "stage": "bake",
+        "backend": "mvadapter",
+        "startedAt": 1791480025.2507882,
+        "status": "completed",
+        "torch": "2.5.1+cu118",
+        "cuda": "11.8",
+        "gpu": "NVIDIA GeForce RTX 3080 Ti",
+        "pytorchMemoryFraction": 0.85,
+        "seconds": 10.130977153778076,
+        "peakAllocatedMiB": 1750.55419921875,
+        "peakReservedMiB": 2004.0
+      },
+      {
+        "stage": "paint",
+        "backend": "mvadapter",
+        "startedAt": 1791479940.1616056,
+        "status": "completed",
+        "torch": "2.5.1+cu118",
+        "cuda": "11.8",
+        "gpu": "NVIDIA GeForce RTX 3080 Ti",
+        "pytorchMemoryFraction": 0.85,
+        "seconds": 82.7659330368042,
+        "peakAllocatedMiB": 2109.46435546875,
+        "peakReservedMiB": 2166.0
+      },
+      {
+        "stage": "validate_texture",
+        "backend": "mvadapter",
+        "startedAt": 1791480037.3509624,
+        "status": "completed",
+        "torch": "2.5.1+cu118",
+        "cuda": "11.8",
+        "gpu": "NVIDIA GeForce RTX 3080 Ti",
+        "pytorchMemoryFraction": 0.85,
+        "seconds": 3.039231300354004,
+        "peakAllocatedMiB": 77.1884765625,
+        "peakReservedMiB": 106.0
+      }
+    ]
+  },
+  "sdxl": {
+    "seed": 42,
+    "steps": 30,
+    "viewSize": 512,
+    "textureSize": 2048,
+    "memoryMode": "sequential",
+    "paintSeconds": 205.00490546226501,
+    "totalStageSeconds": 252.7752983570099,
+    "peakTorchReservedMiB": 3224.0,
+    "metrics": [
+      {
+        "stage": "bake",
+        "backend": "mvadapter",
+        "startedAt": 1791479818.2613175,
+        "status": "completed",
+        "torch": "2.5.1+cu118",
+        "cuda": "11.8",
+        "gpu": "NVIDIA GeForce RTX 3080 Ti",
+        "pytorchMemoryFraction": 0.72,
+        "seconds": 44.70997858047485,
+        "peakAllocatedMiB": 1750.55419921875,
+        "peakReservedMiB": 2004.0
+      },
+      {
+        "stage": "paint",
+        "backend": "mvadapter",
+        "startedAt": 1791479609.6610005,
+        "status": "completed",
+        "torch": "2.5.1+cu118",
+        "cuda": "11.8",
+        "gpu": "NVIDIA GeForce RTX 3080 Ti",
+        "pytorchMemoryFraction": 0.72,
+        "seconds": 205.00490546226501,
+        "peakAllocatedMiB": 3169.22705078125,
+        "peakReservedMiB": 3224.0
+      },
+      {
+        "stage": "validate_texture",
+        "backend": "mvadapter",
+        "startedAt": 1791479865.3602548,
+        "status": "completed",
+        "torch": "2.5.1+cu118",
+        "cuda": "11.8",
+        "gpu": "NVIDIA GeForce RTX 3080 Ti",
+        "pytorchMemoryFraction": 0.72,
+        "seconds": 3.0604143142700195,
+        "peakAllocatedMiB": 77.1884765625,
+        "peakReservedMiB": 106.0
+      }
+    ]
+  },
+  "decision": "SDXL default: more faithful clothing color, gold trim and boots on this controlled chibi case. SD2.1 is faster and smaller but introduced red/blue garment details. Single-case comparison, not a universal benchmark."
+}

@@ -1,0 +1,141 @@
+{
+  "id": "ee8e4bc8cc4b467794f6e87a6571a64a",
+  "name": "Q版完整流程验收",
+  "updatedAt": 1791511822.8384438,
+  "stages": {
+    "shape": {
+      "directory": "runs/a47c25078cbf473c9157a25697c1a33b",
+      "completedAt": 1791511749.0245895,
+      "version": "1.1.70",
+      "validation": {
+        "status": "passed-structural-check",
+        "outputKind": "untextured-mesh",
+        "bytes": 540820,
+        "sha256": "3b1558e20bf9d9eb86481d1cf6d6bc18fd0185b27e9168450e1dfa6559ee7581",
+        "vertices": 15002,
+        "triangles": 30000,
+        "hasUV": false,
+        "hasTexture": false,
+        "skins": 0,
+        "animations": 0,
+        "bounds": [
+          [
+            -0.361905038356781,
+            -0.9491634368896484,
+            -0.5528268218040466
+          ],
+          [
+            0.32475247979164124,
+            0.9204034805297852,
+            0.5178539156913757
+          ]
+        ],
+        "watertight": true,
+        "windingConsistent": true,
+        "signedVolume": 0.29013131070574666,
+        "components": 33,
+        "nearZeroAreaTriangles": 4,
+        "selfIntersectionsChecked": false,
+        "unityImportTested": false,
+        "unrealImportTested": false,
+        "limitations": [
+          "Untextured geometry; no UV, skin or animation promised",
+          "Structural validity does not prove riggable topology"
+        ],
+        "resources": {
+          "seconds": 61.379999999999995,
+          "peakTorchReservedMiB": 10392.0,
+          "note": "PyTorch allocation only; GPU driver and other apps use additional memory."
+        }
+      }
+    },
+    "texture": {
+      "directory": "runs/5840dd8d81f8412b8c5bd8d4e66aaefc",
+      "completedAt": 1791511818.591647,
+      "version": "1.1.70",
+      "validation": {
+        "status": "passed-structural-check",
+        "outputKind": "textured-mesh",
+        "bytes": 2632248,
+        "sha256": "eab9a2338fd393254560a4e6a8937e46784c392a0a344b75682049710ed0ebe5",
+        "vertices": 21953,
+        "triangles": 30000,
+        "hasUV": true,
+        "hasTexture": true,
+        "skins": 0,
+        "animations": 0,
+        "bounds": [
+          [
+            -0.361905038356781,
+            -0.9491634368896484,
+            -0.5528268218040466
+          ],
+          [
+            0.32475247979164124,
+            0.9204034805297852,
+            0.5178539156913757
+          ]
+        ],
+        "watertight": true,
+        "windingConsistent": true,
+        "signedVolume": 0.29013131070574666,
+        "components": 33,
+        "nearZeroAreaTriangles": 4,
+        "selfIntersectionsChecked": false,
+        "unityImportTested": false,
+        "unrealImportTested": false,
+        "limitations": [
+          "Generated RGB appearance can contain drawn lighting; constant roughness/metallic",
+          "Unseen texels are marked and filled deterministically",
+          "Skinning, animation and engine import require separate validation"
+        ],
+        "textureSize": [
+          2048,
+          2048
+        ],
+        "maxSurfacePositionError": 0.0,
+        "sourceJobId": "runs/a47c25078cbf473c9157a25697c1a33b",
+        "baseMeshSha256": "3b1558e20bf9d9eb86481d1cf6d6bc18fd0185b27e9168450e1dfa6559ee7581",
+        "resources": {
+          "seconds": 62.38113760948181,
+          "peakTorchReservedMiB": 2356.0,
+          "note": "PyTorch allocation only; GPU driver and other apps use additional memory."
+        }
+      }
+    },
+    "rig": {
+      "directory": "runs/8ac2e305f0c84f599d4eebc7a58add7b",
+      "completedAt": 1791511822.8384404,
+      "version": "1.1.70",
+      "validation": {
+        "status": "passed-structural-check",
+        "outputKind": "rigged-mesh",
+        "skins": 1,
+        "animations": 3,
+        "bones": 19,
+        "unweightedVertices": 0,
+        "maximumWeightSumError": 2.220446049250313e-16,
+        "verticesBeforeWeld": 21953,
+        "verticesAfterWeld": 15000,
+        "weightMethod": "voxel-proxy-heat-transfer",
+        "proxyVoxelSize": 0.014605991542339325,
+        "maxInfluences": 4,
+        "bytes": 6927584,
+        "clips": [
+          "Idle",
+          "Walk",
+          "Wave"
+        ],
+        "limitations": [
+          "基础人形骨架与程序动作；请检查关节变形，非动捕或通用 AI 绑定。",
+          "当前导出未代替 Unity / Unreal 的导入验收。"
+        ],
+        "resources": {
+          "seconds": 0,
+          "peakTorchReservedMiB": 0,
+          "note": "PyTorch allocation only; GPU driver and other apps use additional memory."
+        }
+      }
+    }
+  }
+}

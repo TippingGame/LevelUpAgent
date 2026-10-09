@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 2,
+  "resourceVersion": "2026.10.1",
+  "releaseTag": "model-workbench-resources",
+  "target": "linux-x64-cu118",
+  "cuda": "11.8"
+}

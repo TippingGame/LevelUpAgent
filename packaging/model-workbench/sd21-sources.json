@@ -1,0 +1,121 @@
+{
+  "license": "SD2.1: CreativeML Open RAIL++-M; MV-Adapter: Apache-2.0",
+  "sources": [
+    "https://huggingface.co/sd2-community/stable-diffusion-2-1-base/tree/4e63672c03103b6c636b8fb4119ba982469b2955",
+    "https://huggingface.co/huanngzh/mv-adapter/tree/6de4033df6b53366f3c009d22f5ec434bb55e59f",
+    "https://huggingface.co/sd2-community/stable-diffusion-2/resolve/2511124fabf8bf30c0ca9dccd9729e7f0f2fa669/LICENSE-MODEL"
+  ],
+  "originalModel": "stabilityai/stable-diffusion-2-1-base",
+  "archiveNote": "Original endpoint returned HTTP 401; sd2-community archive used explicitly.",
+  "files": [
+    {
+      "path": "adapter/README.md",
+      "bytes": 4468,
+      "sha256": "8fece33947fbec91561c6c7d4573d4c603ee6dd6e50177fa1632aeeca5ebbf2c",
+      "sourceUrl": "https://huggingface.co/huanngzh/mv-adapter/resolve/6de4033df6b53366f3c009d22f5ec434bb55e59f/README.md"
+    },
+    {
+      "path": "adapter/mvadapter_ig2mv_sd21.safetensors",
+      "bytes": 708310064,
+      "sha256": "7940d6197be614fc6a3483ece1ed37cac850f94375d127ada6ae6464ce9252c3",
+      "sourceUrl": "https://huggingface.co/huanngzh/mv-adapter/resolve/6de4033df6b53366f3c009d22f5ec434bb55e59f/mvadapter_ig2mv_sd21.safetensors"
+    },
+    {
+      "path": "base/README.md",
+      "bytes": 12473,
+      "sha256": "28d20df20b26b5bd476370e4bf51832442db701b21a9fa90a62cc4a272d18581",
+      "sourceUrl": "https://huggingface.co/sd2-community/stable-diffusion-2-1-base/resolve/4e63672c03103b6c636b8fb4119ba982469b2955/README.md"
+    },
+    {
+      "path": "base/feature_extractor/preprocessor_config.json",
+      "bytes": 342,
+      "sha256": "2a1da83b5e1032aaeef397552ddb408dca0d8cd1dc58f61bf6abf38d6f33a0a2",
+      "sourceUrl": "https://huggingface.co/sd2-community/stable-diffusion-2-1-base/resolve/4e63672c03103b6c636b8fb4119ba982469b2955/feature_extractor/preprocessor_config.json"
+    },
+    {
+      "path": "base/model_index.json",
+      "bytes": 543,
+      "sha256": "518553e098fdaa4153d9a92139e344e44f53bb329c22f383293e3099c4f1bad2",
+      "sourceUrl": "https://huggingface.co/sd2-community/stable-diffusion-2-1-base/resolve/4e63672c03103b6c636b8fb4119ba982469b2955/model_index.json"
+    },
+    {
+      "path": "base/scheduler/scheduler_config.json",
+      "bytes": 346,
+      "sha256": "11ac5627d7df0fa344b875c4b5722b1767a8a2aa1684c2cf8b4d614300127234",
+      "sourceUrl": "https://huggingface.co/sd2-community/stable-diffusion-2-1-base/resolve/4e63672c03103b6c636b8fb4119ba982469b2955/scheduler/scheduler_config.json"
+    },
+    {
+      "path": "base/text_encoder/config.json",
+      "bytes": 613,
+      "sha256": "7e33bfc475f6cf76e69b28b101993ca834d1f22ff4d35caefde32d63d4f42fba",
+      "sourceUrl": "https://huggingface.co/sd2-community/stable-diffusion-2-1-base/resolve/4e63672c03103b6c636b8fb4119ba982469b2955/text_encoder/config.json"
+    },
+    {
+      "path": "base/text_encoder/model.fp16.safetensors",
+      "bytes": 680821096,
+      "sha256": "681c555376658c81dc273f2d737a2aeb23ddb6d1d8e5b3a7064636d359a22668",
+      "sourceUrl": "https://huggingface.co/sd2-community/stable-diffusion-2-1-base/resolve/4e63672c03103b6c636b8fb4119ba982469b2955/text_encoder/model.fp16.safetensors"
+    },
+    {
+      "path": "base/tokenizer/merges.txt",
+      "bytes": 524619,
+      "sha256": "9fd691f7c8039210e0fced15865466c65820d09b63988b0174bfe25de299051a",
+      "sourceUrl": "https://huggingface.co/sd2-community/stable-diffusion-2-1-base/resolve/4e63672c03103b6c636b8fb4119ba982469b2955/tokenizer/merges.txt"
+    },
+    {
+      "path": "base/tokenizer/special_tokens_map.json",
+      "bytes": 460,
+      "sha256": "f118ab3a983206e4f32583448de6bd6aae4ee21869135cef1f5848a753cdaab6",
+      "sourceUrl": "https://huggingface.co/sd2-community/stable-diffusion-2-1-base/resolve/4e63672c03103b6c636b8fb4119ba982469b2955/tokenizer/special_tokens_map.json"
+    },
+    {
+      "path": "base/tokenizer/tokenizer_config.json",
+      "bytes": 807,
+      "sha256": "d562b18a0c6d32a168fce3d7a342fce64579ebacffb98fb71b0affc494fc32d8",
+      "sourceUrl": "https://huggingface.co/sd2-community/stable-diffusion-2-1-base/resolve/4e63672c03103b6c636b8fb4119ba982469b2955/tokenizer/tokenizer_config.json"
+    },
+    {
+      "path": "base/tokenizer/vocab.json",
+      "bytes": 1059962,
+      "sha256": "e089ad92ba36837a0d31433e555c8f45fe601ab5c221d4f607ded32d9f7a4349",
+      "sourceUrl": "https://huggingface.co/sd2-community/stable-diffusion-2-1-base/resolve/4e63672c03103b6c636b8fb4119ba982469b2955/tokenizer/vocab.json"
+    },
+    {
+      "path": "base/unet/config.json",
+      "bytes": 911,
+      "sha256": "ce0c6d379e3b1d3e1f79338de70c80a1e36f17a6372439a8249b6fb0dfa1b608",
+      "sourceUrl": "https://huggingface.co/sd2-community/stable-diffusion-2-1-base/resolve/4e63672c03103b6c636b8fb4119ba982469b2955/unet/config.json"
+    },
+    {
+      "path": "base/unet/diffusion_pytorch_model.fp16.safetensors",
+      "bytes": 1731904736,
+      "sha256": "28ec9cf3b239c0751c201b1f6fb46b551df5862731b30a37aa1360101cb3fbab",
+      "sourceUrl": "https://huggingface.co/sd2-community/stable-diffusion-2-1-base/resolve/4e63672c03103b6c636b8fb4119ba982469b2955/unet/diffusion_pytorch_model.fp16.safetensors"
+    },
+    {
+      "path": "base/vae/config.json",
+      "bytes": 553,
+      "sha256": "424117cb534ce03497c41305ed868980123917b2b6abba4bbaa615e968772903",
+      "sourceUrl": "https://huggingface.co/sd2-community/stable-diffusion-2-1-base/resolve/4e63672c03103b6c636b8fb4119ba982469b2955/vae/config.json"
+    },
+    {
+      "path": "base/vae/diffusion_pytorch_model.fp16.safetensors",
+      "bytes": 167335342,
+      "sha256": "3e4c08995484ee61270175e9e7a072b66a6e4eeb5f0c266667fe1f45b90daf9a",
+      "sourceUrl": "https://huggingface.co/sd2-community/stable-diffusion-2-1-base/resolve/4e63672c03103b6c636b8fb4119ba982469b2955/vae/diffusion_pytorch_model.fp16.safetensors"
+    },
+    {
+      "path": "base/LICENSE-MODEL",
+      "bytes": 14206,
+      "sha256": "e514164be7f2ca2c0fb39e7283b01ab4a06d802837eaf171aa4645cfd7ee1157",
+      "sourceUrl": "https://huggingface.co/sd2-community/stable-diffusion-2/resolve/2511124fabf8bf30c0ca9dccd9729e7f0f2fa669/LICENSE-MODEL"
+    },
+    {
+      "path": "adapter/LICENSE",
+      "bytes": 11357,
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "sourceUrl": "https://github.com/huanngzh/MV-Adapter/blob/4277e0018232bac82bb2c103caf0893cedb711be/LICENSE"
+    }
+  ],
+  "backend": "mvadapter_sd21"
+}

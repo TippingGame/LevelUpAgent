@@ -15,11 +15,13 @@
 | 创作 | 图片、视频、语音、参考素材、蒙版编辑与本地历史 |
 | 写作 | 文稿、设定集、参考库、目标执行、快照与剧情试玩 |
 | 星图 | 类型化节点、并行分支、画板与可复用蓝图 |
+| 3D | TripoSG 形状、SD2.1 独立贴图、可调整的人形蒙皮与基础动画；大型资源按版本独立安装 |
 
 ![星图工作台](docs/images/constellation-workflow.png)
 
 还包含主题与声明式布局、摇光残影桌面陪伴、连接迁移和 CLI 配置同步。
 完整范围、限制及验证记录见 [功能总览](docs/FEATURES.md)。
+3D 工作台的运行条件、SD2.1 / SDXL 实测比较和 Release 资源发布见 [3D 模型工作台](docs/MODEL_WORKBENCH.md)。
 
 ## 开始使用
 
@@ -56,9 +58,9 @@ pnpm tauri build
 
 [架构](docs/ARCHITECTURE.md) · [性能](docs/PERFORMANCE.md) · [Codex 工作流对照](docs/REPLACEMENT_AUDIT.md) · [路线图](docs/ROADMAP.md) · [发布](docs/RELEASE.md)
 
-当前发布版本为 `1.1.70`。Windows 未配置 Authenticode，macOS 使用 ad-hoc 签名、尚未公证。跨平台发布与实体机验证边界见 [1.1.70 发布说明](docs/RELEASE_1.1.70.md)。
+当前发布版本为 `1.2.71`。Windows 未配置 Authenticode，macOS 使用 ad-hoc 签名、尚未公证。跨平台发布与实体机验证边界见 [1.2.71 发布说明](docs/RELEASE_1.2.71.md)。
 
-`1.1.70` 修复创作空间图片编辑器的画布适配和拖动范围，支持按住空格自由拖动画布，并在创作历史的时间行右侧显示图片真实宽高；详细验证见 [发布说明](docs/RELEASE_1.1.70.md)。此前的本地测试包记录保留在 [构建日志](docs/VERSION_1.1.65.md)。
+`1.2.71` 新增 TripoSG → SD2.1 独立贴图 → 蒙皮与动画的 3D 工作台，支持固定灰底预览和 GLB/FBX 导出。模型与 CUDA 等大依赖使用固定 Release 的通用资源包，跨应用版本复用。Windows 安装及卸载自适应系统语言，清理个人数据前额外确认。详见 [发布说明](docs/RELEASE_1.2.71.md) 与 [发布规范](docs/RELEASE_GUIDE.md)。
 
 ## 许可
 

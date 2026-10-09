@@ -97,6 +97,7 @@ interface SpineStudioProps {
   onMedia: () => void;
   onWriting: () => void;
   onConstellation: () => void;
+  onModel3d: () => void;
   onConfigureConnection: () => void;
   onPendingCountChange: (count: number) => void;
 }
@@ -169,6 +170,7 @@ export function SpineStudio({
   onMedia,
   onWriting,
   onConstellation,
+  onModel3d,
   onConfigureConnection,
   onPendingCountChange,
 }: SpineStudioProps) {
@@ -752,6 +754,7 @@ export function SpineStudio({
     >
       <CreativeStudioHeader
         mode="spine"
+        onModel3d={onModel3d}
         subtitle={tr("可编辑的 2D 骨骼动画", "Editable 2D skeletal animation")}
         onMedia={onMedia}
         onWriting={onWriting}

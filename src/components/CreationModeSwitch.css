@@ -66,7 +66,7 @@
 .creative-studio-header :is(button, select, input):focus-visible { outline: 2px solid var(--creative-accent); outline-offset: 3px; }
 .creative-studio-header .creation-mode-switch {
   justify-self: center;
-  width: 394px;
+  width: 430px;
   height: 36px;
   display: flex;
   align-items: center;
@@ -107,7 +107,7 @@
   .creative-studio-actions .writing-model { max-width: 110px; }
 }
 @container creative-header (max-width: 980px) {
-  .creative-studio-header .creation-mode-switch { width: 148px; }
+  .creative-studio-header .creation-mode-switch { width: 178px; }
   .creative-studio-header .creation-mode-switch button:first-child { flex: 1; }
   .creative-studio-header .creation-mode-switch button { padding: 0; }
   .creative-studio-header .creation-mode-switch button span { display: none; }
@@ -140,3 +140,6 @@
 
 .creative-studio-header[data-creative-mode="spine"] { --creative-accent: var(--info-text); --creative-accent-soft: color-mix(in srgb, var(--creative-accent) 10%, var(--surface)); --creative-accent-border: color-mix(in srgb, var(--creative-accent) 22%, var(--surface)); --creative-accent-hover: color-mix(in srgb, var(--creative-accent) 16%, var(--surface)); }
 .creative-studio-header .creation-mode-switch button[data-creative-mode="spine"] { --creative-tab-accent: var(--info-text); }
+
+.creative-studio-header[data-creative-mode="model3d"] { --creative-accent: var(--info-text); }
+.creative-studio-header .creation-mode-switch button[data-creative-mode="model3d"] { --creative-tab-accent: var(--info-text); }

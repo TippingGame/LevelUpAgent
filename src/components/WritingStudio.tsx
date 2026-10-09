@@ -198,6 +198,7 @@ interface WritingStudioProps {
   onSpine: () => void;
   onMedia: () => void;
   onConstellation: () => void;
+  onModel3d: () => void;
 }
 
 const ENTITY_KINDS: WritingEntityKind[] = ["character", "location", "faction", "item", "world", "plot", "rule", "quest", "custom"];
@@ -232,6 +233,7 @@ export function WritingStudio({
   onMedia,
   onSpine,
   onConstellation,
+  onModel3d,
 }: WritingStudioProps) {
   const [projects, setProjects] = useState<WritingProject[]>([]);
   const [activeProjectId, setActiveProjectId] = useState("");
@@ -1293,7 +1295,7 @@ export function WritingStudio({
 
   return (
     <main className={`writing-studio creative-studio${armorClassName}`} data-armor-level={armorDataLevel}>
-      <CreativeStudioHeader mode="writing" onSpine={onSpine} className="writing-topbar" subtitle={saving ? tr("正在保存…", "Saving…") : savedAt ? tr("已自动保存", "Autosaved") : tr("本地写作项目", "Local writing projects")} onMedia={onMedia} onConstellation={onConstellation} context={<button
+      <CreativeStudioHeader mode="writing" onModel3d={onModel3d} onSpine={onSpine} className="writing-topbar" subtitle={saving ? tr("正在保存…", "Saving…") : savedAt ? tr("已自动保存", "Autosaved") : tr("本地写作项目", "Local writing projects")} onMedia={onMedia} onConstellation={onConstellation} context={<button
             type="button"
             className="writing-navigator-toggle"
             aria-label={navigatorOpen ? tr("关闭写作导航", "Close writing navigation") : tr("打开写作导航", "Open writing navigation")}

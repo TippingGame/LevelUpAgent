@@ -1,6 +1,7 @@
 ; Based on tauri-cli-v2.11.4's NSIS template (MIT / Apache-2.0).
 ; Local changes: resolve the previous NSIS directory from its UninstallString,
-; guard invalid uninstall paths, and retain legacy remembered install locations.
+; guard invalid uninstall paths, retain legacy remembered install locations,
+; and confirm personal-data cleanup on the localized uninstall page.
 ; See docs/WINDOWS_INSTALLER_COMPATIBILITY.md before updating this template.
 Unicode true
 ManifestDPIAware true
@@ -439,43 +440,57 @@ FunctionEnd
 ; 1. Confirm uninstall page
 Var DeleteAppDataCheckbox
 Var DeleteAppDataCheckboxState
-!define /ifndef WS_EX_LAYOUTRTL         0x00400000
-!define MUI_PAGE_CUSTOMFUNCTION_SHOW un.ConfirmShow
-Function un.ConfirmShow ; Add add a `Delete app data` check box
-  ; $1 inner dialog HWND
-  ; $2 window DPI
-  ; $3 style
-  ; $4 x
-  ; $5 y
-  ; $6 width
-  ; $7 height
-  FindWindow $1 "#32770" "" $HWNDPARENT ; Find inner dialog
-  System::Call "user32::GetDpiForWindow(p r1) i .r2"
-  ${If} $(^RTL) = 1
-    StrCpy $3 "${__NSD_CheckBox_EXSTYLE} | ${WS_EX_LAYOUTRTL}"
-    IntOp $4 50 * $2
-  ${Else}
-    StrCpy $3 "${__NSD_CheckBox_EXSTYLE}"
-    IntOp $4 0 * $2
+Var DeleteAppDataConfirmed
+; A native NSIS confirmation page cannot dispatch nsDialogs click callbacks.
+; Own this page so mouse and keyboard toggles use the same confirmation handler.
+UninstPage custom un.ConfirmShow un.ConfirmLeave
+Function un.ConfirmShow
+  Call un.SkipIfPassive
+  !insertmacro MUI_HEADER_TEXT "$(cleanupUninstallTitle)" "$(cleanupUninstallBody)"
+  StrCpy $DeleteAppDataCheckboxState 0
+  StrCpy $DeleteAppDataConfirmed 0
+  nsDialogs::Create 1018
+  Pop $0
+  ${If} $0 == error
+    Abort
   ${EndIf}
-  IntOp $5 100 * $2
-  IntOp $6 400 * $2
-  IntOp $7 25 * $2
-  IntOp $4 $4 / 96
-  IntOp $5 $5 / 96
-  IntOp $6 $6 / 96
-  IntOp $7 $7 / 96
-  System::Call 'user32::CreateWindowEx(i r3, w "${__NSD_CheckBox_CLASS}", w "$(deleteAppData)", i ${__NSD_CheckBox_STYLE}, i r4, i r5, i r6, i r7, p r1, i0, i0, i0) i .s'
+  ${IfThen} $(^RTL) = 1 ${|} nsDialogs::SetRTL $(^RTL) ${|}
+  ${NSD_CreateLabel} 0 10u 100% 24u "$(cleanupKeepData)"
+  Pop $0
+  ${NSD_CreateLabel} 0 42u 100% 12u "$(cleanupInstallLocation)"
+  Pop $0
+  ${NSD_CreateText} 0 58u 100% 14u "$INSTDIR"
+  Pop $0
+  SendMessage $0 ${EM_SETREADONLY} 1 0
+  ${NSD_CreateCheckbox} 0 90u 100% 26u "$(deleteAppData)"
   Pop $DeleteAppDataCheckbox
-  SendMessage $HWNDPARENT ${WM_GETFONT} 0 0 $1
-  SendMessage $DeleteAppDataCheckbox ${WM_SETFONT} $1 1
+  ${NSD_OnClick} $DeleteAppDataCheckbox un.ConfirmDeleteAppData
+  GetDlgItem $0 $HWNDPARENT 1
+  SendMessage $0 ${WM_SETTEXT} 0 "STR:$(^UninstallBtn)"
+  nsDialogs::Show
 FunctionEnd
-!define MUI_PAGE_CUSTOMFUNCTION_LEAVE un.ConfirmLeave
+Function un.ConfirmDeleteAppData
+  Pop $0 ; nsDialogs pushes the clicked control's HWND.
+  ${NSD_GetState} $DeleteAppDataCheckbox $0
+  ${If} $0 == ${BST_CHECKED}
+    StrCpy $DeleteAppDataConfirmed 0
+    ; Only visibly check the box once the user has confirmed.
+    ${NSD_SetState} $DeleteAppDataCheckbox ${BST_UNCHECKED}
+    MessageBox MB_YESNO|MB_ICONEXCLAMATION|MB_DEFBUTTON2 "$(confirmDeleteAppData)" /SD IDNO IDYES cleanup_confirmed
+    Return
+    cleanup_confirmed:
+    ${NSD_SetState} $DeleteAppDataCheckbox ${BST_CHECKED}
+    StrCpy $DeleteAppDataConfirmed 1
+  ${Else}
+    StrCpy $DeleteAppDataConfirmed 0
+  ${EndIf}
+FunctionEnd
 Function un.ConfirmLeave
   SendMessage $DeleteAppDataCheckbox ${BM_GETCHECK} 0 0 $DeleteAppDataCheckboxState
+  ${If} $DeleteAppDataConfirmed != 1
+    StrCpy $DeleteAppDataCheckboxState 0
+  ${EndIf}
 FunctionEnd
-!define MUI_PAGE_CUSTOMFUNCTION_PRE un.SkipIfPassive
-!insertmacro MUI_UNPAGE_CONFIRM
 
 ; 2. Uninstalling Page
 !insertmacro MUI_UNPAGE_INSTFILES
@@ -485,11 +500,47 @@ FunctionEnd
 !insertmacro MUI_LANGUAGE "{{this}}"
 {{/each}}
 !insertmacro MUI_RESERVEFILE_LANGDLL
+LangString cleanupUninstallTitle ${LANG_ENGLISH} "Uninstall ${PRODUCTNAME}"
+LangString cleanupUninstallTitle ${LANG_SIMPCHINESE} "卸载 ${PRODUCTNAME}"
+LangString cleanupUninstallTitle ${LANG_TRADCHINESE} "解除安裝 ${PRODUCTNAME}"
+LangString cleanupUninstallBody ${LANG_ENGLISH} "Remove ${PRODUCTNAME} from this computer."
+LangString cleanupUninstallBody ${LANG_SIMPCHINESE} "从此计算机移除 ${PRODUCTNAME}。"
+LangString cleanupUninstallBody ${LANG_TRADCHINESE} "從此電腦移除 ${PRODUCTNAME}。"
+LangString cleanupKeepData ${LANG_ENGLISH} "Your personal data is kept by default. Select the option below only if you also want to delete it."
+LangString cleanupKeepData ${LANG_SIMPCHINESE} "默认保留个人数据。如需同时清理，请勾选下方选项。"
+LangString cleanupKeepData ${LANG_TRADCHINESE} "預設保留個人資料。如需同時清理，請勾選下方選項。"
+LangString cleanupInstallLocation ${LANG_ENGLISH} "Installation folder:"
+LangString cleanupInstallLocation ${LANG_SIMPCHINESE} "安装目录："
+LangString cleanupInstallLocation ${LANG_TRADCHINESE} "安裝目錄："
+LangString confirmDeleteAppData ${LANG_ENGLISH} "Also delete this account's ${PRODUCTNAME} data when uninstalling?$\r$\n$\r$\nSettings, conversations and files in the app's data folders will be permanently deleted. Back up anything you need first.$\r$\n$\r$\nYes selects the option; nothing is deleted until you uninstall. No keeps your data."
+LangString confirmDeleteAppData ${LANG_SIMPCHINESE} "卸载时同时清理当前账户的 ${PRODUCTNAME} 个人数据吗？$\r$\n$\r$\n应用数据目录中的设置、对话记录和文件将被永久删除，无法恢复。请先备份需要保留的内容。$\r$\n$\r$\n选择“是”后勾选此项，执行卸载时才会清理；选择“否”保留数据。"
+LangString confirmDeleteAppData ${LANG_TRADCHINESE} "解除安裝時同時清理目前帳戶的 ${PRODUCTNAME} 個人資料嗎？$\r$\n$\r$\n應用程式資料目錄中的設定、對話記錄和檔案將被永久刪除，無法復原。請先備份需要保留的內容。$\r$\n$\r$\n選擇「是」後勾選此項，執行解除安裝時才會清理；選擇「否」保留資料。"
 {{#each language_files}}
   !include "{{this}}"
 {{/each}}
 
+; Read the current Windows display language on every launch, including uninstall.
+; Never restore a language saved by an older installer or show a language picker.
+!macro NormalizeSystemLanguage
+  ${If} $LANGUAGE == 1028
+  ${OrIf} $LANGUAGE == 3076
+  ${OrIf} $LANGUAGE == 5124
+    StrCpy $LANGUAGE 1028 ; Traditional Chinese: Taiwan, Hong Kong, Macao
+  ${ElseIf} $LANGUAGE == 2052
+  ${OrIf} $LANGUAGE == 4100
+    StrCpy $LANGUAGE 2052 ; Simplified Chinese: China, Singapore
+  ${Else}
+    StrCpy $LANGUAGE 1033 ; English fallback
+  ${EndIf}
+!macroend
+!macro UseSystemLanguage
+  System::Call 'kernel32::GetUserDefaultUILanguage() i .r0'
+  StrCpy $LANGUAGE $0
+  !insertmacro NormalizeSystemLanguage
+!macroend
+
 Function .onInit
+  !insertmacro UseSystemLanguage
   ${GetOptions} $CMDLINE "/P" $PassiveMode
   ${IfNot} ${Errors}
     StrCpy $PassiveMode 1
@@ -769,13 +820,16 @@ Function .onInstSuccess
 FunctionEnd
 
 Function un.onInit
+  !insertmacro UseSystemLanguage
   !insertmacro SetContext
 
   !if "${INSTALLMODE}" == "both"
     !insertmacro MULTIUSER_UNINIT
   !endif
 
-  !insertmacro MUI_UNGETLANGUAGE
+  ; Language follows the current OS even if it changed since installation.
+  StrCpy $DeleteAppDataCheckboxState 0
+  StrCpy $DeleteAppDataConfirmed 0
 
   ${GetOptions} $CMDLINE "/P" $PassiveMode
   ${IfNot} ${Errors}
@@ -883,6 +937,7 @@ Section Uninstall
   ; Delete app data if the checkbox is selected
   ; and if not updating
   ${If} $DeleteAppDataCheckboxState = 1
+  ${AndIf} $DeleteAppDataConfirmed = 1
   ${AndIf} $UpdateMode <> 1
     ; Clear the install location $INSTDIR from registry
     DeleteRegKey SHCTX "${MANUPRODUCTKEY}"

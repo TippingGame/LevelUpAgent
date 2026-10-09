@@ -23,6 +23,23 @@ test("Windows upgrade uses the versioned custom NSIS template", () => {
   assert.match(lock, /'@tauri-apps\/cli':\s+specifier: [^\n]+\s+version: 2\.11\.4\s/);
 });
 
+test("NSIS follows system language and requires confirmation before deleting personal data", () => {
+  assert.deepEqual(config.bundle.windows.nsis.languages, ["English", "SimpChinese", "TradChinese"]);
+  assert.equal(config.bundle.windows.nsis.displayLanguageSelector, false);
+  assert.match(functionBody(".onInit"), /!insertmacro UseSystemLanguage/);
+  assert.match(functionBody("un.onInit"), /!insertmacro UseSystemLanguage/);
+  assert.doesNotMatch(functionBody("un.onInit"), /!insertmacro MUI_UNGETLANGUAGE/);
+  assert.match(template, /kernel32::GetUserDefaultUILanguage/);
+  assert.match(template, /LangString confirmDeleteAppData \$\{LANG_SIMPCHINESE\}/);
+  assert.match(template, /LangString confirmDeleteAppData \$\{LANG_TRADCHINESE\}/);
+  assert.match(functionBody("un.ConfirmShow"), /\$\{NSD_OnClick\} \$DeleteAppDataCheckbox un\.ConfirmDeleteAppData/);
+  assert.match(functionBody("un.ConfirmDeleteAppData"), /MB_YESNO\|MB_ICONEXCLAMATION\|MB_DEFBUTTON2/);
+  assert.match(functionBody("un.ConfirmDeleteAppData"), /\$\{NSD_SetState\} \$DeleteAppDataCheckbox \$\{BST_UNCHECKED\}/);
+  assert.match(functionBody("un.ConfirmDeleteAppData"), /\$\{NSD_SetState\} \$DeleteAppDataCheckbox \$\{BST_CHECKED\}/);
+  assert.match(functionBody("un.ConfirmLeave"), /\$DeleteAppDataConfirmed != 1[\s\S]*StrCpy \$DeleteAppDataCheckboxState 0/);
+  assert.match(template, /\$DeleteAppDataCheckboxState = 1\s+\$\{AndIf\} \$DeleteAppDataConfirmed = 1\s+\$\{AndIf\} \$UpdateMode <> 1/);
+});
+
 test("native NSIS resolves and uninstalls legacy/current installs without deleting user data", {
   skip: process.platform !== "win32",
   timeout: 120_000,
@@ -41,12 +58,16 @@ test("native NSIS resolves and uninstalls legacy/current installs without deleti
   const nativeOutput = quote(output.replaceAll("/", "\\"));
   const uninstall = functionBody("PageLeaveReinstall").match(/  reinst_uninstall:([\s\S]*?)  reinst_done:/);
   assert.ok(uninstall);
+  const languageMacros = template.match(/!macro NormalizeSystemLanguage[\s\S]*?!macro UseSystemLanguage[\s\S]*?!macroend/)[0];
+  const languageChecks = [[2052,2052],[4100,2052],[1028,1028],[3076,1028],[5124,1028],[1033,1033],[1031,1033]].map(([input, expected]) =>
+    `StrCpy $LANGUAGE ${input}\n!insertmacro NormalizeSystemLanguage\n!insertmacro AssertEqual '$LANGUAGE' '${expected}' 'display language ${input} selects ${expected}'`).join("\n");
   // Compile the actual production functions and uninstall branch. Only the
   // registry namespace, payload, and uninstaller belong to this test fixture.
   const source = String.raw`
 Unicode true
 !include LogicLib.nsh
 !include FileFunc.nsh
+!include nsDialogs.nsh
 Name "${id}"
 OutFile "${nativeOutput}\test.exe"
 RequestExecutionLevel user
@@ -62,7 +83,12 @@ Var WixMode
 Var UpdateMode
 Var PassiveMode
 Var Log
+Var DeleteAppDataCheckbox
+Var DeleteAppDataCheckboxState
+Var DeleteAppDataConfirmed
 LangString unableToUninstall 1033 "Unable to uninstall!"
+LangString confirmDeleteAppData 1033 "Delete test data?"
+${languageMacros}
 
 !macro AssertEqual actual expected label
   StrCmp '@{actual}' '@{expected}' +4
@@ -102,11 +128,70 @@ ${uninstall[1]}
   reinst_done:
 FunctionEnd
 
+Function un.ConfirmDeleteAppData
+${functionBody("un.ConfirmDeleteAppData")}
+FunctionEnd
+Function un.ConfirmLeave
+${functionBody("un.ConfirmLeave")}
+FunctionEnd
+
+Function un.onInit
+  @{GetOptions} $CMDLINE "/CLEANUPTEST" $0
+  IfErrors cleanup_test_done
+  FileOpen $Log '@{TESTROOT}\cleanup-results.txt' w
+${languageChecks}
+  !insertmacro UseSystemLanguage
+  ; A hidden, fixture-only checkbox exercises production state transitions.
+  ; /S also verifies MessageBox /SD IDNO without interacting with the desktop.
+  System::Call 'user32::CreateWindowExW(i0, w "BUTTON", w "", i @{BS_AUTOCHECKBOX}, i0, i0, i100, i20, p0, p0, p0, p0) p.s'
+  Pop $DeleteAppDataCheckbox
+  IntCmp $DeleteAppDataCheckbox 0 cleanup_test_no_control
+  StrCpy $DeleteAppDataConfirmed 0
+  Call un.ConfirmLeave
+  !insertmacro AssertEqual '$DeleteAppDataCheckboxState' '0' 'cleanup is off by default'
+  @{NSD_SetState} $DeleteAppDataCheckbox @{BST_CHECKED}
+  Call un.ConfirmLeave
+  !insertmacro AssertEqual '$DeleteAppDataCheckboxState' '0' 'checked box without confirmation cannot enable cleanup'
+  StrCpy $DeleteAppDataConfirmed 1
+  Call un.ConfirmLeave
+  !insertmacro AssertEqual '$DeleteAppDataCheckboxState' '1' 'confirmed checked box enables cleanup'
+  @{NSD_SetState} $DeleteAppDataCheckbox @{BST_UNCHECKED}
+  Push $DeleteAppDataCheckbox
+  Call un.ConfirmDeleteAppData
+  !insertmacro AssertEqual '$DeleteAppDataConfirmed' '0' 'unchecking revokes confirmation'
+  Call un.ConfirmLeave
+  !insertmacro AssertEqual '$DeleteAppDataCheckboxState' '0' 'unchecking preserves data'
+  @{NSD_SetState} $DeleteAppDataCheckbox @{BST_CHECKED}
+  Push $DeleteAppDataCheckbox
+  Call un.ConfirmDeleteAppData
+  @{NSD_GetState} $DeleteAppDataCheckbox $0
+  !insertmacro AssertEqual '$0' '0' 'No leaves checkbox unchecked'
+  !insertmacro AssertEqual '$DeleteAppDataConfirmed' '0' 'No cannot authorize cleanup'
+  Call un.ConfirmLeave
+  !insertmacro AssertEqual '$DeleteAppDataCheckboxState' '0' 'No preserves data on page leave'
+  System::Call 'user32::DestroyWindow(p $DeleteAppDataCheckbox)'
+  FileWrite $Log 'COMPLETE$\r$\n'
+  FileClose $Log
+  SetErrorLevel 0
+  Quit
+  cleanup_test_no_control:
+    FileWrite $Log 'FAIL: could not create fixture checkbox$\r$\n'
+    FileClose $Log
+    SetErrorLevel 9
+    Quit
+  cleanup_test_done:
+FunctionEnd
+
 Section
   SetShellVarContext current
   SetRegView 64
   StrCpy $PassiveMode 1
   FileOpen $Log '@{TESTROOT}\results.txt' w
+${languageChecks}
+  !insertmacro UseSystemLanguage
+  WriteUninstaller '@{TESTROOT}\cleanup-test.exe'
+  ExecWait '$\"@{TESTROOT}\cleanup-test.exe$\" /S /CLEANUPTEST _?=@{TESTROOT}' $0
+  !insertmacro AssertEqual '$0' '0' 'production cleanup state transitions pass'
   !insertmacro RegisterFixture '@{TESTROOT}\旧版 自定义目录'
   WriteRegStr HKCU 'Software\levelup\@{PRODUCTNAME}' '' '$INSTDIR'
   WriteRegStr HKCU '@{UNINSTKEY}' 'DisplayVersion' '1.0.51'
@@ -185,6 +270,10 @@ SectionEnd
   assert.equal(run.status, 0, `${run.error ?? ""}\n${result}`);
   assert.match(result, /COMPLETE/);
   assert.doesNotMatch(result, /FAIL:/);
+  const cleanupResult = readFileSync(join(output, "cleanup-results.txt"), "utf8");
+  assert.match(cleanupResult, /COMPLETE/);
+  assert.doesNotMatch(cleanupResult, /FAIL:/);
   console.log(result.trim());
+  console.log(cleanupResult.trim());
   console.log(`Native installer evidence: ${output}`);
 });

@@ -392,6 +392,7 @@ import { mergeThreadCatalog, threadMatchesQuery } from "./lib/conversationCatalo
 import { useComposerDraft } from "./lib/useComposerDraft";
 import type { ThreadCursor } from "./lib/types";
 
+const ModelWorkbench = lazy(() => import("./components/ModelWorkbench").then((module) => ({ default: module.ModelWorkbench })));
 const SpineStudio = lazy(() => import("./components/SpineStudio").then((module) => ({ default: module.SpineStudio })));
 const MediaStudio = lazy(() => import("./components/MediaStudio").then((module) => ({ default: module.MediaStudio })));
 const MediaAssetCard = lazy(() => import("./components/MediaStudio").then((module) => ({ default: module.MediaAssetCard })));
@@ -797,10 +798,11 @@ function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [workspaceView]);
+  const [model3dPendingCount, setModel3dPendingCount] = useState(0);
   const [mediaStudioPendingCount, setMediaStudioPendingCount] = useState(0);
   const [constellationPendingCount, setConstellationPendingCount] = useState(0);
   const [spinePendingCount, setSpinePendingCount] = useState(0);
-  const mediaPendingCount = mediaStudioPendingCount + constellationPendingCount + spinePendingCount;
+  const mediaPendingCount = model3dPendingCount + mediaStudioPendingCount + constellationPendingCount + spinePendingCount;
   const [mediaCatalogRevision, setMediaCatalogRevision] = useState(0);
   const [activePetId, setActivePetId] = useState("yui");
   const [petProfiles, setPetProfiles] = useState<PetProfile[]>([]);
@@ -5084,10 +5086,10 @@ function App() {
         </div>
 
         <button
-          className={`media-nav-button${workspaceView === "writing" || workspaceView === "media" || workspaceView === "constellation" || workspaceView === "spine" ? " active" : ""}`}
+          className={`media-nav-button${workspaceView === "writing" || workspaceView === "media" || workspaceView === "constellation" || workspaceView === "spine" || workspaceView === "model3d" ? " active" : ""}`}
           type="button"
           aria-label={tr("打开创作空间", "Open Creative Studio")}
-          aria-current={workspaceView === "writing" || workspaceView === "media" || workspaceView === "constellation" || workspaceView === "spine" ? "page" : undefined}
+          aria-current={workspaceView === "writing" || workspaceView === "media" || workspaceView === "constellation" || workspaceView === "spine" || workspaceView === "model3d" ? "page" : undefined}
           onClick={() => {
             openCreativeStudio();
             setProfileMenuOpen(false);
@@ -5095,7 +5097,7 @@ function App() {
           }}
         >
           <ImagePlus size={16} />
-          <span><strong>{tr("创作空间", "Creative Studio")}</strong><small>{mediaPendingCount > 0 ? tr(`${mediaPendingCount} 个结果正在后台生成`, `${mediaPendingCount} outputs generating`) : tr("图片 · 视频 · 语音 · 写作 · 星图 · Spine", "Image · Video · Speech · Writing · Constellation · Spine")}</small></span>
+          <span><strong>{tr("创作空间", "Creative Studio")}</strong><small>{mediaPendingCount > 0 ? tr(`${mediaPendingCount} 个结果正在后台生成`, `${mediaPendingCount} outputs generating`) : tr("图片 · 视频 · 语音 · 写作 · 星图 · Spine · 3D", "Image · Video · Speech · Writing · Constellation · Spine · 3D")}</small></span>
           {mediaPendingCount > 0 ? <span className="media-nav-progress" title={tr(`${mediaPendingCount} 个结果正在生成`, `${mediaPendingCount} outputs generating`)}><LoaderCircle className="spin" size={12} /><b>{mediaPendingCount}</b></span> : <Sparkles size={14} />}
         </button>
 
@@ -5278,6 +5280,7 @@ function App() {
       <DeferredWorkspace active={workspaceView === "media"}>
       <MediaStudio
         onSpine={() => setWorkspaceView("spine")}
+        onModel3d={() => setWorkspaceView("model3d")}
         active={workspaceView === "media"}
         locale={locale}
         armorMode={armorMode}
@@ -5296,6 +5299,7 @@ function App() {
       <DeferredWorkspace active={workspaceView === "writing"}>
       <WritingStudio
         onSpine={() => setWorkspaceView("spine")}
+        onModel3d={() => setWorkspaceView("model3d")}
         active={workspaceView === "writing"}
         locale={locale}
         armorMode={armorMode}
@@ -5316,6 +5320,7 @@ function App() {
       <DeferredWorkspace active={workspaceView === "constellation"}>
       <ConstellationStudio
         onSpine={() => setWorkspaceView("spine")}
+        onModel3d={() => setWorkspaceView("model3d")}
         active={workspaceView === "constellation"}
         threads={threads}
         onOpenConversation={activateThread}
@@ -5336,8 +5341,14 @@ function App() {
         onPendingCountChange={setConstellationPendingCount}
       />
       </DeferredWorkspace>
+      <DeferredWorkspace active={workspaceView === "model3d"}>
+        <ModelWorkbench active={workspaceView === "model3d"}
+          onMedia={() => setWorkspaceView("media")} onWriting={() => setWorkspaceView("writing")}
+          onConstellation={() => setWorkspaceView("constellation")} onSpine={() => setWorkspaceView("spine")}
+          onPendingCountChange={setModel3dPendingCount} />
+      </DeferredWorkspace>
       <DeferredWorkspace active={workspaceView === "spine"}>
-        <SpineStudio active={workspaceView === "spine"} locale={locale} mediaCatalogRevision={mediaCatalogRevision}
+        <SpineStudio onModel3d={() => setWorkspaceView("model3d")} active={workspaceView === "spine"} locale={locale} mediaCatalogRevision={mediaCatalogRevision}
           onMedia={() => setWorkspaceView("media")} onWriting={() => setWorkspaceView("writing")} onConstellation={() => setWorkspaceView("constellation")}
           onConfigureConnection={() => setSettingsOpen(true)} onPendingCountChange={setSpinePendingCount} />
       </DeferredWorkspace>
@@ -6274,7 +6285,7 @@ function QQ2007Toolbar({
 }) {
   const items = [
     ["new-task", tr("新建任务", "New task"), onNewThread, false],
-    ["scheduled", tr("创作空间", "Studio"), onMedia, workspaceView === "writing" || workspaceView === "media" || workspaceView === "constellation" || workspaceView === "spine"],
+    ["scheduled", tr("创作空间", "Studio"), onMedia, workspaceView === "writing" || workspaceView === "media" || workspaceView === "constellation" || workspaceView === "spine" || workspaceView === "model3d"],
     ["groups", tr("摇光残影", "Echo"), onPet, petOpen],
     ["plugins", tr("插件", "Extensions"), onExtensions, false],
     ["sites", tr("站点", "Website"), onWebsite, false],

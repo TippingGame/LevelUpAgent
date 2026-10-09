@@ -17,7 +17,7 @@ not the cause of the empty directory and is not used to resolve the path.
 `src-tauri/windows/installer.nsi` is based on the official
 [tauri-cli-v2.11.4 template](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.4/crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi),
 under Tauri's MIT / Apache-2.0 licenses. The configuration explicitly selects it.
-Its local changes are limited to the previous NSIS installation directory:
+The installation-directory changes are:
 
 - Derive the directory from the existing product's registered `UninstallString`,
   which does not depend on publisher metadata. Strip paired outer quotes and
@@ -35,8 +35,27 @@ Its local changes are limited to the previous NSIS installation directory:
 
 No migration writes run merely by opening the installer. Normal installation
 writes the current publisher, version, and directory records as before. The
-updater, user-data deletion checkbox, MSI path, and signing configuration retain
-their upstream behavior. This change does not migrate between MSI and NSIS.
+updater, MSI path, and signing configuration retain their upstream behavior.
+This change does not migrate between MSI and NSIS.
+
+## Language and personal-data confirmation
+
+The NSIS package includes English, Simplified Chinese, and Traditional Chinese.
+Both initializers call `GetUserDefaultUILanguage` on every launch. Mainland China
+and Singapore select Simplified Chinese; Taiwan, Hong Kong and Macao select
+Traditional Chinese; other languages fall back to English. Neither installation
+nor uninstallation opens a language picker or restores an old installer language.
+Changing the Windows display language after installation also changes uninstall UI.
+
+The uninstall confirmation page uses `nsDialogs`, so both mouse and keyboard
+checkbox changes reach the same callback. Personal data is kept by default.
+Selecting cleanup first opens a localized warning with **No** as the default;
+only **Yes** checks the box. Unchecking clears the confirmation, and selecting
+again requires a fresh confirmation. Leaving the page requires both a checked
+box and the explicit confirmation before enabling cleanup. Silent/passive
+uninstalls keep data, and the existing updater-mode deletion guard remains.
+The cleanup paths remain the existing per-account AppData directories; clicking
+the checkbox or opening the warning does not delete anything.
 
 The standard installer hooks execute after the maintenance page; a pre-install
 hook alone cannot repair this failure. That is why a versioned template is used.
@@ -52,7 +71,10 @@ product; production LevelUpAgent installs and user data are never test targets.
 The fixture reproduces exit code 2 using the previous empty-parameter command,
 then verifies successful old/new publisher uninstalls, custom Unicode and spaced
 paths, stale version/directory records, preserved user-data sentinels, missing or
-malformed uninstall commands, remembered paths, and fresh installs. Artifacts and
+malformed uninstall commands, remembered paths, and fresh installs. It also runs
+the production cleanup callbacks against a hidden fixture checkbox, covering
+unchecked defaults, unconfirmed selection, confirmed selection, revocation,
+and the safe **No** response in silent mode. No production cleanup runs. Artifacts and
 assertion output remain under `artifacts/LevelUpAgentInstallerTest-*`.
 
 When updating the Tauri CLI, review the vendored template against the new upstream

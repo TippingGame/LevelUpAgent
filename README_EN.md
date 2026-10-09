@@ -55,9 +55,9 @@ pnpm tauri build
 
 [Architecture](docs/ARCHITECTURE.md) · [Performance](docs/PERFORMANCE.md) · [Codex workflow comparison](docs/REPLACEMENT_AUDIT.md) · [Roadmap](docs/ROADMAP.md) · [Releases](docs/RELEASE.md)
 
-The current release is `1.1.70`. Windows builds lack Authenticode signatures; macOS builds use ad-hoc signing and are not notarized. Platform verification limits are documented in the [1.1.70 release notes](docs/RELEASE_1.1.70.md).
+The current release is `1.2.71`. Windows builds lack Authenticode signatures; macOS builds use ad-hoc signing and are not notarized. Platform verification limits are documented in the [1.2.71 release notes](docs/RELEASE_1.2.71.md).
 
-Version `1.1.70` fixes canvas fitting and panning in the creation workspace image editor, supports holding Space to freely pan the canvas, and displays actual image dimensions aligned to the right of the timestamp in creation history. See the [release notes](docs/RELEASE_1.1.70.md) for verification. Earlier local test builds remain documented in the [build history](docs/VERSION_1.1.65.md).
+Version `1.2.71` adds a 3D workbench: TripoSG shape generation, separate SD2.1 texturing, rigging and animation, with a neutral gray viewer and GLB/FBX exports. Large model and CUDA resources live in one shared Release and survive app updates. Windows installers and uninstallers follow the current system language; personal-data cleanup requires an extra confirmation. See the [release notes](docs/RELEASE_1.2.71.md) and [publishing guide](docs/RELEASE_GUIDE.md).
 
 ## License
 
