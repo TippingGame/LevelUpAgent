@@ -23,15 +23,20 @@ jobs:
         with:
           script: |
             const tag = context.ref.replace(/^refs\/tags\//, "");
-            let release;
-            try {
-              release = (await github.rest.repos.getReleaseByTag({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                tag,
-              })).data;
-            } catch (error) {
-              if (error.status !== 404) throw error;
+            // The tag endpoint can return 404 for an existing draft. Enumerate
+            // drafts as well so reruns cannot split assets across two releases.
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            });
+            const matches = releases.filter(release => release.tag_name === tag);
+            if (matches.length > 1) {
+              core.setFailed(`Multiple releases exist for ${tag}; consolidate drafts before retrying`);
+              return;
+            }
+            let release = matches[0];
+            if (!release) {
               release = (await github.rest.repos.createRelease({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -133,18 +138,32 @@ jobs:
         run: bash scripts/build-macos.sh
       - name: Upload macOS DMG
         if: runner.os == 'macOS'
+        uses: actions/github-script@v7
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          shopt -s nullglob
-          dmg_files=(artifacts/macos/*.dmg)
-          if (( ${#dmg_files[@]} != 1 )); then
-            echo "Expected exactly one macOS DMG, found ${#dmg_files[@]}" >&2
-            exit 1
-          fi
-          gh release upload "${GITHUB_REF_NAME}" "${dmg_files[0]}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --clobber
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        with:
+          script: |
+            const fs = require("node:fs/promises");
+            const { createHash } = require("node:crypto");
+            const files = (await fs.readdir("artifacts/macos")).filter(name => name.endsWith(".dmg"));
+            if (files.length !== 1) throw new Error(`Expected one macOS DMG, found ${files.length}`);
+            const release_id = Number(process.env.RELEASE_ID);
+            const params = { owner: context.repo.owner, repo: context.repo.repo, release_id };
+            const release = (await github.rest.repos.getRelease(params)).data;
+            if (!release.draft) throw new Error("Refusing to modify a published release");
+            const name = files[0];
+            const data = await fs.readFile(`artifacts/macos/${name}`);
+            const digest = `sha256:${createHash("sha256").update(data).digest("hex")}`;
+            const assets = await github.paginate(github.rest.repos.listReleaseAssets, { ...params, per_page: 100 });
+            const existing = assets.find(asset => asset.name === name);
+            if (existing?.state === "uploaded" && existing.size === data.length && existing.digest === digest) return;
+            if (existing) await github.rest.repos.deleteReleaseAsset({
+              owner: params.owner, repo: params.repo, asset_id: existing.id,
+            });
+            await github.rest.repos.uploadReleaseAsset({
+              ...params, name, data,
+              headers: { "content-type": "application/octet-stream", "content-length": data.length },
+            });
       - name: Build and upload non-macOS bundle
         if: runner.os != 'macOS'
         uses: tauri-apps/tauri-action@v0
