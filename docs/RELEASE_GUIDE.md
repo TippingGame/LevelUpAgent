@@ -66,6 +66,15 @@ Linux/WSL 必须覆盖真实进程组取消和目录链接恢复，Windows 原�
 
 本文的仓库内同步副本为 `LevelUpAgent/docs/RELEASE_GUIDE.md`，修改发布规范时同时更新两份。
 
+已验证记录：v1.2.72 于 2026-10-09 21:34:32（Asia/Shanghai）正式发布并设为 Latest。
+构建提交 `3ff34012f3cbaac79f8cee57b34fc911aeda4a5a`，三平台 CI run `37934222275`
+与四平台 Release run `37934223456` 全部成功。10 个资产完整下载并通过 SHA-256 / GitHub
+digest 校验，Windows EXE/MSI updater 签名及可信注释签名有效；公开 `latest.json` 返回 200，
+版本为 `1.2.72`。Windows 包内 59 个资源文件核对通过，安装器与主程序版本均为 `1.2.72`。
+正式 EXE 已同步本机安装包目录并更新 SHA 清单；通用资源 `2026.10.1` 继续复用，未重新打包上传。
+本次未覆盖现有安装或执行旧版应用内更新。详细记录：`LevelUpAgent/docs/RELEASE_1.2.72.md`；
+证据：`research/release-1.2.72-2026-10-09`。
+
 已验证记录：v1.2.71 于 2026-10-09 15:15:28（Asia/Shanghai）正式发布并设为 Latest。
 构建提交 `8aa8fc2d18674a38b2d804720b3029ca30c81d94`，三平台 CI run `37888509630`
 与四平台 Release run `37888569068` 全部成功。10 个应用资产完整下载并通过 SHA-256 / GitHub

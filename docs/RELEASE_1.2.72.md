@@ -1,6 +1,6 @@
 # LevelUpAgent 1.2.72 发布记录
 
-日期：2026-10-09。状态：发布准备中，完成检查与资产核验后公开。
+日期：2026-10-09。状态：已发布到 GitHub，正式 Release 为 `v1.2.72`，已设为 Latest。
 
 ## 本版内容
 
@@ -29,7 +29,23 @@
 - Python 16 项测试在 Windows 14 通过、2 按平台跳过；WSL 16 项全部通过，覆盖真实进程组取消和目录链接恢复。
 - CI / Release 工作流通过 actionlint 检查。通用资源清单公开下载返回 200，14 个分片的大小与 GitHub digest 匹配，资源 Release 保持 prerelease、不占用 Latest。
 
-GitHub Actions、资产哈希与 updater 签名、公开更新清单结果将在核验后补充。
+- 构建提交：`3ff34012f3cbaac79f8cee57b34fc911aeda4a5a`，tag：`v1.2.72`。
+- [三平台 CI](https://github.com/TippingGame/LevelUpAgent/actions/runs/37934222275) 与 [四平台 Release](https://github.com/TippingGame/LevelUpAgent/actions/runs/37934223456) 全部成功。Windows Rust 测试 538 通过、Linux 539 通过；各平台按条件忽略 4 项。
+- 两个 macOS 包均在原生 runner 完成 DMG 内及模拟复制安装后的签名验证。
+- Windows EXE 解包核对 59 个资源文件，忽略文本换行差异后与源码一致；正式 CSP、updater 公钥和地址均存在，无 QA 页面或隔离应用标识。安装器和主程序的 FileVersion / ProductVersion 均为 `1.2.72`。
+
+## 发布结果
+
+- 正式 Release：[LevelUpAgent v1.2.72](https://github.com/TippingGame/LevelUpAgent/releases/tag/v1.2.72)，Release ID `407921564`。
+- 发布时间：北京时间 2026-10-09 21:34:32，已设为 Latest，非预发布。
+- Windows EXE/MSI、Apple Silicon/Intel DMG、Linux AppImage/DEB/RPM、Windows 签名及更新清单共 10 个资产齐全；全部完整下载，大小与 SHA-256 均与 GitHub digest 一致。
+- Windows EXE/MSI updater 签名和可信注释签名通过现有公钥验证；`latest.json` 的下载 URL 和签名匹配本次资产。
+- 未登录的公开 `latest.json` 与正式发布页均返回 HTTP 200；清单版本为 `1.2.72`，字节与已验签资产内的清单一致。
+- 通用 3D 资源 `2026.10.1` 保持公开 prerelease，14 个分片的大小和 digest 与清单匹配；本次未重新打包或上传资源。
+- Windows 安装包已同步至 `G:\Work\LevelUpAgent\安装包\LevelUpAgent_1.2.72_Windows_x64-setup.exe`，保留旧版，新增 `SHA256_1.2.72.txt` 并更新总清单。
+- EXE 大小：14,751,424 字节；SHA-256：`34149D774384A27F5E4794557A4E7940F6A576DCB00716B9EB2DE26EBEBC0B2A`。
+
+下载过程中遇到本地连接缓慢，改用断点续传与分段下载；合并后的 AppImage 已通过完整 SHA-256 校验。未改动远端资产。
 
 ## 验证边界
 
