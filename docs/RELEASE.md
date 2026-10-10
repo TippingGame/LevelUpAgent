@@ -47,5 +47,5 @@ Authenticode，因此安装包没有系统级发布者签名，首次下载或�
 公开资产不可覆盖，内容变化必须增加资源版本。v1.3.73 的音频资源为 `2026.10.1`，仅支持 Windows x64，
 MusicGen Small 权重许可为 CC-BY-NC-4.0，仅限非商业用途。
 
-具体步骤和实际发布记录见 [发布手册](RELEASE_GUIDE.md)、[1.3.73 发布记录](RELEASE_1.3.73.md) 与
+具体步骤和实际发布记录见 [发布手册](RELEASE_GUIDE.md)、[1.3.74 发布记录](RELEASE_1.3.74.md) 与
 [音频资源构建说明](../packaging/music-workbench/README.md)。

@@ -5,7 +5,6 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_RECENT_IMAGES: usize = 4;
 
 #[derive(Serialize, Deserialize)]
@@ -18,17 +17,17 @@ struct ImageResult {
 /// Caller must resolve filesystem permissions before importing the file.
 pub fn capture(storage: &Path, path: &Path) -> Result<String, String> {
     let metadata = std::fs::metadata(path).map_err(|e| format!("Cannot view image: {e}"))?;
-    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_IMAGE_BYTES {
-        return Err("view_image requires a non-empty image file no larger than 8 MiB".into());
+    if !metadata.is_file() || metadata.len() == 0 {
+        return Err("view_image requires a non-empty image file".into());
     }
     let bytes = std::fs::read(path).map_err(|e| format!("Cannot view image: {e}"))?;
-    if bytes.len() as u64 > MAX_IMAGE_BYTES || attachment::detect_image_mime(&bytes).is_none() {
-        return Err("view_image supports PNG, JPEG, WebP and GIF images up to 8 MiB".into());
+    if attachment::detect_image_mime(&bytes).is_none() {
+        return Err("view_image supports PNG, JPEG, WebP and GIF images".into());
     }
-    let image_attachment = attachment::import_base64_image(
+    let image_attachment = attachment::import_image_bytes(
         storage,
         path.file_name().and_then(|v| v.to_str()).unwrap_or("image"),
-        &base64::engine::general_purpose::STANDARD.encode(bytes),
+        bytes,
     )?;
     serde_json::to_string(&ImageResult {
         path: path.to_string_lossy().into_owned(),
@@ -78,8 +77,7 @@ pub fn resolve(storage: &Path, messages: &mut [AgentMessage]) {
         remaining = remaining.saturating_sub(1);
         let loaded = attachment::read_managed_reference(storage, &result.image_attachment.id)
             .and_then(|image| {
-                if image.kind != AttachmentKind::Image || image.bytes.len() as u64 > MAX_IMAGE_BYTES
-                {
+                if image.kind != AttachmentKind::Image {
                     return Err("Stored visual evidence is not a supported image".into());
                 }
                 result.image_attachment.mime_type = image.mime_type;
@@ -206,13 +204,12 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let source = root.join("contact-sheet.png");
         let encoded = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX2kAAAAASUVORK5CYII=";
-        std::fs::write(
-            &source,
-            base64::engine::general_purpose::STANDARD
-                .decode(encoded)
-                .unwrap(),
-        )
-        .unwrap();
+        let mut bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        bytes.resize(8 * 1024 * 1024 + 1, 0);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        std::fs::write(&source, bytes).unwrap();
         let result = capture(&root.join("attachments"), &source).unwrap();
         let mut history: Vec<AgentMessage> = serde_json::from_value(serde_json::json!([
             {"role":"assistant","content":"inspect", "toolCalls":[
@@ -234,7 +231,10 @@ mod tests {
         assert_eq!(wire.len(), 4);
         assert_eq!(wire[2].role, "tool");
         assert_eq!(wire[3].role, "user");
-        assert_eq!(wire[3].attachments[0].data_base64.as_deref(), Some(encoded));
+        assert_eq!(
+            wire[3].attachments[0].data_base64.as_deref(),
+            Some(encoded.as_str())
+        );
         // Missing cached bytes report a recoverable read failure, never a
         // fabricated visual pass or a fatal conversation error.
         let id = history[1].attachments[0].id.clone();

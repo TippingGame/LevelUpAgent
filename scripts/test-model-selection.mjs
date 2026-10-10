@@ -154,7 +154,7 @@ test("MiniMax defaults use discovered text models and exclude H3 and images", ()
 });
 
 test("media-only connections have no text default and cannot be text fallbacks", () => {
-  for (const id of ["", "   ", "Seedance-2", "Seedance-2.0", "Seedance-2.5", "seedance/Seedance-2.5", "MiniMax-H3", "models/minimax/MiniMax-H3-Max", "MiniMax-Hailuo-2.3", "image-01", "image-01-live", "gpt-image-2.5-sunburst"]) {
+  for (const id of ["", "   ", "Seedance-2", "Seedance-2.0", "Seedance-2.5", "seedance/Seedance-2.5", "Seedream-5-Pro", "无限制-Seedream-5-Pro", "models/seedream/Seedream-5-Pro", "MiniMax-H3", "models/minimax/MiniMax-H3-Max", "MiniMax-Hailuo-2.3", "image-01", "image-01-live", "gpt-image-2.5-sunburst"]) {
     assert.equal(selection.isTextGenerationModel({ id }), false, id);
     assert.equal(selection.profileHasTextModel({ model: id }), false, id);
     assert.equal(selection.preferredDetectedModel({ ...grokProfile, name: "Seedance" }, models(id)), undefined, id);

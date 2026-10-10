@@ -14,7 +14,6 @@ const MAX_NON_IMAGE_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_MEDIA_REFERENCE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_PREVIEW_CHARS: usize = 4_000;
 const MAX_TEXT_BYTES: u64 = MAX_NON_IMAGE_ATTACHMENT_BYTES;
-const MAX_REQUEST_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_REQUEST_TEXT_BYTES: u64 = 48 * 1024 * 1024;
 const MAX_REQUEST_DOCUMENT_BYTES: u64 = 48 * 1024 * 1024;
 const MAX_REQUEST_FILE_BYTES: u64 = 64 * 1024 * 1024;
@@ -223,11 +222,11 @@ fn import_path(
     } else {
         MAX_ATTACHMENT_BYTES
     };
-    if metadata.len() > maximum || allow_video && metadata.len() == 0 {
+    if (metadata.len() > maximum && !is_image_file(source)?) || allow_video && metadata.len() == 0 {
         return Err(if allow_video {
-            "Media references must be between 1 byte and 64 MiB".to_owned()
+            "Media references must be non-empty; videos may be at most 64 MiB".to_owned()
         } else {
-            "Attachments may be at most 64 MiB".to_owned()
+            "Non-image attachments may be at most 64 MiB".to_owned()
         });
     }
     let bytes = std::fs::read(source)
@@ -263,13 +262,20 @@ pub fn import_base64_attachment(
         .and_then(|value| value.split_once(',').map(|(_, data)| data))
         .unwrap_or(encoded)
         .trim();
-    let maximum_encoded_len = (MAX_ATTACHMENT_BYTES as usize).div_ceil(3) * 4;
-    if encoded.len() > maximum_encoded_len {
-        return Err("Pasted files may be at most 64 MiB".to_owned());
-    }
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(encoded)
         .map_err(|_| "The pasted file data is invalid".to_owned())?;
+    import_bytes(storage, name, bytes, false)
+}
+
+pub(crate) fn import_image_bytes(
+    storage: &Path,
+    name: &str,
+    bytes: Vec<u8>,
+) -> Result<ImageAttachment, String> {
+    if detect_image_mime(&bytes).is_none() {
+        return Err("Image content must be a PNG, JPEG, WebP, or GIF image".to_owned());
+    }
     import_bytes(storage, name, bytes, false)
 }
 
@@ -284,11 +290,13 @@ fn import_bytes(
     } else {
         MAX_ATTACHMENT_BYTES
     };
-    if bytes.len() as u64 > maximum || allow_video && bytes.is_empty() {
+    if (bytes.len() as u64 > maximum && detect_image_mime(&bytes).is_none())
+        || allow_video && bytes.is_empty()
+    {
         return Err(if allow_video {
-            "Media references must be between 1 byte and 64 MiB".to_owned()
+            "Media references must be non-empty; videos may be at most 64 MiB".to_owned()
         } else {
-            "Attachments may be at most 64 MiB".to_owned()
+            "Non-image attachments may be at most 64 MiB".to_owned()
         });
     }
     let name = name
@@ -350,7 +358,10 @@ pub fn read_managed_reference(
     let path = storage.join(format!("{attachment_id}.bin"));
     let metadata = std::fs::metadata(&path)
         .map_err(|_| "The selected reference image is no longer available".to_owned())?;
-    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_MEDIA_REFERENCE_BYTES {
+    if !metadata.is_file()
+        || metadata.len() == 0
+        || (metadata.len() > MAX_MEDIA_REFERENCE_BYTES && !is_image_file(&path)?)
+    {
         return Err("The selected media reference has an invalid size".to_owned());
     }
     let bytes = std::fs::read(&path)
@@ -383,8 +394,11 @@ pub fn read_managed_reference(
 pub fn read_local_media_reference(path: &Path) -> Result<ManagedReference, String> {
     let metadata = std::fs::metadata(path)
         .map_err(|error| format!("Could not read media reference metadata: {error}"))?;
-    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_MEDIA_REFERENCE_BYTES {
-        return Err("Media references must be between 1 byte and 64 MiB".to_owned());
+    if !metadata.is_file()
+        || metadata.len() == 0
+        || (metadata.len() > MAX_MEDIA_REFERENCE_BYTES && !is_image_file(path)?)
+    {
+        return Err("Media references must be non-empty; videos may be at most 64 MiB".to_owned());
     }
     let bytes =
         std::fs::read(path).map_err(|error| format!("Could not read media reference: {error}"))?;
@@ -425,7 +439,8 @@ pub fn preview(
     let path = storage.join(format!("{attachment_id}.bin"));
     let metadata = std::fs::metadata(&path)
         .map_err(|_| "The selected attachment is no longer available".to_owned())?;
-    if !metadata.is_file() || metadata.len() > MAX_MEDIA_REFERENCE_BYTES {
+    if !metadata.is_file() || (metadata.len() > MAX_MEDIA_REFERENCE_BYTES && !is_image_file(&path)?)
+    {
         return Err("The selected attachment has an invalid size".to_owned());
     }
     let bytes = std::fs::read(path)
@@ -483,7 +498,6 @@ pub fn resolve_with_workspace(
     workspace: Option<&Path>,
 ) -> Result<(), String> {
     let active_user_index = messages.iter().rposition(|message| message.role == "user");
-    let mut image_total = 0_u64;
     let mut text_total = 0_u64;
     let mut document_total = 0_u64;
     let mut file_total = 0_u64;
@@ -503,7 +517,9 @@ pub fn resolve_with_workspace(
             let path = storage.join(format!("{}.bin", attachment.id));
             let metadata = std::fs::metadata(&path)
                 .map_err(|_| format!("Attachment '{}' is no longer available", attachment.name))?;
-            if !metadata.is_file() || metadata.len() > MAX_ATTACHMENT_BYTES {
+            if !metadata.is_file()
+                || (metadata.len() > MAX_ATTACHMENT_BYTES && !is_image_file(&path)?)
+            {
                 return Err(format!(
                     "Attachment '{}' has an invalid size",
                     attachment.name
@@ -546,10 +562,6 @@ pub fn resolve_with_workspace(
 
             match attachment.kind {
                 AttachmentKind::Image => {
-                    image_total = image_total.saturating_add(bytes.len() as u64);
-                    if image_total > MAX_REQUEST_IMAGE_BYTES {
-                        return Err("Images in one request may total at most 64 MiB".to_owned());
-                    }
                     attachment.data_base64 =
                         Some(base64::engine::general_purpose::STANDARD.encode(&bytes));
                 }
@@ -894,6 +906,15 @@ pub(crate) fn validate_id(id: &str) -> Result<(), String> {
         return Err("Attachment ID is invalid".to_owned());
     }
     Ok(())
+}
+
+/// Recognize images by content, including files larger than legacy attachment limits.
+pub(crate) fn is_image_file(path: &Path) -> Result<bool, String> {
+    let mut header = Vec::with_capacity(12);
+    std::fs::File::open(path)
+        .and_then(|file| file.take(12).read_to_end(&mut header))
+        .map_err(|error| format!("Could not read image header: {error}"))?;
+    Ok(detect_image_mime(&header).is_some())
 }
 
 pub(crate) fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
@@ -2193,17 +2214,41 @@ mod tests {
     }
 
     #[test]
-    fn accepts_images_above_the_previous_twenty_mib_limit() {
-        assert_eq!(MAX_ATTACHMENT_BYTES, 64 * 1024 * 1024);
-        assert_eq!(MAX_REQUEST_IMAGE_BYTES, 64 * 1024 * 1024);
+    fn large_images_preserve_bytes_through_import_preview_and_resolution() {
         let root = root("large-image-attachment");
-        let source = root.join("large.png");
-        let mut bytes = vec![0_u8; 20 * 1024 * 1024 + 1];
+        // Only sniff the format locally; validation belongs to the provider.
+        let source = root.join("large.unknown");
+        let mut bytes = vec![0x5a_u8; 64 * 1024 * 1024 + 1];
         bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
-        std::fs::write(&source, bytes).unwrap();
-        let attachment = import(&root.join("managed"), &source).unwrap();
+        std::fs::write(&source, &bytes).unwrap();
+        let storage = root.join("managed");
+        let attachment = import(&storage, &source).unwrap();
         assert_eq!(attachment.kind, AttachmentKind::Image);
-        assert!(attachment.size_bytes > 20 * 1024 * 1024);
+        assert_eq!(attachment.size_bytes, bytes.len() as u64);
+        assert_eq!(read_local_media_reference(&source).unwrap().bytes, bytes);
+        assert_eq!(
+            read_managed_reference(&storage, &attachment.id)
+                .unwrap()
+                .bytes,
+            bytes
+        );
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        drop(bytes);
+        assert_eq!(
+            preview(&storage, &attachment.id, &attachment.name)
+                .unwrap()
+                .data_base64
+                .as_deref(),
+            Some(encoded.as_str())
+        );
+        let pasted = import_base64_image(&storage, "pasted.png", &encoded).unwrap();
+        let mut messages = vec![user_message(vec![attachment, pasted])];
+        // Both the individual image and the request exceed the former 64 MiB cap.
+        resolve(&storage, &mut messages).unwrap();
+        for image in &messages[0].attachments {
+            assert_eq!(image.kind, AttachmentKind::Image);
+            assert_eq!(image.data_base64.as_deref(), Some(encoded.as_str()));
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 

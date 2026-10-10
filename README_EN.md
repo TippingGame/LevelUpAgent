@@ -1,65 +1,68 @@
-<img src="public/logo.png" width="64" height="64" alt="LevelUpAgent" />
+<div align="center">
+
+<img src="public/logo.png" width="88" height="88" alt="LevelUpAgent" />
 
 # LevelUpAgent
 
-A local-first desktop agent. Connect your models and work on code, research, and creative projects in one workspace.
+### Turn an idea into something real.
 
-[简体中文](README.md) · **English** · [Documentation](docs/README.md) · [LevelUpAPI](https://levelup.mom/)
+A desktop agent for code and creative work. Connect your own models and go from the first thought to the finished project.
 
-## Workspaces
+[![Release](https://img.shields.io/github/v/release/TippingGame/LevelUpAgent?style=flat-square&color=f26564)](https://github.com/TippingGame/LevelUpAgent/releases/latest)
+[![Platforms](https://img.shields.io/badge/Windows%20%7C%20macOS%20%7C%20Linux-4f78c4?style=flat-square)](https://github.com/TippingGame/LevelUpAgent/releases/latest)
+[![License](https://img.shields.io/badge/license-LGPL--3.0-5f9c86?style=flat-square)](LICENSE)
 
-| Workspace | Capabilities |
+**[Download](https://github.com/TippingGame/LevelUpAgent/releases/latest)** · **[Documentation](docs/README.md)** · [Issues & ideas](https://github.com/TippingGame/LevelUpAgent/issues)
+
+[简体中文](README.md) · **English**
+
+</div>
+
+![LevelUpAgent conversation home with projects, model controls, execution modes, and task details](docs/images/conversation-home.png)
+
+## One workspace, from thinking to shipping
+
+Let your agent explore a project, edit code, run commands, and verify pages. Plan before executing, or give a longer task to Goal. Files, tool calls, and changes remain available for review.
+
+| What you want to make | What you can use |
 | --- | --- |
-| Agent | Streaming conversations, files, commands, approvals, Goals, Skills, MCP, browser QA, and change review |
-| Conversations | History search, quick switching, independent drafts, queued follow-ups, forks, import, and export |
-| Creative Studio | Images, video, speech, references, mask editing, and local history |
-| Audio | Local MusicGen Small instrumentals, playback, WAV export, favorites, trimming, and on-demand resources |
-| Writing | Manuscripts, codex entries, references, goals, snapshots, and narrative playtesting |
-| Constellation | Typed nodes, parallel branches, a canvas, and reusable blueprints |
+| **Code & research** | Streaming chat · Project files · Terminal · Browser QA · Change review |
+| **Images & sound** | Image generation · Reference edits · Inpainting · Video · Speech · Local music |
+| **Stories & worlds** | Writing studio · Lore & references · Story playtesting · Spine · 3D |
+| **Your own workflow** | Skills · MCP · Constellation workflows · Themes & layouts · Desktop companions |
 
-![Constellation workspace](docs/images/constellation-workflow.png)
+## Give your ideas room to grow
 
-Themes, declarative layouts, Starlight Echoes desktop companions, connection migration, and CLI configuration sync are also included. See the [feature inventory](docs/FEATURES.md) for scope and limitations.
+Describe a scene, add references, and start creating. Prompts, settings, and generation history stay on your machine, ready for the next iteration.
 
-## Get Started
+![LevelUpAgent Creative Studio home with six genuinely generated artworks](docs/images/creative-studio.png)
 
-Install a build from this repository's **Releases**, add a connection with its Base URL, API key, and model, then select your project.
+<div align="center"><sub>Cloud Post Office · Undersea Library · Moon Café · Pocket Forest · Desert Spring · Interstellar Garden<br />Captured in a separate 1.3.74 demo workspace. Account balance is redacted.</sub></div>
 
-Supported protocols include OpenAI Responses, Chat Completions, Anthropic Messages, Gemini GenerateContent, and OpenCode Go automatic routing. Connections support failover; discovery and reasoning controls follow actual provider and model capabilities.
+## Start in three steps
 
-Press `Ctrl/Cmd + K` in chat to search conversations and commands. Agent executes tasks, Plan exposes read-only tools, Chat uses no tools, and Goal continues work through a completion audit. [Workflows and recovery](docs/AGENT_WORKFLOWS.md)
+1. **Install** — Get the build for your system from [Releases](https://github.com/TippingGame/LevelUpAgent/releases/latest).
+2. **Connect** — Enter your Base URL, API key, and model. Supports Responses, Chat Completions, Anthropic, Gemini, and OpenCode Go.
+3. **Create** — Choose a project and start a conversation, or open Creative Studio. Press `Ctrl / Cmd + K` to search conversations and commands.
 
-## Permissions And Data
+Conversations and drafts are stored locally; API keys stay in the OS credential vault. Submitted context goes to your selected model provider. The default Agent permission allows workspace edits and some commands automatically; you can choose per-action approval. [Permissions & data →](docs/SECURITY_AUDIT.md)
 
-API keys stay in the OS credential vault. Conversations and drafts are stored locally. Configured model providers receive submitted context; local storage does not imply offline inference.
-
-New installations default to `agent` permission, allowing workspace edits and some commands automatically. `request` asks before side effects; `full` allows automatic execution and access outside the workspace. Existing choices are preserved. Shell and stdio MCP run with your OS account's privileges. [Security boundaries](docs/SECURITY_AUDIT.md)
-
-## Development
+<details>
+<summary><strong>Develop locally</strong></summary>
 
 Requires Node.js 22.18+, pnpm 11+, stable Rust, and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
 
 ```sh
-pnpm install
+pnpm install --frozen-lockfile
 pnpm tauri dev
 ```
 
-`pnpm dev` previews the UI without desktop credentials, file tools, or real Agent execution.
+`pnpm dev` previews the frontend only. Before contributing, run `pnpm check`, `pnpm build`, and `cargo test --manifest-path src-tauri/Cargo.toml`. See [architecture](docs/ARCHITECTURE.md) and the [publishing guide](docs/RELEASE_GUIDE.md).
 
-```sh
-pnpm check
-pnpm build
-cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-cargo test --manifest-path src-tauri/Cargo.toml
-pnpm tauri build
-```
+</details>
 
-[Architecture](docs/ARCHITECTURE.md) · [Performance](docs/PERFORMANCE.md) · [Codex workflow comparison](docs/REPLACEMENT_AUDIT.md) · [Roadmap](docs/ROADMAP.md) · [Releases](docs/RELEASE.md)
+<sub>Local music currently supports Windows x64. MusicGen weights use CC-BY-NC-4.0 for non-commercial use. Large audio and 3D resources download on demand. [Capabilities & requirements](docs/FEATURES.md) · [1.3.74 release notes & platform signing](docs/RELEASE_1.3.74.md)</sub>
 
-The current release is `1.3.73`. Windows builds lack Authenticode signatures; macOS builds use ad-hoc signing and are not notarized. Platform verification limits are documented in the [1.3.73 release notes](docs/RELEASE_1.3.73.md).
+---
 
-Version `1.3.73` adds a local audio workbench to Creative Studio: 4–30 second instrumentals, playback, trimming and fades, favorites, and WAV export, with memory and download progress indicators. Python, CUDA, and models are downloaded from an independent resource Release and excluded from app installers. Local audio currently supports Windows x64; MusicGen weights use CC-BY-NC-4.0 for non-commercial use. See the [audio guide](docs/AUDIO_WORKBENCH.md), [release notes](docs/RELEASE_1.3.73.md), and [publishing guide](docs/RELEASE_GUIDE.md).
-
-## License
-
-[LGPL-3.0-only](LICENSE). See [third-party notices](src-tauri/THIRD_PARTY_NOTICES.md).
+[LGPL-3.0-only](LICENSE) · [Third-party notices](src-tauri/THIRD_PARTY_NOTICES.md) · [LevelUpAPI](https://levelup.mom/)

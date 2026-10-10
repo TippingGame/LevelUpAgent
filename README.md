@@ -1,68 +1,68 @@
-<img src="public/logo.png" width="64" height="64" alt="LevelUpAgent" />
+<div align="center">
+
+<img src="public/logo.png" width="88" height="88" alt="LevelUpAgent" />
 
 # LevelUpAgent
 
-本地优先的桌面 Agent。连接自己的模型，在同一个工作区完成开发、研究与创作。
+### 把想法，做成作品。
 
-**简体中文** · [English](README_EN.md) · [文档](docs/README.md) · [LevelUpAPI](https://levelup.mom/)
+会写代码，也懂创作的桌面 Agent。连接自己的模型，从第一句想法到最后一次交付。
 
-## 工作台
+[![Release](https://img.shields.io/github/v/release/TippingGame/LevelUpAgent?style=flat-square&color=f26564)](https://github.com/TippingGame/LevelUpAgent/releases/latest)
+[![Platforms](https://img.shields.io/badge/Windows%20%7C%20macOS%20%7C%20Linux-4f78c4?style=flat-square)](https://github.com/TippingGame/LevelUpAgent/releases/latest)
+[![License](https://img.shields.io/badge/license-LGPL--3.0-5f9c86?style=flat-square)](LICENSE)
 
-| 入口 | 能力 |
+**[下载应用](https://github.com/TippingGame/LevelUpAgent/releases/latest)** · **[使用文档](docs/README.md)** · [反馈与建议](https://github.com/TippingGame/LevelUpAgent/issues)
+
+**简体中文** · [English](README_EN.md)
+
+</div>
+
+![LevelUpAgent 会话首页：项目、模型、执行模式与任务详情](docs/images/conversation-home.png)
+
+## 一个工作区，从思考到交付
+
+让 Agent 读项目、改代码、运行命令、验证页面；也可以先规划，再执行。长任务交给 Goal，过程中的文件、工具调用与变更都能回看。
+
+| 想做什么 | 在这里完成 |
 | --- | --- |
-| Agent | 流式会话、项目文件、命令、审批、Goal、Skills、MCP、浏览器验证与变更审阅 |
-| 会话 | 全历史检索、快捷切换、独立草稿、运行中追加、分支、导入与导出 |
-| 创作 | 图片、视频、语音、参考素材、蒙版编辑与本地历史 |
-| 音频 | MusicGen Small 本地纯音乐生成、试听、WAV 导出、收藏与裁剪；模型和依赖按需下载 |
-| 写作 | 文稿、设定集、参考库、目标执行、快照与剧情试玩 |
-| 星图 | 类型化节点、并行分支、画板与可复用蓝图 |
-| 3D | TripoSG 形状、SD2.1 独立贴图、可调整的人形蒙皮与基础动画；大型资源按版本独立安装 |
+| **开发与研究** | 流式会话 · 项目文件 · 终端 · 浏览器验证 · 变更审阅 |
+| **图片与声音** | 生图 · 参考图编辑 · 蒙版重绘 · 视频 · 语音 · 本地音乐 |
+| **故事与世界** | 写作工作台 · 设定与参考库 · 剧情试玩 · Spine · 3D |
+| **自己的工作方式** | Skills · MCP · 星图工作流 · 主题与布局 · 桌宠陪伴 |
 
-![星图工作台](docs/images/constellation-workflow.png)
+## 灵感，有地方落地
 
-还包含主题与声明式布局、摇光残影桌面陪伴、连接迁移和 CLI 配置同步。
-完整范围、限制及验证记录见 [功能总览](docs/FEATURES.md)。
-3D 工作台的运行条件、SD2.1 / SDXL 实测比较和 Release 资源发布见 [3D 模型工作台](docs/MODEL_WORKBENCH.md)。
+写下画面，带上参考图，开始创作。提示词、参数与生成历史留在本机，下一次灵感可以接着上一次继续。
 
-## 开始使用
+![LevelUpAgent 创作空间：首页与六张实际生成的创意作品](docs/images/creative-studio.png)
 
-从仓库 **Releases** 安装对应平台的版本，添加模型连接，填写 Base URL、API Key 和模型，然后选择项目。
+<div align="center"><sub>云端邮局 · 深海图书馆 · 月面咖啡馆 · 掌心森林 · 沙漠里的春天 · 星际花园<br />截图来自 1.3.74 独立演示工作区；账户余额已遮蔽。</sub></div>
 
-支持 OpenAI Responses、Chat Completions、Anthropic Messages、Gemini GenerateContent 和 OpenCode Go 自动路由。多个连接可配置故障转移；模型发现与思考档位以连接实际返回和模型能力为准。
+## 三步开始
 
-聊天工作台按 `Ctrl/Cmd + K` 搜索会话和命令。Agent 执行任务，Plan 只做只读规划，Chat 不调用工具，Goal 持续推进并审计完成结果。[使用与恢复](docs/AGENT_WORKFLOWS.md)
+1. **安装** — 从 [Releases](https://github.com/TippingGame/LevelUpAgent/releases/latest) 下载对应系统的安装包。
+2. **连接** — 填写自己的 Base URL、API Key 和模型。支持 Responses、Chat Completions、Anthropic、Gemini 与 OpenCode Go。
+3. **开工** — 选择项目开始会话，或进入创作空间生成第一件作品。`Ctrl / Cmd + K` 随时搜索会话和命令。
 
-## 权限与数据
+会话与草稿保存在本机，API Key 存入系统凭据库；发送的上下文会交给所选模型服务。默认 Agent 权限允许工作区编辑和部分命令自动执行，也可切换为逐项审批。[权限与数据说明 →](docs/SECURITY_AUDIT.md)
 
-API Key 保存在系统凭据库，会话和草稿保存在本机。配置的模型服务会收到发送的上下文；本地存储不代表离线推理。
+<details>
+<summary><strong>本地开发</strong></summary>
 
-新安装默认使用 `agent` 权限：工作区文件编辑和部分命令可以自动执行。`request` 对副作用逐项询问；`full` 允许自动执行及工作区外访问。已有权限选择保留。Shell 与 stdio MCP 使用当前系统账户权限。[安全边界](docs/SECURITY_AUDIT.md)
-
-## 开发
-
-需要 Node.js 22.18+、pnpm 11+、稳定版 Rust 及 [Tauri 平台依赖](https://v2.tauri.app/start/prerequisites/)。
+需要 Node.js 22.18+、pnpm 11+、稳定版 Rust 和 [Tauri 平台依赖](https://v2.tauri.app/start/prerequisites/)。
 
 ```sh
-pnpm install
+pnpm install --frozen-lockfile
 pnpm tauri dev
 ```
 
-`pnpm dev` 只预览界面，不具备桌面凭据、文件工具或真实 Agent 执行能力。
+`pnpm dev` 仅预览前端。提交前运行 `pnpm check`、`pnpm build`、`cargo test --manifest-path src-tauri/Cargo.toml`。更多见 [架构](docs/ARCHITECTURE.md) 与 [发布规范](docs/RELEASE_GUIDE.md)。
 
-```sh
-pnpm check
-pnpm build
-cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-cargo test --manifest-path src-tauri/Cargo.toml
-pnpm tauri build
-```
+</details>
 
-[架构](docs/ARCHITECTURE.md) · [性能](docs/PERFORMANCE.md) · [Codex 工作流对照](docs/REPLACEMENT_AUDIT.md) · [路线图](docs/ROADMAP.md) · [发布](docs/RELEASE.md)
+<sub>本地音乐目前支持 Windows x64；MusicGen 权重为 CC-BY-NC-4.0，仅限非商业用途。音频与 3D 大型资源按需下载。[功能与运行条件](docs/FEATURES.md) · [1.3.74 更新说明及平台签名情况](docs/RELEASE_1.3.74.md)</sub>
 
-当前发布版本为 `1.3.73`。Windows 未配置 Authenticode，macOS 使用 ad-hoc 签名、尚未公证。跨平台发布与实体机验证边界见 [1.3.73 发布说明](docs/RELEASE_1.3.73.md)。
+---
 
-`1.3.73` 将本地音频工作台接入创作空间，支持 4–30 秒纯音乐、试听、裁剪与淡入淡出、收藏和 WAV 导出；显示显存／内存、下载进度和空间提示。Python、CUDA 和模型通过独立资源 Release 下载，不进入主安装包。当前本地音频支持 Windows x64，MusicGen 权重为 CC-BY-NC-4.0，仅限非商业用途。详见 [音频工作台](docs/AUDIO_WORKBENCH.md)、[发布说明](docs/RELEASE_1.3.73.md) 与 [发布规范](docs/RELEASE_GUIDE.md)。
-
-## 许可
-
-[LGPL-3.0-only](LICENSE)。第三方归属见 [THIRD_PARTY_NOTICES](src-tauri/THIRD_PARTY_NOTICES.md)。
+[LGPL-3.0-only](LICENSE) · [第三方归属](src-tauri/THIRD_PARTY_NOTICES.md) · [LevelUpAPI](https://levelup.mom/)

@@ -24,7 +24,8 @@ constraints to Bing as `site:` terms and verifies the returned hosts.
 `view_image` and `browser_screenshot` keep every image from the latest tool-call
 batch, including batches larger than four images. Older image pixels are limited
 to the remaining recent-image budget and explicitly marked when omitted; reopen
-an older image when its pixels are needed. Each image still has an 8 MiB limit.
+an older image when its pixels are needed. Image bytes are passed through without
+a client-side size limit; the upstream provider decides what it accepts.
 
 New installations default to `agent` permission. It automatically permits file
 writes/edits, delegation, and commands that pass the heuristic risk filter.
@@ -93,8 +94,9 @@ Paths have no extension allowlist, including dotfiles and extensionless files.
 Quoted paths are exact; unquoted paths use the longest existing filename so
 spaces in names and trailing prose can coexist. Existing files appear as message attachments, including files outside
 the workspace explicitly supplied by the user. Directories and missing paths
-remain text so a request to create a new file can proceed. Each file may be up
-to 64 MiB, including empty files. Supported images are sent as images; reliably
+remain text so a request to create a new file can proceed. Legacy managed non-image
+files may be up to 64 MiB, including empty files. Supported images are sent as
+original bytes without local size or count limits; reliably
 decoded text and PDF/Office text are extracted up to the existing context limits.
 Unrecognized binary formats, unparseable documents and text/documents above
 20 MiB use original-file references for local tools. These references preserve

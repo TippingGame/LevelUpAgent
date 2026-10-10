@@ -222,7 +222,7 @@ export function reasoningEffortForProfile(
   return reasoningEffortsForProfile(profile).includes(effort) ? effort : "auto";
 }
 
-const NON_CHAT_MODEL = /(?:^|[\/:._-])(?:audio|dall-e|embed(?:ding|dings)?|image|imagen|imagine|moderation|realtime|speech|sora|stt|transcri|tts|veo|video|vision-preview|whisper|seedance|hailuo|minimax[._-]h[0-9]+)(?:[\/:._-]|$)/i;
+const NON_CHAT_MODEL = /(?:^|[\/:._-])(?:audio|dall-e|embed(?:ding|dings)?|image|imagen|imagine|moderation|realtime|speech|sora|stt|transcri|tts|veo|video|vision-preview|whisper|seedance|seedream|hailuo|minimax[._-]h[0-9]+)(?:[\/:._-]|$)/i;
 const LIGHTWEIGHT_MODEL = /(?:^|[\/:._-])(?:flash|haiku|mini|nano|small|lite)(?:[\/:._-]|$)/i;
 
 /** Keep text selectors and automatic defaults aligned as new media model names appear. */

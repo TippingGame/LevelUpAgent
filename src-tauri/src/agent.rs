@@ -3189,7 +3189,7 @@ fn tool_specs() -> Vec<(&'static str, &'static str, Value)> {
         ),
         (
             "view_image",
-            "View a local PNG, JPEG, WebP or GIF (up to 8 MiB). Returns actual image content to your vision context, not just its path. Use this for artwork and contact-sheet visual verification. Paths follow the selected filesystem permission; restricted hatch runs may view images only inside their canonical run directory. All images from the latest image tool batch are attached; older image results may be omitted and must be reopened when needed.",
+            "View a local PNG, JPEG, WebP or GIF. Sends the original image bytes without a local size limit; the provider decides what it accepts. Returns actual image content to your vision context, not just its path. Use this for artwork and contact-sheet visual verification. Paths follow the selected filesystem permission; restricted hatch runs may view images only inside their canonical run directory. All images from the latest image tool batch are attached; older image results may be omitted and must be reopened when needed.",
             json!({"type":"object", "properties":{"path":{"type":"string", "description":TOOL_PATH_DESCRIPTION}}, "required":["path"]}),
         ),
     ]
@@ -6988,6 +6988,86 @@ mod tests {
             );
             let (result, _) = collect_stream(request).await;
             assert!(result.content.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn large_inline_images_reach_upstream_unchanged_and_preserve_errors() {
+        use base64::Engine;
+        let mut bytes = vec![0x5a_u8; 4_658_448];
+        bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        for (status, detail) in [
+            ("524 A Timeout Occurred", "upstream image request timed out"),
+            ("400 Bad Request", "Upstream request failed"),
+            (
+                "413 Payload Too Large",
+                "upstream image size limit exceeded",
+            ),
+        ] {
+            // The same 4.4 MiB size as the reported incident reaches a real HTTP listener.
+            let response = match detail {
+                "upstream image request timed out" => {
+                    r#"{"error":{"message":"upstream image request timed out"}}"#
+                }
+                "Upstream request failed" => r#"{"error":{"message":"Upstream request failed"}}"#,
+                _ => r#"{"error":{"message":"upstream image size limit exceeded"}}"#,
+            };
+            let (url, capture) = mock_http_response_server(status, "application/json", response);
+            let mut request = test_request(url, ProviderProtocol::OpenaiResponses);
+            request.profile.model = "gpt-6-astra".into();
+            request.messages[0].attachments.push(ImageAttachment {
+                id: "0123456789abcdef0123456789abcdef".into(),
+                name: "large.png".into(),
+                mime_type: "image/png".into(),
+                size_bytes: bytes.len() as u64,
+                kind: crate::models::AttachmentKind::Image,
+                data_base64: Some(encoded.clone()),
+                text_content: None,
+            });
+            let error = run_turn_stream(
+                &Client::new(),
+                request,
+                "test-key",
+                CancellationToken::new(),
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                error.starts_with(&format!("Provider returned {}", &status[..3])),
+                "{error}"
+            );
+            assert!(error.ends_with(detail), "{error}");
+            let body = captured_json_request(
+                capture.recv_timeout(Duration::from_secs(5)).unwrap(),
+                "/v1/responses",
+            );
+            assert_eq!(body["model"], "gpt-6-astra");
+            let image = body["input"][0]["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["type"] == "input_image")
+                .unwrap();
+            let data = image["image_url"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("data:image/png;base64,")
+                .unwrap();
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD
+                    .decode(data)
+                    .unwrap(),
+                bytes
+            );
+            assert!(
+                body["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|tool| tool["type"] == "function")
+            );
         }
     }
 

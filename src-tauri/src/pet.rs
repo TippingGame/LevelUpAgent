@@ -675,6 +675,40 @@ impl PetManager {
         Ok(())
     }
 
+    fn active_window_position(&self) -> Option<crate::pet_life::PetWindowPosition> {
+        let state = self.state.lock().ok()?;
+        state
+            .life
+            .get(&state.active_pet_id)?
+            .window_position
+            .clone()
+    }
+
+    fn save_active_window_position(
+        &self,
+        x: f64,
+        y: f64,
+        monitor_origin: (i32, i32),
+    ) -> Result<(), String> {
+        let mut stored = self
+            .state
+            .lock()
+            .map_err(|_| "Could not lock desktop pet state".to_owned())?;
+        let mut state = stored.clone();
+        let pet_id = state.active_pet_id.clone();
+        let life = state
+            .life
+            .entry(pet_id)
+            .or_insert_with(|| StoredPetLife::new(now_millis()));
+        if !life.set_window_position(x, y) {
+            return Err("Starlight Echo window position must be finite".to_owned());
+        }
+        life.window_position.as_mut().unwrap().monitor_origin = Some(monitor_origin);
+        save_state(&self.state_path, &state)?;
+        *stored = state;
+        Ok(())
+    }
+
     pub fn export_backup(
         &self,
         pet_id: &str,
@@ -1173,6 +1207,38 @@ impl PetManager {
     }
 }
 
+/// Snapshot native geometry before hide/close/exit, while the window still exists.
+/// This also captures autonomous movement, without relying on renderer teardown IPC.
+pub fn persist_window_position(app: &tauri::AppHandle) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("pet") else {
+        return Ok(());
+    };
+    if !window.is_visible().map_err(|error| error.to_string())? {
+        return Ok(());
+    }
+    let Some(monitor) = window
+        .current_monitor()
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(());
+    };
+    let position = window.outer_position().map_err(|error| error.to_string())?;
+    let size = window.outer_size().map_err(|error| error.to_string())?;
+    let area = monitor.work_area();
+    let x = normalized_position_axis(position.x, area.position.x, area.size.width, size.width);
+    let y = normalized_position_axis(position.y, area.position.y, area.size.height, size.height);
+    app.state::<PetManager>().save_active_window_position(
+        x,
+        y,
+        (monitor.position().x, monitor.position().y),
+    )
+}
+
+fn normalized_position_axis(position: i32, origin: i32, available: u32, size: u32) -> f64 {
+    ((f64::from(position) - f64::from(origin)) / f64::from(available.saturating_sub(size).max(1)))
+        .clamp(0.0, 1.0)
+}
+
 pub fn create_window(app: &tauri::AppHandle, visible: bool) -> Result<WebviewWindow, String> {
     if let Some(window) = app.get_webview_window("pet") {
         return Ok(window);
@@ -1189,21 +1255,48 @@ pub fn create_window(app: &tauri::AppHandle, visible: bool) -> Result<WebviewWin
         .visible(visible)
         .build()
         .map_err(|error| format!("Could not create Starlight Echo window: {error}"))?;
-    if let Ok(Some(monitor)) = window.current_monitor()
+    let saved = app.state::<PetManager>().active_window_position();
+    let saved_monitor = saved
+        .as_ref()
+        .and_then(|saved| saved.monitor_origin)
+        .and_then(|origin| {
+            window
+                .available_monitors()
+                .ok()?
+                .into_iter()
+                .find(|monitor| (monitor.position().x, monitor.position().y) == origin)
+        });
+    if let Some(monitor) = saved_monitor.or_else(|| window.current_monitor().ok().flatten())
         && let Ok(size) = window.outer_size()
     {
-        let monitor_position = monitor.position();
-        let monitor_size = monitor.size();
-        let x = monitor_position.x
-            + monitor_size
-                .width
-                .saturating_sub(size.width)
-                .saturating_sub(24) as i32;
-        let y = monitor_position.y
-            + monitor_size
-                .height
-                .saturating_sub(size.height)
-                .saturating_sub(52) as i32;
+        let area = monitor.work_area();
+        let (x, y) = if let Some(saved) = saved {
+            (
+                area.position.x
+                    + (saved.x.clamp(0.0, 1.0)
+                        * f64::from(area.size.width.saturating_sub(size.width)))
+                    .round() as i32,
+                area.position.y
+                    + (saved.y.clamp(0.0, 1.0)
+                        * f64::from(area.size.height.saturating_sub(size.height)))
+                    .round() as i32,
+            )
+        } else {
+            (
+                area.position.x
+                    + area
+                        .size
+                        .width
+                        .saturating_sub(size.width)
+                        .saturating_sub(24) as i32,
+                area.position.y
+                    + area
+                        .size
+                        .height
+                        .saturating_sub(size.height)
+                        .saturating_sub(24) as i32,
+            )
+        };
         let _ = window.set_position(PhysicalPosition::new(x, y));
     }
     install_mouse_passthrough(&window)?;
@@ -2023,6 +2116,35 @@ mod tests {
     #[test]
     fn new_pet_state_uses_seventy_five_percent_scale() {
         assert_eq!(scale_for(&StoredPetState::default(), DEFAULT_PET_ID), 0.75);
+    }
+
+    #[test]
+    fn latest_native_pet_position_survives_reopen_and_invalid_saves() {
+        let root =
+            std::env::temp_dir().join(format!("levelup-pet-position-{}", uuid::Uuid::new_v4()));
+        let manager = PetManager::open(&root, &root).unwrap();
+        manager
+            .save_active_window_position(0.2, 0.3, (0, 0))
+            .unwrap();
+        let x = normalized_position_axis(-728, -1920, 1920, 430);
+        let y = normalized_position_axis(346, 24, 1040, 580);
+        manager
+            .save_active_window_position(x, y, (-1920, 0))
+            .unwrap();
+        assert!(
+            manager
+                .save_active_window_position(f64::NAN, y, (0, 0))
+                .is_err()
+        );
+        drop(manager);
+        let reopened = PetManager::open(&root, &root).unwrap();
+        let saved = reopened.active_window_position().unwrap();
+        assert!((saved.x - 0.8).abs() < f64::EPSILON);
+        assert!((saved.y - 0.7).abs() < f64::EPSILON);
+        assert_eq!(saved.monitor_origin, Some((-1920, 0)));
+        assert_eq!(normalized_position_axis(-1, 0, 200, 430), 0.0);
+        assert_eq!(normalized_position_axis(500, 0, 200, 430), 1.0);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

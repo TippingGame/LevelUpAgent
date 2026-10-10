@@ -6,7 +6,6 @@ import type { LocalAttachmentPath } from "./localAttachments";
 import type { WorkspaceFileSearch } from "./composerReferences";
 import { deduplicateMediaRefresh } from "./mediaPolling";
 import { runHarnessStream } from "./harnessStream";
-import { tr } from "./i18n";
 import type {
   AgentMessage,
   AgentMode,
@@ -358,11 +357,11 @@ export async function importMessagePathAttachments(
 
 export async function importAttachments(sourcePaths: string[]): Promise<ImageAttachment[]> {
   if (!isDesktop() || sourcePaths.length === 0) return [];
-  return invoke<ImageAttachment[]>("import_image_attachments", { sourcePaths: sourcePaths.slice(0, 12) });
+  return invoke<ImageAttachment[]>("import_image_attachments", { sourcePaths });
 }
 
 export async function importClipboardImages(files: File[]): Promise<ImageAttachment[]> {
-  const images = files.filter((file) => file.type.startsWith("image/")).slice(0, 8);
+  const images = files.filter((file) => file.type.startsWith("image/"));
   if (!isDesktop() || images.length === 0) return [];
   const timestamp = new Date().toISOString().replace(/[-:.TZ]/g, "");
   const payloads = await Promise.all(images.map(async (file, index) => ({
@@ -378,7 +377,7 @@ export async function importMediaReferences(sourcePaths: string[]): Promise<Imag
 }
 
 export async function importClipboardAttachments(files: File[]): Promise<ImageAttachment[]> {
-  const selected = files.slice(0, 12);
+  const selected = files;
   if (!isDesktop() || selected.length === 0) return [];
   const sourcePaths = selected.map((file) => (file as File & { path?: string }).path?.trim() ?? "");
   if (sourcePaths.every(Boolean)) return importAttachments(sourcePaths);
@@ -1388,9 +1387,6 @@ export async function importClipboardResources(files: File[], existingAttachment
   if (!isDesktop() || files.length === 0) return [];
   const paths = files.map((file) => (file as File & { path?: string }).path?.trim() ?? "");
   if (paths.every(Boolean)) return importLocalResources(paths, existingAttachments);
-  if (files.some((file) => file.size > 64 * 1024 * 1024)) {
-    throw new Error(tr("粘贴的文件数据不能超过 64 MiB；大文件请通过选择或拖入添加", "Pasted file data cannot exceed 64 MiB; select or drop larger local files"));
-  }
   const timestamp = new Date().toISOString().replace(/[-:.TZ]/g, "");
   const attachments = await Promise.all(files.map(async (file, index) => ({
     name: clipboardAttachmentName(file, timestamp, index),

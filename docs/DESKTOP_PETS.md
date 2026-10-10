@@ -4,6 +4,8 @@ LevelUpAgent calls its animated companions Starlight Echoes. The feature include
 
 On Windows, transparent parts of the overlay pass mouse input through to the window underneath. The character and active prompt automatically become interactive when the pointer enters their tight bounds. The character supports click-drag movement across monitors, double-click opens its conversation, and right-click opens its Life workspace. A task reminder's **open** action focuses the main window directly on the Plan view.
 
+The native host saves the latest visible position before hiding the overlay, closing either the main or pet window, and exiting. This includes autonomous movement since the last drag. Position is stored relative to the monitor work area together with its origin, then restored on the same monitor when available and clamped inside the current work area. Hidden windows cannot overwrite the last visible position. Recreating a closed overlay runs outside the UI thread so Windows webview creation cannot block the app.
+
 ## Autonomous life
 
 Each echo owns a persistent life record rather than deriving its state only from the current Agent request. The record contains:

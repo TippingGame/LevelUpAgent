@@ -321,6 +321,8 @@ pub struct PetActivityLogEntry {
 pub struct PetWindowPosition {
     pub x: f64,
     pub y: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor_origin: Option<(i32, i32)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -1526,7 +1528,15 @@ impl StoredPetLife {
         if !x.is_finite() || !y.is_finite() {
             return false;
         }
-        self.window_position = Some(PetWindowPosition { x, y });
+        let monitor_origin = self
+            .window_position
+            .as_ref()
+            .and_then(|position| position.monitor_origin);
+        self.window_position = Some(PetWindowPosition {
+            x,
+            y,
+            monitor_origin,
+        });
         true
     }
 

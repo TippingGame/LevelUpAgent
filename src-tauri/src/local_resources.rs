@@ -1,7 +1,7 @@
 //! User-selected local resources. Files and folders are referenced without
 //! copying a directory tree or dispatching on filename extensions.
 use std::collections::HashSet;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
@@ -86,14 +86,10 @@ fn import(storage: &Path, path: &Path) -> Result<ImageAttachment, String> {
     if !metadata.is_file() && !metadata.is_dir() {
         return Err("Select a regular file or folder".into());
     }
-    if metadata.is_file() && metadata.len() <= MAX_PASTED_BYTES as u64 {
+    if metadata.is_file() {
         // Only native visual context needs bytes at import time. Every other
         // format follows the same path-reference route, including text/docs.
-        let mut header = [0; 12];
-        let length = std::fs::File::open(&path)
-            .and_then(|mut file| file.read(&mut header))
-            .map_err(|error| format!("Could not open selected file: {error}"))?;
-        if attachment::detect_image_mime(&header[..length]).is_some() {
+        if attachment::is_image_file(&path)? {
             return attachment::import(storage, &path);
         }
     }
@@ -200,17 +196,14 @@ pub fn import_selected_paths(
 }
 
 pub fn import_base64(storage: &Path, name: &str, encoded: &str) -> Result<ImageAttachment, String> {
-    if encoded.len() > MAX_PASTED_BYTES.div_ceil(3) * 4 {
-        return Err("Pasted file data may be at most 64 MiB; select or drop the local file for a path reference".into());
-    }
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(encoded)
         .map_err(|_| "Invalid pasted file data".to_owned())?;
-    if bytes.len() > MAX_PASTED_BYTES {
-        return Err("Pasted file data may be at most 64 MiB".into());
-    }
     if attachment::detect_image_mime(&bytes).is_some() {
-        return attachment::import_base64_image(storage, name, encoded);
+        return attachment::import_image_bytes(storage, name, bytes);
+    }
+    if bytes.len() > MAX_PASTED_BYTES {
+        return Err("Pasted non-image file data may be at most 64 MiB; select or drop the local file for a path reference".into());
     }
     std::fs::create_dir_all(storage).map_err(|error| error.to_string())?;
     crate::filesystem::restrict_directory(storage)?;
@@ -398,13 +391,6 @@ pub fn resolve(storage: &Path, item: &mut ImageAttachment, active: bool) -> Resu
 
 fn working_image(resource: &Resource) -> Result<(String, Vec<u8>), String> {
     let path = available_path(resource)?;
-    if std::fs::metadata(&path)
-        .map_err(|error| error.to_string())?
-        .len()
-        > MAX_PASTED_BYTES as u64
-    {
-        return Err("Image context may be at most 64 MiB".into());
-    }
     let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
     let mime = attachment::detect_image_mime(&bytes)
         .ok_or("The working copy is no longer a supported image")?
@@ -840,6 +826,44 @@ mod tests {
         }
         assert_eq!(std::fs::read_dir(&fixture.storage).unwrap().count(), 7);
         assert!(!fixture.workspace.join(".levelup-attachments").exists());
+    }
+
+    #[test]
+    fn large_images_remain_visual_resources_for_paths_paste_and_working_copies() {
+        let fixture = Fixture::new();
+        let source = fixture.root.join("large.unknown");
+        let mut bytes = vec![0x5a_u8; 64 * 1024 * 1024 + 1];
+        bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        std::fs::write(&source, &bytes).unwrap();
+        let selected = fixture.select(std::slice::from_ref(&source), &[]);
+        assert_eq!(selected[0].kind, AttachmentKind::Image);
+        assert_eq!(selected[0].size_bytes, bytes.len() as u64);
+        assert!(load(&fixture.storage, &selected[0].id).unwrap().is_none());
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let pasted = import_base64(&fixture.storage, "pasted.unknown", &encoded).unwrap();
+        assert_eq!(pasted.kind, AttachmentKind::Image);
+        assert_eq!(
+            attachment::read_managed_reference(&fixture.storage, &pasted.id)
+                .unwrap()
+                .bytes,
+            bytes
+        );
+        drop(bytes);
+        let mut working =
+            prepare_constellation_inputs(&fixture.storage, &selected, &fixture.workspace).unwrap();
+        let mut item = working.pop().unwrap();
+        let id = item.id.clone();
+        assert!(resolve(&fixture.storage, &mut item, true).unwrap());
+        assert_eq!(item.data_base64.as_deref(), Some(encoded.as_str()));
+        drop(item);
+        assert_eq!(
+            preview(&fixture.storage, &id)
+                .unwrap()
+                .unwrap()
+                .data_base64
+                .as_deref(),
+            Some(encoded.as_str())
+        );
     }
 
     #[test]

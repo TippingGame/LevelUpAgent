@@ -71,7 +71,6 @@ const PROVIDER_CREDENTIAL_PREFIX: &str = "provider:";
 const MCP_CREDENTIAL_PREFIX: &str = "mcp:";
 const MAX_PENDING_CONFIRMATIONS: usize = 128;
 const PROVIDER_RECONNECT_RETRIES: u32 = 5;
-const LARGE_INLINE_IMAGE_BYTES: u64 = 4 * 1024 * 1024;
 const EMPTY_POST_TOOL_RESPONSE_RETRIES: usize = 2;
 // Low/medium-effort models sometimes advance the browser workflow one tool per
 // round. Four bounded nudges cover browser_list, server startup, browser startup,
@@ -3233,11 +3232,14 @@ fn select_pet(
 }
 
 #[tauri::command]
-fn set_pet_overlay_visible(
+async fn set_pet_overlay_visible(
     app: tauri::AppHandle,
     manager: tauri::State<'_, pet::PetManager>,
     visible: bool,
 ) -> Result<pet::PetDashboard, String> {
+    if !visible {
+        pet::persist_window_position(&app)?;
+    }
     let dashboard = manager.set_overlay_visible(visible)?;
     let window = pet::create_window(&app, visible)?;
     if visible {
@@ -3252,6 +3254,17 @@ fn set_pet_overlay_visible(
     }
     let _ = app.emit_to("pet", "pet://refresh", &dashboard);
     Ok(dashboard)
+}
+
+fn persist_pet_position_before_exit(app: &tauri::AppHandle) {
+    if let Err(error) = pet::persist_window_position(app) {
+        logging::write(
+            "warn",
+            "pet",
+            "window_position_save_failed",
+            serde_json::json!({ "error": logging::safe_error(&error) }),
+        );
+    }
 }
 
 #[tauri::command]
@@ -3820,6 +3833,7 @@ fn profile_supports_text(profile: &ProviderProfile) -> bool {
                 | "video"
                 | "whisper"
                 | "seedance"
+                | "seedream"
                 | "hailuo"
         )
     }) && !tokens.windows(2).any(|pair| {
@@ -3978,19 +3992,6 @@ fn provider_reconnect_delay(retry_number: u32) -> Duration {
 
 fn should_reconnect_provider(error: &str, retry_number: u32) -> bool {
     agent::is_reconnectable_provider_error(error) && retry_number < PROVIDER_RECONNECT_RETRIES
-}
-
-fn request_has_large_inline_image(request: &AgentTurnRequest) -> bool {
-    request.messages.iter().any(|message| {
-        message.attachments.iter().any(|attachment| {
-            matches!(attachment.kind, models::AttachmentKind::Image)
-                && attachment.size_bytes >= LARGE_INLINE_IMAGE_BYTES
-        })
-    })
-}
-
-fn should_reconnect_request(error: &str, retry_number: u32, has_large_inline_image: bool) -> bool {
-    should_reconnect_provider(error, retry_number) && (!has_large_inline_image || retry_number < 1)
 }
 
 // Generation waits for an upstream result or explicit cancellation. Retries do
@@ -4259,7 +4260,6 @@ where
     let mut reconnecting = false;
     let mut last_reconnect_attempt = 0_u32;
     let mut reset_output_before_attempt = false;
-    let has_large_inline_image = request_has_large_inline_image(&request);
     'providers: for (index, profile) in candidates.into_iter().enumerate() {
         if index > 0 && provider_is_cooling_down(database, &profile.id)? {
             logging::write(
@@ -4430,8 +4430,7 @@ where
                     let error = agent::annotate_tool_compatibility_error(error, &request);
                     let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
                     let output_was_emitted = emitted.load(Ordering::Acquire);
-                    let will_retry =
-                        should_reconnect_request(&error, retry_number, has_large_inline_image);
+                    let will_retry = should_reconnect_provider(&error, retry_number);
                     let status = if will_retry {
                         "retrying"
                     } else if error.contains("REQUEST_CANCELLED") {
@@ -5370,9 +5369,6 @@ fn import_image_attachments(
     app: tauri::AppHandle,
     source_paths: Vec<String>,
 ) -> Result<Vec<ImageAttachment>, String> {
-    if source_paths.len() > 12 {
-        return Err("Select at most 12 attachments at a time".to_owned());
-    }
     let storage = attachment_storage(&app)?;
     let mut imported = Vec::new();
     for path in source_paths {
@@ -5431,8 +5427,8 @@ fn import_clipboard_images(
     app: tauri::AppHandle,
     images: Vec<ClipboardAttachmentPayload>,
 ) -> Result<Vec<ImageAttachment>, String> {
-    if images.is_empty() || images.len() > 8 {
-        return Err("Paste between 1 and 8 images at a time".to_owned());
+    if images.is_empty() {
+        return Err("Paste at least one image".to_owned());
     }
     let storage = attachment_storage(&app)?;
     let mut imported = Vec::new();
@@ -5458,8 +5454,8 @@ fn import_clipboard_attachments(
     app: tauri::AppHandle,
     attachments: Vec<ClipboardAttachmentPayload>,
 ) -> Result<Vec<ImageAttachment>, String> {
-    if attachments.is_empty() || attachments.len() > 12 {
-        return Err("Paste between 1 and 12 files at a time".to_owned());
+    if attachments.is_empty() {
+        return Err("Paste at least one file".to_owned());
     }
     let storage = attachment_storage(&app)?;
     let mut imported = Vec::new();
@@ -5790,7 +5786,6 @@ async fn agent_turn_stream_inner(
     let mut reconnecting = false;
     let mut last_reconnect_attempt = 0_u32;
     let mut reset_output_before_attempt = false;
-    let has_large_inline_image = request_has_large_inline_image(&request);
     'providers: for (index, profile) in candidates.into_iter().enumerate() {
         if index > 0 && provider_is_cooling_down(&database, &profile.id)? {
             logging::write(
@@ -5964,8 +5959,7 @@ async fn agent_turn_stream_inner(
                     let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
                     let output_was_emitted = emitted.load(Ordering::Acquire);
                     let retryable = agent::is_retryable_provider_error(&error);
-                    let will_retry =
-                        should_reconnect_request(&error, retry_number, has_large_inline_image);
+                    let will_retry = should_reconnect_provider(&error, retry_number);
                     let status = if will_retry {
                         "retrying"
                     } else if error.contains("REQUEST_CANCELLED") {
@@ -11859,6 +11853,9 @@ pub fn run() {
         .manage(subagent::SubagentManager::default())
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                if matches!(window.label(), "main" | "pet") {
+                    persist_pet_position_before_exit(window.app_handle());
+                }
                 logging::write(
                     "info",
                     "app",
@@ -12180,6 +12177,7 @@ pub fn run() {
             logging::write("info", "app", "event_loop_ready", serde_json::json!({}))
         }
         tauri::RunEvent::ExitRequested { code, .. } => {
+            persist_pet_position_before_exit(app);
             if let Some(manager) = app.try_state::<music_workbench::MusicWorkbench>() {
                 tauri::async_runtime::block_on(manager.close());
             }
@@ -14354,6 +14352,9 @@ mod tests {
             "Seedance-2",
             "Seedance-2.0",
             "seedance/Seedance-2.5",
+            "Seedream-5-Pro",
+            "无限制-Seedream-5-Pro",
+            "models/seedream/Seedream-5-Pro",
             "image-01",
             "image-01-live",
             "gpt-image-2.5-sunburst",
@@ -14891,14 +14892,6 @@ mod tests {
     }
 
     #[test]
-    fn large_inline_images_only_allow_one_reconnect_attempt() {
-        let timeout = "Provider stream timed out after 90 seconds without activity";
-        assert!(should_reconnect_request(timeout, 0, true));
-        assert!(!should_reconnect_request(timeout, 1, true));
-        assert!(should_reconnect_request(timeout, 1, false));
-    }
-
-    #[test]
     fn harness_delivery_finishes_after_events_for_every_runtime_exit() {
         use crate::harness::types::{HarnessRunOutcome, HarnessRuntimeEvent, RuntimeState};
         let results = [
@@ -15085,11 +15078,38 @@ mod tests {
         thread::spawn(move || {
             for (status, body) in responses {
                 let (mut stream, _) = listener.accept().unwrap();
-                let mut request = vec![0_u8; 32 * 1024];
-                let size = stream.read(&mut request).unwrap();
-                assert!(
-                    String::from_utf8_lossy(&request[..size]).starts_with("POST /v1/responses ")
-                );
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 32 * 1024];
+                let mut expected_size = None;
+                loop {
+                    let size = stream.read(&mut buffer).unwrap();
+                    assert!(
+                        size > 0,
+                        "client closed before sending the complete request"
+                    );
+                    request.extend_from_slice(&buffer[..size]);
+                    if expected_size.is_none()
+                        && let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                    {
+                        let headers = String::from_utf8_lossy(&request[..end]);
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap();
+                        expected_size = Some(end + 4 + length);
+                    }
+                    if expected_size.is_some_and(|size| request.len() >= size) {
+                        break;
+                    }
+                }
+                assert!(String::from_utf8_lossy(&request).starts_with("POST /v1/responses "));
                 let response = format!(
                     "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len(),
@@ -15288,7 +15308,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transient_provider_failures_reconnect_five_times_before_succeeding() {
+    async fn large_inline_images_reconnect_five_times_before_succeeding() {
+        use base64::Engine;
         let root = std::env::temp_dir().join(format!(
             "levelup-provider-reconnect-{}",
             uuid::Uuid::new_v4()
@@ -15316,7 +15337,17 @@ mod tests {
                 tool_call_id: None,
                 provider_reasoning_blocks: Vec::new(),
                 internal: false,
-                attachments: Vec::new(),
+                attachments: vec![models::ImageAttachment {
+                    id: "0123456789abcdef0123456789abcdef".into(),
+                    name: "large.png".into(),
+                    mime_type: "image/png".into(),
+                    size_bytes: 4_658_448,
+                    kind: models::AttachmentKind::Image,
+                    data_base64: Some(
+                        base64::engine::general_purpose::STANDARD.encode(vec![0_u8; 4_658_448]),
+                    ),
+                    text_content: None,
+                }],
             }],
             mode: "chat".to_owned(),
             workspace: None,
