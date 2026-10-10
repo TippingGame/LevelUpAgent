@@ -1,6 +1,6 @@
 # LevelUpAgent 1.3.74 发布记录
 
-日期：2026-10-11。状态：准备发布，正式资产与公开清单验收后补充结果。
+日期：2026-10-11。状态：已发布到 GitHub，正式 Release 为 `v1.3.74`，已设为 Latest。
 
 ## 本版内容
 
@@ -29,3 +29,17 @@ Windows updater 使用签名校验。macOS／Linux 仍以 Releases 手动下载�
 3D 资源沿用 `linux-x64-cu118`，音频资源沿用 `windows-x64-cu128`，独立资源版本均为 `2026.10.1`。
 
 证据目录：`G:\Work\LevelUpAgent\research\release-1.3.74-2026-10-11`。
+
+## 发布结果
+
+- 正式 Release：[LevelUpAgent v1.3.74](https://github.com/TippingGame/LevelUpAgent/releases/tag/v1.3.74)，Release ID `409193415`；北京时间 **2026-10-11 05:04:46** 发布并设为 Latest，非预发布。
+- 构建提交：`4d7593e803a793757831903c68be265c0f818aba`，tag：`v1.3.74`。
+- [三平台 CI](https://github.com/TippingGame/LevelUpAgent/actions/runs/38083755127) 全部通过；Windows 首次因 Chocolatey 返回 504 缺少 NSIS，仅重跑失败作业后成功，未改动构建提交。
+- [四平台 Release](https://github.com/TippingGame/LevelUpAgent/actions/runs/38084605371) 全部通过；两个 macOS runner 均执行 DMG 校验、包内签名和模拟复制安装后的签名验证。
+- Windows EXE/MSI、Apple Silicon/Intel DMG、Linux AppImage/DEB/RPM、Windows 签名及更新清单共 10 个资产完整下载，大小与 SHA256 全部匹配 GitHub digest。
+- Windows EXE/MSI updater 签名和可信注释签名有效；公开发布页与 `latest.json` 返回 HTTP 200，清单版本为 `1.3.74`，URL、签名与资产一致。
+- Windows 安装包完整性、主程序 x64 架构、安装器／主程序版本、65 个内置资源、正式 CSP 与 updater 配置检查通过；没有演示标识或调试端口。
+- 音频与 3D 共享资源清单匿名返回 200，全部分卷大小和 GitHub digest 匹配；继续保持 prerelease，不占应用 Latest。
+- 正式 EXE 已同步到 `G:\Work\LevelUpAgent\安装包\LevelUpAgent_1.3.74_Windows_x64-setup.exe`，保留旧版本并更新版本／总 SHA256 清单。大小 14,948,902 字节；SHA256：`CA7B61862761A3C2AFA851635A20D6503211319A0C8A35AFA3852729B9AB3B0A`。
+
+本轮进行了独立 Windows Tauri 功能验收和正式安装包内容验证，未覆盖用户现有安装或执行旧版应用内更新。macOS 完成原生 runner 的签名与模拟安装验证；本轮未新增 macOS／Linux 实体机交互验收。应用 tag 与签名资产保留原构建提交，发布后仅同步文档记录。

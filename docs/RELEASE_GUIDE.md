@@ -90,6 +90,17 @@ Linux/WSL 必须覆盖真实进程组取消和目录链接恢复，Windows 原�
 
 本文的仓库内同步副本为 `LevelUpAgent/docs/RELEASE_GUIDE.md`，修改发布规范时同时更新两份。
 
+已验证记录：v1.3.74 于 2026-10-11 05:04:46（Asia/Shanghai）正式发布并设为 Latest。
+构建提交 `4d7593e803a793757831903c68be265c0f818aba`，三平台 CI run `38083755127`
+与四平台 Release run `38084605371` 成功。Windows CI 首次 NSIS 下载遇到 Chocolatey 504，
+仅重跑失败作业后通过。10 个资产完整下载并通过 SHA256 / GitHub digest 校验，Windows EXE/MSI
+updater 签名及可信注释签名有效；公开 `latest.json` 返回 200、版本为 `1.3.74`。
+本版修复大图会话限制／故障转移及桌宠关闭位置保存，重做中英文 README 和两张真实截图；
+六张实际生成的创作示例已保留在本地历史。Windows 独立原生位置恢复、主程序版本和 65 个资源
+检查通过；音频及 3D 独立资源继续复用，均保持 prerelease。正式 EXE 和哈希清单已同步本机安装包目录。
+本次未覆盖现有安装或执行旧版应用内更新；macOS／Linux 未新增实体机交互验收。
+详细记录：`LevelUpAgent/docs/RELEASE_1.3.74.md`；证据：`research/release-1.3.74-2026-10-11`。
+
 已验证记录：v1.3.73 于 2026-10-10 09:04:34（Asia/Shanghai）正式发布并设为 Latest。
 构建提交 `d3ab6a0ce8fba45e1115d303d9893e763482ecda`，三平台 CI run `38010254505`
 与四平台 Release run `38010355807` 全部成功。10 个资产完整下载并通过 SHA256 / GitHub
