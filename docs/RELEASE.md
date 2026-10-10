@@ -36,3 +36,16 @@ Authenticode，因此安装包没有系统级发布者签名，首次下载或�
 
 已安装的 v1.0.0 没有 updater 配置，不能自动升级；用户需要手动安装一次 updater 版 v1.0.1，之后
 才能通过应用内入口安装后续版本。
+
+## 工作台资源独立发布
+
+3D 与音频工作台的大型 Python、PyTorch / CUDA 和模型依赖不进入主安装包，也不随每个应用 tag 重复构建。
+它们分别固定在 `model-workbench-resources` 和 `music-workbench-resources` Release，兼容资源版本由各工作台
+的 `resources.json` 指定。先核验分卷和清单，再公开共享资源，最后发布引用这些资源的应用版本。
+
+资源 Release 保持 prerelease，使用 `--latest=false`，不得上传 `latest.json`；应用正式版才设为 Latest。
+公开资产不可覆盖，内容变化必须增加资源版本。v1.3.73 的音频资源为 `2026.10.1`，仅支持 Windows x64，
+MusicGen Small 权重许可为 CC-BY-NC-4.0，仅限非商业用途。
+
+具体步骤和实际发布记录见 [发布手册](RELEASE_GUIDE.md)、[1.3.73 发布记录](RELEASE_1.3.73.md) 与
+[音频资源构建说明](../packaging/music-workbench/README.md)。

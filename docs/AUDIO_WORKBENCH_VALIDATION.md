@@ -33,6 +33,8 @@
 上传时 Release 保留 draft + prerelease。按用户的 v1.3.73 发布要求，2026-10-10 08:41（UTC+8）已公开为
 [独立音频资源 Release](https://github.com/TippingGame/LevelUpAgent/releases/tag/music-workbench-resources)，保持 prerelease 且不占用应用 Latest。
 公开清单匿名下载返回 HTTP 200，内容与本地清单逐字节一致；6 个分卷的大小和 GitHub SHA256 均再次核验通过。
+全部 6 个分卷分别读取首尾 64 KiB，12 次匿名 Range 请求均返回 HTTP 206，Content-Range 与本地字节一致；
+首次链路探测遇到连接超时，重试后完成。未为此重复下载全部 4.88 GiB。
 发布链路证据在 `G:\Work\LevelUpAgent\research\release-1.3.73-2026-10-10`。
 
 最终重新执行 `pnpm check`、`pnpm build`、Rust 音频常规测试和 Python 测试均通过；`git diff --check` 无空白错误。Tauri 音频资源表仅包含 6 个控制文件，合计 21,916 bytes；大型资源与验收产物均在 Git 忽略目录，未加入主安装包。

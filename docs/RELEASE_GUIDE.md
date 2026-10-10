@@ -90,6 +90,17 @@ Linux/WSL 必须覆盖真实进程组取消和目录链接恢复，Windows 原�
 
 本文的仓库内同步副本为 `LevelUpAgent/docs/RELEASE_GUIDE.md`，修改发布规范时同时更新两份。
 
+已验证记录：v1.3.73 于 2026-10-10 09:04:34（Asia/Shanghai）正式发布并设为 Latest。
+构建提交 `d3ab6a0ce8fba45e1115d303d9893e763482ecda`，三平台 CI run `38010254505`
+与四平台 Release run `38010355807` 全部成功。10 个资产完整下载并通过 SHA256 / GitHub
+digest 校验，Windows EXE/MSI updater 签名及可信注释签名有效；公开 `latest.json` 返回 200、
+版本为 `1.3.73`。Windows 包内 65 个资源文件核对通过，安装器和主程序版本均为 `1.3.73`。
+音频资源 `2026.10.1` 于当天 08:41:23 先行公开，6 个分卷和清单通过大小／digest 校验，
+匿名清单返回 200，全部分卷首尾 Range 下载返回 206 且字节匹配。音频和 3D 资源均保持
+prerelease、不占用应用 Latest，大型模型和依赖不进入主包。正式 EXE 已同步本机安装包目录，
+新增版本 SHA256 并更新总清单。本次未覆盖现有安装或执行旧版应用内更新。
+详细记录：`LevelUpAgent/docs/RELEASE_1.3.73.md`；证据：`research/release-1.3.73-2026-10-10`。
+
 已验证记录：v1.2.72 于 2026-10-09 21:34:32（Asia/Shanghai）正式发布并设为 Latest。
 构建提交 `3ff34012f3cbaac79f8cee57b34fc911aeda4a5a`，三平台 CI run `37934222275`
 与四平台 Release run `37934223456` 全部成功。10 个资产完整下载并通过 SHA-256 / GitHub
