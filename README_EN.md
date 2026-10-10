@@ -8,9 +8,7 @@
 
 A desktop agent for code and creative work. Connect your own models and go from the first thought to the finished project.
 
-[![Release](https://img.shields.io/github/v/release/TippingGame/LevelUpAgent?style=flat-square&color=f26564)](https://github.com/TippingGame/LevelUpAgent/releases/latest)
-[![Platforms](https://img.shields.io/badge/Windows%20%7C%20macOS%20%7C%20Linux-4f78c4?style=flat-square)](https://github.com/TippingGame/LevelUpAgent/releases/latest)
-[![License](https://img.shields.io/badge/license-LGPL--3.0-5f9c86?style=flat-square)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/TippingGame/LevelUpAgent?style=flat-square&color=f26564)](https://github.com/TippingGame/LevelUpAgent/releases/latest) [![Platforms](https://img.shields.io/badge/Windows%20%7C%20macOS%20%7C%20Linux-4f78c4?style=flat-square)](https://github.com/TippingGame/LevelUpAgent/releases/latest) [![License](https://img.shields.io/badge/license-LGPL--3.0-5f9c86?style=flat-square)](LICENSE)
 
 **[Download](https://github.com/TippingGame/LevelUpAgent/releases/latest)** · **[Documentation](docs/README.md)** · [Issues & ideas](https://github.com/TippingGame/LevelUpAgent/issues)
 

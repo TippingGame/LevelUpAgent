@@ -8,9 +8,7 @@
 
 会写代码，也懂创作的桌面 Agent。连接自己的模型，从第一句想法到最后一次交付。
 
-[![Release](https://img.shields.io/github/v/release/TippingGame/LevelUpAgent?style=flat-square&color=f26564)](https://github.com/TippingGame/LevelUpAgent/releases/latest)
-[![Platforms](https://img.shields.io/badge/Windows%20%7C%20macOS%20%7C%20Linux-4f78c4?style=flat-square)](https://github.com/TippingGame/LevelUpAgent/releases/latest)
-[![License](https://img.shields.io/badge/license-LGPL--3.0-5f9c86?style=flat-square)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/TippingGame/LevelUpAgent?style=flat-square&color=f26564)](https://github.com/TippingGame/LevelUpAgent/releases/latest) [![Platforms](https://img.shields.io/badge/Windows%20%7C%20macOS%20%7C%20Linux-4f78c4?style=flat-square)](https://github.com/TippingGame/LevelUpAgent/releases/latest) [![License](https://img.shields.io/badge/license-LGPL--3.0-5f9c86?style=flat-square)](LICENSE)
 
 **[下载应用](https://github.com/TippingGame/LevelUpAgent/releases/latest)** · **[使用文档](docs/README.md)** · [反馈与建议](https://github.com/TippingGame/LevelUpAgent/issues)
 
