@@ -1,0 +1,34 @@
+name: Audio workbench resources
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: music-workbench-resources
+  cancel-in-progress: false
+
+jobs:
+  resources:
+    # Prepared portable Python and verified model tree; independent of app tags.
+    runs-on: [self-hosted, windows, x64, music-workbench]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Test queue and audio bridge
+        run: python -B -m unittest discover -s modules/music_workbench/tests -v
+      - name: Package reusable resources
+        env:
+          MUSIC_WORKBENCH_STAGING: ${{ vars.MUSIC_WORKBENCH_STAGING }}
+        run: python scripts/package-music-workbench.py --staging "$env:MUSIC_WORKBENCH_STAGING" --output artifacts/music-workbench/release
+      - name: Verify and upload immutable assets to draft resource Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/upload-music-workbench.mjs artifacts/music-workbench/release

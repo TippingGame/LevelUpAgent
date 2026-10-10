@@ -16,8 +16,8 @@ const stageName = (stage: ModelStage) => ({ shape: tr("生成形状", "Shape"), 
 const componentName = (name: ModelComponent) => ({ runtime: tr("Python 与 CUDA 运行环境", "Python & CUDA runtime"), triposg: "TripoSG", texture: "SD2.1 + MV-Adapter", blender: "Blender" })[name];
 const phaseName = (phase?: string) => ({ prepare: "准备参考图", shape: "TripoSG 生成形状", export: "减面与检查", uv: "展开 UV", paint: "SD2.1 生成六视角颜色", bake: "烘焙颜色贴图", validate_texture: "检查贴图模型", rig: "蒙皮与动画", download: "下载资源", verify: "校验文件", extract: "安装资源" })[phase ?? ""] ?? phase;
 
-export function ModelWorkbench({ active, onMedia, onWriting, onConstellation, onSpine, onPendingCountChange }: {
-  active: boolean; onMedia: () => void; onWriting: () => void; onConstellation: () => void; onSpine: () => void;
+export function ModelWorkbench({ active, onMusic, onMedia, onWriting, onConstellation, onSpine, onPendingCountChange }: {
+  active: boolean; onMusic: () => void; onMedia: () => void; onWriting: () => void; onConstellation: () => void; onSpine: () => void;
   onPendingCountChange: (count: number) => void;
 }) {
   const [status, setStatus] = useState<ModelStatus>(), [error, setError] = useState("");
@@ -148,7 +148,7 @@ export function ModelWorkbench({ active, onMedia, onWriting, onConstellation, on
   </div>;
 
   return <section className="model-workbench creative-studio" hidden={!active} aria-label={tr("3D 模型工作台", "3D Model Workbench")}>
-    <CreativeStudioHeader mode="model3d" subtitle={tr("从一张图，到可动的模型", "From an image to a moving model")} onMedia={onMedia} onWriting={onWriting} onConstellation={onConstellation} onSpine={onSpine}
+    <CreativeStudioHeader mode="model3d" onMusic={onMusic} subtitle={tr("从一张图，到可动的模型", "From an image to a moving model")} onMedia={onMedia} onWriting={onWriting} onConstellation={onConstellation} onSpine={onSpine}
       actions={<button onClick={() => setEnvironment(true)}><Settings2 size={14}/>{tr("环境与下载", "Setup & downloads")}</button>}/>
     <div className="model-stagebar" aria-label={tr("制作阶段", "Workflow stages")}>
       {stages.map((item, index) => <button key={item} className={stage === item ? "selected" : ""} onClick={() => setStage(item)} aria-current={stage === item ? "step" : undefined}>

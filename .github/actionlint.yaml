@@ -1,3 +1,4 @@
 self-hosted-runner:
   labels:
     - model-workbench
+    - music-workbench

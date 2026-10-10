@@ -17,6 +17,8 @@ mod media;
 mod migration;
 mod model_workbench;
 mod models;
+mod music_resources;
+mod music_workbench;
 mod network;
 mod pet;
 mod pet_life;
@@ -11850,6 +11852,7 @@ pub fn run() {
             pending_git_rollbacks: Mutex::new(HashMap::new()),
         })
         .manage(model_workbench::ModelWorkbench::default())
+        .manage(music_workbench::MusicWorkbench::default())
         .manage(mcp::McpManager::default())
         .manage(browser::BrowserManager::default())
         .manage(sandbox::ProcessManager::default())
@@ -11992,6 +11995,14 @@ pub fn run() {
     };
     let app = builder
         .invoke_handler(tauri::generate_handler![
+            music_workbench::music_status,
+            music_workbench::music_hardware,
+            music_workbench::music_request,
+            music_workbench::music_manifest,
+            music_workbench::music_install,
+            music_workbench::music_cancel_install,
+            music_workbench::music_artifact,
+            music_workbench::music_export,
             model_workbench::model3d_status,
             model_workbench::model3d_manifest,
             model_workbench::model3d_start,
@@ -12169,6 +12180,9 @@ pub fn run() {
             logging::write("info", "app", "event_loop_ready", serde_json::json!({}))
         }
         tauri::RunEvent::ExitRequested { code, .. } => {
+            if let Some(manager) = app.try_state::<music_workbench::MusicWorkbench>() {
+                tauri::async_runtime::block_on(manager.close());
+            }
             if let Some(manager) = app.try_state::<browser::BrowserManager>() {
                 tauri::async_runtime::block_on(manager.close_all());
             }

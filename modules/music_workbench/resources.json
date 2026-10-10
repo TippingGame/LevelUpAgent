@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "resourceVersion": "2026.10.1",
+  "releaseTag": "music-workbench-resources",
+  "repository": "TippingGame/LevelUpAgent",
+  "target": "windows-x64-cu128",
+  "modelRevision": "4c8334b02c6ec4e8664a91979669a501ec497792"
+}

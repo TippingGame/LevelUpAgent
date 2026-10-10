@@ -190,6 +190,7 @@ interface ConstellationStudioProps {
   onConfigureConnection: () => void;
   onSpine: () => void;
   onModel3d: () => void;
+  onMusic: () => void;
   onMedia: () => void;
   onWriting: () => void;
   onPendingCountChange: (count: number) => void;
@@ -269,7 +270,7 @@ function ConstellationStudioInner({
   onConfigureConnection,
   onMedia,
   onSpine,
-  onModel3d,
+  onModel3d, onMusic,
   onWriting,
   onPendingCountChange,
 }: ConstellationStudioProps) {
@@ -1941,7 +1942,7 @@ function ConstellationStudioInner({
   const selectedTemplate = overviewTemplates.find((template) => template.id === templateId);
   return (
     <>
-      <CreativeStudioHeader mode="constellation" onModel3d={onModel3d} onSpine={onSpine} className="constellation-topbar" subtitle={tr("把灵感连成作品", "Connect ideas into finished work")}
+      <CreativeStudioHeader mode="constellation" onModel3d={onModel3d} onMusic={onMusic} onSpine={onSpine} className="constellation-topbar" subtitle={tr("把灵感连成作品", "Connect ideas into finished work")}
         onMedia={onMedia} onWriting={onWriting} onBrandClick={() => { if (!overviewOpen) void returnToOverview(); }} brandDisabled={running || projectBusy || Boolean(entrySnapshot)}
         context={!overviewOpen && <input className="constellation-title-input nodrag nopan" value={graphTitle} maxLength={120} aria-label={tr("星图名称", "Constellation name")} onFocus={() => setSpacePanActive(false)} onChange={(event) => setGraphTitle(event.target.value)} />}
         actions={<div className="constellation-topbar-actions">

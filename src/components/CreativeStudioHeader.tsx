@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Bone, Box, BookOpen, Ellipsis, ImagePlus, Star } from "lucide-react";
+import { Bone, Box, BookOpen, Ellipsis, ImagePlus, Music2, Star } from "lucide-react";
 import { tr } from "../lib/i18n";
 import "./CreationModeSwitch.css";
 
-type CreativeMode = "media" | "writing" | "constellation" | "spine" | "model3d";
+type CreativeMode = "media" | "writing" | "constellation" | "spine" | "model3d" | "music";
 
-export function CreativeStudioHeader({ mode, className = "", subtitle, context, actions, onBrandClick, brandDisabled, onMedia, onWriting, onConstellation, onSpine, onModel3d }: {
+export function CreativeStudioHeader({ mode, className = "", subtitle, context, actions, onBrandClick, brandDisabled, onMedia, onWriting, onConstellation, onSpine, onModel3d, onMusic }: {
   mode: CreativeMode;
   className?: string;
   subtitle?: ReactNode;
@@ -18,6 +18,7 @@ export function CreativeStudioHeader({ mode, className = "", subtitle, context, 
   onConstellation?: () => void;
   onSpine?: () => void;
   onModel3d?: () => void;
+  onMusic?: () => void;
 }) {
   const [actionsOpen, setActionsOpen] = useState(false);
   const actionsRef = useRef<HTMLDivElement>(null);
@@ -38,6 +39,7 @@ export function CreativeStudioHeader({ mode, className = "", subtitle, context, 
   useEffect(() => setActionsOpen(false), [mode]);
   const modes = [
     { id: "media", label: tr("图片 · 视频 · 语音", "Image · Video · Speech"), Icon: ImagePlus, onClick: onMedia },
+    { id: "music", label: tr("音频", "Audio"), Icon: Music2, onClick: onMusic },
     { id: "writing", label: tr("写作", "Writing"), Icon: BookOpen, onClick: onWriting },
     { id: "constellation", label: tr("星图", "Constellation"), Icon: Star, onClick: onConstellation },
     { id: "spine", label: "Spine", Icon: Bone, onClick: onSpine },

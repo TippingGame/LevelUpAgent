@@ -13,6 +13,7 @@ A local-first desktop agent. Connect your models and work on code, research, and
 | Agent | Streaming conversations, files, commands, approvals, Goals, Skills, MCP, browser QA, and change review |
 | Conversations | History search, quick switching, independent drafts, queued follow-ups, forks, import, and export |
 | Creative Studio | Images, video, speech, references, mask editing, and local history |
+| Audio | Local MusicGen Small instrumentals, playback, WAV export, favorites, trimming, and on-demand resources |
 | Writing | Manuscripts, codex entries, references, goals, snapshots, and narrative playtesting |
 | Constellation | Typed nodes, parallel branches, a canvas, and reusable blueprints |
 
@@ -55,9 +56,9 @@ pnpm tauri build
 
 [Architecture](docs/ARCHITECTURE.md) · [Performance](docs/PERFORMANCE.md) · [Codex workflow comparison](docs/REPLACEMENT_AUDIT.md) · [Roadmap](docs/ROADMAP.md) · [Releases](docs/RELEASE.md)
 
-The current release is `1.2.72`. Windows builds lack Authenticode signatures; macOS builds use ad-hoc signing and are not notarized. Platform verification limits are documented in the [1.2.72 release notes](docs/RELEASE_1.2.72.md).
+The current release is `1.3.73`. Windows builds lack Authenticode signatures; macOS builds use ad-hoc signing and are not notarized. Platform verification limits are documented in the [1.3.73 release notes](docs/RELEASE_1.3.73.md).
 
-Version `1.2.72` fixes white 3D previews after texturing and reuses Spine’s reference cutout with preview, apply and restore controls. White-background preparation now preserves enclosed pale skin and highlights. Media generation can wait up to 10 minutes; large model and CUDA dependencies continue to use the shared resource Release. See the [release notes](docs/RELEASE_1.2.72.md) and [publishing guide](docs/RELEASE_GUIDE.md).
+Version `1.3.73` adds a local audio workbench to Creative Studio: 4–30 second instrumentals, playback, trimming and fades, favorites, and WAV export, with memory and download progress indicators. Python, CUDA, and models are downloaded from an independent resource Release and excluded from app installers. Local audio currently supports Windows x64; MusicGen weights use CC-BY-NC-4.0 for non-commercial use. See the [audio guide](docs/AUDIO_WORKBENCH.md), [release notes](docs/RELEASE_1.3.73.md), and [publishing guide](docs/RELEASE_GUIDE.md).
 
 ## License
 

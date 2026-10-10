@@ -22,9 +22,33 @@ Draft，因此 `v1.0.32` 继续显示 `Latest`；在核对资产并正式发布�
 
 ## 零、以后每次发布速查
 
+### 从 v1.3.73 起：音频资源同样独立发布
+
+创作空间新增音频工作台。主安装包只包含小型控制代码，Python 3.10、PyTorch 2.8 / CUDA 12.8
+与 MusicGen Small 权重固定在 `music-workbench-resources` Release；不会随应用版本重复上传。
+音频资源版本 `2026.10.1`，目标 `windows-x64-cu128`，由 `modules/music_workbench/resources.json` 固定。
+
+- 6 个分卷共 5,241,344,415 bytes（约 4.88 GiB），安装约 9.26 GiB；用户需预留约 20 GiB 临时空间。
+- 每卷小于 2 GB，支持断点续传、SHA256 校验、离线导入；清单在分卷全部上传并核验后最后上传。
+- 首次创建为 draft + prerelease。**发布引用它的应用版本前，先公开资源 Release**；草稿的公共下载地址不可用。
+- 资源保持 prerelease 且 `--latest=false`，不得上传 `latest.json` 或抢占应用 Latest。
+- MusicGen Small 权重为 CC-BY-NC-4.0，仅限非商业用途；本地音频当前仅支持 Windows x64。
+- 发布检查增加音频 Python 测试与 Rust `music_` 测试；真实独立环境／CUDA、播放、裁剪和取消验收见
+  `docs/AUDIO_WORKBENCH_VALIDATION.md`。约 2.32 GiB 的短片段推理峰值不代表长片段或整卡占用。
+
+```powershell
+python -B -m unittest discover -s modules/music_workbench/tests -v
+node scripts/upload-music-workbench.mjs artifacts/music-workbench/release
+# 首次公开前核对 6 个分卷和版本清单的大小与 GitHub digest：
+gh release edit music-workbench-resources --draft=false --prerelease --latest=false
+```
+
+公开后核对 `music-workbench-2026.10.1-windows-x64-cu128.json` 和分卷可下载，再发布应用 `v1.3.73`。
+资源构建步骤见 `packaging/music-workbench/README.md`；功能与许可说明见 `docs/AUDIO_WORKBENCH.md`。
+
 ### 从 v1.2.71 起：应用和 3D 通用资源分别发布
 
-应用安装包继续通过 `vX.Y.Z` tag 触发四平台构建，本次应用版本为 `1.2.72`。
+应用安装包继续通过 `vX.Y.Z` tag 触发四平台构建，本次应用版本为 `1.3.73`。
 Python / PyTorch / CUDA、TripoSG、SD2.1 + MV-Adapter、Blender 不进入应用安装包，
 也不再随每个应用版本重复打包或上传。所有额外资源固定放在同一个 Release：
 
@@ -39,7 +63,7 @@ https://github.com/TippingGame/LevelUpAgent/releases/tag/model-workbench-resourc
 - 清单名为 `model-workbench-<资源版本>-<目标>.json`，分片名也包含独立资源版本，每片小于 2 GB。
   初始清单：`model-workbench-2026.10.1-linux-x64-cu118.json`。
 - 资源 Release 使用 prerelease 且 `--latest=false`，只用于把通用资源与应用更新渠道分开，
-  不能上传 `latest.json`；应用正式版（当前 `v1.2.72`）设为 Latest。
+  不能上传 `latest.json`；应用正式版（本次 `v1.3.73`）设为 Latest。
 - 只有模型、CUDA 或依赖内容变化时才增加资源版本并上传新资产，旧资产保留。
   不覆盖已公开的分片或清单；同名同哈希文件复用，同名不同哈希必须改资源版本。
 - 上传顺序：本地校验所有分片与完整归档 → 上传分片并核对 GitHub digest → 最后上传清单。

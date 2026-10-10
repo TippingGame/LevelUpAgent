@@ -1,6 +1,6 @@
 # 文档
 
-代码基线：`1.0.56`，2026-09-18 工作树改进。文档中的“支持”指代码具备该能力；外部模型可用性、实际质量和平台认证需分别验证。
+当前应用版本：`1.3.73`。音频工作台及发布说明于 2026-10-10 更新；其余专题保留各自的验证日期。文档中的“支持”指代码具备该能力；外部模型可用性、实际质量和平台认证需分别验证。
 
 | 内容 | 入口 |
 | --- | --- |
@@ -15,6 +15,7 @@
 | 模型可调用的客户端能力 | [能力契约](CLIENT_CAPABILITIES.md) |
 | 模型协议与平台路由 | [LevelUpAPI 兼容性](LEVELUPAPI_COMPATIBILITY.md) |
 | 图片、视频与素材上传 | [媒体平台](MEDIA_PLATFORMS.md) |
+| 本地音乐生成、试听、剪辑与独立资源下载 | [音频工作台](AUDIO_WORKBENCH.md) |
 | DAG、蓝图、画板与蒙版 | [星图](CONSTELLATION.md) |
 | Spine 骨骼动画、多图姿态、整图入口、拆层与本机任务恢复 | [Spine 工作台](SPINE_STUDIO.md)、[第二版实施日志](SPINE_V2_IMPLEMENTATION_LOG.md)、[第三版实施日志](SPINE_V3_IMPLEMENTATION_LOG.md)、[第四版实施日志](SPINE_V4_IMPLEMENTATION_LOG.md)、[树木与动物真实验证](SPINE_V4_SPECIES_VALIDATION.md) |
 | 写作目标、参考库与恢复 | [写作 Goal](WRITING_GOAL_MODE.md) |
@@ -24,7 +25,7 @@
 | 主题包和声明式布局 | [Themes](THEMES.md)、[Layouts](LAYOUTS.md) |
 | 主题制作与验收约束 | [开发规范](THEME_DEVELOPMENT.md)、[Agent 工作流程](THEME_AGENT_WORKFLOW.md) |
 | 开发优先级与已知缺口 | [路线图](ROADMAP.md) |
-| 安装包、签名与更新 | [发布](RELEASE.md) |
+| 安装包、签名与更新 | [发布](RELEASE.md)、[发布手册](RELEASE_GUIDE.md)、[1.3.73 发布记录](RELEASE_1.3.73.md) |
 | 参考来源与适配范围 | [参考研究](REFERENCE_RESEARCH.md) |
 | 生图到 Unity 网格、本地与云端 3D 任务方案（调研／未实现） | [高斯泼溅与生模型工作流](GAUSSIAN_3D_WORKFLOW_RESEARCH.md) |
 | 可拆卸 3D 模块、体积核算与验证工具 | [模块验证方案](MODEL3D_MODULE_VALIDATION.md)、[逐步验证日志](MODEL3D_VALIDATION_LOG.md) |

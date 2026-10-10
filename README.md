@@ -13,6 +13,7 @@
 | Agent | 流式会话、项目文件、命令、审批、Goal、Skills、MCP、浏览器验证与变更审阅 |
 | 会话 | 全历史检索、快捷切换、独立草稿、运行中追加、分支、导入与导出 |
 | 创作 | 图片、视频、语音、参考素材、蒙版编辑与本地历史 |
+| 音频 | MusicGen Small 本地纯音乐生成、试听、WAV 导出、收藏与裁剪；模型和依赖按需下载 |
 | 写作 | 文稿、设定集、参考库、目标执行、快照与剧情试玩 |
 | 星图 | 类型化节点、并行分支、画板与可复用蓝图 |
 | 3D | TripoSG 形状、SD2.1 独立贴图、可调整的人形蒙皮与基础动画；大型资源按版本独立安装 |
@@ -58,9 +59,9 @@ pnpm tauri build
 
 [架构](docs/ARCHITECTURE.md) · [性能](docs/PERFORMANCE.md) · [Codex 工作流对照](docs/REPLACEMENT_AUDIT.md) · [路线图](docs/ROADMAP.md) · [发布](docs/RELEASE.md)
 
-当前发布版本为 `1.2.72`。Windows 未配置 Authenticode，macOS 使用 ad-hoc 签名、尚未公证。跨平台发布与实体机验证边界见 [1.2.72 发布说明](docs/RELEASE_1.2.72.md)。
+当前发布版本为 `1.3.73`。Windows 未配置 Authenticode，macOS 使用 ad-hoc 签名、尚未公证。跨平台发布与实体机验证边界见 [1.3.73 发布说明](docs/RELEASE_1.3.73.md)。
 
-`1.2.72` 修复 3D 贴图生成后的白模预览，新增与 Spine 共用的参考图抠底、预览、应用与还原，改善白底处理误删浅色脸部和高光的问题。媒体生成可等待最多 10 分钟；模型与 CUDA 等大依赖继续复用固定 Release 的通用资源包。详见 [发布说明](docs/RELEASE_1.2.72.md) 与 [发布规范](docs/RELEASE_GUIDE.md)。
+`1.3.73` 将本地音频工作台接入创作空间，支持 4–30 秒纯音乐、试听、裁剪与淡入淡出、收藏和 WAV 导出；显示显存／内存、下载进度和空间提示。Python、CUDA 和模型通过独立资源 Release 下载，不进入主安装包。当前本地音频支持 Windows x64，MusicGen 权重为 CC-BY-NC-4.0，仅限非商业用途。详见 [音频工作台](docs/AUDIO_WORKBENCH.md)、[发布说明](docs/RELEASE_1.3.73.md) 与 [发布规范](docs/RELEASE_GUIDE.md)。
 
 ## 许可
 
