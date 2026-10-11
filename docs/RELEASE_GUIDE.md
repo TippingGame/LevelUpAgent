@@ -22,7 +22,7 @@ Draft，因此 `v1.0.32` 继续显示 `Latest`；在核对资产并正式发布�
 
 ## 零、以后每次发布速查
 
-### v1.3.76：YuE2 INT8 与参考旋律（发布验收中）
+### v1.3.76：YuE2 INT8 与参考旋律（已正式发布）
 
 这次同时升级程序加载器和独立资源；官方原版 YuE2 / VAE 的模型 revision 未变。
 INT8 转换权重、SheetSage2 参考旋律和 HDEMUCS 纯音乐流程使用不同的加载接口，不能只替换旧模型。
@@ -125,6 +125,16 @@ Linux/WSL 必须覆盖真实进程组取消和目录链接恢复，Windows 原�
 选择和清理确认状态。正式应用发布前检查资源 Release 不会抢占 Latest。
 
 本文的仓库内同步副本为 `LevelUpAgent/docs/RELEASE_GUIDE.md`，修改发布规范时同时更新两份。
+
+已验证记录：v1.3.76 于 2026-10-11 21:24:44（Asia/Shanghai）正式发布并设为 Latest。
+构建提交 `88c84da987e1bd916d08eb9301f3eb4657259f55`，三平台 CI run `38141523021`
+与四平台 Release run `38141525734` 均成功。10 个资产完整下载并通过 GitHub SHA256 digest，
+Windows EXE/MSI updater 及可信注释签名有效，公开 `latest.json` HTTP 200、版本为 `1.3.76`。
+YuE2 INT8 新 8 分卷和 JSON 清单均可匿名读取；旧 30 个资源文件保持。隔离原生离线安装、
+歌曲／纯音乐／参考音频、四种外观、播放／剪辑／导出和重启保留通过；ACE-Step、MusicGen 回归通过。
+正式 EXE 已同步本机安装包目录，保留旧版并更新 SHA256 清单。未覆盖用户正式安装，
+macOS/Linux 未新增实体机交互验收。详细记录：`LevelUpAgent/docs/RELEASE_1.3.76.md`；
+证据：`research/release-1.3.76-2026-10-11`。
 
 已验证记录：v1.3.75 于 2026-10-11 14:23:57（Asia/Shanghai）正式发布并设为 Latest。
 构建提交 `3cb7110985c683f8e3b0def76340d0b73084583c`，三平台 CI run `38114725194`

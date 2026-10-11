@@ -1,6 +1,6 @@
 # v1.3.76：YuE2 INT8 与参考音频
 
-状态：实现、原生安装与独立资源公开验收完成；应用 GitHub 发布验收进行中。
+已于 2026-10-11 21:24:44（Asia/Shanghai）正式发布并设为 Latest。
 
 ## 变化
 
@@ -27,4 +27,14 @@ RTX 3080 Ti 12 GiB 上通过 45 秒歌曲、10 秒自动纯音乐、参考旋律
 
 ## 平台与签名
 
-本地音乐资源仅支持 Windows x64。应用仍通过四平台 GitHub Actions 构建；Windows updater 使用 Tauri 签名，不包含 Authenticode；macOS 为 ad-hoc 签名、未公证；Linux 包未做发行版签名。正式资产、签名和公开更新清单须全部核验后才发布。
+本地音乐资源仅支持 Windows x64。应用仍通过四平台 GitHub Actions 构建；Windows updater 使用 Tauri 签名，不包含 Authenticode；macOS 为 ad-hoc 签名、未公证；Linux 包未做发行版签名。正式资产、签名和公开更新清单均已核验。
+
+## GitHub 发布与交付
+
+- 构建提交 `88c84da987e1bd916d08eb9301f3eb4657259f55`，tag `v1.3.76`。三平台 CI run `38141523021`、四平台 Release run `38141525734` 均成功。
+- 10 个应用资产完整下载，大小、SHA256 与 GitHub digest 一致；Windows EXE/MSI updater 签名及可信注释签名有效。公开发布页与 `latest.json` HTTP 200，版本为 `1.3.76`，URL 和签名均匹配。
+- Windows 安装包通过完整性、x64 架构、正式 CSP/updater 配置与 69 个内置资源检查，不含 QA 标识、调试端口、大型模型或运行环境。
+- 音频资源页现有 39 个文件：旧 30 个大小和 digest 保持不变；新 8 分卷和清单的 GitHub SHA256 digest 均匹配，匿名下载的清单及每卷首尾字节与本地一致。原生应用公开清单与四种外观的下载大小提示验证通过。
+- 正式 EXE 已保存为 `G:\Work\LevelUpAgent\安装包\LevelUpAgent_1.3.76_Windows_x64-setup.exe`，保留旧包并更新 SHA256 清单；14,952,633 bytes，SHA256：`BC46E278C6904993B007C8A764B3BB54209A3767B5882A92F7B62436F447FFC9`。
+
+发布证据：`research/release-1.3.76-2026-10-11`；原生与推理证据：`research/yue2-261011-upgrade`。本次使用隔离 Windows QA 应用验证功能，并检查正式安装包内容；未覆盖用户正式安装或执行旧版应用内更新，macOS/Linux 未新增实体机交互验收。
