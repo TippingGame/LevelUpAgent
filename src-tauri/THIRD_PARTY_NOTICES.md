@@ -1,5 +1,19 @@
 # Harness upstream notices
 
+## Optional local music resources
+
+Music runtimes and model weights are downloaded separately from application installers.
+The resource archives retain upstream licenses, model cards and Python distribution notices.
+
+- [ACE-Step 1.5](https://github.com/ace-step/ACE-Step-1.5): MIT; the packaged Qwen3-Embedding-0.6B text encoder uses Apache-2.0.
+- [YuE2](https://github.com/multimodal-art-projection/YuE): Apache-2.0 code; YuE2-3B and YuE2-Vae weights use CC-BY-NC-4.0, for non-commercial use.
+- [MusicGen Small](https://huggingface.co/facebook/musicgen-small): CC-BY-NC-4.0 weights, for non-commercial use.
+
+Pinned revisions, resource layouts and retained notices are documented in
+[`packaging/music-workbench/README.md`](../packaging/music-workbench/README.md).
+
+## Harness primitives
+
 The harness primitives in `src-tauri/src/harness/` adapt small, provider-neutral ideas
 from these projects. No upstream TUI, credential store, provider implementation,
 or sandbox is copied into LevelUpAgent.

@@ -25,7 +25,7 @@ Let your agent explore a project, edit code, run commands, and verify pages. Pla
 | What you want to make | What you can use |
 | --- | --- |
 | **Code & research** | Streaming chat · Project files · Terminal · Browser QA · Change review |
-| **Images & sound** | Image generation · Reference edits · Inpainting · Video · Speech · Local music |
+| **Images & sound** | Image generation · Reference edits · Inpainting · Video · Speech · Instrumentals & lyric-conditioned songs |
 | **Stories & worlds** | Writing studio · Lore & references · Story playtesting · Spine · 3D |
 | **Your own workflow** | Skills · MCP · Constellation workflows · Themes & layouts · Desktop companions |
 
@@ -59,7 +59,7 @@ pnpm tauri dev
 
 </details>
 
-<sub>Local music currently supports Windows x64. MusicGen weights use CC-BY-NC-4.0 for non-commercial use. Large audio and 3D resources download on demand. [Capabilities & requirements](docs/FEATURES.md) · [1.3.74 release notes & platform signing](docs/RELEASE_1.3.74.md)</sub>
+<sub>Local music supports Windows x64. ACE-Step 1.5 uses MIT / Qwen3 Apache-2.0; YuE2 and MusicGen weights use CC-BY-NC-4.0 for non-commercial use. Large audio and 3D resources download on demand. [Capabilities & requirements](docs/FEATURES.md) · [1.3.75 release notes & platform signing](docs/RELEASE_1.3.75.md)</sub>
 
 ---
 
