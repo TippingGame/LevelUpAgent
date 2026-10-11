@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import json
 import math
 import os
+import re
 from pathlib import Path
 import sqlite3
 import threading
@@ -19,7 +20,7 @@ MODEL_FILES = ["config.json", "generation_config.json", "model.safetensors", "pr
 SONG_SPECS = json.loads((ROOT / "song-resources.json").read_text(encoding="utf-8"))
 ENGINES = {"musicgen": {"label": "MusicGen Small", "min": 4, "max": 30, "revision": MODEL_REVISION},
            "acestep": {"label": "ACE-Step 1.5", "min": 10, "max": 600, "revision": SONG_SPECS["acestep"]["modelRevision"]},
-           "yue2": {"label": "YuE2", "min": 8, "max": 360, "revision": SONG_SPECS["yue2"]["modelRevision"]}}
+           "yue2": {"label": "YuE2 INT8", "min": 8, "max": 600, "revision": SONG_SPECS["yue2"]["modelRevision"]}}
 
 
 def write_json(path: Path, data):
@@ -39,6 +40,16 @@ class Config:
         self.engine_roots = json.loads(os.environ.get("LEVELUP_MUSIC_ENGINE_ROOTS", "{}"))
         self.outputs = self.data / "outputs"
         self.outputs.mkdir(exist_ok=True)
+        self.references = self.data / "references"
+        self.references.mkdir(exist_ok=True)
+
+    def reference(self, reference_id):
+        if not isinstance(reference_id, str) or not re.fullmatch(r"[a-f0-9]{32}", reference_id):
+            raise ValueError("无效的参考音频，请重新导入。")
+        path = (self.references / (reference_id + ".wav")).resolve()
+        if not path.is_relative_to(self.references) or not path.is_file():
+            raise ValueError("参考音频已不存在，请重新导入。")
+        return path
 
     @property
     def python(self):
@@ -135,8 +146,12 @@ def request_params(body):
     if engine == "acestep" and (len(prompt.strip()) > 512 or len(lyrics.strip()) > 4096):
         raise ValueError("ACE-Step 音乐描述最多 512 字，歌词最多 4096 字")
     limits = ENGINES.get(engine, ENGINES["musicgen"])
+    reference_id = body.get("reference_id", "")
+    if not isinstance(reference_id, str) or (reference_id and (engine != "yue2" or not re.fullmatch(r"[a-f0-9]{32}", reference_id))):
+        raise ValueError("参考音频仅支持 YuE2，请选择已导入的音频。")
     return {
         "engine": engine, "mode": mode, "language": language,
+        "reference_id": reference_id,
         "title": title.strip(), "prompt": prompt.strip(), "lyrics": lyrics.strip() if mode == "song" else "",
         "duration": numeric(body.get("duration", 10), "时长", limits["min"], limits["max"]),
         "seed": numeric(body.get("seed", 42), "种子", 0, 2147483647, True),

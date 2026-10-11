@@ -22,6 +22,21 @@ Draft，因此 `v1.0.32` 继续显示 `Latest`；在核对资产并正式发布�
 
 ## 零、以后每次发布速查
 
+### v1.3.76：YuE2 INT8 与参考旋律（发布验收中）
+
+这次同时升级程序加载器和独立资源；官方原版 YuE2 / VAE 的模型 revision 未变。
+INT8 转换权重、SheetSage2 参考旋律和 HDEMUCS 纯音乐流程使用不同的加载接口，不能只替换旧模型。
+详细来源、实测时长与显存见 `docs/YUE2_261011_UPGRADE.md`。
+
+- 使用 `scripts/prepare-yue2-int8.py` 从固定 ComfyUI commit 构建独立 Python 3.13 / torch 2.11 / CUDA 13 环境。
+  保留 ComfyUI 完整对应 GPL 源码、CC-BY-NC 模型许可和 HDEMUCS MIT 许可；不启动 Comfy 服务。
+- 新资源为 `2026.10.11-yue2-int8`、`windows-x64-cu130`，8 分卷 + JSON，下载约 6.57 GiB、安装约 8.54 GiB。
+  `music-workbench-2026.10.11-yue2-int8-windows-x64-cu130.json` 与全部同前缀分卷必须放在同级目录供手动导入。
+- 原生离线导入、歌曲、自动纯音乐、参考音频、播放／剪辑／导出与取消退出均已验证。
+  所有分卷核对 GitHub digest 后最后上传清单；9 个新资源文件已通过匿名下载校验，原生应用读取公开清单成功。
+- 旧的 MusicGen、ACE-Step、YuE2 资源和已发布 tag 不覆盖；旧作品和原始参考文件保留。
+  主安装包只含 10 个小型音频控制文件，不含大型环境或模型；资源 Release 继续为 prerelease。
+
 ### v1.3.75：ACE-Step 1.5 / YuE2（已正式发布）
 
 已发布的 v1.3.73 / v1.3.74 音频工作台仍是 MusicGen Small。v1.3.75 源码已接入 ACE-Step 1.5 Turbo
@@ -69,7 +84,7 @@ gh release edit music-workbench-resources --draft=false --prerelease --latest=fa
 
 ### 从 v1.2.71 起：应用和 3D 通用资源分别发布
 
-应用安装包继续通过 `vX.Y.Z` tag 触发四平台构建，本次应用版本为 `1.3.75`。
+应用安装包继续通过 `vX.Y.Z` tag 触发四平台构建，本次应用版本为 `1.3.76`。
 Python / PyTorch / CUDA、TripoSG、SD2.1 + MV-Adapter、Blender 不进入应用安装包，
 也不再随每个应用版本重复打包或上传。所有额外资源固定放在同一个 Release：
 
@@ -84,7 +99,7 @@ https://github.com/TippingGame/LevelUpAgent/releases/tag/model-workbench-resourc
 - 清单名为 `model-workbench-<资源版本>-<目标>.json`，分片名也包含独立资源版本，每片小于 2 GB。
   初始清单：`model-workbench-2026.10.1-linux-x64-cu118.json`。
 - 资源 Release 使用 prerelease 且 `--latest=false`，只用于把通用资源与应用更新渠道分开，
-  不能上传 `latest.json`；应用正式版（本次 `v1.3.75`）设为 Latest。
+  不能上传 `latest.json`；应用正式版（本次 `v1.3.76`）设为 Latest。
 - 只有模型、CUDA 或依赖内容变化时才增加资源版本并上传新资产，旧资产保留。
   不覆盖已公开的分片或清单；同名同哈希文件复用，同名不同哈希必须改资源版本。
 - 上传顺序：本地校验所有分片与完整归档 → 上传分片并核对 GitHub digest → 最后上传清单。

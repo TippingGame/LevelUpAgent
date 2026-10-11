@@ -224,6 +224,8 @@ if __name__ == "__main__":
     p.add_argument("--torch-source", type=Path, help="Reuse an exact-version local wheel installation")
     p.add_argument("--only", choices=("runtime", "models"))
     args = p.parse_args()
+    if args.engine == "yue2":
+        p.error("YuE2 INT8 now uses scripts/prepare-yue2-int8.py; see docs/YUE2_261011_UPGRADE.md")
     args.staging = args.staging.resolve()
     args.cache = args.cache.resolve()
     spec = SPECS[args.engine]

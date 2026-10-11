@@ -11,13 +11,12 @@
   },
   "yue2": {
     "schemaVersion": 1,
-    "resourceVersion": "2026.10.11-yue2",
+    "resourceVersion": "2026.10.11-yue2-int8",
     "releaseTag": "music-workbench-resources",
     "repository": "TippingGame/LevelUpAgent",
-    "target": "windows-x64-cu128",
-    "modelRevision": "8f24312f187763b9854adeec87e437e2b03bbff1",
-    "vaeRevision": "152733a19ad43aa67e367f9b5503ef8075bb5126",
-    "sourceRevision": "88da114a67df892af0329472073b96a5ef700b93",
+    "target": "windows-x64-cu130",
+    "modelRevision": "2f76ca75e6ee094169de899cc7fc99d6887e2196",
+    "sourceRevision": "830232b856045ca2892833212d7771078a13edd5",
     "components": ["runtime", "yue2-models"]
   }
 }

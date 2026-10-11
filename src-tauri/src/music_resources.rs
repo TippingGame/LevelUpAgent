@@ -74,11 +74,15 @@ pub fn resources(root: &Path, engine: Engine) -> PathBuf {
 }
 pub fn required(engine: Engine, name: &str) -> Vec<&'static str> {
     if name == "runtime" {
-        vec![
+        let mut files = vec![
             "python.exe",
             "ready.json",
             "Lib/site-packages/torch/__init__.py",
-        ]
+        ];
+        if engine == Engine::Yue2 {
+            files.push("comfy-source/comfy/text_encoders/yue2.py");
+        }
+        files
     } else {
         match engine {
             Engine::Musicgen => vec!["model.safetensors", "manifest.json", "config.json"],
@@ -91,10 +95,9 @@ pub fn required(engine: Engine, name: &str) -> Vec<&'static str> {
             ],
             Engine::Yue2 => vec![
                 "manifest.json",
-                "YuE2-3B/model.safetensors",
-                "YuE2-3B/weights_manifest.json",
-                "YuE2-Vae/model.safetensors",
-                "YuE2-Vae/weights_manifest.json",
+                "checkpoints/yue2_3b_int8_convrot.safetensors",
+                "audio_encoders/sheetsage2_bf16.safetensors",
+                "hdemucs_high_trained.pt",
             ],
         }
     }
@@ -753,7 +756,7 @@ mod tests {
             let mut m = spec(engine);
             m["components"] = json!({});
             for name in engine.components() {
-                m["components"][name] = json!({"unpackedBytes":100,"sha256":"a".repeat(64),"license":"test","sources":["test"],"parts":[{"name":format!("music-workbench-{}-windows-x64-cu128-{name}.zip.part001", spec(engine)["resourceVersion"].as_str().unwrap()),"bytes":100,"sha256":"b".repeat(64)}]});
+                m["components"][name] = json!({"unpackedBytes":100,"sha256":"a".repeat(64),"license":"test","sources":["test"],"parts":[{"name":format!("music-workbench-{}-{}-{name}.zip.part001", spec(engine)["resourceVersion"].as_str().unwrap(), spec(engine)["target"].as_str().unwrap()),"bytes":100,"sha256":"b".repeat(64)}]});
             }
             let bytes = serde_json::to_vec(&m).unwrap();
             assert!(validate(&bytes, engine).is_ok());
@@ -788,9 +791,13 @@ mod tests {
             json!({"resourceVersion":spec(engine)["resourceVersion"]}).to_string(),
         )
         .unwrap();
-        fs::write(dir.join("manifest.json"), json!({"revision":spec(engine)["modelRevision"],"files":[{"file":"YuE2-3B/model.safetensors","bytes":7},{"file":"YuE2-Vae/model.safetensors","bytes":7}]}).to_string()).unwrap();
+        fs::write(dir.join("manifest.json"), json!({"revision":spec(engine)["modelRevision"],"files":[{"file":"checkpoints/yue2_3b_int8_convrot.safetensors","bytes":7},{"file":"audio_encoders/sheetsage2_bf16.safetensors","bytes":7},{"file":"hdemucs_high_trained.pt","bytes":7}]}).to_string()).unwrap();
         assert!(installed(&root, engine, "yue2-models"));
-        fs::write(dir.join("YuE2-3B/model.safetensors"), b"bad").unwrap();
+        fs::write(
+            dir.join("checkpoints/yue2_3b_int8_convrot.safetensors"),
+            b"bad",
+        )
+        .unwrap();
         assert!(!installed(&root, engine, "yue2-models"));
         fs::remove_dir_all(root).unwrap();
     }

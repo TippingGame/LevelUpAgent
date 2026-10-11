@@ -60,7 +60,7 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(self.bridge.store.all(), [])
 
     def test_song_engines_validate_lyrics_duration_and_never_fallback(self):
-        for engine, maximum in [("acestep", 600), ("yue2", 360)]:
+        for engine, maximum in [("acestep", 600), ("yue2", 600)]:
             body = {"engine": engine, "prompt": "Warm acoustic pop", "mode": "song", "lyrics": "[Verse]\n晨光落在窗前", "language": "zh", "duration": 45}
             self.assertEqual(request_params(body)["lyrics"], body["lyrics"])
             self.assertEqual(request_params(dict(body, duration=maximum))["duration"], maximum)
@@ -88,6 +88,20 @@ class BridgeTest(unittest.TestCase):
         self.bridge.store.save(interrupted)
         self.bridge = Bridge(self.config)
         self.assertEqual(self.bridge.store.get(interrupted["id"])["status"], "interrupted")
+
+    def test_reference_is_managed_and_cannot_be_a_prompt_path(self):
+        body = {"engine": "yue2", "prompt": "Warm piano"}
+        for reference in ("../../outside", "a" * 31, 123, "C:/outside.wav"):
+            with self.subTest(reference=reference), self.assertRaises(ValueError):
+                request_params(dict(body, reference_id=reference))
+        reference_id = "a" * 32
+        self.assertEqual(request_params(dict(body, reference_id=reference_id))["reference_id"], reference_id)
+        with self.assertRaises(ValueError):
+            request_params(dict(body, engine="acestep", reference_id=reference_id))
+        with self.assertRaisesRegex(ValueError, "重新导入"):
+            self.bridge.manager.submit(dict(body, reference_id=reference_id))
+        with self.assertRaisesRegex(ValueError, "安装"):
+            self.bridge.dispatch("import_reference", {"path": "C:/outside.wav"})
 
     def test_invalid_trim_cleans_partial_and_leaves_source(self):
         job = self.sketch()

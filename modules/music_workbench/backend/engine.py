@@ -9,7 +9,7 @@ import signal
 import threading
 import time
 
-from .core import ROOT, ENGINES, MODEL_FILES, MODEL_REVISION, inspect_wav, new_job, request_params, write_json
+from .core import ROOT, ENGINES, SONG_SPECS, MODEL_FILES, MODEL_REVISION, inspect_wav, new_job, request_params, write_json
 
 def readiness(config, engine="musicgen"):
     runtime_path, model_path = config.paths(engine)
@@ -20,7 +20,7 @@ def readiness(config, engine="musicgen"):
             manifest = json.loads(marker.read_text(encoding="utf-8"))
             records = {r["file"]: r for r in manifest["files"]}
             required = MODEL_FILES if engine == "musicgen" else (
-                ["acestep-v15-turbo/model.safetensors", "vae/diffusion_pytorch_model.safetensors", "Qwen3-Embedding-0.6B/model.safetensors"] if engine == "acestep" else ["YuE2-3B/model.safetensors", "YuE2-Vae/model.safetensors"])
+                ["acestep-v15-turbo/model.safetensors", "vae/diffusion_pytorch_model.safetensors", "Qwen3-Embedding-0.6B/model.safetensors"] if engine == "acestep" else ["checkpoints/yue2_3b_int8_convrot.safetensors", "audio_encoders/sheetsage2_bf16.safetensors", "hdemucs_high_trained.pt"])
             model_ok = manifest["revision"] == ENGINES[engine]["revision"] and all(name in records for name in required) and all(
                 (model_path / name).resolve().is_relative_to(model_path) and (model_path / name).is_file() and (model_path / name).stat().st_size == record["bytes"] for name, record in records.items())
         except (KeyError, ValueError, OSError):
@@ -30,7 +30,9 @@ def readiness(config, engine="musicgen"):
     if marker_runtime.exists() and (runtime_path / ("python.exe" if os.name == "nt" else "bin/python")).exists():
         try:
             runtime_info = json.loads(marker_runtime.read_text(encoding="utf-8"))
-            if engine != "musicgen" and runtime_info.get("engine") != engine:
+            if engine != "musicgen" and (runtime_info.get("engine") != engine or runtime_info.get("sourceRevision") != SONG_SPECS[engine]["sourceRevision"]):
+                runtime_info = {}
+            if engine == "yue2" and not (runtime_path / "comfy-source/comfy/text_encoders/yue2.py").is_file():
                 runtime_info = {}
         except (ValueError, OSError):
             pass
@@ -53,6 +55,11 @@ class JobManager:
 
     def submit(self, body):
         params = request_params(body)
+        if params.get("reference_id"):
+            self.config.reference(params["reference_id"])
+            metadata = json.loads((self.config.references / (params["reference_id"] + ".json")).read_text(encoding="utf-8"))
+            params["reference_name"] = metadata["name"]
+            params["reference_duration"] = metadata["duration"]
         if params["engine"] in ENGINES:
             ok, runtime = readiness(self.config, params["engine"])
             if not ok or not runtime:
@@ -155,12 +162,12 @@ class JobManager:
         engine = job["params"]["engine"]
         runtime, model = self.config.paths(engine) if engine in ENGINES else (None, None)
         request = {"params": job["params"], "model": str(model), "output": str(output), "model_revision": ENGINES[engine]["revision"] if engine in ENGINES else None}
-        if engine == "yue2":
-            request.update(model=str(model / "YuE2-3B"), vae=str(model / "YuE2-Vae"))
+        if engine == "yue2" and job["params"].get("reference_id"):
+            request["reference"] = str(self.config.reference(job["params"]["reference_id"]))
         write_json(directory / "request.json", request)
         python = runtime / ("python.exe" if os.name == "nt" else "bin/python") if runtime else sys.executable
         worker = ROOT / "backend" / f"{engine}_worker.py"
-        self.subprocess(job, [str(python), str(worker), str(directory / "request.json")], directory)
+        self.subprocess(job, [str(python), "-B", "-s", str(worker), str(directory / "request.json")], directory)
         with self.lock:
             if self.is_cancelled(job["id"]):
                 return
@@ -172,7 +179,7 @@ class JobManager:
                 fields.update(audio=info, sha256=hashlib.sha256(output.read_bytes()).hexdigest(), model_revision=request["model_revision"], license="CC-BY-NC-4.0" if job["params"]["engine"] == "musicgen" else "见引擎授权")
                 if (directory / "generation.json").is_file():
                     receipt = json.loads((directory / "generation.json").read_text(encoding="utf-8"))
-                    fields.update({k: receipt[k] for k in ("metrics", "warnings", "truncated", "license", "duration_mode") if k in receipt})
+                    fields.update({k: receipt[k] for k in ("metrics", "warnings", "truncated", "license", "duration_mode", "engine_label") if k in receipt})
                     if fields.get("warnings"):
                         fields["phase"] = "音频已生成，请查看提示"
                 fields["artifacts"] = {"audio": str(output), "metadata": str(directory / "metadata.json"), "request": str(directory / "request.json")}

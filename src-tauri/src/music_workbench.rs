@@ -89,7 +89,11 @@ impl MusicWorkbench {
             *guard = Some(start_service(app)?);
         }
         match tokio::time::timeout(
-            Duration::from_secs(if action == "trim" { 120 } else { 20 }),
+            Duration::from_secs(if matches!(action, "trim" | "import_reference") {
+                120
+            } else {
+                20
+            }),
             guard.as_mut().unwrap().request(action, request),
         )
         .await
@@ -276,7 +280,7 @@ pub async fn music_request(
 ) -> Result<Value, String> {
     if !matches!(
         action.as_str(),
-        "generate" | "cancel" | "trim" | "favorite" | "archive"
+        "generate" | "cancel" | "trim" | "favorite" | "archive" | "import_reference"
     ) || !request.is_object()
         || request.to_string().len() > 32_000
     {

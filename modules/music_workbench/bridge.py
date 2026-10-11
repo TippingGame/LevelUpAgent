@@ -5,12 +5,15 @@ Only this small control plane is shipped inside the desktop application.
 """
 import hashlib
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 import time
+import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from backend.core import Config, ENGINES, Store, new_job, trim_wav, write_json
+from backend.core import Config, ENGINES, ROOT, Store, new_job, trim_wav, write_json
 from backend.engine import JobManager, readiness
 
 
@@ -33,6 +36,29 @@ class Bridge:
             if body.get("engine", "musicgen") not in ENGINES:
                 raise ValueError("请选择已安装的音频引擎")
             return self.manager.submit(body)
+        if action == "import_reference":
+            _, ready = readiness(self.config, "yue2")
+            if not ready:
+                raise ValueError("请先安装 YuE2 INT8 运行环境。")
+            source = body.get("path")
+            if not isinstance(source, str) or not source or len(source) > 4096:
+                raise ValueError("请选择本地参考音频。")
+            reference_id = uuid.uuid4().hex
+            target = self.config.references / (reference_id + ".wav")
+            runtime, _ = self.config.paths("yue2")
+            python = runtime / ("python.exe" if os.name == "nt" else "bin/python")
+            try:
+                result = subprocess.run([str(python), "-B", "-s", str(ROOT / "backend/yue2_audio.py"), source, str(target)],
+                                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+                                        env=dict(os.environ, PYTHONUTF8="1"), creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+                if result.returncode:
+                    raise ValueError("参考音频导入失败：" + result.stderr[-1000:])
+                info = dict(json.loads(result.stdout), id=reference_id)
+                write_json(target.with_suffix(".json"), info)
+                return info
+            except Exception:
+                target.unlink(missing_ok=True)
+                raise
         if action == "cancel":
             return self.manager.cancel(body["id"])
         if action in ("favorite", "archive"):
@@ -55,6 +81,7 @@ class Bridge:
                            parent_id=source["id"], audio=info, finished_at=time.time(),
                            sha256=hashlib.sha256(audio.read_bytes()).hexdigest(),
                            license=source.get("license"), model_revision=source.get("model_revision"),
+                           engine_label=source.get("engine_label"),
                            warnings=source.get("warnings", []), truncated=source.get("truncated"),
                            edit={"start": body["start"], "end": body["end"], "fade": body.get("fade", 0.1)})
                 write_json(directory / "metadata.json", job)

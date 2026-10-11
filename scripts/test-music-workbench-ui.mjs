@@ -27,7 +27,9 @@ try {
   await page.emulateMedia({colorScheme:mode});
   await page.evaluate(armor=>localStorage.setItem('levelup-agent.armor-mode.v1',String(armor)),armor);
   await page.reload(); await enter();
-  await page.locator('.music-compose').getByLabel('生成模型',{exact:true}).selectOption('acestep');
+  await page.locator('.music-compose').getByLabel('生成模型',{exact:true}).selectOption('yue2');
+  if(!await button('选择参考音频').isVisible())await page.getByText('参考音频（选填）',{exact:true}).click();
+  assert.equal(await button('选择参考音频').isVisible(),true);
   await button('带歌词歌曲').click();
   await page.getByLabel('歌词',{exact:true}).fill('[Verse]\n晨光落在窗前\n我们迎着风向前');
   await page.getByLabel('演唱语言',{exact:true}).selectOption('zh');
@@ -36,6 +38,8 @@ try {
   assert.match(await page.getByLabel('音乐描述',{exact:true}).inputValue(),/Soft piano/);
   await page.getByText('更多参数',{exact:true}).click();
   await page.getByLabel('种子',{exact:true}).fill('20261009');
+  await page.getByText('参考音频（选填）',{exact:true}).scrollIntoViewIfNeeded();
+  await page.screenshot({path:resolve(output,`${native?'native':'browser'}-${mode}-${armor?'armor':'plain'}-reference.png`)});
   await button('生成音乐').hover();
   await page.screenshot({path:resolve(output,`${native?'native':'browser'}-${mode}-${armor?'armor':'plain'}.png`)});
   await setupDialog(); await page.getByRole('dialog').waitFor();
@@ -62,14 +66,14 @@ try {
  await page.reload(); await enter();
  assert.equal(await page.getByLabel('歌词',{exact:true}).inputValue(),'[Verse]\n晨光落在窗前\n我们迎着风向前');
  await page.locator('.music-compose').getByLabel('生成模型',{exact:true}).selectOption('yue2');
- assert.equal(await page.getByLabel('时长（秒）',{exact:true}).getAttribute('max'),'360');
+ assert.equal(await page.getByLabel('时长（秒）',{exact:true}).getAttribute('max'),'600');
  await page.locator('.music-compose').getByLabel('生成模型',{exact:true}).selectOption('musicgen');
  assert.equal(await button('带歌词歌曲').isDisabled(),true);
  assert.equal(await page.getByLabel('歌词',{exact:true}).count(),0);
  assert.equal(await page.getByLabel('时长（秒）',{exact:true}).getAttribute('max'),'30');
  await page.getByText('更多参数',{exact:true}).click();
  assert.equal(await page.getByLabel('种子',{exact:true}).inputValue(),'20261009');
- if(native) {
+ if(native && !process.argv.includes('--appearance-only')) {
   await page.locator('.music-compose').getByLabel('生成模型',{exact:true}).selectOption(engine);
   if(engine!=='musicgen')await button('带歌词歌曲').click();
   report.initial=await invoke('music_status'); report.hardware=await invoke('music_hardware');

@@ -40,9 +40,11 @@ def package(staging, output, part_bytes=1_000_000_000, engine="musicgen"):
         model_required = {
             "musicgen": ["model.safetensors", "manifest.json", "config.json"],
             "acestep": ["manifest.json", "acestep-v15-turbo/model.safetensors", "acestep-v15-turbo/config.json", "Qwen3-Embedding-0.6B/model.safetensors", "vae/diffusion_pytorch_model.safetensors"],
-            "yue2": ["manifest.json", "YuE2-3B/model.safetensors", "YuE2-3B/weights_manifest.json", "YuE2-Vae/model.safetensors", "YuE2-Vae/weights_manifest.json"],
+            "yue2": ["manifest.json", "checkpoints/yue2_3b_int8_convrot.safetensors", "audio_encoders/sheetsage2_bf16.safetensors", "hdemucs_high_trained.pt"],
         }[engine]
         required = ["python.exe", "ready.json", "Lib/site-packages/torch/__init__.py"] if name == "runtime" else model_required
+        if name == "runtime" and engine == "yue2":
+            required.append("comfy-source/comfy/text_encoders/yue2.py")
         if any(not (source / p).is_file() for p in required):
             raise ValueError(f"Incomplete {name} component")
         if name == "runtime" and engine != "musicgen":
