@@ -1,7 +1,7 @@
 # ACE-Step 1.5 与 YuE2 接入记录
 
 开始日期：2026-10-11。目标为正式音频工作台同时接入 ACE-Step 1.5 和 YuE2，支持纯音乐与按歌词演唱，保留 MusicGen 和已有作品。
-两个引擎已完成真实推理与原生桌面验收；独立资源上传核验仍在进行。按用户确认，应用版本更新为 1.3.75，正在准备发布。
+两个引擎已完成真实推理、原生桌面验收与独立资源公开下载核验。应用 v1.3.75 已于 2026-10-11 14:23:57（Asia/Shanghai）正式发布并设为 Latest。
 
 ## 完成门槛
 
@@ -38,8 +38,12 @@
 
 YuE2 的 NAR 阶段通过官方 `yue2.nar.synthesize` 指定 `query_chunk_size=512`，限制 Windows SDPA 工作区；未复制参考包里修改过的 pipeline 或第三方 WebUI。模型源代码始终从固定 Git 提交导出。ACE-Step checkpoint 侧 Python 文件按官方同步规则在打包前固化，推理不需要改动资源。
 
-## 仍在进行
+## 发布与兼容验收
 
-两个独立资源版本的 GitHub 上传及匿名下载核验尚在进行，清单最后上传。ACE-Step 共 10 个分卷、8,605,753,923 下载 bytes、12,495,192,040 安装 bytes；YuE2 共 11 个分卷、9,332,598,511 下载 bytes、12,503,247,378 安装 bytes。
+两个独立资源版本已追加到共享 GitHub 资源页，对应分卷全部核验后最后上传清单。三个引擎共 30 个文件通过大小、GitHub SHA256 digest、匿名清单及全部分卷首尾 Range 下载校验。ACE-Step 共 10 个分卷、8,605,753,923 下载 bytes、12,495,192,040 安装 bytes；YuE2 共 11 个分卷、9,332,598,511 下载 bytes、12,503,247,378 安装 bytes。
 
-应用 1.3.75 正在准备发布，结果记录于 [发布记录](RELEASE_1.3.75.md)。原型数据库与用户提供的整合包保持原样。已公开的 MusicGen 资源不覆盖，应用主包仅包含 9 个小型音频控制文件，共约 35 KiB。
+应用 v1.3.75 已正式发布，结果记录于 [发布记录](RELEASE_1.3.75.md)。原型数据库与用户提供的整合包保持原样。已公开的 MusicGen 资源不覆盖，应用主包仅包含 9 个小型音频控制文件，共约 35 KiB。
+
+隔离 v1.3.75 Tauri 应用通过真实 `music_manifest` 命令读取 MusicGen、ACE-Step 和 YuE2 公开清单，下载大小提示在四种外观均通过。证据：`research/release-1.3.75-2026-10-11/native-manifests/public.json`。
+
+旧 MusicGen 环境回归生成 3.94 秒音频，worker 耗时 6.92 秒，PyTorch 峰值分配显存 2.317 GiB；既有 4 条任务及 WAV 哈希不变。证据：`research/release-1.3.75-2026-10-11/legacy-musicgen-verification.json`。

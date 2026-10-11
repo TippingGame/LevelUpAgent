@@ -1,6 +1,6 @@
 # LevelUpAgent 1.3.75 发布记录
 
-日期：2026-10-11。状态：准备发布，正式资产与公开清单验收后补充结果。
+日期：2026-10-11。状态：已发布到 GitHub，正式 Release 为 `v1.3.75`，已设为 Latest。
 
 ## 本版内容
 
@@ -43,3 +43,17 @@ RTX 3080 Ti 12 GiB、约 64 GiB RAM，两个引擎均在各自可搬迁 Python �
 Windows updater 使用签名校验，未配置 Authenticode；macOS 使用 ad-hoc 签名，尚未公证；Linux 包未做发行版签名。没有覆盖用户现有安装或作品库。
 
 应用发布证据目录：`G:\Work\LevelUpAgent\research\release-1.3.75-2026-10-11`。
+
+## 发布结果
+
+- 正式 Release：[LevelUpAgent v1.3.75](https://github.com/TippingGame/LevelUpAgent/releases/tag/v1.3.75)，Release ID `409438669`；北京时间 **2026-10-11 14:23:57** 发布并设为 Latest，非预发布。
+- 构建提交：`3cb7110985c683f8e3b0def76340d0b73084583c`，tag：`v1.3.75`。
+- [三平台 CI](https://github.com/TippingGame/LevelUpAgent/actions/runs/38114725194) 和 [四平台 Release](https://github.com/TippingGame/LevelUpAgent/actions/runs/38114726825) 全部成功。两个 macOS runner 均执行 DMG 校验、包内签名及模拟复制安装后的签名验证。
+- 10 个应用资产完整下载，大小与 SHA256 全部匹配 GitHub digest；Windows EXE/MSI updater 签名及可信注释签名有效。公开发布页和 `latest.json` 均返回 HTTP 200，版本、URL、签名与已验证资产一致。
+- Windows EXE 完整性、主程序 x64 架构、安装器／主程序版本 1.3.75、68 个内置资源、正式 CSP 和 updater 配置通过；没有 QA 标识或调试端口。
+- 音频三个引擎共 27 个分卷及 3 份清单通过大小、GitHub SHA256 digest 和匿名下载校验。清单 HTTP 200，全部分卷首尾 64 KiB 的 Range 请求 HTTP 206 且字节相同；资源清单均在对应分卷核验后上传。
+- 正式版本代码的隔离 Tauri 应用实际读取三个引擎的公开清单，浅色／深色 × Armor Mode 关／开四种外观的下载大小显示通过。3D 固定资源继续复用且公开校验通过；音频和 3D 资源均保持 prerelease、不占应用 Latest。
+- MusicGen 旧资源回归生成 3.94 秒音频，worker 耗时 6.92 秒，PyTorch 峰值分配显存 2.317 GiB；既有 4 条任务和 WAV 哈希保持。证据：`legacy-musicgen-verification.json`。
+- 正式 EXE 已同步到 `G:\Work\LevelUpAgent\安装包\LevelUpAgent_1.3.75_Windows_x64-setup.exe`，保留旧版并更新版本／总 SHA256 清单；14,946,009 字节，SHA256：`184AEE1F269E4D5A57EBBEF6DF44025F9E7BD824B60C156F226140ACE1F8549D`。
+
+本轮完成隔离 Windows 原生功能验收与正式安装包内容验证，未覆盖用户现有安装或执行旧版应用内更新；macOS／Linux 未新增实体机交互验收。应用 tag 与签名资产保留原构建提交，发布后仅同步文档记录。
