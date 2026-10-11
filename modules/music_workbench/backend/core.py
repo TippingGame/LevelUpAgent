@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import array
+from contextlib import contextmanager
 import json
 import math
 import os
@@ -15,6 +16,10 @@ ROOT = Path(__file__).resolve().parents[1]
 VERSION = "1"
 MODEL_REVISION = "4c8334b02c6ec4e8664a91979669a501ec497792"
 MODEL_FILES = ["config.json", "generation_config.json", "model.safetensors", "preprocessor_config.json", "special_tokens_map.json", "spiece.model", "tokenizer.json", "tokenizer_config.json"]
+SONG_SPECS = json.loads((ROOT / "song-resources.json").read_text(encoding="utf-8"))
+ENGINES = {"musicgen": {"label": "MusicGen Small", "min": 4, "max": 30, "revision": MODEL_REVISION},
+           "acestep": {"label": "ACE-Step 1.5", "min": 10, "max": 600, "revision": SONG_SPECS["acestep"]["modelRevision"]},
+           "yue2": {"label": "YuE2", "min": 8, "max": 360, "revision": SONG_SPECS["yue2"]["modelRevision"]}}
 
 
 def write_json(path: Path, data):
@@ -30,6 +35,8 @@ class Config:
         self.data.mkdir(parents=True, exist_ok=True)
         self.models = Path(os.environ.get("LEVELUP_MUSIC_MODELS", self.data / "resources")).resolve()
         self.runtime = Path(os.environ.get("LEVELUP_MUSIC_RUNTIME", self.models / "runtime")).resolve()
+        # Supplied only by the host. Prompts/IPC requests cannot override paths.
+        self.engine_roots = json.loads(os.environ.get("LEVELUP_MUSIC_ENGINE_ROOTS", "{}"))
         self.outputs = self.data / "outputs"
         self.outputs.mkdir(exist_ok=True)
 
@@ -41,6 +48,13 @@ class Config:
     def model(self):
         return self.models / "musicgen-small"
 
+    def paths(self, engine):
+        if engine == "musicgen":
+            return self.runtime, self.model
+        spec = SONG_SPECS[engine]
+        root = Path(self.engine_roots.get(engine, self.data / "resources" / spec["resourceVersion"])).resolve()
+        return root / "runtime", root / spec["components"][1]
+
 
 
 class Store:
@@ -51,10 +65,16 @@ class Store:
             db.execute("CREATE TABLE IF NOT EXISTS drafts (id TEXT PRIMARY KEY, data TEXT NOT NULL)")
         self.lock = threading.RLock()
 
+    @contextmanager
     def connect(self):
         db = sqlite3.connect(self.path, timeout=20)
-        db.execute("PRAGMA journal_mode=WAL")
-        return db
+        try:
+            db.execute("PRAGMA journal_mode=WAL")
+            with db:
+                yield db
+        finally:
+            # sqlite3's transaction context does not close its file handle.
+            db.close()
 
     def save(self, job, table="jobs"):
         assert table in ("jobs", "drafts")
@@ -93,7 +113,7 @@ def numeric(value, name, lower, upper, integer=False):
 
 def request_params(body):
     engine = body.get("engine", "musicgen")
-    if engine not in ("musicgen", "sketch"):
+    if engine not in (*ENGINES, "sketch"):
         raise ValueError("此引擎尚未接入；请选择已实现的引擎")
     prompt = body.get("prompt", "")
     title = body.get("title", "未命名灵感")
@@ -104,11 +124,21 @@ def request_params(body):
         raise ValueError("作品名须为 1–80 个字符")
     if not isinstance(lyrics, str) or len(lyrics) > 6000:
         raise ValueError("歌词过长")
-    if lyrics.strip():
+    mode = body.get("mode", "instrumental")
+    language = body.get("language", "auto")
+    if mode not in ("instrumental", "song") or language not in ("auto", "zh", "en", "ja"):
+        raise ValueError("请选择有效的创作方式和演唱语言")
+    if engine in ("musicgen", "sketch") and (mode == "song" or lyrics.strip()):
         raise ValueError("当前引擎只生成纯音乐，不支持歌词")
+    if mode == "song" and not lyrics.strip():
+        raise ValueError("请填写歌词，或选择纯音乐")
+    if engine == "acestep" and (len(prompt.strip()) > 512 or len(lyrics.strip()) > 4096):
+        raise ValueError("ACE-Step 音乐描述最多 512 字，歌词最多 4096 字")
+    limits = ENGINES.get(engine, ENGINES["musicgen"])
     return {
-        "engine": engine, "title": title.strip(), "prompt": prompt.strip(), "lyrics": lyrics.strip(),
-        "duration": numeric(body.get("duration", 10), "时长", 4, 30),
+        "engine": engine, "mode": mode, "language": language,
+        "title": title.strip(), "prompt": prompt.strip(), "lyrics": lyrics.strip() if mode == "song" else "",
+        "duration": numeric(body.get("duration", 10), "时长", limits["min"], limits["max"]),
         "seed": numeric(body.get("seed", 42), "种子", 0, 2147483647, True),
         "guidance": numeric(body.get("guidance", 3), "提示词强度", 1, 8),
         "bpm": numeric(body.get("bpm", 90), "速度", 40, 200, True),
@@ -146,10 +176,13 @@ def trim_wav(source: Path, target: Path, start, end, fade):
     frame_count = len(samples) // channels
     fade_frames = int(fade * rate)
     if fade_frames:
-        for frame in range(frame_count):
-            gain = min(1.0, frame / fade_frames, (frame_count - 1 - frame) / fade_frames)
-            for c in range(channels):
-                samples[frame * channels + c] = int(samples[frame * channels + c] * gain)
+        # Only the edges change. Iterating the entire song makes long trims
+        # needlessly slow and can block the control pipe for tens of seconds.
+        for edge in range(fade_frames):
+            gain = edge / fade_frames
+            for frame in (edge, frame_count - 1 - edge):
+                for c in range(channels):
+                    samples[frame * channels + c] = int(samples[frame * channels + c] * gain)
     with wave.open(str(target), "wb") as dst:
         dst.setnchannels(channels)
         dst.setsampwidth(2)

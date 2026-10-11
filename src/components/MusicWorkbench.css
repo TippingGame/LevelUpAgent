@@ -3,8 +3,8 @@
 .music-workbench button, .music-environment button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font: inherit; font-size: 12px; cursor: pointer; }
 .music-workbench button:hover:not(:disabled), .music-environment button:hover:not(:disabled) { border-color: var(--accent); background: var(--surface-soft); }
 .music-workbench button:disabled, .music-environment button:disabled { opacity: .45; cursor: default; }
-.music-workbench :is(button,input,textarea,summary,audio):focus-visible, .music-environment button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-.music-workbench :is(input:not([type="checkbox"]),textarea) { box-sizing: border-box; min-width: 0; width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font: inherit; font-size: 13px; }
+.music-workbench :is(button,input,textarea,select,summary,audio):focus-visible, .music-environment :is(button,select):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.music-workbench :is(input:not([type="checkbox"]),textarea,select), .music-environment select { box-sizing: border-box; min-width: 0; width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font: inherit; font-size: 13px; }
 .music-workbench textarea { resize: vertical; min-height: 120px; line-height: 1.7; }
 .music-workbench label { display: grid; gap: 8px; color: var(--muted); font-size: 12px; }
 .music-workbench h2, .music-environment h2 { margin: 0; font-size: 16px; font-weight: 600; }
@@ -16,6 +16,9 @@
 .music-intro > svg { color: var(--accent); flex-shrink: 0; margin-top: 2px; }
 .music-intro p { margin-top: 6px; }
 .music-presets, .music-track-actions, .music-dialog-actions { display: flex; gap: 7px; flex-wrap: wrap; }
+.music-mode { display: flex; gap: 8px; }
+.music-mode button { flex: 1; }
+.music-mode button[aria-pressed="true"] { background: var(--info-soft); border-color: var(--info-line); color: var(--info-text); }
 .music-presets button { padding: 5px 10px; font-size: 11px; border-radius: 16px; color: var(--muted); }
 .music-fields { display: grid; grid-template-columns: minmax(0, 2fr) minmax(85px, 1fr); gap: 12px; }
 .music-details { border-top: 1px solid var(--line); padding-top: 13px; }

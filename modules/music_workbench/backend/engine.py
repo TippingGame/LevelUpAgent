@@ -9,23 +9,29 @@ import signal
 import threading
 import time
 
-from .core import ROOT, MODEL_FILES, MODEL_REVISION, inspect_wav, new_job, request_params, write_json
+from .core import ROOT, ENGINES, MODEL_FILES, MODEL_REVISION, inspect_wav, new_job, request_params, write_json
 
-def readiness(config):
-    marker = config.model / "manifest.json"
+def readiness(config, engine="musicgen"):
+    runtime_path, model_path = config.paths(engine)
+    marker = model_path / "manifest.json"
     model_ok = False
     if marker.exists():
         try:
             manifest = json.loads(marker.read_text(encoding="utf-8"))
             records = {r["file"]: r for r in manifest["files"]}
-            model_ok = manifest["revision"] == MODEL_REVISION and all((config.model / name).is_file() and (config.model / name).stat().st_size == records[name]["bytes"] for name in MODEL_FILES)
+            required = MODEL_FILES if engine == "musicgen" else (
+                ["acestep-v15-turbo/model.safetensors", "vae/diffusion_pytorch_model.safetensors", "Qwen3-Embedding-0.6B/model.safetensors"] if engine == "acestep" else ["YuE2-3B/model.safetensors", "YuE2-Vae/model.safetensors"])
+            model_ok = manifest["revision"] == ENGINES[engine]["revision"] and all(name in records for name in required) and all(
+                (model_path / name).resolve().is_relative_to(model_path) and (model_path / name).is_file() and (model_path / name).stat().st_size == record["bytes"] for name, record in records.items())
         except (KeyError, ValueError, OSError):
             pass
     runtime_info = {}
-    marker_runtime = config.runtime / "ready.json"
-    if marker_runtime.exists() and config.python.exists():
+    marker_runtime = runtime_path / "ready.json"
+    if marker_runtime.exists() and (runtime_path / ("python.exe" if os.name == "nt" else "bin/python")).exists():
         try:
             runtime_info = json.loads(marker_runtime.read_text(encoding="utf-8"))
+            if engine != "musicgen" and runtime_info.get("engine") != engine:
+                runtime_info = {}
         except (ValueError, OSError):
             pass
     return model_ok, runtime_info
@@ -47,10 +53,10 @@ class JobManager:
 
     def submit(self, body):
         params = request_params(body)
-        if params["engine"] == "musicgen":
-            ok, runtime = readiness(self.config)
+        if params["engine"] in ENGINES:
+            ok, runtime = readiness(self.config, params["engine"])
             if not ok or not runtime:
-                raise ValueError("请先到模型与资源安装 MusicGen")
+                raise ValueError("请先到环境与下载安装 " + ENGINES[params["engine"]]["label"])
         with self.lock:
             if sum(j["status"] in ("queued", "running") for j in self.store.all()) >= 8:
                 raise ValueError("队列已满，请等待当前任务完成")
@@ -146,11 +152,14 @@ class JobManager:
         directory = self.config.outputs / job["id"]
         directory.mkdir(exist_ok=True)
         output = directory / "audio.wav"
-        request = {"params": job["params"], "model": str(self.config.model), "output": str(output), "model_revision": MODEL_REVISION if job["params"]["engine"] == "musicgen" else None}
-        write_json(directory / "request.json", request)
         engine = job["params"]["engine"]
-        python = self.config.python if engine == "musicgen" else sys.executable
-        worker = ROOT / "backend" / ("musicgen_worker.py" if engine == "musicgen" else "sketch_worker.py")
+        runtime, model = self.config.paths(engine) if engine in ENGINES else (None, None)
+        request = {"params": job["params"], "model": str(model), "output": str(output), "model_revision": ENGINES[engine]["revision"] if engine in ENGINES else None}
+        if engine == "yue2":
+            request.update(model=str(model / "YuE2-3B"), vae=str(model / "YuE2-Vae"))
+        write_json(directory / "request.json", request)
+        python = runtime / ("python.exe" if os.name == "nt" else "bin/python") if runtime else sys.executable
+        worker = ROOT / "backend" / f"{engine}_worker.py"
         self.subprocess(job, [str(python), str(worker), str(directory / "request.json")], directory)
         with self.lock:
             if self.is_cancelled(job["id"]):
@@ -161,6 +170,11 @@ class JobManager:
                 if info["rms"] < 0.00001:
                     raise ValueError("生成音频为空或近乎静音，请更换种子重试")
                 fields.update(audio=info, sha256=hashlib.sha256(output.read_bytes()).hexdigest(), model_revision=request["model_revision"], license="CC-BY-NC-4.0" if job["params"]["engine"] == "musicgen" else "见引擎授权")
+                if (directory / "generation.json").is_file():
+                    receipt = json.loads((directory / "generation.json").read_text(encoding="utf-8"))
+                    fields.update({k: receipt[k] for k in ("metrics", "warnings", "truncated", "license", "duration_mode") if k in receipt})
+                    if fields.get("warnings"):
+                        fields["phase"] = "音频已生成，请查看提示"
                 fields["artifacts"] = {"audio": str(output), "metadata": str(directory / "metadata.json"), "request": str(directory / "request.json")}
             final = self.store.update(job["id"], **fields)
             write_json(directory / "metadata.json", final)

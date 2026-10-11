@@ -8,13 +8,15 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const directory = path.resolve(process.argv[2] ?? "artifacts/music-workbench/release");
-const spec = JSON.parse(fs.readFileSync(path.join(root, "modules/music_workbench/resources.json"), "utf8"));
+const engine = process.argv[3] ?? "musicgen";
+if (!["musicgen", "acestep", "yue2"].includes(engine)) throw new Error("Unknown engine");
+const spec = engine === "musicgen" ? JSON.parse(fs.readFileSync(path.join(root, "modules/music_workbench/resources.json"), "utf8")) : JSON.parse(fs.readFileSync(path.join(root, "modules/music_workbench/song-resources.json"), "utf8"))[engine];
 const manifestPath = path.join(directory, `music-workbench-${spec.resourceVersion}-${spec.target}.json`);
 const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-for (const key of ["schemaVersion", "resourceVersion", "releaseTag", "target", "repository", "modelRevision"]) {
+for (const key of ["schemaVersion", "resourceVersion", "releaseTag", "target", "repository", "modelRevision", "sourceRevision", "vaeRevision"]) {
   if (manifest[key] !== spec[key]) throw new Error(`Resource specification mismatch: ${key}`);
 }
-const components = ["runtime", "musicgen-small"];
+const components = engine === "musicgen" ? ["runtime", "musicgen-small"] : spec.components;
 if (Object.keys(manifest.components).sort().join() !== components.sort().join()) throw new Error("Invalid component set");
 const files = [], names = new Set();
 for (const [name, component] of Object.entries(manifest.components)) {

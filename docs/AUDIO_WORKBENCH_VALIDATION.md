@@ -1,5 +1,8 @@
 # 音频工作台集成验收
 
+2026-10-11 的 ACE-Step 1.5 / YuE2 双引擎接入、独立资源、长歌曲和原生验收见
+[双引擎接入记录](AUDIO_ENGINES_INTEGRATION.md)。以下保留 v1.3.73 初次集成 MusicGen 的历史证据。
+
 日期：2026-10-10。Windows x64，RTX 3080 Ti 12 GiB，系统内存约 64 GiB。
 
 ## 已验证

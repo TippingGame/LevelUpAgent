@@ -10,7 +10,7 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from backend.core import Config, Store, new_job, trim_wav, write_json
+from backend.core import Config, ENGINES, Store, new_job, trim_wav, write_json
 from backend.engine import JobManager, readiness
 
 
@@ -24,12 +24,15 @@ class Bridge:
         if not isinstance(body, dict):
             raise ValueError("Invalid audio request")
         if action == "status":
-            model, runtime = readiness(self.config)
-            return {"ready": model and bool(runtime), "jobs": self.store.all()}
+            engines = {}
+            for engine in ENGINES:
+                model, runtime = readiness(self.config, engine)
+                engines[engine] = {"ready": model and bool(runtime), "modelReady": model, "runtimeReady": bool(runtime)}
+            return {"ready": any(e["ready"] for e in engines.values()), "engines": engines, "jobs": self.store.all()}
         if action == "generate":
-            if body.get("engine", "musicgen") != "musicgen":
-                raise ValueError("请选择 MusicGen Small")
-            return self.manager.submit(dict(body, engine="musicgen"))
+            if body.get("engine", "musicgen") not in ENGINES:
+                raise ValueError("请选择已安装的音频引擎")
+            return self.manager.submit(body)
         if action == "cancel":
             return self.manager.cancel(body["id"])
         if action in ("favorite", "archive"):
@@ -52,6 +55,7 @@ class Bridge:
                            parent_id=source["id"], audio=info, finished_at=time.time(),
                            sha256=hashlib.sha256(audio.read_bytes()).hexdigest(),
                            license=source.get("license"), model_revision=source.get("model_revision"),
+                           warnings=source.get("warnings", []), truncated=source.get("truncated"),
                            edit={"start": body["start"], "end": body["end"], "fade": body.get("fade", 0.1)})
                 write_json(directory / "metadata.json", job)
                 return self.store.save(job)

@@ -21,27 +21,40 @@ def digest(path):
     return h.hexdigest()
 
 
-def package(staging, output, part_bytes=1_000_000_000):
+def package(staging, output, part_bytes=1_000_000_000, engine="musicgen"):
+    spec = SPEC if engine == "musicgen" else json.loads((ROOT / "modules/music_workbench/song-resources.json").read_text(encoding="utf-8"))[engine]
+    components = COMPONENTS if engine == "musicgen" else spec["components"]
     if not 0 < part_bytes < 2_000_000_000:
         raise ValueError("GitHub assets must be below 2 GB")
     output.mkdir(parents=True, exist_ok=True)
-    manifest = dict(SPEC, components={})
-    prefix = f"music-workbench-{SPEC['resourceVersion']}-{SPEC['target']}"
+    manifest = dict(spec, components={})
+    prefix = f"music-workbench-{spec['resourceVersion']}-{spec['target']}"
     index = output / f"{prefix}.json"
     if index.exists():
         raise ValueError("Immutable manifest already exists; use a fresh output directory or resource version")
-    for name in COMPONENTS:
+    for name in components:
         source = staging / name
         provenance = json.loads((source / "provenance.json").read_text(encoding="utf-8"))
         if not provenance.get("license") or not provenance.get("sources"):
             raise ValueError("Missing resource provenance")
-        required = ["python.exe", "ready.json", "Lib/site-packages/torch/__init__.py"] if name == "runtime" else ["model.safetensors", "manifest.json", "config.json"]
+        model_required = {
+            "musicgen": ["model.safetensors", "manifest.json", "config.json"],
+            "acestep": ["manifest.json", "acestep-v15-turbo/model.safetensors", "acestep-v15-turbo/config.json", "Qwen3-Embedding-0.6B/model.safetensors", "vae/diffusion_pytorch_model.safetensors"],
+            "yue2": ["manifest.json", "YuE2-3B/model.safetensors", "YuE2-3B/weights_manifest.json", "YuE2-Vae/model.safetensors", "YuE2-Vae/weights_manifest.json"],
+        }[engine]
+        required = ["python.exe", "ready.json", "Lib/site-packages/torch/__init__.py"] if name == "runtime" else model_required
         if any(not (source / p).is_file() for p in required):
             raise ValueError(f"Incomplete {name} component")
-        if name == "musicgen-small":
+        if name == "runtime" and engine != "musicgen":
+            ready = json.loads((source / "ready.json").read_text(encoding="utf-8"))
+            if ready.get("engine") != engine or ready.get("sourceRevision") != spec["sourceRevision"]:
+                raise ValueError("Runtime does not match the pinned engine source")
+        if name != "runtime":
             model = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
-            if model["revision"] != SPEC["modelRevision"]:
+            if model["revision"] != spec["modelRevision"]:
                 raise ValueError("Unexpected model revision")
+            if any(p not in {r["file"] for r in model["files"]} for p in model_required if p != "manifest.json"):
+                raise ValueError("Required model files are missing from the checksum manifest")
             for record in model["files"]:
                 path = (source / record["file"]).resolve()
                 if not path.is_relative_to(source.resolve()) or path.stat().st_size != record["bytes"] or digest(path) != record["sha256"]:
@@ -86,5 +99,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--staging", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--engine", choices=("musicgen", "acestep", "yue2"), default="musicgen")
     args = parser.parse_args()
-    package(args.staging, args.output)
+    package(args.staging, args.output, engine=args.engine)

@@ -22,6 +22,27 @@ Draft，因此 `v1.0.32` 继续显示 `Latest`；在核对资产并正式发布�
 
 ## 零、以后每次发布速查
 
+### ACE-Step 1.5 / YuE2 接入中（尚未发布应用版本）
+
+已发布的 v1.3.73 / v1.3.74 音频工作台仍是 MusicGen Small。当前源码正在加入 ACE-Step 1.5 Turbo
+和 YuE2，支持纯音乐／带歌词歌曲；不能将开发验证记录写成已发布能力。完成门槛与实际证据见
+`docs/AUDIO_ENGINES_INTEGRATION.md`。
+
+- MusicGen 继续复用 `2026.10.1`；歌曲资源分别为 `2026.10.11-acestep`、`2026.10.11-yue2`，
+  由 `modules/music_workbench/song-resources.json` 固定模型、代码和 VAE revision。
+- 每个模型独立安装运行环境与权重，无需先装 MusicGen。主安装包仅枚举 9 个小型控制文件。
+- 使用 `scripts/prepare-song-resources.py` 整理 Python 3.12 可搬迁环境，模型需完成 SHA256 校验；
+  `package-music-workbench.py --engine <acestep|yue2>` 生成对应清单与分卷。
+- `node scripts/upload-music-workbench.mjs <分卷目录> <acestep|yue2>` 向现有共享资源 Release
+  追加独立版本。清单最后上传，不能覆盖旧资源或改变应用 Latest。
+- 发布前实际验证两个引擎的带歌词／纯音乐生成、超过 30 秒的音频、取消／退出清理、原生离线导入、
+  试听／导出／裁剪及四种外观。YuE2 的时长为上限，达到上限时须保留并显示截断提示。
+- 原生验收使用单独的应用 identifier 和全新数据目录，不能覆盖用户正式安装或作品。
+- 两个引擎均已通过真实原生离线导入、生成、试听、裁剪、导出和退出恢复。ACE-Step 另实测
+  180 秒输出；YuE2 最大 180 秒请求自然结束于 61.559 秒，无截断。并非最高时长已全部验证。
+- 歌曲资源分别为 10 卷／8.01 GiB、11 卷／8.69 GiB，各约 11.64 GiB 安装占用。
+  GitHub 上传与匿名下载核验仍在进行；在清单及全部分卷可公开读取前不发布引用它们的应用。
+
 ### 从 v1.3.73 起：音频资源同样独立发布
 
 创作空间新增音频工作台。主安装包只包含小型控制代码，Python 3.10、PyTorch 2.8 / CUDA 12.8

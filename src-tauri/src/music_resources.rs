@@ -16,44 +16,133 @@ use std::{
 use tokio::io::AsyncWriteExt;
 
 pub const SPEC: &str = include_str!("../../modules/music_workbench/resources.json");
-pub const COMPONENTS: [&str; 2] = ["runtime", "musicgen-small"];
-pub fn spec() -> Value {
-    serde_json::from_str(SPEC).expect("audio resource spec")
+const SONG_SPECS: &str = include_str!("../../modules/music_workbench/song-resources.json");
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Engine {
+    #[default]
+    Musicgen,
+    Acestep,
+    Yue2,
 }
-pub fn manifest_name() -> String {
-    let s = spec();
+pub const ENGINES: [Engine; 3] = [Engine::Musicgen, Engine::Acestep, Engine::Yue2];
+impl Engine {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Musicgen => "musicgen",
+            Self::Acestep => "acestep",
+            Self::Yue2 => "yue2",
+        }
+    }
+    pub fn components(self) -> [&'static str; 2] {
+        [
+            "runtime",
+            match self {
+                Self::Musicgen => "musicgen-small",
+                Self::Acestep => "acestep-models",
+                Self::Yue2 => "yue2-models",
+            },
+        ]
+    }
+}
+pub fn spec(engine: Engine) -> Value {
+    if engine == Engine::Musicgen {
+        serde_json::from_str(SPEC).expect("audio resource spec")
+    } else {
+        serde_json::from_str::<Value>(SONG_SPECS).expect("song resource specs")[engine.id()].clone()
+    }
+}
+pub fn manifest_name(engine: Engine) -> String {
+    let s = spec(engine);
     format!(
         "music-workbench-{}-{}.json",
         s["resourceVersion"].as_str().unwrap(),
         s["target"].as_str().unwrap()
     )
 }
-fn base_url() -> String {
-    let s = spec();
+fn base_url(engine: Engine) -> String {
+    let s = spec(engine);
     format!(
         "https://github.com/{}/releases/download/{}",
         s["repository"].as_str().unwrap(),
         s["releaseTag"].as_str().unwrap()
     )
 }
-pub fn resources(root: &Path) -> PathBuf {
+pub fn resources(root: &Path, engine: Engine) -> PathBuf {
     root.join("resources")
-        .join(spec()["resourceVersion"].as_str().unwrap())
+        .join(spec(engine)["resourceVersion"].as_str().unwrap())
 }
-pub fn installed(root: &Path, name: &str) -> bool {
-    let dir = resources(root).join(name);
+pub fn required(engine: Engine, name: &str) -> Vec<&'static str> {
+    if name == "runtime" {
+        vec![
+            "python.exe",
+            "ready.json",
+            "Lib/site-packages/torch/__init__.py",
+        ]
+    } else {
+        match engine {
+            Engine::Musicgen => vec!["model.safetensors", "manifest.json", "config.json"],
+            Engine::Acestep => vec![
+                "manifest.json",
+                "acestep-v15-turbo/model.safetensors",
+                "acestep-v15-turbo/config.json",
+                "Qwen3-Embedding-0.6B/model.safetensors",
+                "vae/diffusion_pytorch_model.safetensors",
+            ],
+            Engine::Yue2 => vec![
+                "manifest.json",
+                "YuE2-3B/model.safetensors",
+                "YuE2-3B/weights_manifest.json",
+                "YuE2-Vae/model.safetensors",
+                "YuE2-Vae/weights_manifest.json",
+            ],
+        }
+    }
+}
+pub fn installed(root: &Path, engine: Engine, name: &str) -> bool {
+    let dir = resources(root, engine).join(name);
     let marker: Value = fs::read(dir.join(".installed.json"))
         .ok()
         .and_then(|v| serde_json::from_slice(&v).ok())
         .unwrap_or(Value::Null);
-    marker["resourceVersion"] == spec()["resourceVersion"]
-        && dir
-            .join(if name == "runtime" {
-                "python.exe"
-            } else {
-                "model.safetensors"
-            })
-            .is_file()
+    if marker["resourceVersion"] != spec(engine)["resourceVersion"]
+        || !required(engine, name)
+            .iter()
+            .all(|file| dir.join(file).is_file())
+    {
+        return false;
+    }
+    let read_json = |file: &str| {
+        fs::read(dir.join(file))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .unwrap_or(Value::Null)
+    };
+    if name == "runtime" {
+        let ready = read_json("ready.json");
+        return ready.is_object()
+            && (engine == Engine::Musicgen
+                || (ready["engine"] == engine.id()
+                    && ready["sourceRevision"] == spec(engine)["sourceRevision"]));
+    }
+    // Match bridge readiness so re-import can repair a missing/truncated model
+    // instead of repeatedly skipping a component whose install marker survived.
+    let model = read_json("manifest.json");
+    model["revision"] == spec(engine)["modelRevision"]
+        && model["files"].as_array().is_some_and(|files| {
+            !files.is_empty()
+                && files.len() <= 2048
+                && files.iter().all(|file| {
+                    file["file"].as_str().is_some_and(|path| {
+                        safe_entry(path)
+                            && file["bytes"].as_u64().is_some_and(|size| {
+                                fs::metadata(dir.join(path)).is_ok_and(|metadata| {
+                                    metadata.is_file() && metadata.len() == size
+                                })
+                            })
+                    })
+                })
+        })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -81,6 +170,10 @@ pub struct Manifest {
     pub repository: String,
     pub target: String,
     pub model_revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vae_revision: Option<String>,
     pub components: BTreeMap<String, Component>,
 }
 fn hash_valid(s: &str) -> bool {
@@ -88,7 +181,7 @@ fn hash_valid(s: &str) -> bool {
         && s.bytes()
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
-pub fn validate(bytes: &[u8]) -> Result<Manifest, String> {
+pub fn validate(bytes: &[u8], engine: Engine) -> Result<Manifest, String> {
     if bytes.len() > 1024 * 1024 {
         return Err("资源清单过大".into());
     }
@@ -101,13 +194,16 @@ pub fn validate(bytes: &[u8]) -> Result<Manifest, String> {
         "repository",
         "target",
         "modelRevision",
+        "sourceRevision",
+        "vaeRevision",
     ] {
-        if value[key] != spec()[key] {
+        if value[key] != spec(engine)[key] {
             return Err(format!("音频资源版本不兼容：{key}"));
         }
     }
     if manifest.components.len() != 2
-        || COMPONENTS
+        || engine
+            .components()
             .iter()
             .any(|n| !manifest.components.contains_key(*n))
     {
@@ -151,9 +247,9 @@ fn client() -> Result<reqwest::Client, String> {
         .build()
         .map_err(|e| e.to_string())
 }
-pub async fn fetch_manifest() -> Result<Manifest, String> {
+pub async fn fetch_manifest(engine: Engine) -> Result<Manifest, String> {
     let response = client()?
-        .get(format!("{}/{}", base_url(), manifest_name()))
+        .get(format!("{}/{}", base_url(engine), manifest_name(engine)))
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -168,7 +264,7 @@ pub async fn fetch_manifest() -> Result<Manifest, String> {
             return Err("资源清单过大".into());
         }
     }
-    validate(&bytes)
+    validate(&bytes, engine)
 }
 
 #[derive(Default)]
@@ -176,9 +272,13 @@ pub struct Installer {
     pub busy: AtomicBool,
     pub cancel: AtomicBool,
     pub operation: Mutex<Value>,
+    pub engine: Mutex<Option<Engine>>,
 }
 impl Installer {
-    pub fn report(&self, value: Value) {
+    pub fn report(&self, mut value: Value) {
+        if let Some(engine) = *self.engine.lock().unwrap_or_else(|e| e.into_inner()) {
+            value["engine"] = json!(engine);
+        }
         *self.operation.lock().unwrap_or_else(|e| e.into_inner()) = value;
     }
     fn check(&self) -> Result<(), String> {
@@ -190,7 +290,14 @@ impl Installer {
     }
 }
 fn digest(file: &Path, state: &Installer) -> Result<String, String> {
+    let name = file
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
     let mut file = fs::File::open(file).map_err(|e| e.to_string())?;
+    let total = file.metadata().map_err(|e| e.to_string())?.len().max(1);
+    let mut verified = 0u64;
     let mut hash = Sha256::new();
     let mut block = vec![0; 4 * 1024 * 1024];
     loop {
@@ -200,11 +307,14 @@ fn digest(file: &Path, state: &Installer) -> Result<String, String> {
             break;
         }
         hash.update(&block[..n]);
+        verified += n as u64;
+        state.report(json!({"status":"running","phase":"verify","detail":name,"progress":verified as f64/total as f64}));
     }
     Ok(format!("{:x}", hash.finalize()))
 }
 
 async fn download(
+    engine: Engine,
     part: &Part,
     path: &Path,
     state: &Installer,
@@ -212,7 +322,7 @@ async fn download(
     total: u64,
 ) -> Result<(), String> {
     download_from(
-        &format!("{}/{}", base_url(), part.name),
+        &format!("{}/{}", base_url(engine), part.name),
         part,
         path,
         state,
@@ -328,14 +438,15 @@ pub fn safe_entry(name: &str) -> bool {
         })
 }
 fn extract(
+    engine: Engine,
     root: &Path,
     cache: &Path,
     name: &str,
     c: &Component,
     state: &Installer,
 ) -> Result<(), String> {
-    let destination = resources(root).join(name);
-    let staging = resources(root).join(format!("{name}.staging"));
+    let destination = resources(root, engine).join(name);
+    let staging = resources(root, engine).join(format!("{name}.staging"));
     if staging.exists() {
         fs::remove_dir_all(&staging).map_err(|e| e.to_string())?;
     }
@@ -345,6 +456,8 @@ fn extract(
         let mut archive = fs::File::create(&archive_path).map_err(|e| e.to_string())?;
         let mut hash = Sha256::new();
         let mut buffer = vec![0; 4 * 1024 * 1024];
+        let archive_bytes: u64 = c.parts.iter().map(|p| p.bytes).sum();
+        let mut merged = 0u64;
         for part in &c.parts {
             let mut file = fs::File::open(cache.join(&part.name)).map_err(|e| e.to_string())?;
             loop {
@@ -355,6 +468,8 @@ fn extract(
                 }
                 hash.update(&buffer[..n]);
                 archive.write_all(&buffer[..n]).map_err(|e| e.to_string())?;
+                merged += n as u64;
+                state.report(json!({"status":"running","phase":"verify","detail":name,"progress":merged as f64/archive_bytes.max(1) as f64}));
             }
         }
         drop(archive);
@@ -365,6 +480,7 @@ fn extract(
             zip::ZipArchive::new(fs::File::open(&archive_path).map_err(|e| e.to_string())?)
                 .map_err(|e| e.to_string())?;
         let mut written = 0u64;
+        let mut extracted = 0u64;
         for i in 0..zip.len() {
             state.check()?;
             let mut file = zip.by_index(i).map_err(|e| e.to_string())?;
@@ -397,6 +513,8 @@ fn extract(
                 target
                     .write_all(&buffer[..n])
                     .map_err(|e| format!("写入 {}：{e}", path.display()))?;
+                extracted += n as u64;
+                state.report(json!({"status":"running", "phase":"extract", "detail":name, "progress":extracted as f64/c.unpacked_bytes as f64}));
             }
             state.report(json!({"status":"running", "phase":"extract", "detail":name, "progress":written as f64/c.unpacked_bytes as f64}));
         }
@@ -404,15 +522,7 @@ fn extract(
         if written != c.unpacked_bytes {
             return Err("资源包解压大小不匹配".into());
         }
-        for file in if name == "runtime" {
-            vec![
-                "python.exe",
-                "ready.json",
-                "Lib/site-packages/torch/__init__.py",
-            ]
-        } else {
-            vec!["model.safetensors", "manifest.json", "config.json"]
-        } {
+        for file in required(engine, name) {
             if !staging.join(file).is_file() {
                 return Err(format!("资源包缺少 {file}"));
             }
@@ -420,7 +530,8 @@ fn extract(
         state.check()?;
         fs::write(
             staging.join(".installed.json"),
-            json!({"resourceVersion":spec()["resourceVersion"], "sha256":c.sha256}).to_string(),
+            json!({"resourceVersion":spec(engine)["resourceVersion"], "sha256":c.sha256})
+                .to_string(),
         )
         .map_err(|e| e.to_string())?;
         if destination.exists() {
@@ -448,26 +559,36 @@ fn extract(
 }
 
 pub async fn install(
+    engine: Engine,
     root: PathBuf,
     offline: Option<PathBuf>,
     state: Arc<Installer>,
 ) -> Result<(), String> {
     let root = root.canonicalize().map_err(|e| e.to_string())?;
     let manifest = if let Some(dir) = &offline {
-        validate(&fs::read(dir.join(manifest_name())).map_err(|e| e.to_string())?)?
+        validate(
+            &fs::read(dir.join(manifest_name(engine))).map_err(|e| {
+                format!(
+                    "请选择包含 {} 及全部分卷的文件夹：{e}",
+                    manifest_name(engine)
+                )
+            })?,
+            engine,
+        )?
     } else {
-        fetch_manifest().await?
+        fetch_manifest(engine).await?
     };
     fs::write(
-        root.join("manifest.json"),
+        root.join(manifest_name(engine)),
         serde_json::to_vec(&manifest).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
     let cache = root.join("downloads");
     fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
-    let needed: Vec<_> = COMPONENTS
+    let needed: Vec<_> = engine
+        .components()
         .into_iter()
-        .filter(|n| !installed(&root, n))
+        .filter(|n| !installed(&root, engine, n))
         .collect();
     let total: u64 = needed
         .iter()
@@ -504,7 +625,7 @@ pub async fn install(
                     .await
                     .map_err(|e| e.to_string())?;
             } else {
-                download(part, &target, &state, prior, total).await?;
+                download(engine, part, &target, &state, prior, total).await?;
             }
             prior += part.bytes;
         }
@@ -516,7 +637,7 @@ pub async fn install(
             component.clone(),
             state.clone(),
         );
-        tokio::task::spawn_blocking(move || extract(&r, &c, &n, &contents, &s))
+        tokio::task::spawn_blocking(move || extract(engine, &r, &c, &n, &contents, &s))
             .await
             .map_err(|e| e.to_string())??;
         // Successful components are immutable and need no download cache.
@@ -594,9 +715,9 @@ mod tests {
         }
     }
     fn fixture() -> Value {
-        let mut m = spec();
+        let mut m = spec(Engine::Musicgen);
         m["components"] = json!({});
-        for name in COMPONENTS {
+        for name in Engine::Musicgen.components() {
             m["components"][name] = json!({"unpackedBytes":100,"sha256":"a".repeat(64),"license":"test","sources":["test"],"parts":[{"name":format!("music-workbench-2026.10.1-windows-x64-cu128-{name}.zip.part001"),"bytes":100,"sha256":"b".repeat(64)}]});
         }
         m
@@ -604,7 +725,7 @@ mod tests {
     #[test]
     fn music_manifest_requires_pinned_identity_and_bounded_parts() {
         let m = fixture();
-        assert!(validate(&serde_json::to_vec(&m).unwrap()).is_ok());
+        assert!(validate(&serde_json::to_vec(&m).unwrap(), Engine::Musicgen).is_ok());
         for (key, value) in [
             ("resourceVersion", json!("other")),
             ("target", json!("linux")),
@@ -613,7 +734,7 @@ mod tests {
         ] {
             let mut bad = m.clone();
             bad[key] = value;
-            assert!(validate(&serde_json::to_vec(&bad).unwrap()).is_err());
+            assert!(validate(&serde_json::to_vec(&bad).unwrap(), Engine::Musicgen).is_err());
         }
         for (key, value) in [
             ("name", json!("../../evil")),
@@ -622,8 +743,56 @@ mod tests {
         ] {
             let mut bad = m.clone();
             bad["components"]["runtime"]["parts"][0][key] = value;
-            assert!(validate(&serde_json::to_vec(&bad).unwrap()).is_err());
+            assert!(validate(&serde_json::to_vec(&bad).unwrap(), Engine::Musicgen).is_err());
         }
+    }
+    #[test]
+    fn music_song_manifests_are_independent_and_pin_code_and_vae() {
+        let root = Path::new("audio-test");
+        for engine in ENGINES {
+            let mut m = spec(engine);
+            m["components"] = json!({});
+            for name in engine.components() {
+                m["components"][name] = json!({"unpackedBytes":100,"sha256":"a".repeat(64),"license":"test","sources":["test"],"parts":[{"name":format!("music-workbench-{}-windows-x64-cu128-{name}.zip.part001", spec(engine)["resourceVersion"].as_str().unwrap()),"bytes":100,"sha256":"b".repeat(64)}]});
+            }
+            let bytes = serde_json::to_vec(&m).unwrap();
+            assert!(validate(&bytes, engine).is_ok());
+            for other in ENGINES.into_iter().filter(|e| *e != engine) {
+                assert!(validate(&bytes, other).is_err());
+                assert_ne!(resources(root, engine), resources(root, other));
+                assert_ne!(manifest_name(engine), manifest_name(other));
+            }
+            if engine != Engine::Musicgen {
+                m["sourceRevision"] = json!("main");
+                assert!(validate(&serde_json::to_vec(&m).unwrap(), engine).is_err());
+            }
+            if engine == Engine::Yue2 {
+                m["sourceRevision"] = spec(engine)["sourceRevision"].clone();
+                m["vaeRevision"] = json!("main");
+                assert!(validate(&serde_json::to_vec(&m).unwrap(), engine).is_err());
+            }
+        }
+    }
+    #[test]
+    fn music_truncated_model_is_repairable_even_with_install_marker() {
+        let root = std::env::temp_dir().join(format!("music-repair-{}", uuid::Uuid::new_v4()));
+        let engine = Engine::Yue2;
+        let dir = resources(&root, engine).join("yue2-models");
+        for file in required(engine, "yue2-models") {
+            let path = dir.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"fixture").unwrap();
+        }
+        fs::write(
+            dir.join(".installed.json"),
+            json!({"resourceVersion":spec(engine)["resourceVersion"]}).to_string(),
+        )
+        .unwrap();
+        fs::write(dir.join("manifest.json"), json!({"revision":spec(engine)["modelRevision"],"files":[{"file":"YuE2-3B/model.safetensors","bytes":7},{"file":"YuE2-Vae/model.safetensors","bytes":7}]}).to_string()).unwrap();
+        assert!(installed(&root, engine, "yue2-models"));
+        fs::write(dir.join("YuE2-3B/model.safetensors"), b"bad").unwrap();
+        assert!(!installed(&root, engine, "yue2-models"));
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn music_extraction_is_staged_and_never_marks_incomplete_install_ready() {
@@ -650,8 +819,8 @@ mod tests {
                 license: "test".into(),
                 sources: vec!["test".into()],
             };
-            assert!(extract(&root, &cache, "runtime", &c, &state).is_err());
-            assert!(!installed(&root, "runtime"));
+            assert!(extract(Engine::Musicgen, &root, &cache, "runtime", &c, &state).is_err());
+            assert!(!installed(&root, Engine::Musicgen, "runtime"));
             assert!(!root.join("escaped").exists());
         }
         state.cancel.store(true, Ordering::Release);

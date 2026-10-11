@@ -2,6 +2,12 @@ name: Audio workbench resources
 
 on:
   workflow_dispatch:
+    inputs:
+      engine:
+        description: Prepared engine resource set
+        type: choice
+        options: [musicgen, acestep, yue2]
+        default: musicgen
 
 permissions:
   contents: write
@@ -21,14 +27,16 @@ jobs:
           node-version: 24
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: ${{ inputs.engine == 'musicgen' && '3.10' || '3.12' }}
       - name: Test queue and audio bridge
         run: python -B -m unittest discover -s modules/music_workbench/tests -v
       - name: Package reusable resources
         env:
-          MUSIC_WORKBENCH_STAGING: ${{ vars.MUSIC_WORKBENCH_STAGING }}
-        run: python scripts/package-music-workbench.py --staging "$env:MUSIC_WORKBENCH_STAGING" --output artifacts/music-workbench/release
+          MUSIC_ENGINE: ${{ inputs.engine }}
+          MUSIC_WORKBENCH_STAGING: ${{ inputs.engine == 'acestep' && vars.MUSIC_ACESTEP_STAGING || inputs.engine == 'yue2' && vars.MUSIC_YUE2_STAGING || vars.MUSIC_WORKBENCH_STAGING }}
+        run: python scripts/package-music-workbench.py --engine "$env:MUSIC_ENGINE" --staging "$env:MUSIC_WORKBENCH_STAGING" --output artifacts/music-workbench/release
       - name: Verify and upload immutable assets to draft resource Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: node scripts/upload-music-workbench.mjs artifacts/music-workbench/release
+          MUSIC_ENGINE: ${{ inputs.engine }}
+        run: node scripts/upload-music-workbench.mjs artifacts/music-workbench/release "$env:MUSIC_ENGINE"

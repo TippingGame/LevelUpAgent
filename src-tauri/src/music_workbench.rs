@@ -16,6 +16,7 @@ use tokio::{
 #[derive(Default)]
 pub struct MusicWorkbench {
     service: Mutex<Option<Service>>,
+    cached_jobs: Mutex<Vec<Value>>,
     pub installer: Arc<resources::Installer>,
 }
 struct Service {
@@ -88,7 +89,7 @@ impl MusicWorkbench {
             *guard = Some(start_service(app)?);
         }
         match tokio::time::timeout(
-            Duration::from_secs(20),
+            Duration::from_secs(if action == "trim" { 120 } else { 20 }),
             guard.as_mut().unwrap().request(action, request),
         )
         .await
@@ -133,7 +134,10 @@ fn start_service(app: &tauri::AppHandle) -> Result<Service, String> {
         return Err("本地音频生成当前支持 Windows x64；其他平台暂未提供运行环境。".into());
     }
     let root = storage(app)?;
-    if !resources::installed(&root, "runtime") {
+    if !resources::ENGINES
+        .iter()
+        .any(|&engine| resources::installed(&root, engine, "runtime"))
+    {
         return Err("请先下载音频运行环境。".into());
     }
     let module = if cfg!(debug_assertions) {
@@ -147,14 +151,26 @@ fn start_service(app: &tauri::AppHandle) -> Result<Service, String> {
     spawn_service(&root, &module)
 }
 fn spawn_service(root: &Path, module: &Path) -> Result<Service, String> {
-    let resource_root = resources::resources(root);
-    let mut command = Command::new(resource_root.join("runtime/python.exe"));
+    let engine = resources::ENGINES
+        .into_iter()
+        .find(|&engine| resources::installed(root, engine, "runtime"))
+        .ok_or("请先安装任一音频引擎的运行环境。")?;
+    let mut command = Command::new(resources::resources(root, engine).join("runtime/python.exe"));
+    let resource_root = resources::resources(root, resources::Engine::Musicgen);
+    let engine_roots: serde_json::Map<String, Value> = resources::ENGINES
+        .into_iter()
+        .map(|e| (e.id().to_owned(), json!(resources::resources(root, e))))
+        .collect();
     command
         .args(["-u", "-B", "-s"])
         .arg(module.join("bridge.py"))
         .env("LEVELUP_MUSIC_DATA", root)
         .env("LEVELUP_MUSIC_MODELS", &resource_root)
         .env("LEVELUP_MUSIC_RUNTIME", resource_root.join("runtime"))
+        .env(
+            "LEVELUP_MUSIC_ENGINE_ROOTS",
+            Value::Object(engine_roots).to_string(),
+        )
         .env("PYTHONUTF8", "1")
         .env("PYTHONNOUSERSITE", "1")
         .env_remove("PYTHONPATH")
@@ -182,20 +198,38 @@ pub async fn music_status(
     state: tauri::State<'_, MusicWorkbench>,
 ) -> Result<Value, String> {
     let root = storage(&app)?;
-    let runtime = resources::installed(&root, "runtime");
+    let runtime = resources::ENGINES
+        .iter()
+        .any(|&engine| resources::installed(&root, engine, "runtime"));
+    let engines: serde_json::Map<String, Value> = resources::ENGINES.into_iter().map(|engine| {
+        let runtime_ready = resources::installed(&root, engine, "runtime");
+        let model_ready = resources::installed(&root, engine, engine.components()[1]);
+        (engine.id().to_owned(), json!({"ready":false,"runtimeReady":runtime_ready,"modelReady":model_ready,"resourceVersion":resources::spec(engine)["resourceVersion"],"root":resources::resources(&root, engine),"manifestName":resources::manifest_name(engine)}))
+    }).collect();
     let operation = state
         .installer
         .operation
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    let mut result = json!({"supported":supported(), "ready":false, "jobs":[], "runtimeReady":runtime, "modelReady":resources::installed(&root,"musicgen-small"),
-        "root":root, "memory":resources::memory(), "diskFreeBytes":resources::disk_free(&root), "operation":operation, "resourceVersion":resources::spec()["resourceVersion"]});
+    // Installing another engine closes the bridge, but existing works remain
+    // visible (and playable) throughout the download, including webview reloads.
+    let cached_jobs = state.cached_jobs.lock().await.clone();
+    let mut result = json!({"supported":supported(), "ready":false, "jobs":cached_jobs, "runtimeReady":runtime, "modelReady":resources::installed(&root,resources::Engine::Musicgen,"musicgen-small"),
+        "root":root, "memory":resources::memory(), "diskFreeBytes":resources::disk_free(&root), "operation":operation, "resourceVersion":resources::spec(resources::Engine::Musicgen)["resourceVersion"], "engines":engines});
     if runtime && !state.installer.busy.load(Ordering::Acquire) {
         match state.request(&app, "status", json!({})).await {
             Ok(service) => {
                 result["ready"] = service["ready"].clone();
                 result["jobs"] = service["jobs"].clone();
+                *state.cached_jobs.lock().await =
+                    service["jobs"].as_array().cloned().unwrap_or_default();
+                for engine in resources::ENGINES {
+                    for field in ["ready", "runtimeReady", "modelReady"] {
+                        result["engines"][engine.id()][field] =
+                            service["engines"][engine.id()][field].clone();
+                    }
+                }
             }
             Err(error) => {
                 result["serviceError"] = error.into();
@@ -254,8 +288,10 @@ pub async fn music_request(
     state.request(&app, &action, request).await
 }
 #[tauri::command]
-pub async fn music_manifest() -> Result<resources::Manifest, String> {
-    resources::fetch_manifest().await
+pub async fn music_manifest(
+    engine: Option<resources::Engine>,
+) -> Result<resources::Manifest, String> {
+    resources::fetch_manifest(engine.unwrap_or_default()).await
 }
 
 #[tauri::command]
@@ -263,12 +299,14 @@ pub async fn music_install(
     app: tauri::AppHandle,
     state: tauri::State<'_, MusicWorkbench>,
     offline_directory: Option<String>,
+    engine: Option<resources::Engine>,
 ) -> Result<(), String> {
     if !supported() {
         return Err("音频资源当前仅支持 Windows x64。".into());
     }
     let root = storage(&app)?;
     let offline = offline_directory.map(PathBuf::from);
+    let engine = engine.unwrap_or_default();
     if state
         .installer
         .busy
@@ -278,6 +316,11 @@ pub async fn music_install(
         return Err("已有音频下载正在进行。".into());
     }
     state.installer.cancel.store(false, Ordering::Release);
+    *state
+        .installer
+        .engine
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(engine);
     // Installation and inference must not replace a Python tree in use.
     let service = { state.service.lock().await.take() };
     if let Some(mut service) = service {
@@ -287,14 +330,17 @@ pub async fn music_install(
         )
         .await;
         if let Ok(Ok(status)) = result
-            && status["result"]["jobs"].as_array().is_some_and(|jobs| {
-                jobs.iter()
-                    .any(|j| j["status"] == "queued" || j["status"] == "running")
-            })
+            && let Some(jobs) = status["result"]["jobs"].as_array()
         {
-            *state.service.lock().await = Some(service);
-            state.installer.busy.store(false, Ordering::Release);
-            return Err("请先等待生成完成或取消音频任务。".into());
+            *state.cached_jobs.lock().await = jobs.clone();
+            if jobs
+                .iter()
+                .any(|j| j["status"] == "queued" || j["status"] == "running")
+            {
+                *state.service.lock().await = Some(service);
+                state.installer.busy.store(false, Ordering::Release);
+                return Err("请先等待生成完成或取消音频任务。".into());
+            }
         }
         service.close().await;
     }
@@ -303,7 +349,7 @@ pub async fn music_install(
         .report(json!({"status":"running","phase":"prepare","detail":"正在读取音频资源清单"}));
     let installer = state.installer.clone();
     tauri::async_runtime::spawn(async move {
-        let result = resources::install(root, offline, installer.clone()).await;
+        let result = resources::install(engine, root, offline, installer.clone()).await;
         match result {
             Ok(()) => installer.report(json!({"status":"completed","phase":"completed","detail":"音频环境已安装","progress":1})),
             Err(error) => installer.report(json!({"status":if installer.cancel.load(Ordering::Acquire) {"cancelled"} else {"failed"},"detail":error})),
@@ -387,22 +433,26 @@ mod tests {
     #[tokio::test]
     #[ignore = "Requires locally prepared audio Release assets and a CUDA GPU or CPU runtime"]
     async fn music_portable_install_generate_cancel_and_eof() {
+        let engine: resources::Engine = serde_json::from_value(json!(
+            std::env::var("MUSIC_TEST_ENGINE").unwrap_or_else(|_| "musicgen".into())
+        ))
+        .unwrap();
         let assets = PathBuf::from(std::env::var("MUSIC_TEST_ASSETS").expect("MUSIC_TEST_ASSETS"));
         let root = PathBuf::from(std::env::var("MUSIC_TEST_ROOT").expect("MUSIC_TEST_ROOT"));
         assert!(!root.exists(), "Use a fresh test root");
         std::fs::create_dir_all(root.join("outputs")).unwrap();
         let installer = Arc::new(resources::Installer::default());
-        resources::install(root.clone(), Some(assets), installer)
+        resources::install(engine, root.clone(), Some(assets), installer)
             .await
             .unwrap();
-        assert!(resources::installed(&root, "runtime"));
+        assert!(resources::installed(&root, engine, "runtime"));
         let module = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../modules/music_workbench");
         let mut service = spawn_service(&root, &module).unwrap();
         assert_eq!(
             service.request("status", json!({})).await.unwrap()["result"]["ready"],
             true
         );
-        let created = service.request("generate", json!({"prompt":"Soft warm piano, calm atmosphere, instrumental, no vocals", "title":"Portable runtime acceptance", "duration":4, "seed":20261009})).await.unwrap();
+        let created = service.request("generate", json!({"engine":engine,"prompt":"Soft warm piano, calm atmosphere, instrumental, no vocals", "title":"Portable runtime acceptance", "duration":if engine == resources::Engine::Musicgen {4} else {10}, "seed":20261009})).await.unwrap();
         assert!(created["error"].is_null(), "{created}");
         let id = created["result"]["id"].as_str().unwrap().to_owned();
         let started = std::time::Instant::now();
@@ -434,7 +484,7 @@ mod tests {
         let next = service
             .request(
                 "generate",
-                json!({"prompt":"Soft warm piano", "duration":30}),
+                json!({"engine":engine,"prompt":"Soft warm piano", "duration":30}),
             )
             .await
             .unwrap();
@@ -461,7 +511,10 @@ mod tests {
         );
         // Close the pipe with an active child: the worker must be stopped.
         service
-            .request("generate", json!({"prompt":"Gentle flute", "duration":30}))
+            .request(
+                "generate",
+                json!({"engine":engine,"prompt":"Gentle flute", "duration":30}),
+            )
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_secs(3)).await;

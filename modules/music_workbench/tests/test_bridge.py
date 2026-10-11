@@ -10,7 +10,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from bridge import Bridge
-from backend.core import Config, Store, inspect_wav, new_job
+from backend.core import Config, Store, inspect_wav, new_job, request_params
 
 
 class BridgeTest(unittest.TestCase):
@@ -58,6 +58,25 @@ class BridgeTest(unittest.TestCase):
                 self.bridge.dispatch(action, body)
         self.assertFalse(self.bridge.dispatch("status", {})["ready"])
         self.assertEqual(self.bridge.store.all(), [])
+
+    def test_song_engines_validate_lyrics_duration_and_never_fallback(self):
+        for engine, maximum in [("acestep", 600), ("yue2", 360)]:
+            body = {"engine": engine, "prompt": "Warm acoustic pop", "mode": "song", "lyrics": "[Verse]\n晨光落在窗前", "language": "zh", "duration": 45}
+            self.assertEqual(request_params(body)["lyrics"], body["lyrics"])
+            self.assertEqual(request_params(dict(body, duration=maximum))["duration"], maximum)
+            for changes in [{"duration": maximum + 1}, {"duration": 4}, {"lyrics": " "}, {"language": "invalid"}]:
+                with self.subTest(engine=engine, changes=changes), self.assertRaises(ValueError):
+                    request_params(dict(body, **changes))
+            with self.assertRaisesRegex(ValueError, "安装"):
+                self.bridge.dispatch("generate", body)
+            # Hidden lyrics are retained in the form but not sent to an instrumental job.
+            self.assertEqual(request_params(dict(body, mode="instrumental"))["lyrics"], "")
+        with self.assertRaises(ValueError):
+            request_params({"engine": "musicgen", "prompt": "warm piano", "mode": "song", "lyrics": "lyrics"})
+        with self.assertRaises(ValueError):
+            request_params({"engine": "acestep", "prompt": "x" * 513})
+        self.assertEqual(self.bridge.store.all(), [])
+        self.assertEqual(set(self.bridge.dispatch("status", {})["engines"]), {"musicgen", "acestep", "yue2"})
 
     def test_cancel_queued_job_and_recover_interrupted_queue(self):
         with self.bridge.manager.lock:

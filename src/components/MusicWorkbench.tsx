@@ -5,7 +5,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { CreativeStudioHeader } from "./CreativeStudioHeader";
 import { isDesktop } from "../lib/bridge";
 import { tr } from "../lib/i18n";
-import { loadMusicDraft, musicArtifact, musicBusy, musicBytes, musicRequest, type MusicHardware, type MusicJob, type MusicManifest, type MusicStatus } from "../lib/musicWorkbench";
+import { loadMusicDraft, musicArtifact, musicBusy, musicBytes, musicEngines, musicRequest, normalizeMusicParams, type MusicEngine, type MusicHardware, type MusicJob, type MusicManifest, type MusicStatus } from "../lib/musicWorkbench";
 import "./MusicWorkbench.css";
 
 const presets = [
@@ -42,7 +42,15 @@ export function MusicWorkbench({ active, onPendingCountChange, ...navigation }: 
   const visible = jobs.filter(j => Boolean(j.archived) === archived && `${j.params.title} ${j.params.prompt}`.toLowerCase().includes(search.toLowerCase()));
   const gpu = hardware?.gpus[0];
   const availableRam = status?.memory.availableMiB;
-  const lowMemory = (gpu != null && gpu.freeMiB < 4096) || (availableRam != null && availableRam < 8192);
+  const engineInfo = musicEngines[params.engine];
+  const engineStatus = status?.engines?.[params.engine];
+  const lowMemory = (gpu != null && gpu.freeMiB < engineInfo.vram * 1024) || (availableRam != null && availableRam < engineInfo.ram * 1024);
+  const invalidParams = params.prompt.trim().length < 3 || params.prompt.length > engineInfo.promptLimit || !Number.isFinite(params.duration) || params.duration < engineInfo.min || params.duration > engineInfo.max || (params.mode === "song" && (!params.lyrics.trim() || params.lyrics.length > engineInfo.lyricLimit));
+  function chooseEngine(engine: MusicEngine) {
+    setManifest(undefined); setError("");
+    setParams(p => normalizeMusicParams({ ...p, engine }));
+  }
+  const engineSelect = <label>{tr("生成模型", "Music model")}<select aria-label={tr("生成模型", "Music model")} value={params.engine} disabled={installing} onChange={e => chooseEngine(e.target.value as MusicEngine)}>{Object.entries(musicEngines).map(([id, info]) => <option key={id} value={id}>{info.label}{status?.engines?.[id as MusicEngine]?.ready ? ` · ${tr("已就绪", "Ready")}` : ""}</option>)}</select></label>;
 
   const refresh = useCallback(async () => {
     if (!isDesktop() || polling.current) return;
@@ -79,7 +87,7 @@ export function MusicWorkbench({ active, onPendingCountChange, ...navigation }: 
     try { const result = await fn(); await refresh(); return result; } catch (e) { setError(String(e)); } finally { setPending(false); }
   }
   async function generate() {
-    const job = await action(() => musicRequest<MusicJob>("generate", { ...params, title: params.title.trim() || tr("未命名灵感", "Untitled idea") }));
+    const job = await action(() => musicRequest<MusicJob>("generate", { ...params, lyrics: params.mode === "song" ? params.lyrics : "", title: params.title.trim() || tr("未命名灵感", "Untitled idea") }));
     if (job) { setSelectedId(job.id); setArchived(false); }
   }
   async function exportAudio() {
@@ -90,21 +98,22 @@ export function MusicWorkbench({ active, onPendingCountChange, ...navigation }: 
     await action(async () => {
       const directory = offline ? await open({ directory: true, multiple: false }) : null;
       if (offline && !directory) return;
-      await invoke("music_install", { offlineDirectory: directory });
+      await invoke("music_install", { engine: params.engine, offlineDirectory: directory });
     });
   }
   async function checkManifest() {
     setChecking(true); setError("");
-    try { setManifest(await invoke<MusicManifest>("music_manifest")); } catch (e) { setError(String(e)); } finally { setChecking(false); }
+    try { setManifest(await invoke<MusicManifest>("music_manifest", { engine: params.engine })); } catch (e) { setError(String(e)); } finally { setChecking(false); }
   }
   const op = status?.operation;
   const progress = op?.totalBytes ? (op.downloadedBytes ?? 0) / op.totalBytes : op?.progress;
-  const downloadSize = manifest && Object.entries(manifest.components).filter(([name]) => !(name === "runtime" ? status?.runtimeReady : status?.modelReady)).reduce((n, [, c]) => n + c.parts.reduce((b, p) => b + p.bytes, 0), 0);
+  const matchingManifest = manifest?.resourceVersion === engineStatus?.resourceVersion ? manifest : undefined;
+  const downloadSize = matchingManifest && Object.entries(matchingManifest.components).filter(([name]) => !(name === "runtime" ? engineStatus?.runtimeReady : engineStatus?.modelReady)).reduce((n, [, c]) => n + c.parts.reduce((b, p) => b + p.bytes, 0), 0);
   const progressView = op && <div className="music-progress" role="status" aria-live="polite">
     <div><strong>{installing ? ({ prepare: tr("准备下载", "Preparing"), download: tr("下载模型与依赖", "Downloading resources"), verify: tr("校验资源", "Verifying"), extract: tr("安装资源", "Installing") })[op.phase ?? ""] : op.status === "completed" ? tr("安装完成", "Installed") : op.status === "cancelled" ? tr("下载已取消", "Download cancelled") : tr("安装失败", "Installation failed")}</strong>
       {installing && <button onClick={() => void action(() => invoke("music_cancel_install"))}><Square size={12}/>{tr("取消下载", "Cancel download")}</button>}</div>
     {installing && <progress max={1} value={progress} aria-label={tr("下载与安装进度", "Download and installation progress")}/>}
-    <small>{op.detail}</small>
+    <small>{op.engine ? `${musicEngines[op.engine].label} · ` : ""}{op.detail}</small>
     {installing && op.totalBytes != null && <small>{musicBytes(op.downloadedBytes ?? 0)} / {musicBytes(op.totalBytes)}{op.bytesPerSecond ? ` · ${musicBytes(op.bytesPerSecond)}/s · ${tr("剩余约", "About")} ${Math.ceil((op.totalBytes - (op.downloadedBytes ?? 0)) / op.bytesPerSecond / 60)} ${tr("分钟", "min")}` : ""}</small>}
   </div>;
 
@@ -112,19 +121,26 @@ export function MusicWorkbench({ active, onPendingCountChange, ...navigation }: 
     <CreativeStudioHeader mode="music" {...navigation} subtitle={tr("写下灵感，听见音乐", "Turn an idea into music")} actions={<button onClick={() => setEnvironment(true)}><Settings2 size={14}/>{tr("环境与下载", "Setup & downloads")}</button>}/>
     <div className="music-body">
       <div className="music-compose">
-        <div className="music-intro"><Music2 size={22}/><div><h2>{tr("创作一段音乐", "Create a piece of music")}</h2><p>{tr("描述风格、乐器和氛围，生成 4–30 秒纯音乐。", "Describe a style, instruments and mood. Create 4–30 seconds of instrumental music.")}</p></div></div>
-        <label>{tr("音乐描述", "Music description")}<textarea aria-label={tr("音乐描述", "Music description")} value={params.prompt} maxLength={2000} rows={5} placeholder={tr("例如：温暖的钢琴、柔和的鼓点，适合雨天阅读的背景音乐。英文描述通常更稳定。", "Warm piano, soft drums, relaxing background music for a rainy day.")} onChange={e => setParams(p => ({ ...p, prompt: e.target.value }))}/></label>
-        <div className="music-presets">{presets.map(([zh, en, prompt]) => <button key={en} onClick={() => setParams(p => ({ ...p, prompt }))}>{tr(zh, en)}</button>)}</div>
-        <div className="music-fields"><label>{tr("作品名（选填）", "Title (optional)")}<input value={params.title} maxLength={80} placeholder={tr("为这段灵感起个名字", "Name this idea")} onChange={e => setParams(p => ({ ...p, title: e.target.value }))}/></label><label>{tr("时长（秒）", "Duration (s)")}<input aria-label={tr("时长（秒）", "Duration (s)")} type="number" min={4} max={30} value={params.duration} onChange={e => setParams(p => ({ ...p, duration: Number(e.target.value) }))}/></label></div>
-        <details className="music-details"><summary>{tr("更多参数", "More settings")}</summary><div className="music-fields"><label>{tr("种子", "Seed")}<input aria-label={tr("种子", "Seed")} type="number" min={0} max={2147483647} value={params.seed} onChange={e => setParams(p => ({ ...p, seed: Number(e.target.value) }))}/></label><label>{tr("描述强度", "Guidance")}<input aria-label={tr("描述强度", "Guidance")} type="number" min={1} max={8} step={0.5} value={params.guidance} onChange={e => setParams(p => ({ ...p, guidance: Number(e.target.value) }))}/></label></div><small>{tr("保留种子可复用参数；更换种子可探索变化。", "Keep the seed to reuse settings, or change it for a variation.")}</small></details>
-        <div className="music-resources"><strong>MusicGen Small <span>{tr("本地运行", "Local")}</span></strong><p>{tr("建议可用显存 ≥ 4 GiB、可用内存 ≥ 8 GiB；长片段可能占用更多。任务结束后释放模型。", "Recommended free VRAM ≥ 4 GiB and RAM ≥ 8 GiB; longer clips may use more. The model unloads after each job.")}</p>
-          <small>{gpu ? `${gpu.name} · ${tr("可用显存", "Free VRAM")} ${musicBytes(gpu.freeMiB * 1048576)}` : hardware ? tr("未检测到 NVIDIA 显卡，将使用 CPU，生成会较慢。", "No NVIDIA GPU detected. CPU generation will be slower.") : tr("正在检测显卡…", "Checking GPU…")}</small>
+        <div className="music-intro"><Music2 size={22}/><div><h2>{tr("创作一段音乐", "Create a piece of music")}</h2><p>{tr("选择纯音乐或带歌词歌曲，写下风格与灵感。", "Choose instrumental music or a song, then describe your idea.")}</p></div></div>
+        {engineSelect}
+        <div className="music-mode" role="group" aria-label={tr("创作方式", "Creation mode")}><button aria-pressed={params.mode === "instrumental"} onClick={() => setParams(p => ({ ...p, mode: "instrumental" }))}>{tr("纯音乐", "Instrumental")}</button><button disabled={params.engine === "musicgen"} aria-pressed={params.mode === "song"} onClick={() => setParams(p => ({ ...p, mode: "song" }))}>{tr("带歌词歌曲", "Song with lyrics")}</button></div>
+        {params.engine === "musicgen" && <small>{tr("MusicGen 仅支持 4–30 秒纯音乐；歌曲或长音乐请选择 ACE-Step 或 YuE2。", "MusicGen supports 4–30 second instrumentals. Choose ACE-Step or YuE2 for songs or longer music.")}</small>}
+        <label>{tr("音乐描述", "Music description")}<textarea aria-label={tr("音乐描述", "Music description")} value={params.prompt} maxLength={engineInfo.promptLimit} rows={4} placeholder={tr("例如：温暖的钢琴、柔和的鼓点、清澈的女声。英文风格描述通常更稳定。", "Warm piano, soft drums and clear female vocals.")} onChange={e => setParams(p => ({ ...p, prompt: e.target.value }))}/></label>
+        {params.prompt.length > engineInfo.promptLimit && <small className="music-warning">{tr(`此模型的描述最多 ${engineInfo.promptLimit} 字，请精简。`, `Shorten the description to ${engineInfo.promptLimit} characters.`)}</small>}
+        <div className="music-presets">{presets.map(([zh, en, prompt]) => <button key={en} onClick={() => setParams(p => ({ ...p, prompt: p.mode === "song" ? prompt.replace(", instrumental, no vocals", ", expressive vocals") : prompt }))}>{tr(zh, en)}</button>)}</div>
+        {params.mode === "song" && <><label>{tr("歌词", "Lyrics")}<textarea aria-label={tr("歌词", "Lyrics")} value={params.lyrics} maxLength={engineInfo.lyricLimit} rows={7} placeholder={"[Verse]\n" + tr("在这里写下主歌…", "Write your verse here…") + "\n\n[Chorus]\n" + tr("在这里写下副歌…", "Write your chorus here…")} onChange={e => setParams(p => ({ ...p, lyrics: e.target.value }))}/></label><small className={params.lyrics.length > engineInfo.lyricLimit ? "music-warning" : undefined}>{params.lyrics.length} / {engineInfo.lyricLimit} · {tr("用 [Verse]、[Chorus] 标记段落；模型可能改唱或漏唱，请试听。", "Use [Verse] and [Chorus] sections. Listen for changed or omitted lyrics.")}</small><label>{tr("演唱语言", "Vocal language")}<select aria-label={tr("演唱语言", "Vocal language")} value={params.language} onChange={e => setParams(p => ({ ...p, language: e.target.value as typeof p.language }))}><option value="auto">{tr("自动", "Auto")}</option><option value="zh">{tr("中文", "Chinese")}</option><option value="en">{tr("英语", "English")}</option><option value="ja">{tr("日语", "Japanese")}</option></select></label></>}
+        <div className="music-fields"><label>{tr("作品名（选填）", "Title (optional)")}<input value={params.title} maxLength={80} placeholder={tr("为这段灵感起个名字", "Name this idea")} onChange={e => setParams(p => ({ ...p, title: e.target.value }))}/></label><label>{params.engine === "yue2" ? tr("时长上限（秒）", "Maximum duration (s)") : tr("时长（秒）", "Duration (s)")}<input aria-label={tr("时长（秒）", "Duration (s)")} type="number" min={engineInfo.min} max={engineInfo.max} value={params.duration} onChange={e => setParams(p => ({ ...p, duration: Number(e.target.value) }))}/></label></div>
+        <small>{engineInfo.min}–{engineInfo.max} {tr("秒", "seconds")} · {params.engine === "yue2" ? tr("模型可提前结束；达到上限时，结尾或歌词可能被截断。", "The model may finish earlier. Reaching the limit may truncate the ending or lyrics.") : tr("长音乐需要更多时间和内存，建议先用短片段试音。", "Longer music needs more time and memory. Try a short sample first.")}</small>
+        <details className="music-details"><summary>{tr("更多参数", "More settings")}</summary><div className="music-fields"><label>{tr("种子", "Seed")}<input aria-label={tr("种子", "Seed")} type="number" min={0} max={2147483647} value={params.seed} onChange={e => setParams(p => ({ ...p, seed: Number(e.target.value) }))}/></label>{params.engine === "musicgen" && <label>{tr("描述强度", "Guidance")}<input aria-label={tr("描述强度", "Guidance")} type="number" min={1} max={8} step={0.5} value={params.guidance} onChange={e => setParams(p => ({ ...p, guidance: Number(e.target.value) }))}/></label>}</div><small>{tr("保留种子可复用参数；更换种子可探索变化。", "Keep the seed to reuse settings, or change it for a variation.")}</small></details>
+        <div className="music-resources"><strong>{engineInfo.label} <span>{tr("本地运行", "Local")}</span></strong><p>{tr(`短片段建议可用显存 ≥ ${engineInfo.vram} GiB、可用内存 ≥ ${engineInfo.ram} GiB。长音乐占用会增加；任务结束后释放模型。`, `For short clips, allow ≥ ${engineInfo.vram} GiB free VRAM and ≥ ${engineInfo.ram} GiB free RAM. Longer music uses more. Models unload after each job.`)}</p>
+          {params.engine === "yue2" && <small>{tr("YuE2 需要支持 BF16 的 NVIDIA 显卡；长歌曲建议 24 GiB 显存及以上。", "YuE2 requires an NVIDIA GPU with BF16 support; 24 GiB VRAM or more is recommended for longer songs.")}</small>}
+          <small>{gpu ? `${gpu.name} · ${tr("可用显存", "Free VRAM")} ${musicBytes(gpu.freeMiB * 1048576)}` : hardware ? params.engine === "musicgen" ? tr("未检测到 NVIDIA 显卡，将使用 CPU，生成会较慢。", "No NVIDIA GPU detected. CPU generation will be slower.") : tr("未检测到 NVIDIA 显卡，请检查显卡驱动。", "No NVIDIA GPU detected. Check your graphics driver.") : tr("正在检测显卡…", "Checking GPU…")}</small>
           <small>{tr("可用内存", "Free RAM")} {musicBytes(availableRam == null ? null : availableRam * 1048576)} · {tr("整机实时数据", "Current system usage")}</small>
-          {lowMemory && <p className="music-warning">{tr("当前可用资源偏低，建议关闭其他生成任务并先尝试 4 秒。", "Available memory is low. Close other generation tasks and try 4 seconds first.")}</p>}
-          <small>{tr("CC-BY-NC-4.0 · 仅限非商业用途 · 不支持按歌词演唱", "CC-BY-NC-4.0 · Non-commercial use · No lyric-conditioned vocals")}</small>
+          {lowMemory && <p className="music-warning">{tr(`当前可用资源偏低，建议关闭其他生成任务并先尝试 ${engineInfo.min} 秒。`, `Available memory is low. Close other generation tasks and try ${engineInfo.min} seconds first.`)}</p>}
+          <small>{engineInfo.license}{params.engine !== "acestep" ? ` · ${tr("仅限非商业用途", "Non-commercial use")}` : ` · ${tr("Turbo 模式", "Turbo mode")}`}</small>
         </div>
-        {!isDesktop() ? <p className="music-warning">{tr("请在桌面应用中使用本地音频生成。", "Open the desktop app to generate local audio.")}</p> : status && !status.supported ? <p className="music-warning">{tr("本地音频生成目前支持 Windows x64。", "Local audio generation currently supports Windows x64.")}</p> : !status?.ready && <button className="music-setup" onClick={() => setEnvironment(true)}><Download size={15}/>{tr("首次使用：准备音频环境", "First use: set up audio resources")}</button>}
-        <button className="music-primary" disabled={!status?.ready || pending || installing || params.prompt.trim().length < 3 || params.duration < 4 || params.duration > 30} onClick={() => void generate()}>{pending ? <LoaderCircle size={16} className="spin"/> : <Sparkles size={16}/>} {tr("生成音乐", "Generate music")}</button>
+        {!isDesktop() ? <p className="music-warning">{tr("请在桌面应用中使用本地音频生成。", "Open the desktop app to generate local audio.")}</p> : status && !status.supported ? <p className="music-warning">{tr("本地音频生成目前支持 Windows x64。", "Local audio generation currently supports Windows x64.")}</p> : !engineStatus?.ready && <button className="music-setup" onClick={() => setEnvironment(true)}><Download size={15}/>{tr("首次使用：准备音频环境", "First use: set up audio resources")}</button>}
+        <button className="music-primary" disabled={!engineStatus?.ready || pending || installing || invalidParams || (hardware != null && !gpu && params.engine !== "musicgen")} onClick={() => void generate()}>{pending ? <LoaderCircle size={16} className="spin"/> : <Sparkles size={16}/>} {tr("生成音乐", "Generate music")}</button>
         {running.length > 0 && <small>{tr(`${running.length} 个任务处理中 · 按顺序生成，避免同时占用显存`, `${running.length} jobs in queue · Generated one at a time`)}</small>}
         {(error || status?.serviceError) && !environment && <div className="music-error" role="alert">{error || status?.serviceError}<button onClick={() => void refresh()}>{tr("重试", "Retry")}</button></div>}
         {!environment && op?.status !== "completed" && progressView}
@@ -139,11 +155,13 @@ export function MusicWorkbench({ active, onPendingCountChange, ...navigation }: 
           <div className="music-player-title"><strong>{selected.params.title}</strong><small>{statusName(selected.status)}</small></div>
           {musicBusy(selected) && <div className="music-progress" role="status"><progress value={selected.progress} max={100}/><small>{selected.phase} · {selected.progress}%</small><button disabled={pending} onClick={() => void action(() => musicRequest("cancel", { id: selected.id }))}><Square size={12}/>{tr("取消生成", "Cancel generation")}</button></div>}
           {selected.error && <p className="music-error" role="alert">{selected.error}</p>}
+          {selected.warnings?.map(warning => <p key={warning} className="music-warning" role="status">{warning}</p>)}
+          <small>{musicEngines[selected.params.engine]?.label ?? "MusicGen Small"} · {selected.params.mode === "song" ? tr("带歌词歌曲", "Song with lyrics") : tr("纯音乐", "Instrumental")}</small>
           {selected.audio && <><svg className="music-waveform" viewBox="0 0 720 64" preserveAspectRatio="none" role="img" aria-label={tr("音频波形", "Audio waveform")}>{selected.audio.peaks.map((p, i) => <rect key={i} x={i * 720 / selected.audio!.peaks.length} y={32 - Math.max(1, p * 30)} width={Math.max(1, 720 / selected.audio!.peaks.length - 1)} height={Math.max(2, p * 60)} className={i / selected.audio!.peaks.length <= position / selected.audio!.duration ? "played" : undefined}/>)}</svg>
             <audio ref={player} key={selected.id} controls preload="metadata" src={audio?.id === selected.id ? audio.url : undefined} onTimeUpdate={e => setPosition(e.currentTarget.currentTime)} onError={() => setError(tr("音频读取失败，请刷新或重新导出。", "Audio could not be loaded. Refresh or export it again."))}/>
             <small>{selected.audio.sample_rate / 1000} kHz · WAV · {musicBytes(selected.audio.bytes)}{selected.metrics ? ` · ${selected.metrics.seconds}s · ${tr("推理显存峰值", "Inference VRAM peak")} ${selected.metrics.peak_gpu_gb} GiB` : ""}</small></>}
           <p className="music-prompt-preview">{selected.params.prompt}</p>
-          <div className="music-track-actions"><button disabled={pending} onClick={() => setParams({ ...selected.params })}><RefreshCw size={13}/>{tr("复用参数", "Reuse settings")}</button>{selected.audio && <><button disabled={pending} onClick={() => void exportAudio()}><Download size={13}/>{tr("保存 WAV", "Save WAV")}</button><button disabled={pending} aria-pressed={selected.favorite} onClick={() => void action(() => musicRequest("favorite", { id: selected.id, favorite: !selected.favorite }))}><Star size={13}/>{selected.favorite ? tr("已收藏", "Saved") : tr("收藏", "Favorite")}</button></>}{!musicBusy(selected) && <button disabled={pending} onClick={() => void action(() => musicRequest("archive", { id: selected.id, archived: !selected.archived }))}>{selected.archived ? tr("恢复", "Restore") : tr("归档", "Archive")}</button>}</div>
+          <div className="music-track-actions"><button disabled={pending} onClick={() => setParams(normalizeMusicParams(selected.params))}><RefreshCw size={13}/>{tr("复用参数", "Reuse settings")}</button>{selected.audio && <><button disabled={pending} onClick={() => void exportAudio()}><Download size={13}/>{tr("保存 WAV", "Save WAV")}</button><button disabled={pending} aria-pressed={selected.favorite} onClick={() => void action(() => musicRequest("favorite", { id: selected.id, favorite: !selected.favorite }))}><Star size={13}/>{selected.favorite ? tr("已收藏", "Saved") : tr("收藏", "Favorite")}</button></>}{!musicBusy(selected) && <button disabled={pending} onClick={() => void action(() => musicRequest("archive", { id: selected.id, archived: !selected.archived }))}>{selected.archived ? tr("恢复", "Restore") : tr("归档", "Archive")}</button>}</div>
           {selected.audio && <details className="music-details"><summary>{tr("裁剪与淡入淡出", "Trim & fade")}</summary><div className="music-trim-fields">{(["start", "end", "fade"] as const).map((key, i) => <label key={key}>{[tr("开始（秒）", "Start (s)"), tr("结束（秒）", "End (s)"), tr("淡入淡出（秒）", "Fade (s)")][i]}<input aria-label={[tr("开始（秒）", "Start (s)"), tr("结束（秒）", "End (s)"), tr("淡入淡出（秒）", "Fade (s)")][i]} type="number" min={0} max={selected.audio!.duration} step={0.1} value={trim[key]} onChange={e => setTrim(t => ({ ...t, [key]: Number(e.target.value) }))}/></label>)}</div><button disabled={pending || trim.end - trim.start < 0.1 || trim.fade > (trim.end - trim.start) / 2} onClick={() => void action(async () => { const job = await musicRequest<MusicJob>("trim", { id: selected.id, ...trim }); setSelectedId(job.id); })}>{tr("另存为新版本", "Save as new version")}</button><small>{tr("原始音频会保留。", "The original audio is preserved.")}</small></details>}
         </div>}
       </div>
@@ -151,13 +169,16 @@ export function MusicWorkbench({ active, onPendingCountChange, ...navigation }: 
     <dialog ref={dialog} className="music-environment" onCancel={() => setEnvironment(false)} onClose={() => setEnvironment(false)} aria-labelledby="music-environment-title">
       <div className="music-dialog-header"><h2 id="music-environment-title">{tr("音频环境与下载", "Audio setup & downloads")}</h2><button aria-label={tr("关闭", "Close")} onClick={() => setEnvironment(false)}><X size={18}/></button></div>
       <p>{tr("首次下载后即可离线生成。Python、CUDA 依赖与模型独立存放，应用升级时可继续使用。", "Download once, then generate offline. Python, CUDA dependencies and models are stored separately and reused across app updates.")}</p>
-      <div className="music-component"><strong>{tr("运行环境", "Runtime")}</strong><span>Python 3.10 · PyTorch 2.8 · CUDA 12.8</span><small>{status?.runtimeReady ? tr("已安装", "Installed") : tr("待下载", "Download required")}</small></div>
-      <div className="music-component"><strong>MusicGen Small</strong><span>{tr("约 2.2 GiB 权重 · CC-BY-NC-4.0 非商业用途", "~2.2 GiB weights · CC-BY-NC-4.0, non-commercial")}</span><small>{status?.modelReady ? tr("已安装", "Installed") : tr("待下载", "Download required")}</small></div>
-      <p>{tr("建议预留 20 GiB 磁盘空间（含临时解压）。支持断点续传和 SHA256 校验，取消后重试会复用已下载内容。", "Reserve 20 GiB of disk space including temporary extraction. Downloads resume and are verified with SHA256.")}</p>
+      {engineSelect}
+      <div className="music-component"><strong>{tr("运行环境", "Runtime")}</strong><span>{engineInfo.runtime}</span><small>{engineStatus?.runtimeReady ? tr("已安装", "Installed") : tr("待下载", "Download required")}</small></div>
+      <div className="music-component"><strong>{engineInfo.label}</strong><span>{engineInfo.license}</span><small>{engineStatus?.modelReady ? tr("已安装", "Installed") : tr("待下载", "Download required")}</small></div>
+      <p>{tr(`建议预留 ${engineInfo.disk} GiB 磁盘空间（含下载缓存与临时解压）。支持断点续传、SHA256 校验；安装期间仍可试听和导出已有作品。`, `Reserve ${engineInfo.disk} GiB of disk space, including download cache and extraction. Downloads resume and are checked with SHA256. Existing works can still be played and exported during installation.`)}</p>
       <small>{tr("可用磁盘", "Free disk")} {musicBytes(status?.diskFreeBytes)}{downloadSize != null ? ` · ${tr("本次下载", "Download size")} ${musicBytes(downloadSize)}` : ""}</small>
-      <small className="music-storage-path">{status?.root}</small>
-      <p>{tr("需要兼容 CUDA 12.8 的 NVIDIA 驱动；无可用 GPU 时使用 CPU，速度较慢。生成中若显存不足，请关闭其他 GPU 任务并缩短时长。", "A CUDA 12.8 compatible NVIDIA driver is recommended. CPU generation is slower. If GPU memory runs out, close other GPU tasks and shorten the clip.")}</p>
-      <div className="music-dialog-actions"><button className="music-primary" disabled={!status?.supported || installing || pending || running.length > 0 || status?.ready} onClick={() => void install()}><Download size={14}/>{tr("下载并安装", "Download & install")}</button><button disabled={!status?.supported || installing || pending || running.length > 0} onClick={() => void install(true)}><FolderOpen size={14}/>{tr("导入离线资源", "Import offline resources")}</button><button disabled={checking || installing || !isDesktop()} onClick={() => void checkManifest()}>{checking ? <LoaderCircle size={14} className="spin"/> : <RefreshCw size={14}/>} {tr("检查下载大小", "Check download size")}</button></div>
+      <small className="music-storage-path">{engineStatus?.root ?? status?.root}</small>
+      <p>{tr("离线导入：选择包含该模型资源清单（JSON）和全部 .zip.part 分卷的文件夹，无需手动解压。原始权重文件夹不能直接作为离线资源包。", "Offline import: choose the folder containing this model’s JSON manifest and all .zip.part files. Do not extract the parts. A raw model directory is not a portable resource pack.")}</p>
+      <small className="music-storage-path">{engineStatus?.manifestName}</small>
+      <p>{params.engine === "musicgen" ? tr("无可用 GPU 时使用 CPU，速度较慢。", "CPU generation is available but slower.") : tr("需要 NVIDIA 显卡及兼容 CUDA 12.8 的驱动，首次请先生成短片段。", "Requires an NVIDIA GPU with a CUDA 12.8 compatible driver. Start with a short sample.")}{params.engine === "yue2" ? tr(" YuE2 还需要 BF16 支持。", " YuE2 also requires BF16 support.") : ""}</p>
+      <div className="music-dialog-actions"><button className="music-primary" disabled={!status?.supported || installing || pending || running.length > 0 || engineStatus?.ready} onClick={() => void install()}><Download size={14}/>{tr("下载并安装", "Download & install")}</button><button disabled={!status?.supported || installing || pending || running.length > 0} onClick={() => void install(true)}><FolderOpen size={14}/>{tr("导入离线资源", "Import offline resources")}</button><button disabled={checking || installing || !isDesktop()} onClick={() => void checkManifest()}>{checking ? <LoaderCircle size={14} className="spin"/> : <RefreshCw size={14}/>} {tr("检查下载大小", "Check download size")}</button></div>
       {progressView}{(error || status?.serviceError) && <div className="music-error" role="alert">{error || status?.serviceError}</div>}
     </dialog>
   </section>;
