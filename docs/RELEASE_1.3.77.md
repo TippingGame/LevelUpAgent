@@ -13,6 +13,10 @@
 
 浏览器与隔离 Tauri 原生窗口均完成系统深浅色 × Armor Mode 开关四种组合验证。超长名字及中英文状态下，名字条保持 150 × 28 px，状态单行省略；主窗口切换外观和刷新通过。本次原生测试使用独立 identifier，不覆盖用户正式安装或数据。
 
-GitHub 构建、资产与更新清单核验进行中。证据目录：`research/release-1.3.77-2026-10-13`。
+已于 2026-10-13 14:50:51（Asia/Shanghai）正式发布并设为 Latest。构建提交 `1b98d43000813aaed57646f88182d316eb389ea2`，三平台 CI run `38356936586` 与四平台 Release run `38356938876` 均成功。10 个资产完整下载并通过 GitHub SHA256 digest 校验；Windows EXE/MSI updater 签名及可信注释签名有效，公开发布页和 `latest.json` 均返回 HTTP 200、版本为 `1.3.77`。证据目录：`research/release-1.3.77-2026-10-13`。
 
 Windows updater 使用 Tauri 签名；macOS 为 ad-hoc 签名、未公证；Linux 包未做发行版签名。
+
+正式 Windows 安装包完成归档完整性、版本、x64 架构、CSP、updater 配置和 69 个资源文件验证，不含 QA 标识和调试端口。音频及 3D 的 4 份清单与 38 个分卷均可匿名读取，资源 Release 保持 prerelease。
+
+安装包已保存到 `G:\Work\LevelUpAgent\安装包\LevelUpAgent_1.3.77_Windows_x64-setup.exe`，保留旧版本并更新 SHA256 清单。SHA256：`394D948DA3CEF8D73A105B141BE00A79378B87DF0FC00DED95A6A39A38173A0D`。本次未覆盖用户正式安装，未执行旧版应用内更新，macOS/Linux 未新增实体机交互验收。

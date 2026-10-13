@@ -22,6 +22,12 @@ Draft，因此 `v1.0.32` 继续显示 `Latest`；在核对资产并正式发布�
 
 ## 零、以后每次发布速查
 
+### v1.3.77：思考档位与桌面残影名字条（已正式发布）
+
+- GPT-6.1 Sol 可选低、中、高、超高和 Max；未登记模型开放通用思考档位，前后端均保留并传递手动选择。
+- 桌面残影名字条的等级和状态保持单行，超长时省略，名字条高度保持 28 px。
+- 应用版本为 1.3.77，音频及 3D 独立资源继续复用。详细验证见 `docs/RELEASE_1.3.77.md`。
+
 ### v1.3.76：YuE2 INT8 与参考旋律（已正式发布）
 
 这次同时升级程序加载器和独立资源；官方原版 YuE2 / VAE 的模型 revision 未变。
@@ -84,7 +90,7 @@ gh release edit music-workbench-resources --draft=false --prerelease --latest=fa
 
 ### 从 v1.2.71 起：应用和 3D 通用资源分别发布
 
-应用安装包继续通过 `vX.Y.Z` tag 触发四平台构建，本次应用版本为 `1.3.76`。
+应用安装包继续通过 `vX.Y.Z` tag 触发四平台构建，本次应用版本为 `1.3.77`。
 Python / PyTorch / CUDA、TripoSG、SD2.1 + MV-Adapter、Blender 不进入应用安装包，
 也不再随每个应用版本重复打包或上传。所有额外资源固定放在同一个 Release：
 
@@ -99,7 +105,7 @@ https://github.com/TippingGame/LevelUpAgent/releases/tag/model-workbench-resourc
 - 清单名为 `model-workbench-<资源版本>-<目标>.json`，分片名也包含独立资源版本，每片小于 2 GB。
   初始清单：`model-workbench-2026.10.1-linux-x64-cu118.json`。
 - 资源 Release 使用 prerelease 且 `--latest=false`，只用于把通用资源与应用更新渠道分开，
-  不能上传 `latest.json`；应用正式版（本次 `v1.3.76`）设为 Latest。
+  不能上传 `latest.json`；应用正式版（本次 `v1.3.77`）设为 Latest。
 - 只有模型、CUDA 或依赖内容变化时才增加资源版本并上传新资产，旧资产保留。
   不覆盖已公开的分片或清单；同名同哈希文件复用，同名不同哈希必须改资源版本。
 - 上传顺序：本地校验所有分片与完整归档 → 上传分片并核对 GitHub digest → 最后上传清单。
@@ -125,6 +131,10 @@ Linux/WSL 必须覆盖真实进程组取消和目录链接恢复，Windows 原�
 选择和清理确认状态。正式应用发布前检查资源 Release 不会抢占 Latest。
 
 本文的仓库内同步副本为 `LevelUpAgent/docs/RELEASE_GUIDE.md`，修改发布规范时同时更新两份。
+
+已验证记录：v1.3.77 已于 2026-10-13 14:50:51（Asia/Shanghai）正式发布并设为 Latest。构建提交 `1b98d43000813aaed57646f88182d316eb389ea2`，三平台 CI run `38356936586` 与四平台 Release run `38356938876` 均成功。10 个资产完整下载并通过 GitHub SHA256 digest 校验；Windows EXE/MSI updater 签名及可信注释签名有效，公开发布页和 `latest.json` 均返回 HTTP 200、版本为 `1.3.77`。
+正式 EXE 已同步安装包目录并更新 SHA256 清单；隔离原生窗口四种外观与长状态截断通过。
+详情：`LevelUpAgent/docs/RELEASE_1.3.77.md`；证据：`research/release-1.3.77-2026-10-13`。
 
 已验证记录：v1.3.76 于 2026-10-11 21:24:44（Asia/Shanghai）正式发布并设为 Latest。
 构建提交 `88c84da987e1bd916d08eb9301f3eb4657259f55`，三平台 CI run `38141523021`
