@@ -44,7 +44,7 @@ button { font: inherit; letter-spacing: 0; }
 .pet-overlay-status { position: absolute; z-index: 4; left: 50%; bottom: 14px; width: 150px; min-height: 28px; display: grid; grid-template-columns: auto minmax(38px, 1fr); align-items: center; gap: 8px; padding: 5px 9px; border: .5px solid rgba(255,255,255,.78); border-radius: 12px; background: rgba(248,250,255,.76); box-shadow: 0 9px 24px rgba(15,23,42,.12), inset 0 0 0 .5px rgba(100,116,139,.1); transform: translateX(-50%); backdrop-filter: saturate(180%) blur(20px); pointer-events: none; }
 .pet-overlay-status > span { min-width: 0; display: flex; align-items: baseline; gap: 5px; }
 .pet-overlay-status strong { overflow: hidden; max-width: 62px; font-size: 10px; font-weight: 720; text-overflow: ellipsis; white-space: nowrap; }
-.pet-overlay-status small { color: #667085; font-size: 8px; font-weight: 760; }
+.pet-overlay-status small { min-width: 0; overflow: hidden; color: #667085; font-size: 8px; font-weight: 760; text-overflow: ellipsis; white-space: nowrap; }
 .pet-overlay-status > i { height: 5px; overflow: hidden; border-radius: 999px; background: rgba(118,118,128,.18); }
 .pet-overlay-status > i > b { height: 100%; display: block; border-radius: inherit; background: linear-gradient(90deg, #0a84ff, #34c759 62%, #ff9f0a); transition: width .28s ease; }
 

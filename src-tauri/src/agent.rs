@@ -1444,6 +1444,12 @@ fn anthropic_body(request: &AgentTurnRequest, stream: bool) -> Value {
                 }
             };
             body["output_config"] = json!({ "effort": effort });
+        } else if effort == "none" {
+            body["thinking"] = json!({ "type": "disabled" });
+        } else {
+            // Unlisted models may use the current Messages effort contract.
+            body["thinking"] = json!({ "type": "adaptive" });
+            body["output_config"] = json!({ "effort": effort });
         }
     }
     body
@@ -1474,8 +1480,10 @@ fn gemini_body(request: &AgentTurnRequest) -> Value {
             json!({ "thinkingLevel": effort.to_ascii_uppercase() })
         } else if is_gemini_2_5_model(&request.profile) {
             json!({ "thinkingBudget": gemini_2_5_thinking_budget(&request.profile, effort) })
+        } else if effort == "none" {
+            json!({ "thinkingBudget": 0 })
         } else {
-            Value::Null
+            json!({ "thinkingLevel": effort.to_ascii_uppercase() })
         };
         if !thinking_config.is_null() {
             body["generationConfig"] = json!({ "thinkingConfig": thinking_config });
@@ -1621,6 +1629,7 @@ fn gemini_2_5_thinking_budget(profile: &ProviderProfile, effort: &str) -> i64 {
         "medium" => 8_192,
         "high" if id.contains("pro") => 32_768,
         "high" => 24_576,
+        "minimal" | "xhigh" | "max" => reasoning_budget_tokens(effort) as i64,
         _ => -1,
     }
 }
@@ -1644,7 +1653,11 @@ fn supported_reasoning_efforts(profile: &ProviderProfile) -> &'static [&'static 
         &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
     let id = reasoning_model_id(profile);
-    if opencode_model_or_variant(&id, "gpt-6-astra") {
+    // Keep in sync with GPT_6_REASONING in src/lib/modelSelection.ts.
+    if id.is_empty() {
+        return &[];
+    }
+    if model_matches_any(&id, &["gpt-6-astra", "gpt-6.1-sol"]) {
         return LOW_MEDIUM_HIGH_XHIGH_MAX;
     }
     if opencode_model_or_variant(&id, "gpt-5.6") {
@@ -1663,17 +1676,49 @@ fn supported_reasoning_efforts(profile: &ProviderProfile) -> &'static [&'static 
         return &[];
     }
 
-    // Other OpenCode Go models currently publish reasoning output but not a
-    // configurable effort scale. Omitting the field preserves their provider
-    // default and avoids transferring unrelated Anthropic/OpenAI variants.
+    // Preserve registered provider restrictions while allowing unlisted models.
     if matches!(profile.protocol, ProviderProtocol::OpencodeGo) {
-        return &[];
+        return if model_matches_any(
+            &id,
+            &[
+                "kimi-k3",
+                "kimi-k2.7-code",
+                "kimi-k2.6",
+                "minimax-m3",
+                "minimax-m2.7",
+                "minimax-m2.5",
+                "qwen3.8-max",
+                "qwen3.7-max",
+                "qwen3.7-plus",
+                "qwen3.6-plus",
+                "mimo-v2.5",
+                "hy3",
+                "muse-spark-1.2-contributor",
+            ],
+        ) {
+            &[]
+        } else {
+            ALL_OPENAI_LEVELS
+        };
     }
 
     if is_minimax_m3_model(profile)
         && !matches!(profile.protocol, ProviderProtocol::GeminiGenerateContent)
     {
         return &["none", "adaptive"];
+    }
+    if opencode_model_or_variant(&id, "minimax-m2")
+        || model_matches_any(
+            &id,
+            &[
+                "claude-sonnet-4-5",
+                "sonnet-4-5",
+                "claude-haiku-4-5",
+                "haiku-4-5",
+            ],
+        )
+    {
+        return &[];
     }
 
     if is_qwen_3_8_model(profile) {
@@ -1733,7 +1778,7 @@ fn supported_reasoning_efforts(profile: &ProviderProfile) -> &'static [&'static 
         return GEMINI_WITH_OFF;
     }
     if matches!(profile.protocol, ProviderProtocol::GeminiGenerateContent) {
-        return &[];
+        return ALL_OPENAI_LEVELS;
     }
     if model_matches_any(&id, &["gpt-5.5-pro", "gpt-5.4-pro", "gpt-5.2-pro"]) {
         return GPT_PRO;
@@ -1756,7 +1801,7 @@ fn supported_reasoning_efforts(profile: &ProviderProfile) -> &'static [&'static 
     {
         return THREE_LEVEL;
     }
-    &[]
+    ALL_OPENAI_LEVELS
 }
 
 fn normalized_reasoning_effort_value(request: &AgentTurnRequest) -> Option<&str> {
@@ -6133,17 +6178,133 @@ mod tests {
         request.reasoning_effort = Some("high".to_owned());
         assert!(anthropic_body(&request, false).get("thinking").is_none());
 
-        // Generic compatible models also stay provider-controlled until their
-        // model ID or catalog declares a supported effort scale.
+        // Unlisted compatible models preserve manually selected efforts.
         request.profile.protocol = ProviderProtocol::OpenaiChat;
         request.profile.model = "unknown-compatible-model".to_owned();
-        assert!(chat_body(&request, false).get("reasoning_effort").is_none());
+        assert_eq!(
+            chat_body(&request, false)["reasoning_effort"],
+            json!("high")
+        );
 
         request.reasoning_effort = Some("auto".to_owned());
         request.profile.protocol = ProviderProtocol::AnthropicMessages;
         assert!(responses_body(&request, false).get("reasoning").is_none());
         assert!(anthropic_body(&request, false).get("thinking").is_none());
         assert!(gemini_body(&request).get("generationConfig").is_none());
+    }
+
+    #[test]
+    fn unlisted_model_reasoning_effort_is_sent_through_each_protocol() {
+        for protocol in [
+            ProviderProtocol::OpenaiChat,
+            ProviderProtocol::OpenaiResponses,
+            ProviderProtocol::OpencodeGo,
+            ProviderProtocol::AnthropicMessages,
+            ProviderProtocol::GeminiGenerateContent,
+        ] {
+            let mut request = test_request("https://levelup.example".to_owned(), protocol);
+            for model in [
+                "unknown-compatible-model",
+                "gpt-7-new",
+                "claude-new",
+                "gemini-4-new",
+            ] {
+                request.profile.model = model.to_owned();
+                for stream in [false, true] {
+                    for effort in ["none", "minimal", "low", "medium", "high", "xhigh", "max"] {
+                        request.reasoning_effort = Some(effort.to_owned());
+                        assert_eq!(
+                            chat_body(&request, stream)["reasoning_effort"],
+                            json!(effort)
+                        );
+                        assert_eq!(
+                            responses_body(&request, stream)["reasoning"]["effort"],
+                            json!(effort)
+                        );
+                        let messages = anthropic_body(&request, stream);
+                        let gemini = gemini_body(&request);
+                        if effort == "none" {
+                            assert_eq!(messages["thinking"]["type"], json!("disabled"));
+                            assert!(messages.get("output_config").is_none());
+                            assert_eq!(
+                                gemini["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+                                json!(0)
+                            );
+                        } else {
+                            assert_eq!(messages["thinking"]["type"], json!("adaptive"));
+                            assert_eq!(messages["output_config"]["effort"], json!(effort));
+                            assert_eq!(
+                                gemini["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+                                json!(effort.to_ascii_uppercase())
+                            );
+                        }
+                    }
+                    for effort in [None, Some("auto"), Some("invalid")] {
+                        request.reasoning_effort = effort.map(str::to_owned);
+                        assert!(
+                            chat_body(&request, stream)
+                                .get("reasoning_effort")
+                                .is_none()
+                        );
+                        assert!(responses_body(&request, stream).get("reasoning").is_none());
+                        assert!(anthropic_body(&request, stream).get("thinking").is_none());
+                        assert!(gemini_body(&request).get("generationConfig").is_none());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gpt_61_sol_reasoning_effort_survives_request_serialization() {
+        for protocol in [
+            ProviderProtocol::OpenaiChat,
+            ProviderProtocol::OpenaiResponses,
+            ProviderProtocol::OpencodeGo,
+        ] {
+            let mut request = test_request("https://levelup.example".to_owned(), protocol);
+            for model in [
+                "gpt-6.1-sol",
+                "gpt-6.1-sol-20261013",
+                "models/gpt-6.1-sol",
+                "openai/gpt-6.1-sol",
+            ] {
+                request.profile.model = model.to_owned();
+                assert_eq!(
+                    supported_reasoning_efforts(&request.profile),
+                    &["low", "medium", "high", "xhigh", "max"],
+                    "{model}"
+                );
+                for stream in [false, true] {
+                    for effort in ["low", "medium", "high", "xhigh", "max"] {
+                        request.reasoning_effort = Some(effort.to_owned());
+                        assert_eq!(
+                            chat_body(&request, stream)["reasoning_effort"],
+                            json!(effort)
+                        );
+                        assert_eq!(
+                            responses_body(&request, stream).pointer("/reasoning/effort"),
+                            Some(&json!(effort))
+                        );
+                    }
+                    for effort in [
+                        None,
+                        Some("auto"),
+                        Some("none"),
+                        Some("minimal"),
+                        Some("ultra"),
+                    ] {
+                        request.reasoning_effort = effort.map(str::to_owned);
+                        assert!(
+                            chat_body(&request, stream)
+                                .get("reasoning_effort")
+                                .is_none()
+                        );
+                        assert!(responses_body(&request, stream).get("reasoning").is_none());
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -6188,7 +6349,7 @@ mod tests {
 
         request.profile.protocol = ProviderProtocol::OpenaiResponses;
         let body = responses_body(&request, false);
-        assert!(body.get("reasoning").is_none());
+        assert_eq!(body.pointer("/reasoning/effort"), Some(&json!("high")));
         assert!(body.get("max_output_tokens").is_none());
     }
 
@@ -6359,7 +6520,10 @@ mod tests {
                 "gemini-3.2-flash-lite",
                 &["minimal", "low", "medium", "high"],
             ),
-            ("gemini-2.5-experimental", &[]),
+            (
+                "gemini-2.5-experimental",
+                &["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+            ),
         ];
         for (model, expected) in gemini_cases {
             profile.model = (*model).to_owned();
@@ -6383,7 +6547,10 @@ mod tests {
             ("gpt-5.2-pro", &["medium", "high", "xhigh"]),
             ("gpt-5.1", &["none", "low", "medium", "high"]),
             ("gpt-5-codex", &["minimal", "low", "medium", "high"]),
-            ("gpt-5.7", &[]),
+            (
+                "gpt-5.7",
+                &["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+            ),
         ];
         for (model, expected) in openai_cases {
             profile.model = (*model).to_owned();

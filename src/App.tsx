@@ -7341,7 +7341,7 @@ function ReasoningPicker({
   const [open, setOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
   const title = adjustable
-    ? tr(`${model} 仅显示已知支持的思考强度`, `Only known supported thinking levels are shown for ${model}`)
+    ? tr(`${model} 可手动选择思考强度；未登记模型提供通用档位，实际支持以服务商为准`, `Choose thinking effort for ${model}; unlisted models offer generic levels, subject to provider support`)
     : tr(`${model} 未公布可调思考档位，沿用模型默认值`, `${model} does not publish adjustable thinking levels; using the model default`);
 
   useEffect(() => {

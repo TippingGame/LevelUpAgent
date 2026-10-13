@@ -280,9 +280,44 @@ test("reasoning levels follow the selected model instead of one global list", ()
   assert.deepEqual(efforts("qwen3.8-max", "openai_responses"), ["auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"]);
   assert.deepEqual(efforts("qwen3.8-max", "anthropic_messages"), ["auto"]);
   assert.deepEqual(efforts("o4-mini", "openai_responses"), ["auto", "low", "medium", "high"]);
-  assert.deepEqual(efforts("unknown-compatible-model", "openai_chat"), ["auto"]);
+  assert.deepEqual(efforts("unknown-compatible-model", "openai_chat"), ["auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"]);
   assert.match(appSource, /if \(effort === "xhigh"\) return tr\("超高", "Extra"\);/);
   assert.doesNotMatch(source, /ultracode/i);
+});
+
+test("GPT-6.1 Sol reuses supported GPT-6 efforts and preserves the selected level", () => {
+  const expected = ["auto", "low", "medium", "high", "xhigh", "max"];
+  for (const protocol of ["openai_chat", "openai_responses", "opencode_go"]) {
+    const models = ["gpt-6.1-sol", "gpt-6.1-sol-20261013", "models/GPT-6.1-SOL"];
+    models.push(protocol === "opencode_go" ? "opencode/gpt-6.1-sol" : "openai/gpt-6.1-sol");
+    for (const model of models) {
+      const profile = { ...openCodeProfile, model, protocol };
+      assert.deepEqual(selection.reasoningEffortsForProfile(profile), expected, `${protocol}: ${model}`);
+      for (const effort of expected) {
+        assert.equal(selection.reasoningEffortForProfile(profile, effort), effort);
+      }
+      for (const effort of ["none", "minimal", "adaptive", "ultra"]) {
+        assert.equal(selection.reasoningEffortForProfile(profile, effort), "auto");
+      }
+    }
+  }
+  // A different model whose name merely starts the same way uses the generic fallback.
+  assert.deepEqual(selection.reasoningEffortsForProfile({ model: "gpt-6.1-solar", protocol: "openai_responses" }), ["auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"]);
+});
+
+test("unlisted models allow manual efforts without resetting the saved selection", () => {
+  const expected = ["auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"];
+  for (const protocol of ["openai_chat", "openai_responses", "opencode_go", "anthropic_messages", "gemini_generate_content"]) {
+    for (const model of ["unknown-compatible-model", "gpt-7-new", "claude-new", "gemini-4-new"]) {
+      const profile = { model, protocol };
+      assert.deepEqual(selection.reasoningEffortsForProfile(profile), expected, `${protocol}: ${model}`);
+      for (const effort of expected) {
+        assert.equal(selection.reasoningEffortForProfile(profile, effort), effort);
+      }
+      assert.equal(selection.reasoningEffortForProfile(profile, "invalid"), "auto");
+    }
+    assert.deepEqual(selection.reasoningEffortsForProfile({ model: " ", protocol }), ["auto"]);
+  }
 });
 
 test("reasoning effort and provider-native blocks stay wired outside the main composer", () => {

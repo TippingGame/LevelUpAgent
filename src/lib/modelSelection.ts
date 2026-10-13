@@ -115,7 +115,8 @@ export function opencodeWireProtocol(model: string): Exclude<ProviderProtocol, "
 }
 
 const AUTO_REASONING = ["auto"] as const satisfies readonly ReasoningEffort[];
-const GPT_6_ASTRA_REASONING = ["auto", "low", "medium", "high", "xhigh", "max"] as const satisfies readonly ReasoningEffort[];
+const GENERIC_REASONING = ["auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"] as const satisfies readonly ReasoningEffort[];
+const GPT_6_REASONING = ["auto", "low", "medium", "high", "xhigh", "max"] as const satisfies readonly ReasoningEffort[];
 const GPT_56_REASONING = ["auto", "none", "low", "medium", "high", "xhigh", "max"] as const satisfies readonly ReasoningEffort[];
 const GPT_52_PLUS_REASONING = ["auto", "none", "low", "medium", "high", "xhigh"] as const satisfies readonly ReasoningEffort[];
 const GPT_53_CODEX_REASONING = ["auto", "low", "medium", "high", "xhigh"] as const satisfies readonly ReasoningEffort[];
@@ -154,10 +155,9 @@ function claudeModelOrVariant(id: string, base: string) {
 }
 
 /**
- * Return only the reasoning levels the selected model is known to accept.
+ * Prefer known model capabilities, with manual effort selection for unknown models.
  * `auto` is always available and means that LevelUpAgent omits the field.
- * Unknown compatible models deliberately stay on Auto instead of receiving an
- * optimistic value that a strict upstream may reject.
+ * Unknown models use generic tiers; the provider validates manually chosen values.
  */
 export function reasoningEffortsForProfile(
   profile: Pick<ProviderProfile, "model" | "protocol">,
@@ -165,23 +165,30 @@ export function reasoningEffortsForProfile(
   const id = profile.protocol === "opencode_go"
     ? normalizeOpenCodeModelId(profile.model).toLocaleLowerCase()
     : bareModelId(profile.model);
+  if (!id) return AUTO_REASONING;
 
-  if (modelOrVariant(id, "gpt-6-astra")) return GPT_6_ASTRA_REASONING;
+  // GPT-6.1 Sol shares Astra's effort tiers; neither accepts none/minimal.
+  // https://developers.openai.com/api/docs/models/gpt-6.1-sol
+  if (modelOrVariant(id, "gpt-6-astra") || modelOrVariant(id, "gpt-6.1-sol")) return GPT_6_REASONING;
   if (modelOrVariant(id, "gpt-5.6")) return GPT_56_REASONING;
   if (modelOrVariant(id, "grok-4.6")) return GROK_46_REASONING;
   if (modelOrVariant(id, "grok-4.5")) return THREE_LEVEL_REASONING;
   if (/^deepseek-(?:v4|flash)(?:[._-]|$)/i.test(id)) return DEEPSEEK_REASONING;
 
-  // The remaining OpenCode Go models expose reasoning output, but the current
-  // Go contract does not publish adjustable effort tiers for them. Keep their
-  // provider default rather than pretending Anthropic/OpenAI levels transfer.
-  if (profile.protocol === "opencode_go") return AUTO_REASONING;
+  if (modelOrVariant(id, "glm-5")) return AUTO_REASONING;
+  // Preserve existing provider-specific restrictions, but allow new model IDs.
+  if (profile.protocol === "opencode_go") {
+    return ["kimi-k3", "kimi-k2.7-code", "kimi-k2.6", "minimax-m3", "minimax-m2.7", "minimax-m2.5",
+      "qwen3.8-max", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus", "mimo-v2.5", "hy3", "muse-spark-1.2-contributor"]
+      .some((model) => modelOrVariant(id, model)) ? AUTO_REASONING : GENERIC_REASONING;
+  }
 
   // M3 exposes an on/off adaptive mode, not adjustable reasoning depth.
   // Responses maps non-none efforts to the same adaptive mode. M2 stays on.
   if (modelOrVariant(id, "minimax-m3") && profile.protocol !== "gemini_generate_content") {
     return MINIMAX_M3_REASONING;
   }
+  if (modelOrVariant(id, "minimax-m2")) return AUTO_REASONING;
 
   if (/^qwen-?3\.8(?:[._-]|$)/i.test(id)) {
     if (profile.protocol === "openai_chat") return QWEN_38_CHAT_REASONING;
@@ -194,14 +201,14 @@ export function reasoningEffortsForProfile(
   if (["mythos-preview", "sonnet-4-6", "opus-4-6"]
     .some((family) => claudeModelOrVariant(id, family))) return CLAUDE_MAX_REASONING;
   if (claudeModelOrVariant(id, "opus-4-5")) return CLAUDE_STANDARD_REASONING;
-  if (/^(?:claude|opus|sonnet|haiku|fable|mythos)(?:[._-]|$)/i.test(id)) return AUTO_REASONING;
+  if (["sonnet-4-5", "haiku-4-5"].some((family) => claudeModelOrVariant(id, family))) return AUTO_REASONING;
 
   if (/^gemini-3(?:\.[0-9]+)?(?:[._-]|$)/i.test(id)) {
     return /(?:^|[._-])pro(?:[._-]|$)/i.test(id) ? THREE_LEVEL_REASONING : GEMINI_3_FLASH_REASONING;
   }
   if (modelOrVariant(id, "gemini-2.5-pro")) return THREE_LEVEL_REASONING;
   if (modelOrVariant(id, "gemini-2.5-flash")) return GEMINI_25_FLASH_REASONING;
-  if (profile.protocol === "gemini_generate_content" || /^gemini(?:[._-]|$)/i.test(id)) return AUTO_REASONING;
+  if (profile.protocol === "gemini_generate_content" || /^gemini(?:[._-]|$)/i.test(id)) return GENERIC_REASONING;
 
   if (modelOrVariant(id, "gpt-5.5-pro") || modelOrVariant(id, "gpt-5.4-pro") || modelOrVariant(id, "gpt-5.2-pro")) {
     return GPT_PRO_REASONING;
@@ -212,7 +219,7 @@ export function reasoningEffortsForProfile(
   if (modelOrVariant(id, "gpt-5.1")) return GPT_51_REASONING;
   if (/^gpt-5(?:$|-(?:chat|codex|mini|nano|pro|[0-9]{4})(?:[._-]|$))/i.test(id)) return GPT_5_REASONING;
   if (/^o(?:1|3|4)(?:[._-]|$)/i.test(id)) return THREE_LEVEL_REASONING;
-  return AUTO_REASONING;
+  return GENERIC_REASONING;
 }
 
 export function reasoningEffortForProfile(

@@ -59,7 +59,7 @@ pnpm tauri dev
 
 </details>
 
-<sub>Local music supports Windows x64. ACE-Step 1.5 uses MIT / Qwen3 Apache-2.0; YuE2 INT8 supports reference melodies. YuE2 and MusicGen weights use CC-BY-NC-4.0 for non-commercial use. Large audio and 3D resources download on demand. [Capabilities & requirements](docs/FEATURES.md) · [1.3.76 release notes & platform signing](docs/RELEASE_1.3.76.md)</sub>
+<sub>Local music supports Windows x64. ACE-Step 1.5 uses MIT / Qwen3 Apache-2.0; YuE2 INT8 supports reference melodies. YuE2 and MusicGen weights use CC-BY-NC-4.0 for non-commercial use. Large audio and 3D resources download on demand. [Capabilities & requirements](docs/FEATURES.md) · [1.3.77 release notes & platform signing](docs/RELEASE_1.3.77.md)</sub>
 
 ---
 
