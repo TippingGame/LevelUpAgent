@@ -22,7 +22,7 @@ Draft，因此 `v1.0.32` 继续显示 `Latest`；在核对资产并正式发布�
 
 ## 零、以后每次发布速查
 
-### v1.3.78：图片预览适配窗口与复制图片（发布中）
+### v1.3.78：图片预览适配窗口与复制图片（已正式发布）
 
 - 打开或切换图片自动适配窗口，预览右上角及图片右键菜单支持复制完整图片。
 - PNG/JPEG/WebP、透明度、超宽图、720 px 窗口和四种外观完成浏览器与隔离原生验证。
@@ -137,6 +137,10 @@ Linux/WSL 必须覆盖真实进程组取消和目录链接恢复，Windows 原�
 选择和清理确认状态。正式应用发布前检查资源 Release 不会抢占 Latest。
 
 本文的仓库内同步副本为 `LevelUpAgent/docs/RELEASE_GUIDE.md`，修改发布规范时同时更新两份。
+
+已验证记录：v1.3.78 已于 2026-10-15 03:33:35（Asia/Shanghai）正式发布并设为 Latest。构建提交 `21ec9652b6fc4e304bc5e887dbda127f9ab9f89d`，三平台 CI run `38622182370` 与四平台 Release run `38622186162` 均成功。Windows CI 首次 Chrome 启动超时，重跑失败作业后通过。10 个资产完整下载并通过 GitHub SHA256 digest 校验；Windows EXE/MSI updater 签名及可信注释签名有效，公开发布页和 `latest.json` 均返回 HTTP 200、版本为 `1.3.78`。
+正式 EXE 已同步安装包目录并更新 SHA256 清单；隔离原生窗口图片适配、复制与四种外观通过。
+详情：`LevelUpAgent/docs/RELEASE_1.3.78.md`；证据：`research/release-1.3.78-2026-10-15`。
 
 已验证记录：v1.3.77 已于 2026-10-13 14:50:51（Asia/Shanghai）正式发布并设为 Latest。构建提交 `1b98d43000813aaed57646f88182d316eb389ea2`，三平台 CI run `38356936586` 与四平台 Release run `38356938876` 均成功。10 个资产完整下载并通过 GitHub SHA256 digest 校验；Windows EXE/MSI updater 签名及可信注释签名有效，公开发布页和 `latest.json` 均返回 HTTP 200、版本为 `1.3.77`。
 正式 EXE 已同步安装包目录并更新 SHA256 清单；隔离原生窗口四种外观与长状态截断通过。

@@ -16,4 +16,8 @@
 
 原生测试使用独立 identifier `com.levelup.agent.releaseqa1378` 和独立数据目录，不覆盖用户正式安装或作品。证据目录：`research/release-1.3.78-2026-10-15`。
 
-GitHub 构建、资产与更新清单核验进行中。
+已于 2026-10-15 03:33:35（Asia/Shanghai）正式发布并设为 Latest。构建提交 `21ec9652b6fc4e304bc5e887dbda127f9ab9f89d`，三平台 CI run `38622182370` 与四平台 Release run `38622186162` 均成功。Windows CI 首次 Chrome 启动超时，重跑失败作业后通过。10 个资产完整下载并通过 GitHub SHA256 digest 校验；Windows EXE/MSI updater 签名及可信注释签名有效，公开发布页和 `latest.json` 均返回 HTTP 200、版本为 `1.3.78`。
+
+正式 Windows 安装包完成归档完整性、版本、x64 架构、CSP、updater 配置和 69 个资源文件验证，不含 QA 标识和调试端口。音频及 3D 的 4 份清单与 38 个分卷均可匿名读取，资源 Release 保持 prerelease。
+
+安装包已保存到 `G:\Work\LevelUpAgent\安装包\LevelUpAgent_1.3.78_Windows_x64-setup.exe`，保留旧版本并更新 SHA256 清单。SHA256：`A0012D8153FCDC375FAD90BDFA9792201E19E523CD579DE05E28A00B29DD7CE0`。本次未覆盖用户正式安装，未执行旧版应用内更新，macOS/Linux 未新增实体机交互验收。
