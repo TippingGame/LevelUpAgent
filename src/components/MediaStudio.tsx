@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -60,6 +61,7 @@ import {
   type ArmorModeLevel,
   type ArmorSkillState,
 } from "../lib/armorMode";
+import { useImageCopy } from "./useImageCopy";
 import { copyText } from "../lib/clipboard";
 import { IMAGE_DIMENSION_OPTIONS, IMAGE_RATIO_OPTIONS, VIDEO_SIZE_OPTIONS, imageModelCapabilities, mediaModelBaseId, mediaModelSupportsExplicitImageMask, selectStudioMediaModel, sortStudioMediaModels, videoModelCapabilities } from "../lib/mediaCapabilities";
 import { createMediaReferenceUrl, imageEditInputs, moveMediaReference, orderedMediaReferenceUrls, type MediaReferenceUrl } from "../lib/mediaReferences";
@@ -1194,6 +1196,7 @@ function MediaImageEditSource({ attachment, index, active, onOpen, onRemove }: {
 
 export function MediaAssetCard({ asset, locale, onDelete, onPreview, onReuse, onEdit }: { asset: StudioMediaAsset; locale: string; onDelete?: () => void; onPreview?: () => void; onReuse?: () => Promise<void> | void; onEdit?: () => Promise<void> | void }) {
   const url = mediaAssetUrl(asset);
+  const imageCopy = useImageCopy(asset.kind === "image" ? url : undefined);
   const [exporting, setExporting] = useState(false);
   const [reusing, setReusing] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -1266,7 +1269,7 @@ export function MediaAssetCard({ asset, locale, onDelete, onPreview, onReuse, on
 
   return (
     <article className={`media-asset-card kind-${asset.kind} status-${asset.status} ${canExport || canReuse || canEdit || onDelete ? "has-actions" : ""}`}>
-      <div className="media-preview" style={{ aspectRatio: previewRatio }}>
+      <div className="media-preview" style={{ aspectRatio: previewRatio }} onContextMenu={imageCopy.openMenu} tabIndex={asset.kind === "image" && url ? 0 : undefined}>
         {asset.status === "completed" && url && asset.kind === "image" && (canPreview ? (
           <button className="media-preview-trigger" type="button" onClick={onPreview} aria-label={tr("打开大图预览", "Open large image preview")}>
             <img src={url} alt={asset.revisedPrompt || asset.prompt} onLoad={(event) => recordImageDimensions(event.currentTarget)} />
@@ -1282,7 +1285,9 @@ export function MediaAssetCard({ asset, locale, onDelete, onPreview, onReuse, on
         {(asset.status === "queued" || asset.status === "in_progress") && <div className="pending-preview"><LoaderCircle className="spin" size={24} /><strong>{asset.downloadProgress ? tr("已生成，正在下载", "Generated, downloading") : asset.gatewayStatus === "billing" ? tr("已生成，正在结算", "Generated, settling usage") : statusLabel(asset.status)}</strong><span>{pendingAssetDetail(asset)}</span></div>}
         {asset.status === "failed" && <div className="failed-preview"><CircleAlert size={24} /><strong>{tr("生成失败", "Generation failed")}</strong></div>}
       </div>
+      {imageCopy.contextMenu}
       <div className="media-asset-content">
+        {imageCopy.status !== "idle" && <small className="media-image-copy-feedback" role="status">{imageCopy.label}</small>}
         <div className={`media-asset-prompt${promptExpanded ? " expanded" : ""}`}>
           <p title={asset.prompt}>{asset.prompt}</p>
           {(canExpandPrompt || asset.kind === "image") && <div className="media-asset-prompt-actions">
@@ -1333,6 +1338,7 @@ export function MediaImagePreview({
   onClose: () => void;
 }) {
   const url = mediaAssetUrl(asset);
+  const imageCopy = useImageCopy(asset.kind === "image" ? url : undefined);
   const canvasRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
   const dragRef = useRef<{
@@ -1348,6 +1354,7 @@ export function MediaImagePreview({
   const [imageSize, setImageSize] = useState({ width: 0, height: 0 });
   const [view, setView] = useState<PreviewTransform>({ zoom: 1, x: 0, y: 0 });
   const viewRef = useRef(view);
+  const fitModeRef = useRef(true);
   const exportingRef = useRef(false);
   const currentAssetIdRef = useRef(asset.id);
   currentAssetIdRef.current = asset.id;
@@ -1361,7 +1368,8 @@ export function MediaImagePreview({
     ? previewAssets[currentIndex + 1]
     : undefined;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    fitModeRef.current = true;
     if (dragFrameRef.current !== null) window.cancelAnimationFrame(dragFrameRef.current);
     dragFrameRef.current = null;
     pendingDragPointRef.current = null;
@@ -1372,7 +1380,7 @@ export function MediaImagePreview({
     viewRef.current = resetView;
     setView(resetView);
     setExportError(false);
-  }, [asset.id]);
+  }, [asset.id, url]);
 
   useEffect(() => {
     viewRef.current = view;
@@ -1386,17 +1394,23 @@ export function MediaImagePreview({
   useEffect(() => {
     const handleResize = () => {
       setView((current) => {
-        const offset = constrainPreviewOffset(current, current.zoom, imageSize, canvasRef.current);
-        return { ...current, ...offset };
+        const next = fitModeRef.current
+          ? fittedPreview(imageSize, canvasRef.current)
+          : { ...current, ...constrainPreviewOffset(current, current.zoom, imageSize, canvasRef.current) };
+        viewRef.current = next;
+        return next;
       });
     };
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
+    const observer = new ResizeObserver(handleResize);
+    if (canvasRef.current) observer.observe(canvasRef.current);
+    return () => observer.disconnect();
   }, [imageSize.height, imageSize.width]);
 
   const applyZoom = (requestedZoom: number, anchor: PreviewPoint = { x: 0, y: 0 }) => {
     const current = viewRef.current;
-    const zoom = Math.min(MAX_PREVIEW_ZOOM, Math.max(MIN_PREVIEW_ZOOM, requestedZoom));
+    fitModeRef.current = false;
+    const minimum = Math.min(MIN_PREVIEW_ZOOM, fittedPreview(imageSize, canvasRef.current).zoom);
+    const zoom = Math.min(MAX_PREVIEW_ZOOM, Math.max(minimum, requestedZoom));
     const ratio = zoom / current.zoom;
     const candidate = {
       x: anchor.x - (anchor.x - current.x) * ratio,
@@ -1408,22 +1422,16 @@ export function MediaImagePreview({
   };
 
   const showActualSize = () => {
+    fitModeRef.current = false;
     const next = { zoom: 1, x: 0, y: 0 };
     viewRef.current = next;
     setView(next);
   };
 
   const fitImage = () => {
-    const bounds = canvasRef.current?.getBoundingClientRect();
-    if (!bounds || !imageReady) return;
-    const zoom = Math.min(
-      1,
-      Math.max(
-        MIN_PREVIEW_ZOOM,
-        Math.min((bounds.width - 32) / imageSize.width, (bounds.height - 32) / imageSize.height),
-      ),
-    );
-    const next = { zoom, x: 0, y: 0 };
+    if (!imageReady) return;
+    fitModeRef.current = true;
+    const next = fittedPreview(imageSize, canvasRef.current);
     viewRef.current = next;
     setView(next);
   };
@@ -1565,6 +1573,8 @@ export function MediaImagePreview({
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
       if (event.target instanceof HTMLElement && event.target.closest("input, textarea, select, [contenteditable]:not([contenteditable='false'])")) return;
+      if (event.target instanceof HTMLElement && event.target.closest(".media-image-context-menu")) return;
+      if (event.key === "Enter" && event.target instanceof HTMLElement && event.target.closest(".media-image-lightbox-copy")) return;
       if (!["Escape", "ArrowLeft", "ArrowRight", "Enter"].includes(event.key)) return;
       // Capture before the focused button or canvas handles the key.
       event.preventDefault();
@@ -1593,6 +1603,7 @@ export function MediaImagePreview({
     <div className={`media-image-lightbox${armorClassName}`} data-armor-level={armorMode ? armorModeLevel ?? "standard" : undefined} role="dialog" aria-modal="true" aria-labelledby="media-image-preview-title" onMouseDown={(event) => {
       if (event.target === event.currentTarget) onClose();
     }}>
+      {imageCopy.contextMenu}
       <section className="media-image-lightbox-dialog">
         <header>
           <div>
@@ -1600,6 +1611,11 @@ export function MediaImagePreview({
             <p title={asset.prompt}>{asset.prompt}</p>
           </div>
           <div className="media-image-lightbox-actions">
+            <span className="media-image-copy-feedback" role="status">{imageCopy.status !== "idle" ? imageCopy.label : ""}</span>
+            <button className="media-image-lightbox-copy" type="button" disabled={!imageReady || imageCopy.status === "copying"}
+              onClick={() => void imageCopy.copy()} aria-label={tr("复制图片", "Copy image")} title={imageCopy.label}>
+              {imageCopy.status === "copying" ? <LoaderCircle className="spin" size={17} /> : imageCopy.status === "copied" ? <Check size={17} /> : imageCopy.status === "error" ? <CircleAlert size={17} /> : <Copy size={17} />}
+            </button>
             {onEdit && asset.filePath && <button
               className="media-image-lightbox-edit"
               type="button"
@@ -1627,6 +1643,9 @@ export function MediaImagePreview({
           role="region"
           aria-label={tr("图片查看区域，可拖动图片并使用滚轮缩放", "Image viewer; drag the image and use the wheel to zoom")}
           tabIndex={0}
+          onContextMenu={(event) => {
+            if (!(event.target as Element).closest("button, .media-image-lightbox-toolbar")) imageCopy.openMenu(event);
+          }}
           onPointerDown={beginDrag}
           onPointerMove={moveDrag}
           onPointerUp={endDrag}
@@ -1658,8 +1677,10 @@ export function MediaImagePreview({
             alt={asset.revisedPrompt || asset.prompt}
             draggable={false}
             onLoad={(event) => {
-              setImageSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight });
-              const resetView = { zoom: 1, x: 0, y: 0 };
+              const size = { width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight };
+              setImageSize(size);
+              fitModeRef.current = true;
+              const resetView = fittedPreview(size, canvasRef.current);
               viewRef.current = resetView;
               setView(resetView);
             }}
@@ -1684,7 +1705,7 @@ export function MediaImagePreview({
             <button type="button" disabled={!imageReady} onClick={fitImage} title={`${tr("适应窗口", "Fit to window")} (F)`}><Maximize2 size={14} /><span>{tr("适应窗口", "Fit")}</span></button>
             <button type="button" disabled={!imageReady} onClick={() => showActualSize()} title={`${tr("原始大小", "Actual size")} (0)`}>1:1</button>
             <i aria-hidden="true" />
-            <button type="button" disabled={!imageReady || view.zoom <= MIN_PREVIEW_ZOOM} onClick={() => applyZoom(view.zoom / PREVIEW_ZOOM_STEP)} aria-label={tr("缩小", "Zoom out")} title={tr("缩小", "Zoom out")}><ZoomOut size={15} /></button>
+            <button type="button" disabled={!imageReady || view.zoom <= Math.min(MIN_PREVIEW_ZOOM, fittedPreview(imageSize, canvasRef.current).zoom)} onClick={() => applyZoom(view.zoom / PREVIEW_ZOOM_STEP)} aria-label={tr("缩小", "Zoom out")} title={tr("缩小", "Zoom out")}><ZoomOut size={15} /></button>
             <output aria-live="polite">{Math.round(view.zoom * 100)}%</output>
             <button type="button" disabled={!imageReady || view.zoom >= MAX_PREVIEW_ZOOM} onClick={() => applyZoom(view.zoom * PREVIEW_ZOOM_STEP)} aria-label={tr("放大", "Zoom in")} title={tr("放大", "Zoom in")}><ZoomIn size={15} /></button>
           </div>
@@ -1702,6 +1723,13 @@ export function MediaImagePreview({
     </div>,
     document.body,
   );
+}
+
+// Reserve space for the navigation buttons, bottom toolbar and pan hint.
+function fittedPreview(size: { width: number; height: number }, canvas: HTMLDivElement | null): PreviewTransform {
+  const bounds = canvas?.getBoundingClientRect();
+  if (!bounds || size.width <= 0 || size.height <= 0) return { zoom: 1, x: 0, y: 0 };
+  return { zoom: Math.min(1, Math.max(1, bounds.width - 120) / size.width, Math.max(1, bounds.height - 140) / size.height), x: 0, y: 0 };
 }
 
 function constrainPreviewOffset(

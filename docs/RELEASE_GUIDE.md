@@ -22,6 +22,12 @@ Draft，因此 `v1.0.32` 继续显示 `Latest`；在核对资产并正式发布�
 
 ## 零、以后每次发布速查
 
+### v1.3.78：图片预览适配窗口与复制图片（发布中）
+
+- 打开或切换图片自动适配窗口，预览右上角及图片右键菜单支持复制完整图片。
+- PNG/JPEG/WebP、透明度、超宽图、720 px 窗口和四种外观完成浏览器与隔离原生验证。
+- 应用版本为 1.3.78，音频及 3D 独立资源继续复用。详细记录见 `docs/RELEASE_1.3.78.md`。
+
 ### v1.3.77：思考档位与桌面残影名字条（已正式发布）
 
 - GPT-6.1 Sol 可选低、中、高、超高和 Max；未登记模型开放通用思考档位，前后端均保留并传递手动选择。
@@ -90,7 +96,7 @@ gh release edit music-workbench-resources --draft=false --prerelease --latest=fa
 
 ### 从 v1.2.71 起：应用和 3D 通用资源分别发布
 
-应用安装包继续通过 `vX.Y.Z` tag 触发四平台构建，本次应用版本为 `1.3.77`。
+应用安装包继续通过 `vX.Y.Z` tag 触发四平台构建，本次应用版本为 `1.3.78`。
 Python / PyTorch / CUDA、TripoSG、SD2.1 + MV-Adapter、Blender 不进入应用安装包，
 也不再随每个应用版本重复打包或上传。所有额外资源固定放在同一个 Release：
 
@@ -105,7 +111,7 @@ https://github.com/TippingGame/LevelUpAgent/releases/tag/model-workbench-resourc
 - 清单名为 `model-workbench-<资源版本>-<目标>.json`，分片名也包含独立资源版本，每片小于 2 GB。
   初始清单：`model-workbench-2026.10.1-linux-x64-cu118.json`。
 - 资源 Release 使用 prerelease 且 `--latest=false`，只用于把通用资源与应用更新渠道分开，
-  不能上传 `latest.json`；应用正式版（本次 `v1.3.77`）设为 Latest。
+  不能上传 `latest.json`；应用正式版（本次 `v1.3.78`）设为 Latest。
 - 只有模型、CUDA 或依赖内容变化时才增加资源版本并上传新资产，旧资产保留。
   不覆盖已公开的分片或清单；同名同哈希文件复用，同名不同哈希必须改资源版本。
 - 上传顺序：本地校验所有分片与完整归档 → 上传分片并核对 GitHub digest → 最后上传清单。

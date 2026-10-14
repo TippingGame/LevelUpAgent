@@ -81,3 +81,12 @@
 }
 
 .media-image-edit-hint { margin: 0; padding: 0 10px 10px; }
+
+.media-image-context-menu { position: fixed; z-index: 220; min-width: 180px; padding: 5px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--text); }
+.media-image-context-menu button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 10px; border: 0; border-radius: 6px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.media-image-context-menu button:hover, .media-image-context-menu button:focus-visible { background: var(--surface-soft); outline: 2px solid var(--accent); outline-offset: -2px; }
+.media-image-context-menu button:disabled { opacity: .5; cursor: default; }
+.media-image-copy-feedback { max-width: 170px; color: var(--muted); font-size: var(--font-caption); }
+.media-image-lightbox-dialog > header .media-image-lightbox-copy { background: var(--surface); color: var(--text); border-color: var(--line); }
+.media-image-lightbox-dialog > header .media-image-lightbox-copy:hover:not(:disabled) { background: var(--surface-soft); border-color: var(--accent); }
+.media-image-lightbox-dialog > header .media-image-lightbox-copy:disabled { opacity: .5; cursor: default; }
