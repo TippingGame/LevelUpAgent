@@ -15,6 +15,8 @@ mod logging;
 mod mcp;
 mod media;
 mod migration;
+#[cfg(windows)]
+mod model_resources;
 mod model_workbench;
 mod models;
 mod music_resources;
@@ -12178,6 +12180,7 @@ pub fn run() {
         }
         tauri::RunEvent::ExitRequested { code, .. } => {
             persist_pet_position_before_exit(app);
+            model_workbench::shutdown(app);
             if let Some(manager) = app.try_state::<music_workbench::MusicWorkbench>() {
                 tauri::async_runtime::block_on(manager.close());
             }

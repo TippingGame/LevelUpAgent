@@ -1,4 +1,4 @@
-//! Local 3D studio bridge. The lightweight bootstrap runs in Linux/WSL2;
+//! Local 3D studio bridge with native Windows and Linux workers;
 //! CUDA, Python, Blender and model weights are versioned Release resources.
 use base64::Engine;
 use serde_json::{Value, json};
@@ -16,6 +16,8 @@ use tokio::{io::AsyncWriteExt, process::Command};
 #[derive(Default)]
 pub struct ModelWorkbench {
     busy: Arc<AtomicBool>,
+    #[cfg(windows)]
+    installer: Arc<crate::model_resources::Installer>,
 }
 
 struct BusyGuard(Arc<AtomicBool>);
@@ -33,7 +35,7 @@ fn storage(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .join("model-workbench");
     std::fs::create_dir_all(root.join("projects")).map_err(|e| e.to_string())?;
     // The parent may exist outside MSIX while its newly created child is
-    // redirected. Resolve the child so Rust and WSL see the same data root.
+    // redirected. Resolve the child so Rust and workers see the same data root.
     let projects = root
         .join("projects")
         .canonicalize()
@@ -62,53 +64,55 @@ fn module(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .map_err(|e| format!("3D launcher is missing: {e}"))
 }
 
-async fn linux_path(path: &Path) -> Result<String, String> {
+fn command_path(path: &Path) -> String {
+    let value = path.to_string_lossy();
     #[cfg(windows)]
     {
-        let original = path.to_string_lossy();
-        let plain = original.strip_prefix(r"\\?\").unwrap_or(&original);
-        let mut command = Command::new("wsl.exe");
-        command
-            .args(["--exec", "wslpath", "-a", plain])
-            .env("WSL_UTF8", "1")
-            .kill_on_drop(true);
-        crate::process::hide_console_window(&mut command);
-        let output = tokio::time::timeout(Duration::from_secs(15), command.output())
-            .await
-            .map_err(|_| "WSL2 响应超时，请启动已安装的 Linux 发行版。")?
-            .map_err(|e| format!("需要 WSL2 和 Linux Python 3：{e}"))?;
-        if !output.status.success() {
-            return Err("需要已安装的 WSL2 Linux 发行版（含 python3）。请先完成 WSL 设置。".into());
+        if let Some(unc) = value.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{unc}");
         }
-        let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !result.starts_with('/') {
-            return Err("无法转换 WSL 路径。".into());
-        }
-        Ok(result)
+        value.strip_prefix(r"\\?\").unwrap_or(&value).to_string()
     }
     #[cfg(not(windows))]
-    Ok(path.to_string_lossy().into_owned())
+    value.into_owned()
+}
+
+fn require_supported_platform() -> Result<(), String> {
+    if !cfg!(any(target_os = "windows", target_os = "linux")) || !cfg!(target_arch = "x86_64") {
+        return Err("本地 3D 生成目前支持 NVIDIA GPU 的 Windows / Linux x64。".into());
+    }
+    Ok(())
 }
 
 async fn launcher(app: &tauri::AppHandle, action: &str) -> Result<Command, String> {
-    if cfg!(target_os = "macos") || !cfg!(target_arch = "x86_64") {
-        return Err("本地 3D 生成目前需要 NVIDIA GPU，支持 Windows WSL2 / Linux x64。".into());
-    }
-    // Resolve Windows app-container redirection before passing a path to WSL.
+    require_supported_platform()?;
     let data = storage(app)?.canonicalize().map_err(|e| e.to_string())?;
-    let root = linux_path(&data).await?;
-    let script = linux_path(&module(app)?).await?;
-    let mut command = if cfg!(windows) {
-        let mut command = Command::new("wsl.exe");
-        command.args(["--exec", "python3"]).env("WSL_UTF8", "1");
+    let script = module(app)?;
+    #[cfg(windows)]
+    let mut command = {
+        let root = crate::model_resources::resources(&data);
+        let python = root.join("runtime/python/python.exe");
+        if !crate::model_resources::installed(&root, "runtime") {
+            return Err("请先在「环境与下载」安装 Windows 原生运行环境。".into());
+        }
+        let mut command = Command::new(python);
         command
-    } else {
-        Command::new("python3")
+            .arg(command_path(&script))
+            .arg("--resources")
+            .arg(command_path(&root))
+            .env("PYTHONUTF8", "1")
+            .env("LEVELUP_3D_PARENT_PID", std::process::id().to_string())
+            .env_remove("PYTHONHOME")
+            .env_remove("PYTHONPATH");
+        command
     };
-    command.args([
-        &script,
-        "--data",
-        &root,
+    #[cfg(not(windows))]
+    let mut command = {
+        let mut command = Command::new("python3");
+        command.arg(&script);
+        command
+    };
+    command.arg("--data").arg(command_path(&data)).args([
         "--version",
         env!("CARGO_PKG_VERSION"),
         action,
@@ -118,11 +122,12 @@ async fn launcher(app: &tauri::AppHandle, action: &str) -> Result<Command, Strin
     Ok(command)
 }
 
+#[cfg(not(windows))]
 async fn query(app: &tauri::AppHandle, action: &str) -> Result<Value, String> {
     let mut command = launcher(app, action).await?;
     let output = tokio::time::timeout(Duration::from_secs(45), command.output())
         .await
-        .map_err(|_| "环境检测超时，请检查 WSL 或网络。")?
+        .map_err(|_| "环境检测超时，请检查本地 Python 或网络。")?
         .map_err(|e| e.to_string())?;
     if !output.status.success() {
         // WSL may prepend host PATH/proxy warnings. The launcher emits its
@@ -131,7 +136,7 @@ async fn query(app: &tauri::AppHandle, action: &str) -> Result<Value, String> {
             .lines()
             .rev()
             .find(|line| !line.trim().is_empty())
-            .unwrap_or("3D 运行环境启动失败，请检查 WSL2 与 Python 3。")
+            .unwrap_or("3D 运行环境启动失败，请检查 Python 3。")
             .chars()
             .filter(|c| *c != '\0')
             .take(2400)
@@ -141,12 +146,35 @@ async fn query(app: &tauri::AppHandle, action: &str) -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub async fn model3d_status(app: tauri::AppHandle) -> Result<Value, String> {
-    query(&app, "status").await
+pub async fn model3d_status(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, ModelWorkbench>,
+) -> Result<Value, String> {
+    require_supported_platform()?;
+    #[cfg(windows)]
+    {
+        crate::model_resources::status(&storage(&app)?, &state.installer).await
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = state;
+        query(&app, "status").await
+    }
 }
 
 #[tauri::command]
 pub async fn model3d_manifest(app: tauri::AppHandle) -> Result<Value, String> {
+    require_supported_platform()?;
+    #[cfg(windows)]
+    {
+        let root = crate::model_resources::resources(&storage(&app)?);
+        std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        let manifest = crate::model_resources::fetch_manifest().await?;
+        let value = serde_json::to_value(manifest).map_err(|e| e.to_string())?;
+        std::fs::write(root.join("manifest.json"), value.to_string()).map_err(|e| e.to_string())?;
+        Ok(value)
+    }
+    #[cfg(not(windows))]
     query(&app, "manifest").await
 }
 
@@ -157,6 +185,7 @@ pub async fn model3d_start(
     action: String,
     mut request: Value,
 ) -> Result<(), String> {
+    require_supported_platform()?;
     if !matches!(action.as_str(), "install" | "generate")
         || !request.is_object()
         || request.to_string().len() > 32_000
@@ -176,11 +205,68 @@ pub async fn model3d_start(
         let directory = PathBuf::from(path)
             .canonicalize()
             .map_err(|e| e.to_string())?;
-        request["offlineDirectory"] = linux_path(&directory).await?.into();
+        request["offlineDirectory"] = command_path(&directory).into();
+    }
+
+    #[cfg(windows)]
+    {
+        *state
+            .installer
+            .operation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Value::Null;
+        if action == "install" {
+            let offline = request
+                .get("offlineDirectory")
+                .and_then(Value::as_str)
+                .map(PathBuf::from);
+            let components = request
+                .get("components")
+                .cloned()
+                .unwrap_or_else(|| json!(crate::model_resources::COMPONENTS));
+            let selected: Vec<String> =
+                serde_json::from_value(components).map_err(|_| "无效的资源组件")?;
+            let installer = state.installer.clone();
+            installer.cancel.store(false, Ordering::Release);
+            let running = json!({"status":"running","kind":"install","phase":"verify","progress":0,"detail":"正在检查 Windows 资源"});
+            installer.report(running.clone());
+            std::fs::write(root.join("operation.json"), running.to_string())
+                .map_err(|e| e.to_string())?;
+            let resources = crate::model_resources::resources(&root);
+            tauri::async_runtime::spawn(async move {
+                let _guard = guard;
+                let result = crate::model_resources::install(
+                    resources,
+                    offline,
+                    selected,
+                    installer.clone(),
+                )
+                .await;
+                let operation = match result {
+                    Ok(()) => {
+                        json!({"status":"completed","kind":"install","phase":"installed","progress":1,"detail":"所选 Windows 组件已安装并校验"})
+                    }
+                    Err(error) => {
+                        json!({"status":if installer.cancel.load(Ordering::Acquire) {"cancelled"} else {"failed"},"kind":"install","progress":0,"detail":error})
+                    }
+                };
+                let _ = std::fs::write(root.join("operation.json"), operation.to_string());
+                installer.report(operation);
+            });
+            return Ok(());
+        }
     }
     let mut command = launcher(&app, &action).await?;
     let _ = std::fs::remove_file(root.join("cancel"));
     std::fs::write(root.join("lease"), b"alive").map_err(|e| e.to_string())?;
+    std::fs::write(
+        root.join("operation.json"),
+        json!({"status":"running","kind":action,
+        "projectId":request["projectId"],"stage":request["stage"],"phase":"prepare","progress":0,
+        "detail":"正在启动本地工作进程"})
+        .to_string(),
+    )
+    .map_err(|e| e.to_string())?;
     command
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null());
@@ -218,8 +304,27 @@ pub async fn model3d_start(
 }
 
 #[tauri::command]
-pub async fn model3d_cancel(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn model3d_cancel(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, ModelWorkbench>,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    state.installer.cancel.store(true, Ordering::Release);
+    #[cfg(not(windows))]
+    let _ = state;
     std::fs::write(storage(&app)?.join("cancel"), b"cancel").map_err(|e| e.to_string())
+}
+
+pub fn shutdown(app: &tauri::AppHandle) {
+    if let Some(state) = app.try_state::<ModelWorkbench>() {
+        #[cfg(windows)]
+        state.installer.cancel.store(true, Ordering::Release);
+        if state.busy.load(Ordering::Acquire)
+            && let Ok(root) = storage(app)
+        {
+            let _ = std::fs::write(root.join("cancel"), b"app-exit");
+        }
+    }
 }
 
 fn valid_id(id: &str) -> bool {

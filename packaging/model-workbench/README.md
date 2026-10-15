@@ -1,6 +1,8 @@
 # 3D 资源构建
 
-此目录维护通用资源的构建输入。主 Tauri 资源表只列举 `modules/model_workbench` 的七个 Python 源文件和 `resources.json` 兼容清单，不包含此处构建环境、权重或 CUDA。资源独立版本为 `2026.10.1`，统一发布到固定 `model-workbench-resources` Release；应用版本升级不重打包资源。
+Windows 原生资源的构建与验证见 [WINDOWS.md](WINDOWS.md)。以下保留原 Linux 资源构建流程。
+
+此目录维护通用资源的构建输入。主 Tauri 资源表只列举 `modules/model_workbench` 的生产 Python 源文件和两平台兼容清单，不包含此处构建环境、权重或 CUDA。Linux 资源独立版本为 `2026.10.1`，统一发布到固定 `model-workbench-resources` Release；应用版本升级不重打包资源。
 
 在 Linux x64 / WSL Ubuntu 中构建。运行环境固定 Python 3.10、Torch 2.5.1+cu118、torchvision 0.20.1、CUDA 11.8、diffusers 0.32.2。先用 `conda-explicit.txt` 创建独立环境，再安装 Torch 与 `requirements.txt`，最后构建 diso 0.1.4 和 nvdiffrast 0.3.3。需要 CUDA 编译工具及 GCC 11，编译扩展时设置 `CUDA_HOME` 和适合目标 GPU 的 `TORCH_CUDA_ARCH_LIST`。
 

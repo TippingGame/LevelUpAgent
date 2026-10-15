@@ -19,6 +19,18 @@ import launcher as api
 
 
 class WorkbenchTest(unittest.TestCase):
+    def test_unsupported_host_rejected_before_files_or_downloads(self):
+        for system, machine in [('darwin', 'x86_64'), ('linux', 'aarch64'), ('win32', 'ARM64')]:
+            with self.subTest(system=system, machine=machine), \
+                    patch.object(sys, 'argv', ['launcher.py', '--data', str(self.root/'unused'), '--version', '1.3.79', 'manifest']), \
+                    patch.object(sys, 'platform', system), \
+                    patch.object(api.platform, 'machine', return_value=machine), \
+                    patch.object(api, 'fetch_manifest') as fetch:
+                with self.assertRaisesRegex(ValueError, 'Windows / Linux x64'):
+                    api.main()
+                fetch.assert_not_called()
+                self.assertFalse((self.root/'unused').exists())
+
     def test_atomic_json_retries_transient_windows_sharing_violation(self):
         with tempfile.TemporaryDirectory() as directory:
             target=Path(directory)/'progress.json'
@@ -53,7 +65,7 @@ class WorkbenchTest(unittest.TestCase):
     def test_manifest_rejects_incompatible_resources_and_duplicate_parts(self):
         manifest = {**api.RESOURCE_SPEC,'components':{
             name:{'unpackedBytes':1,'sha256':'a'*64,'license':'MIT','sources':['fixed-source'],
-                  'parts':[{'name':f'model-workbench-{api.RESOURCE_VERSION}-{api.TARGET}-{name}.tar.part001',
+                  'parts':[{'name':f'model-workbench-{api.RESOURCE_VERSION}-{api.TARGET}-{name}.{"zip" if api.WINDOWS else "tar"}.part001',
                             'bytes':100,'sha256':'b'*64}]} for name in api.COMPONENTS}}
         self.assertIs(api.validate_manifest(manifest),manifest)
         for key,value in [('resourceVersion','2099.1.1'),('target','linux-x64-cu128'),('cuda','12.8'),
@@ -188,6 +200,7 @@ class WorkbenchTest(unittest.TestCase):
         finally:
             server.shutdown();server.server_close();thread.join()
 
+    @unittest.skipIf(sys.platform=='win32','Native ZIP install is tested by model_resources Rust tests')
     def test_package_roundtrip_offline_install(self):
         spec=importlib.util.spec_from_file_location('packager',MODULE.parents[1]/'scripts/package-model-workbench.py')
         packager=importlib.util.module_from_spec(spec);spec.loader.exec_module(packager)

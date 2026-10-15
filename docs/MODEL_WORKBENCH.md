@@ -27,16 +27,26 @@
 
 ## 运行环境与资源提示
 
-- 本版本目标：NVIDIA CUDA GPU，Windows WSL2 或 Linux x64。Windows 需已有可运行 `python3` 的 WSL2 Linux 发行版，建议 Ubuntu 22.04 或更新版本。启动器使用默认发行版。macOS 显示平台提示，不假装支持 CUDA。
-- 建议 12 GiB 显存、32 GiB 内存。显存显示第一张 CUDA 显卡的当前空闲量；内存与磁盘显示实际 Linux / WSL 环境内的可用量。WSL 的内存限额可能低于 Windows 物理内存。
+- 本版本目标：NVIDIA CUDA GPU，Windows 原生 x64 或 Linux x64。Windows 无需 WSL、系统 Python、CUDA Toolkit 或编译器，运行库随独立资源安装；系统需安装 NVIDIA 驱动。macOS 尚不支持 CUDA 生成。
+- 建议 12 GiB 显存、32 GiB 内存。Windows 实测 RTX 3080 Ti；当前预编译扩展为 8.6+PTX，其他 GPU 未逐项验证。显存显示第一张 CUDA 卡当前空闲量，内存与磁盘为实际宿主系统可用量。
 - 形状精细 / 快速档的显存预算分别约 10.3 / 4.4 GiB；贴图 / 蒙皮分别约 5.9 / 0 GiB。形状 / 贴图 / 蒙皮的内存预算为 17.6 / 13.7 / 3.9 GiB。这些是预算提示；运行后另显示实测阶段耗时与 PyTorch 峰值。
 - 大组件不进入 Tauri 安装包。应用只携带启动器、工作脚本及本地 3D 查看器。
 - Python / PyTorch / CUDA、TripoSG、SD2.1 + MV-Adapter、Blender 可以按阶段安装。操作前显示下载大小、安装占用和临时空间。下载显示字节、速度、进度和估算剩余时间；取消后保留可续传部分。
 - 模型文件体积较大，安装时需要容纳下载分片、合并归档和解压结果。界面按实际清单计算，安装器在写入前再次检查磁盘。
 
-资源目录：`$XDG_DATA_HOME/levelup-agent/model-workbench/resources/<资源版本>/linux-x64-cu118`，未设置 XDG 时位于 `~/.local/share`。同一资源版本由不同应用版本共用，应用升级不会重新下载。作品保存在桌面应用数据目录的 `model-workbench/projects`，与依赖分开。
+Windows 资源目录：桌面应用数据目录下的 `model-workbench/resources/2026.10.15/windows-x64-cu118`。Windows 采用 Rust 原生安装器、ZIP 分卷和便携 Python；旧 Linux TAR 包不兼容。
 
-## 发布资源
+Linux 资源目录：`$XDG_DATA_HOME/levelup-agent/model-workbench/resources/<资源版本>/linux-x64-cu118`，未设置 XDG 时位于 `~/.local/share`。同一资源版本由不同应用版本共用，应用升级不会重新下载。作品保存在桌面应用数据目录的 `model-workbench/projects`，与依赖分开。
+
+## Windows 原生资源
+
+Windows 资源版本由 `modules/model_workbench/resources-windows.json` 固定为 `2026.10.15`。用 `scripts/package-model-workbench-windows.py` 制作，输出 Windows JSON 清单及四组件 ZIP 分卷。离线导入选择清单与分卷所在文件夹。在线安装按当前操作系统与架构选择资源；Windows x64 使用此版本，Linux x64 继续使用 `2026.10.1 / linux-x64-cu118`。不支持的平台会在下载前提示。资源共享 [独立 Release](https://github.com/TippingGame/LevelUpAgent/releases/tag/model-workbench-resources)，应用升级不重复下载。
+
+采用原有 TripoSG、SD2.1、MV-Adapter 权重；Windows/MSVC 编译 diso 与 nvdiffrast，MV-Adapter 的 Triton 导入改为可选。生产路径不启用 CV-CUDA UV padding / Poisson blending。资源包包含 Python/MSVC 运行库、固定上游源码与许可；开发机编译工具不随包分发。
+
+构建与验收见 [Windows 构建记录](../packaging/model-workbench/WINDOWS.md)。旧作品目录和 GLB/FBX 格式保持兼容；安装 Windows 资源不会删除旧 WSL 资源或历史作品。
+
+## 发布 Linux 资源
 
 从应用 1.2.71 起，所有大资源统一放在固定的 `model-workbench-resources` Release，资源版本独立于应用版本。当前资源版本为 `2026.10.1`，下载地址：
 
@@ -105,9 +115,9 @@ PyTorch 显存保留峰值 2,354 MiB，网格位置最大偏差为 0。美术质
 WebView2 中完成真实导入、抠图保存、页面重载与还原原图验证。原生读取的 PNG 与浏览器中的 Spine 输出一致。
 本地验收证据在 `artifacts/model-workbench/texture-quality/`；对照结果不覆盖用户现有作品。
 
-桌面桥接只允许固定的 status / manifest / install / generate 操作。生成进程按阶段隔离，不同时驻留 TripoSG 和 SD2.1。取消终止整个 Linux 工作进程组；桌面进程消失后，心跳租约过期也会停止工作进程。重启后将遗留运行状态显示为中断。
+桌面桥接只允许固定的 status / manifest / install / generate 操作。生成进程按阶段隔离，不同时驻留 TripoSG 和 SD2.1。Linux 取消终止整个工作进程组。Windows launcher 先加入 kill-on-close Job Object 再创建 worker，父桌面进程句柄和心跳共同检测退出，取消或强制退出会清理子进程。安装与生成共享排他资源锁。重启后将遗留运行状态显示为中断。
 
-标准检查：`pnpm check`、`pnpm build`、`cargo test --manifest-path src-tauri/Cargo.toml model_workbench --lib`、`python -B -m unittest discover -s modules/model_workbench/tests -v`。图片预处理测试需要 Pillow（CI 使用 11.1.0）；启动器本身仍只依赖标准库。Linux / WSL 另外执行进程组取消测试。CI 已接入安装器测试。
+标准检查：`pnpm check`、`pnpm build`、`cargo test --manifest-path src-tauri/Cargo.toml model_ --lib`、`python -B -m unittest discover -s modules/model_workbench/tests -v`。图片预处理测试需要 Pillow（CI 使用 11.1.0）；启动器本身仍只依赖标准库。Linux / WSL 另外执行进程组取消测试。Windows 安装器覆盖 ZIP 完整性、续传、取消、资源锁、无 Python 引导及旧作品读取。
 
 本地验证图片和日志保存在 `artifacts/model-workbench/`。四种外观（系统浅 / 深色 × 装甲关 / 开）的浏览器布局、错误面板和 720px 窗口已检查，另在真实 Tauri 窗口检查创作入口、环境面板及显存 / 内存查询。
 

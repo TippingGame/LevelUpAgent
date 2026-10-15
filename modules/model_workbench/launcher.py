@@ -1,4 +1,4 @@
-"""Stdlib-only bootstrap for Linux x64 / Windows WSL2. No GPU imports here.
+"""Stdlib-only controller for Linux and native Windows. No GPU imports here.
 
 The desktop owns a heartbeat lease. Heavy workers are process groups, isolated
 per stage; closing the desktop or cancelling terminates the entire group.
@@ -8,6 +8,7 @@ import contextlib
 import hashlib
 import json
 import os
+import platform
 from pathlib import Path, PurePosixPath
 import re
 import shutil
@@ -22,7 +23,8 @@ import uuid
 
 MODULE = Path(__file__).resolve().parent
 REPOSITORY = 'TippingGame/LevelUpAgent'
-RESOURCE_SPEC = json.loads((MODULE/'resources.json').read_text(encoding='utf-8'))
+WINDOWS = os.name == 'nt'
+RESOURCE_SPEC = json.loads((MODULE/('resources-windows.json' if WINDOWS else 'resources.json')).read_text(encoding='utf-8'))
 TARGET = RESOURCE_SPEC['target']
 RESOURCE_VERSION = RESOURCE_SPEC['resourceVersion']
 RESOURCE_TAG = RESOURCE_SPEC['releaseTag']
@@ -77,6 +79,14 @@ def version_root(version):
     return base/'levelup-agent/model-workbench/resources'/RESOURCE_VERSION/TARGET
 
 
+def python_executable(root):
+    return root/('runtime/python/python.exe' if WINDOWS else 'runtime/python/bin/python')
+
+
+def blender_executable(root):
+    return root/('blender/blender.exe' if WINDOWS else 'blender/blender')
+
+
 def project_dir(data, ident):
     if not isinstance(ident, str) or not re.fullmatch(r'[a-f0-9]{32}', ident):
         raise ValueError('Invalid project ID')
@@ -89,6 +99,15 @@ def project_dir(data, ident):
 def system_info(root):
     result = {'gpus': [], 'ramTotalMiB': None, 'ramAvailableMiB': None,
               'diskFreeBytes': shutil.disk_usage(root).free, 'platform': TARGET}
+    if WINDOWS:
+        import ctypes
+        class Memory(ctypes.Structure):
+            _fields_ = [('length', ctypes.c_uint32), ('load', ctypes.c_uint32)] + [
+                (name, ctypes.c_uint64) for name in ('total','available','pageTotal','pageAvailable','virtualTotal','virtualAvailable','extended')]
+        memory = Memory()
+        memory.length = ctypes.sizeof(memory)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(memory)):
+            result.update(ramTotalMiB=memory.total//1024**2, ramAvailableMiB=memory.available//1024**2)
     try:
         mem = dict(line.split(':', 1) for line in Path('/proc/meminfo').read_text().splitlines())
         result.update(ramTotalMiB=int(mem['MemTotal'].split()[0])//1024,
@@ -97,7 +116,8 @@ def system_info(root):
         pass
     try:
         output = subprocess.run(['nvidia-smi', '--query-gpu=name,memory.total,memory.free,driver_version',
-                                 '--format=csv,noheader,nounits'], capture_output=True, text=True, timeout=8)
+                                 '--format=csv,noheader,nounits'], capture_output=True, text=True, timeout=8,
+                                creationflags=subprocess.CREATE_NO_WINDOW if WINDOWS else 0)
         for line in output.stdout.splitlines():
             name, total, free, driver = [part.strip() for part in line.split(',')]
             result['gpus'].append({'name': name, 'totalMiB': int(total), 'freeMiB': int(free), 'driver': driver})
@@ -110,11 +130,11 @@ def component_ready(root, name):
     marker = read(root/name/'.installed.json', {})
     manifest = read(root/'manifest.json', {})
     component = manifest.get('components', {}).get(name, {})
-    files = {'runtime': ['python/bin/python', 'vendor/TripoSG/triposg/pipelines/pipeline_triposg.py',
+    files = {'runtime': ['python/python.exe' if WINDOWS else 'python/bin/python', 'vendor/TripoSG/triposg/pipelines/pipeline_triposg.py',
                          'vendor/MV-Adapter/mvadapter/__init__.py'],
              'triposg': ['model_index.json'],
              'texture': ['base/model_index.json', 'adapter/mvadapter_ig2mv_sd21.safetensors', 'provenance.json'],
-             'blender': ['blender']}[name]
+             'blender': ['blender.exe' if WINDOWS else 'blender']}[name]
     return (manifest.get('target') == TARGET and manifest.get('schemaVersion') == 2
             and manifest.get('resourceVersion') == RESOURCE_VERSION
             and manifest.get('cuda') == RESOURCE_SPEC['cuda']
@@ -174,7 +194,8 @@ def validate_manifest(manifest, resource_version=RESOURCE_VERSION):
             raise ValueError('Invalid archive parts')
         for part in parts:
             filename = part.get('name', '')
-            prefix = f'model-workbench-{resource_version}-{TARGET}-{name}.tar.part'
+            extension = 'zip' if WINDOWS else 'tar'
+            prefix = f'model-workbench-{resource_version}-{TARGET}-{name}.{extension}.part'
             if not re.fullmatch(re.escape(prefix)+r'\d{3}', filename) or filename in names:
                 raise ValueError('Invalid or duplicate asset name')
             names.add(filename)
@@ -207,6 +228,11 @@ class Cancelled(Exception):
 
 
 def check_cancel(data):
+    if WINDOWS:
+        sys.path.insert(0, str(MODULE)) if str(MODULE) not in sys.path else None
+        from windows_process_tree import parent_exited
+        if parent_exited():
+            raise Cancelled('工作台已关闭，任务已停止。')
     if (data/'cancel').exists():
         raise Cancelled('已取消；可以继续下载或重新运行本阶段。')
     lease = data/'lease'
@@ -297,6 +323,8 @@ def extract_archive(archive, destination, limit, check=lambda: None, progress=la
 
 
 def install(data, root, version, request):
+    if WINDOWS:
+        raise ValueError('Windows resources are installed by the desktop native installer.')
     next_cancel_check = 0
     def check_install_cancel():
         # Windows project data may live on a WSL-mounted NTFS volume. Avoid
@@ -417,7 +445,8 @@ def restore_directory_links(root):
 def child(data, command, logfile, env):
     with logfile.open('ab', buffering=0) as log:
         process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
-                                   env=env, start_new_session=True)
+                                   env=env, start_new_session=not WINDOWS,
+                                   creationflags=subprocess.CREATE_NO_WINDOW if WINDOWS else 0)
         try:
             while process.poll() is None:
                 check_cancel(data)
@@ -434,11 +463,17 @@ def child(data, command, logfile, env):
                 raise RuntimeError(detail or f'阶段运行失败（{process.returncode}），详细信息已保存在本次运行的 run.log。')
         finally:
             if process.poll() is None:
-                os.killpg(process.pid, signal.SIGTERM)
+                if WINDOWS:
+                    process.kill()
+                else:
+                    os.killpg(process.pid, signal.SIGTERM)
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
+                    if WINDOWS:
+                        process.kill()
+                    else:
+                        os.killpg(process.pid, signal.SIGKILL)
                     process.wait()
 
 
@@ -448,6 +483,12 @@ def runtime_env(root):
            'CUDA_HOME': str(root/'runtime/cuda'), 'TORCH_EXTENSIONS_DIR': str(root/'cache/torch'),
            'HF_HOME': str(root/'cache/huggingface'), 'XDG_CACHE_HOME': str(root/'cache'),
            'PYTORCH_CUDA_ALLOC_CONF': 'max_split_size_mb:128', 'MAX_JOBS': '4'}
+    if WINDOWS:
+        for name in ('PYTHONHOME', 'PYTHONPATH', 'CUDA_HOME', 'CUDA_PATH', 'CC', 'CXX', 'CUDAHOSTCXX', 'LD_LIBRARY_PATH', 'LEVELUP_3D_BUILD_EXTENSIONS'):
+            env.pop(name, None)
+        env['PYTHONUTF8'] = '1'
+        env['PATH'] = str(root/'runtime/python') + os.pathsep + env.get('PATH', '')
+        return env
     env['PATH'] = f"{root}/runtime/python/bin:{root}/runtime/cuda/bin:"+env.get('PATH', '')
     env['LD_LIBRARY_PATH'] = f"{root}/runtime/python/lib:{root}/runtime/cuda/lib:/usr/lib/wsl/lib:"+env.get('LD_LIBRARY_PATH','')
     compiler = root/'runtime/python/bin/x86_64-conda-linux-gnu-gcc'
@@ -497,7 +538,7 @@ def generate(data, root, version, request):
         raise ValueError('本阶段依赖尚未安装，请先打开「环境与下载」。')
     hardware = system_info(root)
     if stage != 'rig' and not hardware['gpus']:
-        raise ValueError('未检测到 NVIDIA CUDA 显卡。Windows 请检查 WSL2 GPU 驱动。')
+        raise ValueError('未检测到 NVIDIA CUDA 显卡，请检查系统 NVIDIA 驱动。')
     available = hardware.get('ramAvailableMiB')
     if available and available < 3000:
         raise ValueError('当前可用内存不足 3 GiB，请先关闭其他程序。')
@@ -523,18 +564,18 @@ def generate(data, root, version, request):
         shutil.copyfile(source_path/'model.glb', run/'source_mesh.glb')
         settings.update(baseMeshSha256=sha(run/'source_mesh.glb'), sourceJobId=source['directory'])
     write(run/'request.json', settings)
-    operation(data, kind='generate', stage=stage, projectId=project['id'], run=str(run.relative_to(data)))
+    operation(data, kind='generate', stage=stage, projectId=project['id'], run=run.relative_to(data).as_posix())
     env = runtime_env(root)
     for index, phase in enumerate(STAGES[stage]):
         check_cancel(data)
         operation(data, phase=phase, detail='正在运行 '+phase, stageIndex=index,
                   stageCount=len(STAGES[stage]), progress=index/len(STAGES[stage]))
         if stage == 'rig':
-            command = [str(root/'blender/blender'), '--background', '--factory-startup', '--python-exit-code', '1',
+            command = [str(blender_executable(root)), '--background', '--factory-startup', '--python-exit-code', '1',
                        '--python', str(MODULE/'app/rig_worker.py'), '--', str(run)]
         else:
             worker = 'triposg_worker.py' if stage == 'shape' else 'texture_worker.py'
-            command = [str(root/'runtime/python/bin/python'), str(MODULE/'app'/worker), phase, '--run', str(run)]
+            command = [str(python_executable(root)), str(MODULE/'app'/worker), phase, '--run', str(run)]
         child(data, command, run/'run.log', env)
     if not (run/'model.glb').is_file() or not (run/'validation.json').is_file():
         raise RuntimeError('输出缺少模型或验证报告，未保存为完成阶段。')
@@ -548,7 +589,7 @@ def generate(data, root, version, request):
         'note': 'PyTorch allocation only; GPU driver and other apps use additional memory.',
     }
     write(run/'validation.json', result)
-    project.setdefault('stages', {})[stage] = {'directory': str(run.relative_to(project_path)),
+    project.setdefault('stages', {})[stage] = {'directory': run.relative_to(project_path).as_posix(),
         'completedAt': time.time(), 'version': version, 'resourceVersion': RESOURCE_VERSION, 'validation': result}
     # Previous runs stay on disk. Downstream results from a different shape/texture
     # are detached from the current project so they cannot silently be reused.
@@ -563,9 +604,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data', required=True, type=Path)
     parser.add_argument('--version', required=True)
+    parser.add_argument('--resources', type=Path, help='Explicit native resource location owned by the desktop')
     parser.add_argument('command', choices=['status','manifest','install','generate'])
     args = parser.parse_args()
-    data, root = args.data.resolve(), version_root(args.version)
+    if sys.platform not in ('win32', 'linux') or platform.machine().lower() not in ('amd64', 'x86_64'):
+        raise ValueError('Local 3D resources require Windows / Linux x64 with an NVIDIA GPU.')
+    data, root = args.data.resolve(), args.resources.resolve() if args.resources else version_root(args.version)
+    if WINDOWS and not args.resources:
+        raise ValueError('Windows requires the desktop resource directory (--resources).')
     data.mkdir(parents=True, exist_ok=True)
     root.mkdir(parents=True, exist_ok=True)
     if args.command == 'status':
@@ -575,9 +621,11 @@ def main():
         print(json.dumps(fetch_manifest(root), ensure_ascii=False))
         return
     # Shared resource lock also serializes jobs from different app versions.
-    import fcntl
-    with (root/'.operation.lock').open('w') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with operation_lock(root):
+        if WINDOWS:
+            sys.path.insert(0, str(MODULE))
+            from windows_process_tree import own_process_tree
+            own_process_tree()
         request = json.load(sys.stdin)
         write(data/'operation.json', {'status':'running', 'kind':args.command, 'startedAt':time.time(), 'progress':0})
         try:
@@ -590,6 +638,31 @@ def main():
         except Exception as exc:
             operation(data, status='failed', detail=str(exc))
             raise
+
+
+@contextlib.contextmanager
+def operation_lock(root):
+    if WINDOWS:
+        # Same exclusive CreateFile sharing mode as the Rust installer.
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                      ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        kernel.CreateFileW.restype = wintypes.HANDLE
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel.CreateFileW(str(root/'.operation.lock'), 0xC0000000, 0, None, 4, 0x80, None)
+        if handle == ctypes.c_void_p(-1).value:
+            raise RuntimeError('另一个工作台正在使用这些 3D 资源，请稍后重试。')
+        try:
+            yield
+        finally:
+            kernel.CloseHandle(handle)
+    else:
+        import fcntl
+        with (root/'.operation.lock').open('w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            yield
 
 
 if __name__ == '__main__':

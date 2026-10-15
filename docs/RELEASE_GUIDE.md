@@ -22,6 +22,14 @@ Draft，因此 `v1.0.32` 继续显示 `Latest`；在核对资产并正式发布�
 
 ## 零、以后每次发布速查
 
+### v1.3.79：Windows 原生 3D 与平台资源选择（发布中）
+
+- Windows 3D 工作台原生运行，无需 WSL、系统 Python、CUDA Toolkit 或编译器；系统需 NVIDIA 驱动。
+- Windows x64 使用 `2026.10.15 / windows-x64-cu118`（10 个 ZIP 分卷 + JSON），Linux x64 继续使用 `2026.10.1 / linux-x64-cu118`。按平台自动选择依赖和模型，不支持的平台在下载前提示；离线包不能跨平台混用。
+- 上传命令：`node scripts/upload-model-workbench.mjs artifacts/model-workbench/windows-native/release windows`。默认或显式 `linux` 继续发布 Linux TAR 资源。保留旧资产，逐卷与完整归档校验，GitHub digest 核对后清单最后上传。
+- Windows 资源下载 14,143,575,278 bytes，安装 18,714,139,632 bytes；预编译扩展 `8.6+PTX`，RTX 3080 Ti 12 GiB 已实测。
+- 资源 Release 保持 prerelease、不占 Latest。必须先公开验证 Windows 资源，再发布应用。详细验收与发布记录见 `docs/RELEASE_1.3.79.md`。
+
 ### v1.3.78：图片预览适配窗口与复制图片（已正式发布）
 
 - 打开或切换图片自动适配窗口，预览右上角及图片右键菜单支持复制完整图片。
@@ -96,7 +104,7 @@ gh release edit music-workbench-resources --draft=false --prerelease --latest=fa
 
 ### 从 v1.2.71 起：应用和 3D 通用资源分别发布
 
-应用安装包继续通过 `vX.Y.Z` tag 触发四平台构建，本次应用版本为 `1.3.78`。
+应用安装包继续通过 `vX.Y.Z` tag 触发四平台构建，本次应用版本为 `1.3.79`。
 Python / PyTorch / CUDA、TripoSG、SD2.1 + MV-Adapter、Blender 不进入应用安装包，
 也不再随每个应用版本重复打包或上传。所有额外资源固定放在同一个 Release：
 

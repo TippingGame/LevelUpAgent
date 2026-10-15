@@ -5,10 +5,12 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { modelResourcePlatform } from "./model-resource-platform.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const directory = path.resolve(process.argv[2] ?? "artifacts/model-workbench/release");
-const spec = JSON.parse(fs.readFileSync(path.join(root, "modules/model_workbench/resources.json"), "utf8"));
+if (process.argv.length > 4) throw new Error("Usage: node scripts/upload-model-workbench.mjs <directory> [linux|windows]");
+const { spec, archive } = modelResourcePlatform(root, process.argv[3]);
 const manifestPath = path.join(directory, `model-workbench-${spec.resourceVersion}-${spec.target}.json`);
 const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 for (const key of ["schemaVersion", "resourceVersion", "releaseTag", "target", "cuda"]) {
@@ -20,9 +22,9 @@ const files = [], names = new Set();
 for (const [name, component] of Object.entries(manifest.components)) {
   if (!component.license || !component.sources?.length || !Number.isSafeInteger(component.unpackedBytes) || component.unpackedBytes <= 0 || !component.parts?.length) throw new Error(`Incomplete component: ${name}`);
   const archiveHash = crypto.createHash("sha256");
-  for (const part of component.parts) {
-    const prefix = `model-workbench-${spec.resourceVersion}-${spec.target}-${name}.tar.part`;
-    if (!part.name.startsWith(prefix) || !/^\d{3}$/.test(part.name.slice(prefix.length)) || names.has(part.name)) throw new Error("Invalid or duplicate asset name");
+  for (const [partIndex, part] of component.parts.entries()) {
+    const prefix = `model-workbench-${spec.resourceVersion}-${spec.target}-${name}.${archive}.part`;
+    if (part.name !== prefix + String(partIndex + 1).padStart(3, "0") || names.has(part.name)) throw new Error("Invalid, out-of-order or duplicate asset name");
     names.add(part.name);
     const file = path.join(directory, part.name);
     if (!Number.isSafeInteger(part.bytes) || part.bytes <= 0 || fs.statSync(file).size !== part.bytes || part.bytes >= 2_000_000_000) throw new Error(`Invalid size: ${part.name}`);

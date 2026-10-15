@@ -32,7 +32,7 @@ export interface ModelStatus {
 }
 export const MODEL_COMPONENTS: ModelComponent[] = ["runtime", "triposg", "texture", "blender"];
 export const MODEL_NEEDS: Record<ModelStage, ModelComponent[]> = {
-  shape: ["runtime", "triposg"], texture: ["runtime", "texture"], rig: ["blender"],
+  shape: ["runtime", "triposg"], texture: ["runtime", "texture"], rig: ["runtime", "blender"],
 };
 export function defaultModelJoints(proportion: "standard" | "chibi" = "standard"): Record<string, ModelJoint> {
   const joints: Record<string, ModelJoint> = { hips: [0, .48, 0], spine: [0, .57, 0], chest: [0, .68, 0],

@@ -99,7 +99,8 @@ def main():
     import ctypes
     import signal
     parent = os.getppid()
-    ctypes.CDLL(None).prctl(1, signal.SIGTERM, 0, 0, 0)
+    if sys.platform.startswith('linux'):
+        ctypes.CDLL(None).prctl(1, signal.SIGTERM, 0, 0, 0)
     if os.getppid() != parent:
         raise SystemExit('Parent process exited')
     parser = argparse.ArgumentParser()
