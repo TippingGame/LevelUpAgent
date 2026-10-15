@@ -18,4 +18,8 @@ RTX 3080 Ti 12 GiB 上，隔离的正式 Tauri 页面在仅有 Windows 系统 PA
 
 本地锁定依赖安装、303 项前端测试及外观检查、生产构建、Rust 格式检查、555 项 Rust 测试与全目标 Clippy 通过（5 项 opt-in 测试忽略）。3D Python 20 项测试、3 项 Linux 专属跳过；音频 Python 9 项测试、2 项便携解码器测试跳过。1.3.79 隔离原生客户端确认 Windows 平台、组件复用、旧作品读取、四种外观与 720px 环境对话框。
 
-GitHub 构建、资产与更新清单核验进行中。发布证据：`research/release-1.3.79-2026-10-15`。
+已于 2026-10-15 16:21:14（Asia/Shanghai）正式发布并设为 Latest。构建提交 `a836cd392adb574cbcdcd17302c14ef2fe3e06bf`，三平台 CI run `38696906888` 与四平台 Release run `38696910394` 均成功。10 个资产完整下载并通过 GitHub SHA256 digest 校验；Windows EXE/MSI updater 签名及可信注释签名有效，公开发布页和 `latest.json` 均返回 HTTP 200、版本为 `1.3.79`。发布证据：`research/release-1.3.79-2026-10-15`。
+
+正式 Windows 安装包完成归档完整性、版本、x64 架构、CSP、updater 配置和 71 个资源文件验证，不含 QA 标识和调试端口。Windows 3D 的 10 个新分卷与 JSON 清单可匿名读取，原 15 个 Linux 资源资产 ID、大小和哈希保持；原生客户端读取公开 Windows 清单成功。资源 Release 保持 prerelease、不占应用 Latest。
+
+安装包已保存到 `G:\Work\LevelUpAgent\安装包\LevelUpAgent_1.3.79_Windows_x64-setup.exe`，保留旧版本并更新 SHA256 清单。SHA256：`ADEF6F69FFDAE3CB0E8B8F5A5478E153EE1CD81FD7441C5B1655E6B8914FEA83`。本次未覆盖用户正式安装，未执行旧版应用内更新，macOS/Linux 未新增实体机交互验收。

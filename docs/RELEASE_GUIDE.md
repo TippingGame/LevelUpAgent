@@ -22,7 +22,7 @@ Draft，因此 `v1.0.32` 继续显示 `Latest`；在核对资产并正式发布�
 
 ## 零、以后每次发布速查
 
-### v1.3.79：Windows 原生 3D 与平台资源选择（发布中）
+### v1.3.79：Windows 原生 3D 与平台资源选择（已正式发布）
 
 - Windows 3D 工作台原生运行，无需 WSL、系统 Python、CUDA Toolkit 或编译器；系统需 NVIDIA 驱动。
 - Windows x64 使用 `2026.10.15 / windows-x64-cu118`（10 个 ZIP 分卷 + JSON），Linux x64 继续使用 `2026.10.1 / linux-x64-cu118`。按平台自动选择依赖和模型，不支持的平台在下载前提示；离线包不能跨平台混用。
@@ -145,6 +145,10 @@ Linux/WSL 必须覆盖真实进程组取消和目录链接恢复，Windows 原�
 选择和清理确认状态。正式应用发布前检查资源 Release 不会抢占 Latest。
 
 本文的仓库内同步副本为 `LevelUpAgent/docs/RELEASE_GUIDE.md`，修改发布规范时同时更新两份。
+
+已验证记录：v1.3.79 已于 2026-10-15 16:21:14（Asia/Shanghai）正式发布并设为 Latest。构建提交 `a836cd392adb574cbcdcd17302c14ef2fe3e06bf`，三平台 CI run `38696906888` 与四平台 Release run `38696910394` 均成功。10 个资产完整下载并通过 GitHub SHA256 digest 校验；Windows EXE/MSI updater 签名及可信注释签名有效，公开发布页和 `latest.json` 均返回 HTTP 200、版本为 `1.3.79`。
+Windows 3D 新 10 分卷及清单已先行上传，匿名读取和原生客户端清单检查通过；旧 Linux 资源保留。正式 EXE 已同步安装包目录并更新 SHA256 清单。
+详情：`LevelUpAgent/docs/RELEASE_1.3.79.md`；证据：`research/release-1.3.79-2026-10-15`。
 
 已验证记录：v1.3.78 已于 2026-10-15 03:33:35（Asia/Shanghai）正式发布并设为 Latest。构建提交 `21ec9652b6fc4e304bc5e887dbda127f9ab9f89d`，三平台 CI run `38622182370` 与四平台 Release run `38622186162` 均成功。Windows CI 首次 Chrome 启动超时，重跑失败作业后通过。10 个资产完整下载并通过 GitHub SHA256 digest 校验；Windows EXE/MSI updater 签名及可信注释签名有效，公开发布页和 `latest.json` 均返回 HTTP 200、版本为 `1.3.78`。
 正式 EXE 已同步安装包目录并更新 SHA256 清单；隔离原生窗口图片适配、复制与四种外观通过。
