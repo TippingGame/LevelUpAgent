@@ -16,8 +16,12 @@
 
 功能验证详情见 [验证记录](WORKBENCH_REMOVAL_VALIDATION.md)，本地证据位于 `artifacts/workbench-removal/`。发布检查和安装包校验记录位于 `research/release-1.3.80-2026-10-16`。
 
-1.3.80 本地锁定依赖安装、303 项前端测试和外观检查、生产构建、Rust 格式检查、560 项 Rust 测试及全目标 Clippy 通过（5 项 opt-in 测试忽略）。3D Python 21 项测试（3 项跳过）、音频 Python 9 项测试（2 项跳过），其余通过。GitHub 构建、资产与更新清单核验进行中。
+1.3.80 本地锁定依赖安装、303 项前端测试和外观检查、生产构建、Rust 格式检查、560 项 Rust 测试及全目标 Clippy 通过（5 项 opt-in 测试忽略）。3D Python 21 项测试（3 项跳过）、音频 Python 9 项测试（2 项跳过），其余通过。已于 2026-10-16 13:11:09（Asia/Shanghai）正式发布并设为 Latest。构建提交 e8c0141724de11f5cd81506cf37acbd2f1ffe105，三平台 CI run 38852338120 与四平台 Release run 38852342251 均成功。10 个资产完整下载并通过 GitHub SHA256 digest 校验；Windows EXE/MSI updater 签名及可信注释签名有效，公开发布页和 latest.json 均返回 HTTP 200、版本为 1.3.80。
 
 ## 平台与签名
 
 Windows x64 提供 NSIS / MSI 与 Tauri updater 签名；macOS Apple Silicon / Intel 提供 ad-hoc 签名 DMG，未公证；Linux x64 提供 AppImage / DEB / RPM。主安装包不包含大型模型与运行环境。
+
+正式 Windows 安装包完成归档完整性、版本、x64 架构、CSP、updater 配置和 71 个资源文件验证，不含 QA 标识或调试端口。5 份当前依赖清单与 48 个分卷可公开下载，资源 Release 继续为 prerelease，不占应用 Latest。此次未重新上传任何大型资源。
+
+安装包已保存到 G:\Work\LevelUpAgent\安装包\LevelUpAgent_1.3.80_Windows_x64-setup.exe，保留旧版本并更新 SHA256 清单。SHA256：E4E954EF34B33B9D8391CA2CB89FE7349E859754231C6F150B61C3584DAC47B7。本次未覆盖用户正式安装，未执行旧版应用内更新；macOS / Linux 未新增实体机交互验收。
