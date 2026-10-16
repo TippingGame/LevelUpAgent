@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Check, ChevronRight, Download, FolderOpen, HardDrive, ImagePlus, LoaderCircle, RotateCcw, Settings2, Square, X } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { ResourceRemovalControl } from "./ResourceRemovalControl";
 import { CreativeStudioHeader } from "./CreativeStudioHeader";
 import { ModelViewer } from "./ModelViewer";
 import { ModelReferenceEditor } from "./ModelReferenceEditor";
@@ -14,7 +15,7 @@ import "./ModelWorkbench.css";
 const stages: ModelStage[] = ["shape", "texture", "rig"];
 const stageName = (stage: ModelStage) => ({ shape: tr("生成形状", "Shape"), texture: tr("独立贴图", "Texture"), rig: tr("蒙皮与动画", "Rig & animate") })[stage];
 const componentName = (name: ModelComponent) => ({ runtime: tr("Python 与 CUDA 运行环境", "Python & CUDA runtime"), triposg: "TripoSG", texture: "SD2.1 + MV-Adapter", blender: "Blender" })[name];
-const phaseName = (phase?: string) => ({ prepare: "准备参考图", shape: "TripoSG 生成形状", export: "减面与检查", uv: "展开 UV", paint: "SD2.1 生成六视角颜色", bake: "烘焙颜色贴图", validate_texture: "检查贴图模型", rig: "蒙皮与动画", download: "下载资源", verify: "校验文件", extract: "安装资源" })[phase ?? ""] ?? phase;
+const phaseName = (phase?: string) => ({ prepare: "准备参考图", shape: "TripoSG 生成形状", export: "减面与检查", uv: "展开 UV", paint: "SD2.1 生成六视角颜色", bake: "烘焙颜色贴图", validate_texture: "检查贴图模型", rig: "蒙皮与动画", download: "下载资源", verify: "校验文件", extract: "安装资源", remove: "正在移除依赖" })[phase ?? ""] ?? phase;
 
 export function ModelWorkbench({ active, onMusic, onMedia, onWriting, onConstellation, onSpine, onPendingCountChange }: {
   active: boolean; onMusic: () => void; onMedia: () => void; onWriting: () => void; onConstellation: () => void; onSpine: () => void;
@@ -140,7 +141,7 @@ export function ModelWorkbench({ active, onMusic, onMedia, onWriting, onConstell
   const progress = operation ? modelProgress(operation) : 0;
   const progressView = operation && <div className={`model-progress ${operation.status}`} role="status" aria-live="polite">
     <div><strong>{operation.status === "running" ? phaseName(operation.phase) ?? tr("正在准备", "Preparing") : ({ completed: tr("已完成", "Completed"), failed: tr("运行失败", "Failed"), cancelled: tr("已取消", "Cancelled"), interrupted: tr("已中断", "Interrupted") })[operation.status]}</strong>
-      {operation.status === "running" && <button onClick={() => void invoke("model3d_cancel").catch((err) => setError(String(err)))}><Square size={12}/>{tr("取消", "Cancel")}</button>}</div>
+      {operation.status === "running" && operation.kind !== "remove" && <button onClick={() => void invoke("model3d_cancel").catch((err) => setError(String(err)))}><Square size={12}/>{tr("取消", "Cancel")}</button>}</div>
     {operation.status === "running" && <progress max={1} value={progress} aria-label={tr("任务进度", "Task progress")}/>}
     <small>{operation.worker?.phase === operation.phase && operation.status === "running" ? operation.worker?.detail : operation.detail}</small>
     {operation.totalBytes != null && operation.status === "running" && <small>{modelBytes(operation.downloadedBytes)} / {modelBytes(operation.totalBytes)} · {Math.round(progress*100)}%
@@ -216,6 +217,7 @@ export function ModelWorkbench({ active, onMusic, onMedia, onWriting, onConstell
       {error && <p className="model-error" role="alert">{error}</p>}
       {progressView}
       <div className="model-dialog-actions"><button disabled={checking || busy || !isDesktop()} onClick={() => void checkManifest()}><RotateCcw size={14}/>{checking ? tr("正在检查…", "Checking…") : tr("检查通用资源", "Check resources")}</button><button disabled={busy || !components.length || !isDesktop()} onClick={() => void offlineInstall()}><FolderOpen size={14}/>{tr("离线导入", "Import offline")}</button><button className="model-primary" disabled={busy || !components.length || !manifest || !isDesktop()} onClick={() => void runAction("install", { components })}><Download size={14}/>{tr("下载并安装", "Download & install")}</button></div>
+      {environment && <ResourceRemovalControl scope={tr("当前平台的全部 3D 依赖", "all 3D dependencies for this platform")} disabled={busy || !status || !isDesktop()} onRemove={() => runAction("remove", {})}/>}
     </dialog>
   </section>;
 }

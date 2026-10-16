@@ -1,4 +1,5 @@
 import {
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -235,18 +236,18 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
   const imageRatios = imageCapabilities.ratios;
   const imageEditReady = imageMode === "generate"
     || imageEditEntries.length > 0;
-  const visibleAssets = assets.filter((asset) => asset.kind === kind);
-  const visiblePendingAssets = pendingAssets.filter((asset) => asset.kind === kind);
-  const displayedAssets: StudioMediaAsset[] = [...visiblePendingAssets, ...visibleAssets];
+  const visibleAssets = useMemo(() => assets.filter((asset) => asset.kind === kind), [assets, kind]);
+  const visiblePendingAssets = useMemo(() => pendingAssets.filter((asset) => asset.kind === kind), [pendingAssets, kind]);
+  const displayedAssets = useMemo<StudioMediaAsset[]>(() => [...visiblePendingAssets, ...visibleAssets], [visiblePendingAssets, visibleAssets]);
   const activeImageEditEntry = imageEditEntries.find((entry) => entry.id === imageEditSelectionId) ?? imageEditEntries[0];
   const activeImageEditNumber = imageEditEntries.findIndex((entry) => entry.id === activeImageEditEntry?.id) + 1;
   const currentHistoryState = historyState[kind];
-  const previewableAssets = displayedAssets.filter(
+  const previewableAssets = useMemo(() => displayedAssets.filter(
     (asset) => asset.kind === "image" && asset.status === "completed" && Boolean(mediaAssetUrl(asset)),
-  );
-  const pendingVideoIds = assets
+  ), [displayedAssets]);
+  const pendingVideoIds = useMemo(() => assets
     .filter((asset) => asset.kind === "video" && (asset.status === "queued" || asset.status === "in_progress"))
-    .map((asset) => asset.id);
+    .map((asset) => asset.id), [assets]);
   const videoRefreshError = pendingVideoIds.map((id) => videoRefreshErrors[id]).find(Boolean);
   const visibleError = error ?? (videoRefreshError
     ? tr("视频状态获取失败，将自动重试：", "Video status unavailable; retrying: ") + videoRefreshError
@@ -883,6 +884,15 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
     }
   };
 
+  // Stable event dispatch lets history skip prompt edits without retaining stale
+  // reference lists or image editing settings in its event handlers.
+  const assetActions = useRef({ remove: removeAsset, reuse: reuseImage, edit: editImageAsset });
+  useLayoutEffect(() => { assetActions.current = { remove: removeAsset, reuse: reuseImage, edit: editImageAsset }; });
+  const onAssetAction = useCallback((action: MediaHistoryAction, asset: StudioMediaAsset) => {
+    if (action === "preview") { setPreviewAsset(asset); return; }
+    return assetActions.current[action](asset);
+  }, []);
+
   const armorClassName = armorMode ? ` armor-mode armor-level-${armorModeLevel}` : "";
 
   return (
@@ -1131,7 +1141,7 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
           {currentHistoryState.loading && !currentHistoryState.loaded ? <div className="media-empty"><LoaderCircle className="spin" size={24} /><span>{tr("正在读取首段历史", "Loading recent history")}</span></div>
             : displayedAssets.length === 0 ? <div className="media-empty"><KindIcon kind={kind} /><strong>{tr("还没有作品", "No creations yet")}</strong><span>{tr("输入提示词后，结果会自动出现在这里", "Generated outputs will appear here automatically")}</span></div>
               : <>
-                <div className="media-gallery-grid">{displayedAssets.map((asset) => <MediaAssetCard asset={asset} locale={locale} onDelete={asset.pendingOutput ? undefined : () => void removeAsset(asset)} onPreview={asset.kind === "image" && asset.status === "completed" ? () => setPreviewAsset(asset) : undefined} onReuse={asset.kind === "image" && asset.status === "completed" && Boolean(asset.filePath) ? () => reuseImage(asset) : undefined} onEdit={asset.kind === "image" && asset.status === "completed" && Boolean(asset.filePath) ? () => editImageAsset(asset) : undefined} key={asset.id} />)}</div>
+                <MediaHistoryGrid assets={displayedAssets} locale={locale} onAction={onAssetAction}/>
                 {currentHistoryState.hasMore && <div className="media-history-pagination">
                   <button type="button" disabled={currentHistoryState.loadingMore} onClick={() => void loadHistory(kind)}>
                     {currentHistoryState.loadingMore && <LoaderCircle className="spin" size={14} />}
@@ -1166,6 +1176,24 @@ export function MediaStudio({ active, locale, armorMode, armorModeLevel, armorMo
     </main>
   );
 }
+
+type MediaHistoryAction = "remove" | "preview" | "reuse" | "edit";
+type MediaHistoryDispatch = (action: MediaHistoryAction, asset: StudioMediaAsset) => Promise<void> | void;
+const MediaHistoryCard = memo(function MediaHistoryCard({ asset, locale, onAction }: {
+  asset: StudioMediaAsset; locale: string; onAction: MediaHistoryDispatch;
+}) {
+  const imageReady = asset.kind === "image" && asset.status === "completed";
+  return <MediaAssetCard asset={asset} locale={locale}
+    onDelete={asset.pendingOutput ? undefined : () => void onAction("remove", asset)}
+    onPreview={imageReady ? () => void onAction("preview", asset) : undefined}
+    onReuse={imageReady && asset.filePath ? () => onAction("reuse", asset) : undefined}
+    onEdit={imageReady && asset.filePath ? () => onAction("edit", asset) : undefined}/>;
+});
+const MediaHistoryGrid = memo(function MediaHistoryGrid({ assets, locale, onAction }: {
+  assets: StudioMediaAsset[]; locale: string; onAction: MediaHistoryDispatch;
+}) {
+  return <div className="media-gallery-grid">{assets.map(asset => <MediaHistoryCard key={asset.id} asset={asset} locale={locale} onAction={onAction}/>)}</div>;
+});
 
 function MediaImageEditSource({ attachment, index, active, onOpen, onRemove }: { attachment: ImageAttachment; index: number; active?: boolean; onOpen: () => void; onRemove: () => void }) {
   const [url, setUrl] = useState<string>();
@@ -1211,6 +1239,7 @@ export function MediaAssetCard({ asset, locale, onDelete, onPreview, onReuse, on
   const canReuse = asset.status === "completed" && asset.kind === "image" && Boolean(onReuse);
   const canEdit = asset.status === "completed" && asset.kind === "image" && Boolean(onEdit);
   const canExpandPrompt = asset.prompt.trim().length > 42;
+  const dateFormatter = useMemo(() => new Intl.DateTimeFormat(locale, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }), [locale]);
   const previewRatio = asset.kind === "video" ? videoRatio ?? mediaAssetAspectRatio(asset) ?? 16 / 9 : 4 / 3;
 
   useEffect(() => setVideoRatio(null), [asset.id]);
@@ -1272,10 +1301,10 @@ export function MediaAssetCard({ asset, locale, onDelete, onPreview, onReuse, on
       <div className="media-preview" style={{ aspectRatio: previewRatio }} onContextMenu={imageCopy.openMenu} tabIndex={asset.kind === "image" && url ? 0 : undefined}>
         {asset.status === "completed" && url && asset.kind === "image" && (canPreview ? (
           <button className="media-preview-trigger" type="button" onClick={onPreview} aria-label={tr("打开大图预览", "Open large image preview")}>
-            <img src={url} alt={asset.revisedPrompt || asset.prompt} onLoad={(event) => recordImageDimensions(event.currentTarget)} />
+            <img src={url} loading="lazy" decoding="async" alt={asset.revisedPrompt || asset.prompt} onLoad={(event) => recordImageDimensions(event.currentTarget)} />
             <span><Maximize2 size={14} />{tr("查看大图", "View large")}</span>
           </button>
-        ) : <img src={url} alt={asset.revisedPrompt || asset.prompt} onLoad={(event) => recordImageDimensions(event.currentTarget)} />)}
+        ) : <img src={url} loading="lazy" decoding="async" alt={asset.revisedPrompt || asset.prompt} onLoad={(event) => recordImageDimensions(event.currentTarget)} />)}
         {/* WebView's native download cannot save asset-protocol URLs. Use exportAsset below. */}
         {asset.status === "completed" && url && asset.kind === "video" && <video src={url} controls controlsList="nodownload" preload="metadata" onLoadedMetadata={(event) => {
           const { videoWidth, videoHeight } = event.currentTarget;
@@ -1304,7 +1333,7 @@ export function MediaAssetCard({ asset, locale, onDelete, onPreview, onReuse, on
         </div>
         <div className="media-asset-meta"><span>{asset.model}</span><span>{asset.providerName}</span></div>
         {asset.kind === "video" && (asset.size || asset.seconds) && <div className="media-asset-specs">{asset.size && <span>{asset.size}</span>}{asset.seconds && <span>{asset.seconds}s</span>}</div>}
-        <small className="media-asset-time"><Clock3 size={11} />{new Intl.DateTimeFormat(locale, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(asset.createdAt)}{asset.kind === "image" && imageDimensions && <span>{imageDimensions.width} × {imageDimensions.height}</span>}</small>
+        <small className="media-asset-time"><Clock3 size={11} />{dateFormatter.format(asset.createdAt)}{asset.kind === "image" && imageDimensions && <span>{imageDimensions.width} × {imageDimensions.height}</span>}</small>
         {asset.error && <em title={asset.error}>{mediaErrorSummary(asset.error)}</em>}
         {exportFeedback && <em className={exportFeedback.error ? "media-export-error" : "media-export-success"} title={exportFeedback.text}>{exportFeedback.error ? <CircleAlert size={11} /> : <Check size={11} />}{exportFeedback.text}</em>}
       </div>

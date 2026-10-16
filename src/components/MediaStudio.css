@@ -90,3 +90,10 @@
 .media-image-lightbox-dialog > header .media-image-lightbox-copy { background: var(--surface); color: var(--text); border-color: var(--line); }
 .media-image-lightbox-dialog > header .media-image-lightbox-copy:hover:not(:disabled) { background: var(--surface-soft); border-color: var(--accent); }
 .media-image-lightbox-dialog > header .media-image-lightbox-copy:disabled { opacity: .5; cursor: default; }
+
+/* Skip layout/paint for loaded history outside the scrolling viewport. The last
+   measured size preserves scroll position when cards expand or images load. */
+.media-gallery-grid > .media-asset-card {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 380px;
+}

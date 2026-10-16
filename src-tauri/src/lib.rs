@@ -26,6 +26,7 @@ mod pet;
 mod pet_life;
 mod pet_python;
 mod process;
+mod resource_removal;
 mod sandbox;
 mod skill;
 mod spine;
@@ -11999,6 +12000,7 @@ pub fn run() {
             music_workbench::music_request,
             music_workbench::music_manifest,
             music_workbench::music_install,
+            music_workbench::music_remove_resources,
             music_workbench::music_cancel_install,
             music_workbench::music_artifact,
             music_workbench::music_export,

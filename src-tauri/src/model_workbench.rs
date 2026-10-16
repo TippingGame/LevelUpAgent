@@ -186,7 +186,7 @@ pub async fn model3d_start(
     mut request: Value,
 ) -> Result<(), String> {
     require_supported_platform()?;
-    if !matches!(action.as_str(), "install" | "generate")
+    if !matches!(action.as_str(), "install" | "generate" | "remove")
         || !request.is_object()
         || request.to_string().len() > 32_000
     {
@@ -215,6 +215,30 @@ pub async fn model3d_start(
             .operation
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Value::Null;
+        if action == "remove" {
+            let installer = state.installer.clone();
+            let running = json!({"status":"running","kind":"remove","phase":"remove","detail":"正在移除 3D 依赖和缓存"});
+            installer.report(running.clone());
+            std::fs::write(root.join("operation.json"), running.to_string())
+                .map_err(|e| e.to_string())?;
+            tauri::async_runtime::spawn(async move {
+                let _guard = guard;
+                let data = root.clone();
+                let result =
+                    tokio::task::spawn_blocking(move || crate::model_resources::remove(&data))
+                        .await;
+                let result = result.map_err(|e| e.to_string()).and_then(|r| r);
+                let operation = match result {
+                    Ok(()) => {
+                        json!({"status":"completed","kind":"remove","progress":1,"detail":"3D 依赖已移除，作品与离线资源包已保留"})
+                    }
+                    Err(error) => json!({"status":"failed","kind":"remove","detail":error}),
+                };
+                let _ = std::fs::write(root.join("operation.json"), operation.to_string());
+                installer.report(operation);
+            });
+            return Ok(());
+        }
         if action == "install" {
             let offline = request
                 .get("offlineDirectory")

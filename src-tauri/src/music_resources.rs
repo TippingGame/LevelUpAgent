@@ -651,6 +651,35 @@ pub async fn install(
     Ok(())
 }
 
+/// Remove this engine only, including incomplete installations and its downloads.
+pub fn remove(root: &Path, engine: Engine) -> Result<(), String> {
+    crate::resource_removal::remove_owned(root, &resources(root, engine))?;
+    let spec = spec(engine);
+    let prefix = format!(
+        "music-workbench-{}-{}-",
+        spec["resourceVersion"].as_str().unwrap(),
+        spec["target"].as_str().unwrap()
+    );
+    let cache = root.join("downloads");
+    if cache.is_dir() {
+        for entry in fs::read_dir(&cache).map_err(|e| e.to_string())? {
+            let path = entry.map_err(|e| e.to_string())?.path();
+            if path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .starts_with(&prefix)
+            {
+                crate::resource_removal::remove_owned(root, &path)?;
+            }
+        }
+        for name in engine.components() {
+            crate::resource_removal::remove_owned(root, &cache.join(format!("{name}.zip")))?;
+        }
+    }
+    crate::resource_removal::remove_owned(root, &root.join(manifest_name(engine)))
+}
+
 pub fn disk_free(root: &Path) -> Option<u64> {
     #[cfg(windows)]
     {
@@ -692,6 +721,36 @@ pub fn memory() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn remove_one_engine_preserves_other_engines_and_user_files() {
+        let root = std::env::temp_dir().join(format!("music-remove-{}", uuid::Uuid::new_v4()));
+        for engine in ENGINES {
+            fs::create_dir_all(resources(&root, engine).join("runtime.staging")).unwrap();
+            fs::write(resources(&root, engine).join("model.bin"), b"fixture").unwrap();
+        }
+        fs::create_dir_all(root.join("downloads")).unwrap();
+        fs::create_dir_all(root.join("outputs")).unwrap();
+        fs::write(root.join("outputs/song.wav"), b"song").unwrap();
+        fs::write(root.join("library.sqlite3"), b"history").unwrap();
+        fs::write(root.join("original-offline.zip.part001"), b"source").unwrap();
+        let selected =
+            "music-workbench-2026.10.11-acestep-windows-x64-cu128-runtime.zip.part001.partial";
+        let other = "music-workbench-2026.10.1-windows-x64-cu128-runtime.zip.part001";
+        fs::write(root.join("downloads").join(selected), b"partial").unwrap();
+        fs::write(root.join("downloads").join(other), b"other").unwrap();
+        remove(&root, Engine::Acestep).unwrap();
+        remove(&root, Engine::Acestep).unwrap();
+        assert!(!resources(&root, Engine::Acestep).exists());
+        for engine in [Engine::Musicgen, Engine::Yue2] {
+            assert!(resources(&root, engine).join("model.bin").is_file());
+        }
+        assert!(!root.join("downloads").join(selected).exists());
+        assert!(root.join("downloads").join(other).is_file());
+        assert!(root.join("outputs/song.wav").is_file());
+        assert!(root.join("library.sqlite3").is_file());
+        assert!(root.join("original-offline.zip.part001").is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn music_archive_paths_reject_windows_aliases_and_traversal() {
         for path in [

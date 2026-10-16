@@ -1,0 +1,6 @@
+.resource-removal { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+.resource-removal-confirm { display: grid; gap: 12px; padding: 14px; border: 1px solid var(--danger-line); border-radius: 10px; background: var(--danger-soft); color: var(--text); font-size: 12px; }
+.resource-removal-confirm p { margin: 0; color: var(--muted); line-height: 1.8; }
+.resource-removal-confirm > div { display: flex; flex-wrap: wrap; gap: 8px; }
+.resource-removal .resource-removal-danger { color: var(--danger-text); border-color: var(--danger-line); }
+.resource-removal .resource-removal-danger:hover:not(:disabled) { color: var(--danger-text); border-color: var(--danger-text); background: var(--danger-soft); }

@@ -19,6 +19,29 @@ import launcher as api
 
 
 class WorkbenchTest(unittest.TestCase):
+    def test_remove_keeps_projects_offline_source_and_resource_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            data, root = base/'data', base/'resources'
+            (data/'projects/saved').mkdir(parents=True)
+            (data/'projects/saved/model.glb').write_bytes(b'keep')
+            (base/'offline.tar.part001').write_bytes(b'keep')
+            for name in ('runtime', 'cache', 'downloads', '.install-triposg'):
+                (root/name).mkdir(parents=True)
+                (root/name/'fixture').write_bytes(b'remove')
+            with api.operation_lock(root):
+                with self.assertRaises((RuntimeError, OSError)):
+                    with api.operation_lock(root):
+                        pass
+                api.remove_resources(data, root)
+                self.assertEqual([p.name for p in root.iterdir()], ['.operation.lock'])
+                with self.assertRaises((RuntimeError, OSError)):
+                    with api.operation_lock(root):
+                        pass
+            self.assertTrue((data/'projects/saved/model.glb').is_file())
+            self.assertTrue((base/'offline.tar.part001').is_file())
+            self.assertEqual(api.read(data/'operation.json')['status'], 'completed')
+
     def test_unsupported_host_rejected_before_files_or_downloads(self):
         for system, machine in [('darwin', 'x86_64'), ('linux', 'aarch64'), ('win32', 'ARM64')]:
             with self.subTest(system=system, machine=machine), \

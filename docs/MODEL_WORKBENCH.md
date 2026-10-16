@@ -96,6 +96,8 @@ node scripts/upload-model-workbench.mjs artifacts/model-workbench/release
 
 离线安装：将清单和全部所选组件分片放在同一个目录，在工作台点击「环境与下载 → 离线导入」。同样执行版本、大小、哈希及归档路径检查。
 
+移除依赖：在「环境与下载」点击「移除已安装依赖」，确认后清理当前平台、当前资源版本的全部组件、安装临时文件和下载缓存，在线安装与离线导入都适用。作品、参考图片、已导出结果与原始离线包保留；再次生成前重新下载或离线导入即可。安装、生成与移除互斥，资源被占用时提示稍后重试。Windows 按钮只清理 Windows 原生依赖，不会清理旧 WSL / Linux 环境中的资源。
+
 ## 生命周期与验证
 
 ### 参考图抠底与贴图质量
@@ -115,7 +117,7 @@ PyTorch 显存保留峰值 2,354 MiB，网格位置最大偏差为 0。美术质
 WebView2 中完成真实导入、抠图保存、页面重载与还原原图验证。原生读取的 PNG 与浏览器中的 Spine 输出一致。
 本地验收证据在 `artifacts/model-workbench/texture-quality/`；对照结果不覆盖用户现有作品。
 
-桌面桥接只允许固定的 status / manifest / install / generate 操作。生成进程按阶段隔离，不同时驻留 TripoSG 和 SD2.1。Linux 取消终止整个工作进程组。Windows launcher 先加入 kill-on-close Job Object 再创建 worker，父桌面进程句柄和心跳共同检测退出，取消或强制退出会清理子进程。安装与生成共享排他资源锁。重启后将遗留运行状态显示为中断。
+桌面桥接只允许固定的 status / manifest / install / generate / remove 操作。生成进程按阶段隔离，不同时驻留 TripoSG 和 SD2.1。Linux 取消终止整个工作进程组。Windows launcher 先加入 kill-on-close Job Object 再创建 worker，父桌面进程句柄和心跳共同检测退出，取消或强制退出会清理子进程。安装、生成与移除共享排他资源锁。重启后将遗留运行状态显示为中断。
 
 标准检查：`pnpm check`、`pnpm build`、`cargo test --manifest-path src-tauri/Cargo.toml model_ --lib`、`python -B -m unittest discover -s modules/model_workbench/tests -v`。图片预处理测试需要 Pillow（CI 使用 11.1.0）；启动器本身仍只依赖标准库。Linux / WSL 另外执行进程组取消测试。Windows 安装器覆盖 ZIP 完整性、续传、取消、资源锁、无 Python 引导及旧作品读取。
 

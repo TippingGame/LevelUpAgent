@@ -22,6 +22,13 @@ Draft，因此 `v1.0.32` 继续显示 `Latest`；在核对资产并正式发布�
 
 ## 零、以后每次发布速查
 
+### v1.3.80：依赖移除与图片输入优化（发布中）
+
+- 音频和 3D 工作台在「环境与下载」新增依赖移除与确认，在线下载和离线导入均适用。音频按引擎、3D 按当前平台和资源版本清理，保留作品、历史、参考文件及原始离线包。
+- 音频移除最后一个运行环境后，重启仍可查看历史、试听和导出；生成、排队或安装期间拒绝移除，文件占用时支持重试。
+- 图片历史与提示词输入隔离，增加延迟加载和屏幕外绘制优化；最大化窗口、240 张图片和四种外观已完成隔离桌面验证。
+- 兼容音频和 3D 资源版本不变，继续复用既有资源，不重新打包上传模型。验证与发布记录见 `docs/RELEASE_1.3.80.md`。
+
 ### v1.3.79：Windows 原生 3D 与平台资源选择（已正式发布）
 
 - Windows 3D 工作台原生运行，无需 WSL、系统 Python、CUDA Toolkit 或编译器；系统需 NVIDIA 驱动。
@@ -104,7 +111,7 @@ gh release edit music-workbench-resources --draft=false --prerelease --latest=fa
 
 ### 从 v1.2.71 起：应用和 3D 通用资源分别发布
 
-应用安装包继续通过 `vX.Y.Z` tag 触发四平台构建，本次应用版本为 `1.3.79`。
+应用安装包继续通过 `vX.Y.Z` tag 触发四平台构建，本次应用版本为 `1.3.80`。
 Python / PyTorch / CUDA、TripoSG、SD2.1 + MV-Adapter、Blender 不进入应用安装包，
 也不再随每个应用版本重复打包或上传。所有额外资源固定放在同一个 Release：
 
@@ -119,7 +126,7 @@ https://github.com/TippingGame/LevelUpAgent/releases/tag/model-workbench-resourc
 - 清单名为 `model-workbench-<资源版本>-<目标>.json`，分片名也包含独立资源版本，每片小于 2 GB。
   初始清单：`model-workbench-2026.10.1-linux-x64-cu118.json`。
 - 资源 Release 使用 prerelease 且 `--latest=false`，只用于把通用资源与应用更新渠道分开，
-  不能上传 `latest.json`；应用正式版（本次 `v1.3.78`）设为 Latest。
+  不能上传 `latest.json`；应用正式版（本次 `v1.3.80`）设为 Latest。
 - 只有模型、CUDA 或依赖内容变化时才增加资源版本并上传新资产，旧资产保留。
   不覆盖已公开的分片或清单；同名同哈希文件复用，同名不同哈希必须改资源版本。
 - 上传顺序：本地校验所有分片与完整归档 → 上传分片并核对 GitHub digest → 最后上传清单。

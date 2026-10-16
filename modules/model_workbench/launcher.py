@@ -600,16 +600,35 @@ def generate(data, root, version, request):
     operation(data, status='completed', progress=1, detail='阶段完成，结果已保存')
 
 
+def remove_resources(data, root):
+    # The caller holds the same lock as install/generate. Keep its inode intact.
+    if root.is_symlink():
+        raise ValueError('资源目录包含链接，未移除。')
+    for path in root.iterdir():
+        if path.name == '.operation.lock':
+            continue
+        if path.is_symlink():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    operation(data, status='completed', progress=1, detail='3D 依赖已移除，作品与离线资源包已保留')
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data', required=True, type=Path)
     parser.add_argument('--version', required=True)
     parser.add_argument('--resources', type=Path, help='Explicit native resource location owned by the desktop')
-    parser.add_argument('command', choices=['status','manifest','install','generate'])
+    parser.add_argument('command', choices=['status','manifest','install','generate','remove'])
     args = parser.parse_args()
     if sys.platform not in ('win32', 'linux') or platform.machine().lower() not in ('amd64', 'x86_64'):
         raise ValueError('Local 3D resources require Windows / Linux x64 with an NVIDIA GPU.')
-    data, root = args.data.resolve(), args.resources.resolve() if args.resources else version_root(args.version)
+    data, root = args.data.resolve(), args.resources if args.resources else version_root(args.version)
+    if args.command == 'remove' and any(path.is_symlink() for path in (root, root.parent, root.parent.parent)):
+        raise ValueError('资源目录包含链接，未移除。')
+    root = root.resolve()
     if WINDOWS and not args.resources:
         raise ValueError('Windows requires the desktop resource directory (--resources).')
     data.mkdir(parents=True, exist_ok=True)
@@ -631,6 +650,8 @@ def main():
         try:
             if args.command == 'install':
                 install(data, root, args.version, request)
+            elif args.command == 'remove':
+                remove_resources(data, root)
             else:
                 generate(data, root, args.version, request)
         except Cancelled as exc:

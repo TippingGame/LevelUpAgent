@@ -125,7 +125,9 @@ pub async fn status(data: &Path, installer: &Installer) -> Result<Value, String>
     } else {
         current
     };
-    if operation["status"] == "running" && operation["kind"] != "install" {
+    if operation["status"] == "running"
+        && !matches!(operation["kind"].as_str(), Some("install" | "remove"))
+    {
         let alive = fs::metadata(data.join("lease"))
             .ok()
             .and_then(|m| m.modified().ok())
@@ -312,7 +314,9 @@ pub struct Installer {
 }
 impl Installer {
     pub fn report(&self, mut value: Value) {
-        value["kind"] = json!("install");
+        if value["kind"].is_null() {
+            value["kind"] = json!("install");
+        }
         *self.operation.lock().unwrap_or_else(|e| e.into_inner()) = value;
     }
     fn check(&self) -> Result<(), String> {
@@ -571,6 +575,21 @@ fn extract(
     result
 }
 
+pub fn remove(data: &Path) -> Result<(), String> {
+    let root = resources(data);
+    fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let _lock = resource_lock(&root)?;
+    // Keep the lock file itself in place, so another process cannot bypass it.
+    for entry in fs::read_dir(&root).map_err(|e| e.to_string())? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.file_name().is_some_and(|n| n == ".operation.lock") {
+            continue;
+        }
+        crate::resource_removal::remove_owned(data, &path)?;
+    }
+    Ok(())
+}
+
 pub async fn install(
     root: PathBuf,
     offline: Option<PathBuf>,
@@ -666,6 +685,42 @@ pub async fn install(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn removal_obeys_resource_lock_and_allows_offline_reinstall() {
+        let temp = Temp::new();
+        let data = temp.0.join("data");
+        let root = resources(&data);
+        let offline = temp.0.join("offline");
+        fs::create_dir_all(data.join("projects/saved")).unwrap();
+        fs::write(data.join("projects/saved/model.glb"), b"keep").unwrap();
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&offline).unwrap();
+        let state = Arc::new(Installer::default());
+        write_fixture(&offline);
+        install(
+            root.clone(),
+            Some(offline.clone()),
+            vec!["runtime".into()],
+            state.clone(),
+        )
+        .await
+        .unwrap();
+        let lock = resource_lock(&root).unwrap();
+        assert!(remove(&data).is_err());
+        assert!(installed(&root, "runtime"));
+        drop(lock);
+        fs::create_dir_all(root.join("runtime.staging")).unwrap();
+        fs::create_dir_all(root.join("cache/torch")).unwrap();
+        remove(&data).unwrap();
+        assert!(!installed(&root, "runtime"));
+        assert!(!root.join("cache").exists());
+        assert!(data.join("projects/saved/model.glb").is_file());
+        assert!(offline.join(manifest_name()).is_file());
+        install(root.clone(), Some(offline), vec!["runtime".into()], state)
+            .await
+            .unwrap();
+        assert!(installed(&root, "runtime"));
+    }
     struct Temp(PathBuf);
     impl Temp {
         fn new() -> Self {

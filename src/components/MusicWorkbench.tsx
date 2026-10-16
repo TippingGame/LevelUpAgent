@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Download, FolderOpen, LoaderCircle, Music2, RefreshCw, Settings2, Sparkles, Square, Star, X } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { ResourceRemovalControl } from "./ResourceRemovalControl";
 import { CreativeStudioHeader } from "./CreativeStudioHeader";
 import { isDesktop } from "../lib/bridge";
 import { tr } from "../lib/i18n";
@@ -50,7 +51,7 @@ export function MusicWorkbench({ active, onPendingCountChange, ...navigation }: 
     setManifest(undefined); setError("");
     setParams(p => normalizeMusicParams({ ...p, engine }));
   }
-  const engineSelect = <label>{tr("生成模型", "Music model")}<select aria-label={tr("生成模型", "Music model")} value={params.engine} disabled={installing} onChange={e => chooseEngine(e.target.value as MusicEngine)}>{Object.entries(musicEngines).map(([id, info]) => <option key={id} value={id}>{info.label}{status?.engines?.[id as MusicEngine]?.ready ? ` · ${tr("已就绪", "Ready")}` : ""}</option>)}</select></label>;
+  const engineSelect = <label>{tr("生成模型", "Music model")}<select aria-label={tr("生成模型", "Music model")} value={params.engine} disabled={installing || pending} onChange={e => chooseEngine(e.target.value as MusicEngine)}>{Object.entries(musicEngines).map(([id, info]) => <option key={id} value={id}>{info.label}{status?.engines?.[id as MusicEngine]?.ready ? ` · ${tr("已就绪", "Ready")}` : ""}</option>)}</select></label>;
 
   const refresh = useCallback(async () => {
     if (!isDesktop() || polling.current) return;
@@ -114,13 +115,14 @@ export function MusicWorkbench({ active, onPendingCountChange, ...navigation }: 
     try { setManifest(await invoke<MusicManifest>("music_manifest", { engine: params.engine })); } catch (e) { setError(String(e)); } finally { setChecking(false); }
   }
   const op = status?.operation;
+  const removing = op?.kind === "remove";
   const progress = op?.totalBytes ? (op.downloadedBytes ?? 0) / op.totalBytes : op?.progress;
   const matchingManifest = manifest?.resourceVersion === engineStatus?.resourceVersion ? manifest : undefined;
   const downloadSize = matchingManifest && Object.entries(matchingManifest.components).filter(([name]) => !(name === "runtime" ? engineStatus?.runtimeReady : engineStatus?.modelReady)).reduce((n, [, c]) => n + c.parts.reduce((b, p) => b + p.bytes, 0), 0);
   const progressView = op && <div className="music-progress" role="status" aria-live="polite">
-    <div><strong>{installing ? ({ prepare: tr("准备下载", "Preparing"), download: tr("下载模型与依赖", "Downloading resources"), verify: tr("校验资源", "Verifying"), extract: tr("安装资源", "Installing") })[op.phase ?? ""] : op.status === "completed" ? tr("安装完成", "Installed") : op.status === "cancelled" ? tr("下载已取消", "Download cancelled") : tr("安装失败", "Installation failed")}</strong>
-      {installing && <button onClick={() => void action(() => invoke("music_cancel_install"))}><Square size={12}/>{tr("取消下载", "Cancel download")}</button>}</div>
-    {installing && <progress max={1} value={progress} aria-label={tr("下载与安装进度", "Download and installation progress")}/>}
+    <div><strong>{removing ? (installing ? tr("正在移除依赖", "Removing dependencies") : op.status === "completed" ? tr("依赖已移除", "Dependencies removed") : tr("移除失败，可重试", "Removal failed; retry")) : installing ? ({ prepare: tr("准备下载", "Preparing"), download: tr("下载模型与依赖", "Downloading resources"), verify: tr("校验资源", "Verifying"), extract: tr("安装资源", "Installing") })[op.phase ?? ""] : op.status === "completed" ? tr("安装完成", "Installed") : op.status === "cancelled" ? tr("下载已取消", "Download cancelled") : tr("安装失败", "Installation failed")}</strong>
+      {installing && !removing && <button onClick={() => void action(() => invoke("music_cancel_install"))}><Square size={12}/>{tr("取消下载", "Cancel download")}</button>}</div>
+    {installing && <progress max={1} value={progress} aria-label={removing ? tr("移除进度", "Removal progress") : tr("下载与安装进度", "Download and installation progress")}/>}
     <small>{op.engine ? `${musicEngines[op.engine].label} · ` : ""}{op.detail}</small>
     {installing && op.totalBytes != null && <small>{musicBytes(op.downloadedBytes ?? 0)} / {musicBytes(op.totalBytes)}{op.bytesPerSecond ? ` · ${musicBytes(op.bytesPerSecond)}/s · ${tr("剩余约", "About")} ${Math.ceil((op.totalBytes - (op.downloadedBytes ?? 0)) / op.bytesPerSecond / 60)} ${tr("分钟", "min")}` : ""}</small>}
   </div>;
@@ -197,6 +199,7 @@ export function MusicWorkbench({ active, onPendingCountChange, ...navigation }: 
       <small className="music-storage-path">{engineStatus?.manifestName}</small>
       <p>{params.engine === "musicgen" ? tr("无可用 GPU 时使用 CPU，速度较慢。", "CPU generation is available but slower.") : params.engine === "yue2" ? tr("YuE2 INT8 需要 RTX 30 系及以上、兼容 CUDA 13.0 的 NVIDIA 驱动。旧版 YuE2 资源与此版本不兼容，需下载或导入本页的新资源包；旧作品会保留。", "YuE2 INT8 requires RTX 30 series or newer and an NVIDIA driver compatible with CUDA 13.0. Install the new resource pack shown here; the previous YuE2 runtime is incompatible. Existing works are preserved.") : tr("需要 NVIDIA 显卡及兼容 CUDA 12.8 的驱动，首次请先生成短片段。", "Requires an NVIDIA GPU with a CUDA 12.8 compatible driver. Start with a short sample.")}</p>
       <div className="music-dialog-actions"><button className="music-primary" disabled={!status?.supported || installing || pending || running.length > 0 || engineStatus?.ready} onClick={() => void install()}><Download size={14}/>{tr("下载并安装", "Download & install")}</button><button disabled={!status?.supported || installing || pending || running.length > 0} onClick={() => void install(true)}><FolderOpen size={14}/>{tr("导入离线资源", "Import offline resources")}</button><button disabled={checking || installing || !isDesktop()} onClick={() => void checkManifest()}>{checking ? <LoaderCircle size={14} className="spin"/> : <RefreshCw size={14}/>} {tr("检查下载大小", "Check download size")}</button></div>
+      {environment && <ResourceRemovalControl key={params.engine} scope={tr(`${engineInfo.label} 的已安装依赖`, `installed dependencies for ${engineInfo.label}`)} disabled={!status?.supported || installing || pending || running.length > 0} onRemove={async () => { await action(() => invoke("music_remove_resources", { engine: params.engine })); }}/>}
       {progressView}{(error || status?.serviceError) && <div className="music-error" role="alert">{error || status?.serviceError}</div>}
     </dialog>
   </section>;

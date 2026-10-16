@@ -83,7 +83,7 @@ impl MusicWorkbench {
     ) -> Result<Value, String> {
         let mut guard = self.service.lock().await;
         if self.installer.busy.load(Ordering::Acquire) {
-            return Err("请等待音频环境安装完成。".into());
+            return Err("请等待音频环境操作完成。".into());
         }
         if guard.is_none() {
             *guard = Some(start_service(app)?);
@@ -196,6 +196,37 @@ fn spawn_service(root: &Path, module: &Path) -> Result<Service, String> {
     })
 }
 
+// History and playback remain available even after the last Python is removed.
+fn read_saved_jobs(root: &Path) -> Result<Vec<Value>, String> {
+    let path = root.join("library.sqlite3");
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let db =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| e.to_string())?;
+    let mut query = db
+        .prepare("SELECT data FROM jobs")
+        .map_err(|e| e.to_string())?;
+    let rows = query
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    let mut jobs = Vec::new();
+    for row in rows {
+        jobs.push(
+            serde_json::from_str::<Value>(&row.map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?,
+        );
+    }
+    jobs.sort_by(|a, b| {
+        b["created_at"]
+            .as_f64()
+            .unwrap_or_default()
+            .total_cmp(&a["created_at"].as_f64().unwrap_or_default())
+    });
+    Ok(jobs)
+}
+
 #[tauri::command]
 pub async fn music_status(
     app: tauri::AppHandle,
@@ -218,7 +249,11 @@ pub async fn music_status(
         .clone();
     // Installing another engine closes the bridge, but existing works remain
     // visible (and playable) throughout the download, including webview reloads.
-    let cached_jobs = state.cached_jobs.lock().await.clone();
+    let cached_jobs = if !runtime || state.installer.busy.load(Ordering::Acquire) {
+        read_saved_jobs(&root)?
+    } else {
+        state.cached_jobs.lock().await.clone()
+    };
     let mut result = json!({"supported":supported(), "ready":false, "jobs":cached_jobs, "runtimeReady":runtime, "modelReady":resources::installed(&root,resources::Engine::Musicgen,"musicgen-small"),
         "root":root, "memory":resources::memory(), "diskFreeBytes":resources::disk_free(&root), "operation":operation, "resourceVersion":resources::spec(resources::Engine::Musicgen)["resourceVersion"], "engines":engines});
     if runtime && !state.installer.busy.load(Ordering::Acquire) {
@@ -287,7 +322,7 @@ pub async fn music_request(
         return Err("Invalid audio request".into());
     }
     if state.installer.busy.load(Ordering::Acquire) {
-        return Err("请等待音频环境安装完成。".into());
+        return Err("请等待音频环境操作完成。".into());
     }
     state.request(&app, &action, request).await
 }
@@ -363,6 +398,76 @@ pub async fn music_install(
     Ok(())
 }
 #[tauri::command]
+pub async fn music_remove_resources(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, MusicWorkbench>,
+    engine: resources::Engine,
+) -> Result<(), String> {
+    if !supported() {
+        return Err("音频资源当前仅支持 Windows x64。".into());
+    }
+    let root = storage(&app)?;
+    if state
+        .installer
+        .busy
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err("已有音频环境操作正在进行。".into());
+    }
+    // Holding busy prevents new requests from starting while the worker closes.
+    let service = state.service.lock().await.take();
+    if let Some(mut service) = service {
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            service.request("status", json!({})),
+        )
+        .await;
+        let jobs = match result {
+            Ok(Ok(value)) => value["result"]["jobs"].as_array().cloned(),
+            _ => None,
+        };
+        let error = match jobs {
+            Some(jobs)
+                if !jobs
+                    .iter()
+                    .any(|j| j["status"] == "queued" || j["status"] == "running") =>
+            {
+                *state.cached_jobs.lock().await = jobs;
+                None
+            }
+            Some(_) => Some("请先等待生成完成或取消音频任务。"),
+            None => Some("无法确认音频任务状态，请稍后重试。"),
+        };
+        if let Some(error) = error {
+            *state.service.lock().await = Some(service);
+            state.installer.busy.store(false, Ordering::Release);
+            return Err(error.into());
+        }
+        service.close().await;
+    }
+    *state
+        .installer
+        .engine
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(engine);
+    state.installer.report(json!({"status":"running","kind":"remove","phase":"remove","detail":"正在移除当前音频模型的依赖和缓存"}));
+    let installer = state.installer.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = tokio::task::spawn_blocking(move || resources::remove(&root, engine))
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r);
+        match result {
+            Ok(()) => installer.report(json!({"status":"completed","kind":"remove","progress":1,"detail":"当前模型的依赖已移除，作品与离线资源包已保留"})),
+            Err(error) => installer.report(json!({"status":"failed","kind":"remove","detail":error})),
+        }
+        installer.busy.store(false, Ordering::Release);
+    });
+    Ok(())
+}
+
+#[tauri::command]
 pub fn music_cancel_install(state: tauri::State<'_, MusicWorkbench>) {
     state.installer.cancel.store(true, Ordering::Release);
 }
@@ -422,6 +527,30 @@ pub async fn music_export(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn history_is_available_without_python_resources() {
+        let root = std::env::temp_dir().join(format!("music-history-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        {
+            let db = rusqlite::Connection::open(root.join("library.sqlite3")).unwrap();
+            db.execute(
+                "CREATE TABLE jobs (id TEXT PRIMARY KEY, data TEXT NOT NULL)",
+                [],
+            )
+            .unwrap();
+            for (id, created) in [("old", 10), ("new", 20)] {
+                let value = json!({"id":id,"created_at":created,"status":"succeeded","favorite":true,"audio":{"duration":5}});
+                db.execute("INSERT INTO jobs VALUES (?1, ?2)", [id, &value.to_string()])
+                    .unwrap();
+            }
+        }
+        let jobs = read_saved_jobs(&root).unwrap();
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0]["id"], "new");
+        assert_eq!(jobs[1]["favorite"], true);
+        assert!(!root.join("resources").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn music_artifact_rejects_path_traversal() {
         for id in [

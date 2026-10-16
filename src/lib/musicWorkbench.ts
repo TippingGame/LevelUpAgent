@@ -17,7 +17,7 @@ export interface MusicJob {
   warnings?: string[]; license?: string; truncated?: { abc: boolean; semantic: boolean };
   engine_label?: string;
 }
-export interface MusicOperation { status: string; engine?: MusicEngine; phase?: string; detail: string; progress?: number; downloadedBytes?: number; totalBytes?: number; bytesPerSecond?: number; }
+export interface MusicOperation { status: string; kind?: "install" | "remove"; engine?: MusicEngine; phase?: string; detail: string; progress?: number; downloadedBytes?: number; totalBytes?: number; bytesPerSecond?: number; }
 export interface MusicEngineStatus { ready: boolean; runtimeReady: boolean; modelReady: boolean; resourceVersion: string; root: string; manifestName: string; }
 export interface MusicStatus {
   supported: boolean; ready: boolean; runtimeReady: boolean; modelReady: boolean; serviceError?: string;

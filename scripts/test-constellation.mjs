@@ -804,7 +804,8 @@ test("creative-space image editing submits a distinct source and PNG mask", () =
   assert.match(mediaSource, /source=\{activeImageEditEntry\.originalSource \?\? activeImageEditEntry\.source\}/);
   assert.match(mediaSource, /initialState=\{activeImageEditEntry\.meta\?\.editorState\}/);
   assert.match(mediaSource, /size !== "auto" \? size : undefined/);
-  assert.match(mediaSource, /onEdit=.*editImageAsset/);
+  assert.match(mediaSource, /onEdit=.*onAction\("edit", asset\)/);
+  assert.match(mediaSource, /edit: editImageAsset/);
   assert.match(mediaSource, /media-image-lightbox-edit/);
   assert.match(mediaSource, /mediaModelSupportsExplicitImageMask/);
   assert.match(canvasSource, /expanded: padding > 0/);
