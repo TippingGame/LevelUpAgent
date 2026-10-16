@@ -8,7 +8,7 @@ import ts from "typescript";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import { runHarnessStream } from "../src/lib/harnessStream.ts";
-import { appendAssistantDelta, finalizeAssistantMessage } from "../src/lib/threadExecution.ts";
+import { appendAssistantDelta, finalizeAssistantMessage, providerWaitLabel, providerRetryProgressLabel, settleProviderReconnect } from "../src/lib/threadExecution.ts";
 
 const appSource = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
 const bridgeSource = readFileSync(new URL("../src/lib/bridge.ts", import.meta.url), "utf8");
@@ -59,7 +59,9 @@ function appHarness() {
     window, performance, setThreadRunning() {},
     runModesRef: { current: new Map() }, operationIdsRef: { current: new Map() },
     ensureWorkspaceRunBaseline: async () => {},
-    appendAssistantDelta, finalizeAssistantMessage,
+    appendAssistantDelta, finalizeAssistantMessage, providerWaitLabel, providerRetryProgressLabel, settleProviderReconnect,
+    locale: "en-US",
+    ...compile(appSource.slice(appSource.indexOf("function collapseReconnectStatusMessages("), appSource.indexOf("function normalizeReconnectHistory(")), "({ collapseReconnectStatusMessages, latestReconnectStatusId })"),
     message: (role, content, extra) => ({ id: `message-${++nextId}`, role, content,
       createdAt: nextId, toolCalls: [], attachments: [], ...extra }),
     assistantMessageIdentity: () => ({ modelName: "test-model", providerBrand: "openai" }),
@@ -265,4 +267,53 @@ test("events belonging to another operation cannot complete or mutate this run",
   ipc.send(2, event("run_finished"));
   ipc.end(3);
   await run;
+});
+
+for (const ending of ["success", "cancelled", "timeout"]) {
+  test(`provider wait status updates in place and clears on ${ending}`, async () => {
+    const result = ending === "success" ? success : { status: "error", error: ending === "cancelled" ? "REQUEST_CANCELLED" : "[PROVIDER_WAIT_TIMEOUT:stream]" };
+    const ipc = transport(result);
+    const app = appHarness();
+    const running = app.run();
+    await nextTurn();
+    ipc.send(0, event("assistant_delta", { delta: "partial result" }));
+    ipc.send(1, event("provider_waiting", { wait: { phase: "stream", elapsedMs: 30_000, timeoutMs: 300_000 } }));
+    const waitingId = app.current.messages.find((item) => item.status === "waiting").id;
+    ipc.send(2, event("provider_waiting", { wait: { phase: "stream", elapsedMs: 60_000, timeoutMs: 300_000 } }));
+    const waits = app.current.messages.filter((item) => item.status === "waiting");
+    assert.equal(waits.length, 1);
+    assert.equal(waits[0].id, waitingId);
+    assert.match(waits[0].content, /60s/);
+    let index = 3;
+    if (ending === "success") {
+      ipc.send(index++, event("provider_wait_finished"));
+      assert.ok(app.current.messages.every((item) => item.status !== "waiting"));
+      ipc.send(index++, event("assistant_completed", { content: "complete result" }));
+    }
+    ipc.send(index++, event("run_finished"));
+    ipc.end(index);
+    ipc.resolve();
+    assert.equal(await running, ending === "success" ? "completed" : ending === "timeout" ? "failed" : "cancelled");
+    assert.ok(app.current.messages.every((item) => item.status !== "waiting"));
+    assert.ok(app.current.messages.some((item) => item.content === (ending === "success" ? "complete result" : "partial result")));
+    assert.equal(app.finished.length, 1);
+  });
+}
+
+test("retry wait remains visible until the provider actually produces output", async () => {
+  const ipc = transport();
+  const app = appHarness();
+  const running = app.run();
+  await nextTurn();
+  ipc.send(0, event("provider_reconnecting", { retryAttempt: 1, maxRetryAttempts: 5 }));
+  ipc.send(1, event("provider_waiting", { wait: { phase: "headers", elapsedMs: 30_000, timeoutMs: 90_000 } }));
+  assert.ok(app.current.messages.some((item) => item.status === "waiting"));
+  assert.ok(app.current.messages.some((item) => item.status === "reconnecting"));
+  ipc.send(2, event("provider_reconnected", { retryAttempts: 1 }));
+  assert.ok(app.current.messages.every((item) => item.status !== "waiting" && item.status !== "reconnecting"));
+  ipc.send(3, event("assistant_completed", { content: "recovered" }));
+  ipc.send(4, event("run_finished"));
+  ipc.end(5);
+  ipc.resolve();
+  assert.equal(await running, "completed");
 });

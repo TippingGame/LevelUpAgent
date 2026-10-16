@@ -284,7 +284,7 @@ export interface AgentMessage {
   requestId?: string;
   modelName?: string;
   providerBrand?: ModelProviderBrand;
-  status?: "reconnecting" | "reconnected" | "failed" | "router";
+  status?: "reconnecting" | "reconnected" | "failed" | "router" | "waiting";
   durationMs?: number;
   internal?: boolean;
   changeSet?: ConversationChangeSet;
@@ -536,8 +536,15 @@ export interface ConfigWriteResult {
   changedFiles: string[];
 }
 
+export interface ProviderWait {
+  phase: "headers" | "stream" | "body";
+  elapsedMs: number;
+  timeoutMs: number;
+}
+
 export interface AgentStreamEvent {
-  kind: "stream_opened" | "non_stream_response" | "content_delta" | "content_reset" | "provider_reconnecting" | "provider_reconnected";
+  wait?: ProviderWait;
+  kind: "stream_opened" | "non_stream_response" | "content_delta" | "content_reset" | "provider_reconnecting" | "provider_reconnected" | "provider_waiting" | "provider_wait_finished";
   delta?: string;
   retryAttempt?: number;
   maxRetryAttempts?: number;

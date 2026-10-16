@@ -278,6 +278,7 @@ import {
   appendAssistantDelta,
   finalizeAssistantMessage,
   providerRetryProgressLabel,
+  providerWaitLabel,
   providerThreadId,
   queueStateWithItem,
   queueStateWithoutItem,
@@ -699,7 +700,7 @@ function latestReconnectStatusId(messages: AgentMessage[]): string | undefined {
 }
 
 function normalizeReconnectHistory(thread: AgentThread): { thread: AgentThread; changed: boolean } {
-  const collapsedMessages = collapseReconnectStatusMessages(thread.messages);
+  const collapsedMessages = collapseReconnectStatusMessages(thread.messages.filter((item) => item.status !== "waiting"));
   let changed = collapsedMessages.length !== thread.messages.length;
 
   let latestUserIndex = -1;
@@ -1047,7 +1048,7 @@ function App() {
   const pending = pendingApprovals[activeThread.id] ?? null;
   const latestConnectionMessage = conversationView.latestConnectionMessage;
   const latestConnectionStatus = latestConnectionMessage?.status;
-  const activeReconnectMessageId = running && latestConnectionMessage?.status === "reconnecting"
+  const activeReconnectMessageId = running && (latestConnectionMessage?.status === "reconnecting" || latestConnectionMessage?.status === "waiting")
     ? latestConnectionMessage.id
     : undefined;
   const queuedItems = harnessQueueItems[activeThread.id] ?? [];
@@ -2662,6 +2663,12 @@ function App() {
     let lastReconnectAttempt = 0;
     let maxReconnectAttempts = 5;
     let reconnectStatusMessageId: string | undefined;
+    let providerWaitMessageId: string | undefined;
+    const clearProviderWait = () => {
+      if (!providerWaitMessageId) return;
+      projected = projected.filter((item) => item.id !== providerWaitMessageId);
+      providerWaitMessageId = undefined;
+    };
     let reconnectStartedAt = 0;
     const goalStop: { current: GoalState | null } = { current: null };
     let reconnectProgressTimer: number | undefined;
@@ -2787,6 +2794,25 @@ function App() {
         }),
         reasoningEffort: reasoningEffortForProfile(runProfile, effectiveReasoningEffort),
       }, (event: HarnessRuntimeEvent) => {
+        if (event.kind === "provider_waiting") {
+          const payload = event.payload as { wait?: { phase: string; elapsedMs: number; timeoutMs: number } };
+          if (!payload.wait) return;
+          const content = providerWaitLabel(payload.wait, locale);
+          if (providerWaitMessageId) {
+            projected = projected.map((item) => item.id === providerWaitMessageId ? { ...item, content } : item);
+          } else {
+            const waiting = message("assistant", content, { internal: true, status: "waiting", ...assistantMessageIdentity(runProfile) });
+            providerWaitMessageId = waiting.id;
+            projected = [...projected, waiting];
+          }
+          commitThread(projectedThread(projected), false);
+          return;
+        }
+        clearProviderWait();
+        if (event.kind === "provider_wait_finished") {
+          commitThread(projectedThread(projected), false);
+          return;
+        }
         if (event.kind === "prompt_router_started" || event.kind === "prompt_router_applied" || event.kind === "router_skill_preloaded") {
           flushStreamingDelta();
           const payload = event.payload as {
@@ -3040,8 +3066,10 @@ function App() {
         ], runStartedAt)));
         finishThreadRun(thread.id, operationId, outcome.state);
       }
+      clearProviderWait();
       return pendingApprovalsRef.current[thread.id] ? "awaiting_approval" : outcome.state;
     } catch (error) {
+      clearProviderWait();
       cancelStreamingFrame();
       const reason = errorText(error);
       if (reason.includes("REQUEST_CANCELLED")) {
@@ -7146,7 +7174,7 @@ function AssistantMessageSegment({
   if (item.status) {
     return (
       <div className={`assistant-status-segment ${item.status}`} role="status">
-        {item.status === "reconnecting" ? <LoaderCircle className={reconnectingActive ? "spin" : undefined} size={14} /> : item.status === "reconnected" ? <Check size={14} /> : item.status === "router" ? <Activity size={14} /> : <CircleAlert size={14} />}
+        {(item.status === "reconnecting" || item.status === "waiting") ? <LoaderCircle className={reconnectingActive ? "spin" : undefined} size={14} /> : item.status === "reconnected" ? <Check size={14} /> : item.status === "router" ? <Activity size={14} /> : <CircleAlert size={14} />}
         <span>{item.content}</span>
       </div>
     );
@@ -7294,7 +7322,7 @@ const ConversationMessageList = memo(({
           onReviewFile={onReviewFile}
         />
       ))}
-      {running && latestConnectionStatus !== "reconnecting" && <ThinkingRow />}
+      {running && latestConnectionStatus !== "reconnecting" && latestConnectionStatus !== "waiting" && <ThinkingRow />}
       <div ref={endRef} />
     </>
   );
@@ -10544,6 +10572,18 @@ function errorText(reason: unknown) {
 
 function friendlyAgentError(reason: string) {
   const normalized = reason.toLowerCase();
+  if (reason.includes("PROVIDER_WAIT_TIMEOUT")) {
+    return tr(
+      "模型服务长时间没有响应，本次请求已结束。请重试或切换模型连接；已完成的工具结果仍保留。",
+      "The model service stopped responding and this request ended. Retry or switch model connections; completed tool results are preserved.",
+    );
+  }
+  if (reason.includes("PROVIDER_RETRY_BUDGET_EXHAUSTED")) {
+    return tr(
+      "模型连接连续失败，已停止自动重试。请切换模型连接或稍后重试；已完成的工具结果仍保留。",
+      "Repeated model connection failures stopped automatic retries. Switch model connections or try again later; completed tool results are preserved.",
+    );
+  }
   if (normalized.includes("stream_read_error")) {
     return tr(
       "模型服务读取上游响应时连接中断（stream_read_error）。请重试本轮，或切换模型连接。已完成的工具结果仍保留。",

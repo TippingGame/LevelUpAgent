@@ -26,6 +26,7 @@ mod pet;
 mod pet_life;
 mod pet_python;
 mod process;
+mod provider_wait;
 mod resource_removal;
 mod sandbox;
 mod skill;
@@ -3963,6 +3964,13 @@ fn harness_assistant_delta_event(
     round: usize,
     event: AgentStreamEvent,
 ) -> Option<crate::harness::types::HarnessRuntimeEvent> {
+    if event.kind == "provider_waiting" || event.kind == "provider_wait_finished" {
+        return Some(crate::harness::types::HarnessRuntimeEvent::transient(
+            operation_id,
+            &event.kind,
+            serde_json::json!({ "round": round, "wait": event.wait }),
+        ));
+    }
     if event.kind == "content_reset" {
         return Some(crate::harness::types::HarnessRuntimeEvent::transient(
             operation_id,
@@ -3997,8 +4005,23 @@ fn should_reconnect_provider(error: &str, retry_number: u32) -> bool {
     agent::is_reconnectable_provider_error(error) && retry_number < PROVIDER_RECONNECT_RETRIES
 }
 
-// Generation waits for an upstream result or explicit cancellation. Retries do
-// not share a wall-clock budget that can cut off a healthy later attempt.
+fn failed_provider_attempt(
+    error: String,
+    retry_number: u32,
+    failed_wait: &mut Duration,
+    elapsed: Duration,
+) -> (String, bool) {
+    *failed_wait = failed_wait.saturating_add(elapsed);
+    let reconnectable = should_reconnect_provider(&error, retry_number);
+    if reconnectable && *failed_wait >= provider_wait::FAILED_ATTEMPTS_BUDGET {
+        (format!("[PROVIDER_RETRY_BUDGET_EXHAUSTED] {error}"), false)
+    } else {
+        (error, reconnectable)
+    }
+}
+
+// Transport phases bound silence; healthy streaming has no total deadline.
+// The failed-attempt budget only decides whether to start another retry.
 async fn cancellable_provider_attempt<T, F>(
     cancellation: &CancellationToken,
     future: F,
@@ -4112,7 +4135,10 @@ fn log_provider_request_failed(
             "attemptNumber": attempt_number,
             "failoverIndex": failover_index,
             "latencyMs": latency_ms,
-            "phase": phase,
+            "phase": if error.contains("PROVIDER_WAIT_TIMEOUT:headers") { "headers" }
+                else if error.contains("PROVIDER_WAIT_TIMEOUT:body") { "body" }
+                else { phase },
+            "retryBudgetExhausted": error.contains("PROVIDER_RETRY_BUDGET_EXHAUSTED"),
             "willRetry": will_retry,
             "emittedOutput": emitted_output,
             "streaming": streaming,
@@ -4316,6 +4342,7 @@ where
                 continue;
             }
         };
+        let mut failed_wait = Duration::ZERO;
         for retry_number in 0..=PROVIDER_RECONNECT_RETRIES {
             // Replay only the unfinished provider attempt. Tools run after a
             // completed response; prior tool results remain in the request.
@@ -4331,9 +4358,9 @@ where
             let output_started = emitted.clone();
             let stream_metrics = Arc::new(ProviderStreamMetrics::default());
             let attempt_stream_metrics = stream_metrics.clone();
-            let reconnected_on_open = Arc::new(AtomicBool::new(false));
-            let stream_reconnected = reconnected_on_open.clone();
-            let notify_reconnected_on_open = reconnecting;
+            let reconnected_on_output = Arc::new(AtomicBool::new(false));
+            let stream_reconnected = reconnected_on_output.clone();
+            let notify_reconnected_on_output = reconnecting;
             let reconnect_attempt = last_reconnect_attempt;
             log_provider_request_started(
                 &request,
@@ -4353,8 +4380,20 @@ where
                         cancellation.clone(),
                         |event| {
                             attempt_stream_metrics.observe(&event);
-                            if event.kind == "stream_opened"
-                                && notify_reconnected_on_open
+                            if event.kind == "provider_waiting" || event.kind == "stream_opened" {
+                                logging::write("info", "provider", &event.kind, serde_json::json!({
+                                    "operationId": operation_id, "threadId": request.thread_id.as_deref(),
+                                    "round": round, "profileId": &profile.id, "model": &profile.model,
+                                    "attemptNumber": retry_number + 1, "elapsedMs": started.elapsed().as_millis() as u64,
+                                    "wait": event.wait,
+                                }));
+                            }
+                            if event.kind == "content_delta"
+                                && event
+                                    .delta
+                                    .as_deref()
+                                    .is_some_and(|delta| !delta.is_empty())
+                                && notify_reconnected_on_output
                                 && !stream_reconnected.swap(true, Ordering::AcqRel)
                             {
                                 on_connection_event(
@@ -4368,8 +4407,13 @@ where
                                 .delta
                                 .as_deref()
                                 .is_some_and(|delta| !delta.is_empty())
+                                && !output_started.swap(true, Ordering::AcqRel)
                             {
-                                output_started.store(true, Ordering::Release);
+                                logging::write("info", "provider", "provider_first_token", serde_json::json!({
+                                    "operationId": operation_id, "threadId": request.thread_id.as_deref(),
+                                    "round": round, "profileId": &profile.id, "model": &profile.model,
+                                    "attemptNumber": retry_number + 1, "firstTokenMs": started.elapsed().as_millis() as u64,
+                                }));
                             }
                             on_stream_event(event);
                         },
@@ -4419,7 +4463,7 @@ where
                             &stream_metrics,
                         );
                     }
-                    if reconnecting && !reconnected_on_open.load(Ordering::Acquire) {
+                    if reconnecting && !reconnected_on_output.load(Ordering::Acquire) {
                         on_connection_event(
                             &profile,
                             last_reconnect_attempt,
@@ -4433,7 +4477,23 @@ where
                     let error = agent::annotate_tool_compatibility_error(error, &request);
                     let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
                     let output_was_emitted = emitted.load(Ordering::Acquire);
-                    let will_retry = should_reconnect_provider(&error, retry_number);
+                    if streaming {
+                        log_provider_stream_summary(
+                            &request,
+                            &profile,
+                            operation_id,
+                            round,
+                            retry_number + 1,
+                            failover_attempts,
+                            &stream_metrics,
+                        );
+                    }
+                    let (error, will_retry) = failed_provider_attempt(
+                        error,
+                        retry_number,
+                        &mut failed_wait,
+                        started.elapsed(),
+                    );
                     let status = if will_retry {
                         "retrying"
                     } else if error.contains("REQUEST_CANCELLED") {
@@ -5841,6 +5901,7 @@ async fn agent_turn_stream_inner(
                 continue;
             }
         };
+        let mut failed_wait = Duration::ZERO;
         for retry_number in 0..=PROVIDER_RECONNECT_RETRIES {
             if std::mem::take(&mut reset_output_before_attempt) {
                 let _ = on_event.send(AgentStreamEvent::content_reset());
@@ -5851,9 +5912,9 @@ async fn agent_turn_stream_inner(
             let output_started = emitted.clone();
             let stream_metrics = Arc::new(ProviderStreamMetrics::default());
             let attempt_stream_metrics = stream_metrics.clone();
-            let reconnected_on_open = Arc::new(AtomicBool::new(false));
-            let stream_reconnected = reconnected_on_open.clone();
-            let notify_reconnected_on_open = reconnecting;
+            let reconnected_on_output = Arc::new(AtomicBool::new(false));
+            let stream_reconnected = reconnected_on_output.clone();
+            let notify_reconnected_on_output = reconnecting;
             let reconnect_attempt = last_reconnect_attempt;
             let event_channel = on_event.clone();
             let retry_started_at = now_millis();
@@ -5879,8 +5940,26 @@ async fn agent_turn_stream_inner(
                 cancellation.clone(),
                 move |event| {
                     attempt_stream_metrics.observe(&event);
-                    if event.kind == "stream_opened"
-                        && notify_reconnected_on_open
+                    if event.kind == "provider_waiting" || event.kind == "stream_opened" {
+                        logging::write(
+                            "info",
+                            "provider",
+                            &event.kind,
+                            serde_json::json!({
+                                "operationId": &first_token_operation_id, "threadId": first_token_thread_id.as_deref(),
+                                "profileId": &first_token_profile_id, "model": &first_token_model,
+                                "attemptNumber": retry_number + 1, "elapsedMs": first_token_started.elapsed().as_millis() as u64,
+                                "wait": event.wait,
+                            }),
+                        );
+                    }
+
+                    if event.kind == "content_delta"
+                        && event
+                            .delta
+                            .as_deref()
+                            .is_some_and(|delta| !delta.is_empty())
+                        && notify_reconnected_on_output
                         && !stream_reconnected.swap(true, Ordering::AcqRel)
                     {
                         let _ = event_channel.send(AgentStreamEvent::provider_reconnected(
@@ -5948,7 +6027,7 @@ async fn agent_turn_stream_inner(
                         failover_attempts,
                         &stream_metrics,
                     );
-                    if reconnecting && !reconnected_on_open.load(Ordering::Acquire) {
+                    if reconnecting && !reconnected_on_output.load(Ordering::Acquire) {
                         let _ = on_event.send(AgentStreamEvent::provider_reconnected(
                             last_reconnect_attempt,
                             PROVIDER_RECONNECT_RETRIES,
@@ -5961,8 +6040,22 @@ async fn agent_turn_stream_inner(
                     let error = agent::annotate_tool_compatibility_error(error, &request);
                     let latency_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
                     let output_was_emitted = emitted.load(Ordering::Acquire);
+                    log_provider_stream_summary(
+                        &request,
+                        &profile,
+                        Some(&operation_id),
+                        None,
+                        retry_number + 1,
+                        failover_attempts,
+                        &stream_metrics,
+                    );
                     let retryable = agent::is_retryable_provider_error(&error);
-                    let will_retry = should_reconnect_provider(&error, retry_number);
+                    let (error, will_retry) = failed_provider_attempt(
+                        error,
+                        retry_number,
+                        &mut failed_wait,
+                        started.elapsed(),
+                    );
                     let status = if will_retry {
                         "retrying"
                     } else if error.contains("REQUEST_CANCELLED") {
@@ -11837,8 +11930,8 @@ pub fn run() {
             // Media generation can take several minutes, especially image edits and 4K output.
             media_client: build_http_client(Some(Duration::from_secs(600)))
                 .expect("failed to build media HTTP client"),
-            // Agent generation has no response deadline; the upstream response and
-            // explicit cancellation determine when each attempt ends.
+            // No total generation deadline. The adapter bounds headers, JSON bodies
+            // and SSE silence independently, preserving active long streams.
             provider_client: build_http_client(None).expect("failed to build provider HTTP client"),
             media_refreshes: media::MediaRefreshes::default(),
             active_requests: Mutex::new(HashMap::new()),
@@ -14887,6 +14980,45 @@ mod tests {
     }
 
     #[test]
+    fn provider_failed_wait_budget_stops_retrying_without_masking_cancellation() {
+        let mut elapsed = Duration::ZERO;
+        let error = "Connection failed: upstream unavailable";
+        for attempt in 0..3 {
+            assert!(
+                failed_provider_attempt(
+                    error.to_owned(),
+                    attempt,
+                    &mut elapsed,
+                    Duration::from_secs(90)
+                )
+                .1
+            );
+        }
+        let (error, retry) =
+            failed_provider_attempt(error.to_owned(), 3, &mut elapsed, Duration::from_secs(30));
+        assert!(!retry);
+        assert!(error.contains("PROVIDER_RETRY_BUDGET_EXHAUSTED"));
+        let (error, retry) = failed_provider_attempt(
+            "REQUEST_CANCELLED".to_owned(),
+            0,
+            &mut elapsed,
+            Duration::from_secs(900),
+        );
+        assert!(!retry);
+        assert_eq!(error, "REQUEST_CANCELLED");
+        let mut fresh = Duration::ZERO;
+        assert!(
+            failed_provider_attempt(
+                "Connection failed".to_owned(),
+                0,
+                &mut fresh,
+                Duration::from_secs(10)
+            )
+            .1
+        );
+    }
+
+    #[test]
     fn provider_reconnect_stops_after_six_attempts() {
         let timeout = "Provider returned 504 Gateway Timeout: upstream timed out";
         assert!(should_reconnect_provider(timeout, 0));
@@ -14981,6 +15113,7 @@ mod tests {
                     delta: Some(String::new()),
                     retry_attempt: None,
                     max_retry_attempts: None,
+                    wait: None,
                 },
             )
             .is_none()

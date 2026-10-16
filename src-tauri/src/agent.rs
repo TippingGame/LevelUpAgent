@@ -9,6 +9,8 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+use crate::provider_wait;
+
 use crate::models::{
     AgentMessage, AgentStreamEvent, AgentToolDefinition, AgentTurnRequest, AgentTurnResponse,
     GatewayDiagnostics, ImageAttachment, ModelInfo, ProviderProfile, ProviderProtocol, ToolCall,
@@ -37,8 +39,8 @@ const THEME_GENERATION_BOOTSTRAP_MARKER: &str = "[LEVELUP_THEME_GENERATION_BOOTS
 const THEME_GENERATION_TARGET_MARKER: &str = "[LEVELUP_THEME_GENERATION_TARGET]";
 const PROVIDER_STREAM_INTERRUPTED: &str = "Provider stream ended before completion";
 
-// The shared provider client has no response deadline. Stop/steer cancellation
-// remains active while waiting for headers, JSON bodies, or SSE events.
+// Keep active generations unbounded; transport waits below enforce per-phase
+// deadlines and preserve stop/steer cancellation.
 fn turn_post(client: &Client, url: Url) -> RequestBuilder {
     client.post(url)
 }
@@ -83,37 +85,54 @@ fn gemini_auth_if_present(request: RequestBuilder, api_key: &str) -> RequestBuil
 async fn send_stream_request(
     request: RequestBuilder,
     cancellation: &CancellationToken,
+    emit: &mut impl FnMut(AgentStreamEvent),
 ) -> Result<Response, String> {
-    tokio::select! {
-        biased;
-        _ = cancellation.cancelled() => Err("REQUEST_CANCELLED".to_owned()),
-        response = request.send() => response.map_err(|error| format!("Connection failed: {error}")),
-    }
+    provider_wait::wait(
+        async {
+            request
+                .send()
+                .await
+                .map_err(|error| format!("Connection failed: {error:?}"))
+        },
+        cancellation,
+        "headers",
+        provider_wait::HEADERS_TIMEOUT,
+        emit,
+    )
+    .await
 }
 
 async fn stream_response_json(
     response: Response,
     cancellation: &CancellationToken,
+    emit: &mut impl FnMut(AgentStreamEvent),
 ) -> Result<Value, String> {
-    tokio::select! {
-        biased;
-        _ = cancellation.cancelled() => Err("REQUEST_CANCELLED".to_owned()),
-        result = response_json(response) => result,
-    }
+    provider_wait::wait(
+        response_json(response),
+        cancellation,
+        "body",
+        provider_wait::JSON_TIMEOUT,
+        emit,
+    )
+    .await
 }
 
 async fn next_stream_item<S>(
     stream: &mut S,
     cancellation: &CancellationToken,
+    emit: &mut impl FnMut(AgentStreamEvent),
 ) -> Result<Option<S::Item>, String>
 where
     S: Stream + Unpin,
 {
-    tokio::select! {
-        biased;
-        _ = cancellation.cancelled() => Err("REQUEST_CANCELLED".to_owned()),
-        next = stream.next() => Ok(next),
-    }
+    provider_wait::wait(
+        async { Ok(stream.next().await) },
+        cancellation,
+        "stream",
+        provider_wait::STREAM_IDLE_TIMEOUT,
+        emit,
+    )
+    .await
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -713,13 +732,14 @@ async fn run_gemini_generate_content(
         &request.profile.base_url,
         &format!("/v1beta/models/{model}:generateContent"),
     )?;
-    let response = gemini_auth_if_present(turn_post(client, url), api_key)
-        .json(&gemini_body(&request))
-        .send()
-        .await
-        .map_err(|error| format!("Connection failed: {error}"))?;
+    let response = send_stream_request(
+        gemini_auth_if_present(turn_post(client, url), api_key).json(&gemini_body(&request)),
+        &CancellationToken::new(),
+        &mut |_| {},
+    )
+    .await?;
     let request_id = header_request_id(&response);
-    let value = response_json(response).await?;
+    let value = stream_response_json(response, &CancellationToken::new(), &mut |_| {}).await?;
     parse_gemini_value(&value, request_id)
 }
 
@@ -731,13 +751,14 @@ async fn run_openai_chat(
     let url = endpoint(&request.profile.base_url, "/v1/chat/completions")?;
     let body = chat_body(&request, false);
 
-    let response = bearer_auth_if_present(turn_post(client, url), api_key)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|error| format!("Connection failed: {error}"))?;
+    let response = send_stream_request(
+        bearer_auth_if_present(turn_post(client, url), api_key).json(&body),
+        &CancellationToken::new(),
+        &mut |_| {},
+    )
+    .await?;
     let request_id = header_request_id(&response);
-    let value = response_json(response).await?;
+    let value = stream_response_json(response, &CancellationToken::new(), &mut |_| {}).await?;
     parse_openai_chat_value(&value, request_id)
 }
 
@@ -749,14 +770,16 @@ async fn run_openai_responses(
     let url = endpoint(&request.profile.base_url, "/v1/responses")?;
     let body = responses_body(&request, false);
 
-    let response = bearer_auth_if_present(turn_post(client, url), api_key)
-        .header("OpenAI-Beta", "responses=experimental")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|error| format!("Connection failed: {error}"))?;
+    let response = send_stream_request(
+        bearer_auth_if_present(turn_post(client, url), api_key)
+            .header("OpenAI-Beta", "responses=experimental")
+            .json(&body),
+        &CancellationToken::new(),
+        &mut |_| {},
+    )
+    .await?;
     let request_id = header_request_id(&response);
-    let value = response_json(response).await?;
+    let value = stream_response_json(response, &CancellationToken::new(), &mut |_| {}).await?;
     parse_openai_responses_value(&value, request_id)
 }
 
@@ -767,16 +790,18 @@ async fn run_anthropic_messages(
 ) -> Result<AgentTurnResponse, String> {
     let url = endpoint(&request.profile.base_url, "/v1/messages")?;
     let body = anthropic_body(&request, false);
-    let response = anthropic_request_headers(
-        anthropic_auth_if_present(turn_post(client, url), api_key),
-        &request,
+    let response = send_stream_request(
+        anthropic_request_headers(
+            anthropic_auth_if_present(turn_post(client, url), api_key),
+            &request,
+        )
+        .json(&body),
+        &CancellationToken::new(),
+        &mut |_| {},
     )
-    .json(&body)
-    .send()
-    .await
-    .map_err(|error| format!("Connection failed: {error}"))?;
+    .await?;
     let request_id = header_request_id(&response);
-    let value = response_json(response).await?;
+    let value = stream_response_json(response, &CancellationToken::new(), &mut |_| {}).await?;
     parse_anthropic_value(&value, request_id)
 }
 
@@ -801,12 +826,13 @@ where
     let response = send_stream_request(
         bearer_auth_if_present(turn_post(client, url), api_key).json(&chat_body(&request, true)),
         &cancellation,
+        &mut emit,
     )
     .await?;
     let request_id = header_request_id(&response);
     if !response.status().is_success() || !is_event_stream(&response) {
         emit(AgentStreamEvent::non_stream_response());
-        let value = stream_response_json(response, &cancellation).await?;
+        let value = stream_response_json(response, &cancellation, &mut emit).await?;
         let result = parse_openai_chat_value(&value, request_id)?;
         if !result.content.is_empty() {
             emit(AgentStreamEvent::content(result.content.clone()));
@@ -824,7 +850,7 @@ where
     let mut output_tokens = None;
     let mut completed = false;
     loop {
-        let next = next_stream_item(&mut stream, &cancellation).await?;
+        let next = next_stream_item(&mut stream, &cancellation, &mut emit).await?;
         let Some(event) = next else { break };
         let event = event.map_err(|error| format!("Invalid SSE stream: {error}"))?;
         if event.data.trim() == "[DONE]" {
@@ -925,12 +951,13 @@ where
             .header("OpenAI-Beta", "responses=experimental")
             .json(&responses_body(&request, true)),
         &cancellation,
+        &mut emit,
     )
     .await?;
     let request_id = header_request_id(&response);
     if !response.status().is_success() || !is_event_stream(&response) {
         emit(AgentStreamEvent::non_stream_response());
-        let value = stream_response_json(response, &cancellation).await?;
+        let value = stream_response_json(response, &cancellation, &mut emit).await?;
         let result = parse_openai_responses_value(&value, request_id)?;
         if !result.content.is_empty() {
             emit(AgentStreamEvent::content(result.content.clone()));
@@ -948,7 +975,7 @@ where
     let mut reasoning_blocks = BTreeMap::new();
     let mut completed = false;
     loop {
-        let next = next_stream_item(&mut stream, &cancellation).await?;
+        let next = next_stream_item(&mut stream, &cancellation, &mut emit).await?;
         let Some(event) = next else { break };
         let event = event.map_err(|error| format!("Invalid SSE stream: {error}"))?;
         if event.data.trim() == "[DONE]" {
@@ -1069,12 +1096,13 @@ where
         )
         .json(&anthropic_body(&request, true)),
         &cancellation,
+        &mut emit,
     )
     .await?;
     let request_id = header_request_id(&response);
     if !response.status().is_success() || !is_event_stream(&response) {
         emit(AgentStreamEvent::non_stream_response());
-        let value = stream_response_json(response, &cancellation).await?;
+        let value = stream_response_json(response, &cancellation, &mut emit).await?;
         let result = parse_anthropic_value(&value, request_id)?;
         if !result.content.is_empty() {
             emit(AgentStreamEvent::content(result.content.clone()));
@@ -1091,7 +1119,7 @@ where
     let mut output_tokens = None;
     let mut completed = false;
     loop {
-        let next = next_stream_item(&mut stream, &cancellation).await?;
+        let next = next_stream_item(&mut stream, &cancellation, &mut emit).await?;
         let Some(event) = next else { break };
         let event = event.map_err(|error| format!("Invalid SSE stream: {error}"))?;
         let value = parse_stream_event(&event.data, &event.event)?;
@@ -1235,12 +1263,13 @@ where
     let response = send_stream_request(
         gemini_auth_if_present(turn_post(client, url), api_key).json(&gemini_body(&request)),
         &cancellation,
+        &mut emit,
     )
     .await?;
     let request_id = header_request_id(&response);
     if !response.status().is_success() || !is_event_stream(&response) {
         emit(AgentStreamEvent::non_stream_response());
-        let value = stream_response_json(response, &cancellation).await?;
+        let value = stream_response_json(response, &cancellation, &mut emit).await?;
         let result = parse_gemini_value(&value, request_id)?;
         if !result.content.is_empty() {
             emit(AgentStreamEvent::content(result.content.clone()));
@@ -1256,7 +1285,7 @@ where
     let mut output_tokens = None;
     let mut completed = false;
     loop {
-        let next = next_stream_item(&mut stream, &cancellation).await?;
+        let next = next_stream_item(&mut stream, &cancellation, &mut emit).await?;
         let Some(event) = next else { break };
         let event = event.map_err(|error| format!("Invalid SSE stream: {error}"))?;
         if event.data.trim() == "[DONE]" {
@@ -7139,6 +7168,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_transport_deadlines_cover_every_streaming_protocol() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for protocol in [
+            ProviderProtocol::OpenaiChat,
+            ProviderProtocol::OpenaiResponses,
+            ProviderProtocol::AnthropicMessages,
+            ProviderProtocol::GeminiGenerateContent,
+        ] {
+            for phase in ["headers", "stream", "body"] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let url = format!("http://{}", listener.local_addr().unwrap());
+                let request = test_request(url, protocol.clone());
+                let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+                let task = tokio::spawn(async move {
+                    let mut ready = Some(ready_tx);
+                    run_turn_stream(
+                        &Client::new(),
+                        request,
+                        "test-key",
+                        CancellationToken::new(),
+                        move |event| {
+                            if (event.kind == "stream_opened"
+                                || event.kind == "non_stream_response")
+                                && let Some(tx) = ready.take()
+                            {
+                                let _ = tx.send(());
+                            }
+                        },
+                    )
+                    .await
+                });
+                let (mut connection, _) = listener.accept().await.unwrap();
+                let mut request_bytes = [0u8; 64 * 1024];
+                assert!(connection.read(&mut request_bytes).await.unwrap() > 0);
+                if phase != "headers" {
+                    let content_type = if phase == "stream" {
+                        "text/event-stream"
+                    } else {
+                        "application/json"
+                    };
+                    connection.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nTransfer-Encoding: chunked\r\n\r\n").as_bytes()).await.unwrap();
+                    ready_rx.await.unwrap();
+                }
+                // Only advance virtual time after the real request/headers arrived.
+                // This exercises each adapter without waiting five real minutes.
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(if phase == "headers" {
+                    91
+                } else {
+                    301
+                }))
+                .await;
+                let error = task.await.unwrap().unwrap_err();
+                tokio::time::resume();
+                assert!(
+                    error.contains(&format!("PROVIDER_WAIT_TIMEOUT:{phase}")),
+                    "{protocol:?}: {error}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn delayed_headers_and_silent_streams_wait_for_upstream() {
         for (header_delay, event_delay) in [
             (Duration::from_millis(50), Duration::ZERO),
@@ -7270,7 +7362,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn delayed_json_body_keeps_upstream_error_and_can_be_cancelled() {
         let chunks = futures_util::stream::once(async {
-            tokio::time::sleep(Duration::from_secs(3_600)).await;
+            tokio::time::sleep(Duration::from_secs(60)).await;
             Ok::<_, std::io::Error>(
                 r#"{"error":{"message":"upstream generation deadline exceeded"}}"#,
             )
@@ -7280,7 +7372,7 @@ mod tests {
             .body(reqwest::Body::wrap_stream(chunks))
             .unwrap()
             .into();
-        let error = stream_response_json(response, &CancellationToken::new())
+        let error = stream_response_json(response, &CancellationToken::new(), &mut |_| {})
             .await
             .unwrap_err();
         assert_eq!(
@@ -7291,10 +7383,14 @@ mod tests {
         let chunks = futures_util::stream::pending::<Result<&'static str, std::io::Error>>();
         let response = http::Response::new(reqwest::Body::wrap_stream(chunks)).into();
         let cancellation = CancellationToken::new();
-        let (result, ()) = tokio::join!(stream_response_json(response, &cancellation), async {
-            tokio::time::sleep(Duration::from_secs(3_600)).await;
-            cancellation.cancel();
-        });
+        let mut emit = |_| {};
+        let (result, ()) = tokio::join!(
+            stream_response_json(response, &cancellation, &mut emit),
+            async {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                cancellation.cancel();
+            }
+        );
         assert_eq!(result.unwrap_err(), "REQUEST_CANCELLED");
     }
 
@@ -7322,24 +7418,23 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn silent_stream_waits_beyond_previous_time_limits_and_remains_cancellable() {
-        let stream = futures_util::stream::once(async {
-            tokio::time::sleep(Duration::from_secs(3_600)).await;
-            "upstream result"
-        });
-        let mut stream = Box::pin(stream);
-        let cancellation = CancellationToken::new();
-        assert_eq!(
-            next_stream_item(&mut stream, &cancellation).await.unwrap(),
-            Some("upstream result")
-        );
-
+    async fn silent_stream_times_out_but_still_supports_cancellation() {
         let mut pending = futures_util::stream::pending::<()>();
+        let cancellation = CancellationToken::new();
+        let error = next_stream_item(&mut pending, &cancellation, &mut |_| {})
+            .await
+            .unwrap_err();
+        assert!(error.contains("PROVIDER_WAIT_TIMEOUT:stream"));
+        assert!(is_reconnectable_provider_error(&error));
         let cancel = cancellation.clone();
-        let (result, ()) = tokio::join!(next_stream_item(&mut pending, &cancellation), async {
-            tokio::time::sleep(Duration::from_secs(3_600)).await;
-            cancel.cancel();
-        });
+        let mut emit = |_| {};
+        let (result, ()) = tokio::join!(
+            next_stream_item(&mut pending, &cancellation, &mut emit),
+            async {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                cancel.cancel();
+            }
+        );
         assert_eq!(result.unwrap_err(), "REQUEST_CANCELLED");
     }
 

@@ -117,3 +117,14 @@ export function settleProviderReconnect(
     lastReconnectAttempt: 0,
   };
 }
+
+export function providerWaitLabel(wait: { phase: string; elapsedMs: number; timeoutMs: number }, locale: AppLocale): string {
+  const elapsed = Math.max(0, Math.floor(wait.elapsedMs / 1_000));
+  const limit = Math.max(1, Math.floor(wait.timeoutMs / 1_000));
+  if (locale === "zh-CN") {
+    const stage = wait.phase === "headers" ? "等待模型服务响应" : wait.phase === "body" ? "等待模型返回完整结果" : "等待模型响应继续";
+    return `${stage} · 已等待 ${elapsed} 秒，${limit} 秒无进展将结束本次请求；可随时停止`;
+  }
+  const stage = wait.phase === "headers" ? "Waiting for the model service" : wait.phase === "body" ? "Waiting for the complete response" : "Waiting for more model output";
+  return `${stage} · waiting ${elapsed}s, this request ends after ${limit}s without progress; you can stop at any time`;
+}

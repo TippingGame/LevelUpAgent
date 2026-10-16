@@ -301,15 +301,49 @@ pub struct AgentStreamEvent {
     pub retry_attempt: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_retry_attempts: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wait: Option<ProviderWait>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderWait {
+    pub phase: String,
+    pub elapsed_ms: u64,
+    pub timeout_ms: u64,
 }
 
 impl AgentStreamEvent {
+    pub fn waiting(
+        phase: &str,
+        elapsed: std::time::Duration,
+        timeout: std::time::Duration,
+    ) -> Self {
+        Self {
+            kind: "provider_waiting".to_owned(),
+            wait: Some(ProviderWait {
+                phase: phase.to_owned(),
+                elapsed_ms: elapsed.as_millis().min(u64::MAX as u128) as u64,
+                timeout_ms: timeout.as_millis().min(u64::MAX as u128) as u64,
+            }),
+            ..Self::stream_opened()
+        }
+    }
+
+    pub fn wait_finished() -> Self {
+        Self {
+            kind: "provider_wait_finished".to_owned(),
+            ..Self::stream_opened()
+        }
+    }
+
     pub fn stream_opened() -> Self {
         Self {
             kind: "stream_opened".to_owned(),
             delta: None,
             retry_attempt: None,
             max_retry_attempts: None,
+            wait: None,
         }
     }
 
@@ -319,6 +353,7 @@ impl AgentStreamEvent {
             delta: None,
             retry_attempt: None,
             max_retry_attempts: None,
+            wait: None,
         }
     }
 
@@ -328,6 +363,7 @@ impl AgentStreamEvent {
             delta: Some(delta),
             retry_attempt: None,
             max_retry_attempts: None,
+            wait: None,
         }
     }
 
@@ -337,6 +373,7 @@ impl AgentStreamEvent {
             delta: None,
             retry_attempt: None,
             max_retry_attempts: None,
+            wait: None,
         }
     }
 
@@ -346,6 +383,7 @@ impl AgentStreamEvent {
             delta: None,
             retry_attempt: Some(retry_attempt),
             max_retry_attempts: Some(max_retry_attempts),
+            wait: None,
         }
     }
 
@@ -355,6 +393,7 @@ impl AgentStreamEvent {
             delta: None,
             retry_attempt: Some(retry_attempt),
             max_retry_attempts: Some(max_retry_attempts),
+            wait: None,
         }
     }
 }

@@ -22,6 +22,14 @@ Draft，因此 `v1.0.32` 继续显示 `Latest`；在核对资产并正式发布�
 
 ## 零、以后每次发布速查
 
+### v1.3.81：模型请求等待与自动重试修复
+
+- 响应头等待最多 90 秒，SSE 连续 300 秒没有新事件即超时；持续返回事件的生成不设总时限。非流式 JSON 响应体最多等待 300 秒。
+- 每个供应商在一轮内的失败请求累计耗时达到 300 秒后，不再发起下一次重试，随后按既有设置切换备用连接或明确报错。
+- 等待超过 30 秒显示阶段、耗时和限制，进展、完成、失败及停止后清理提示；只收到响应头不再提前显示重连成功。已完成工具结果保留。
+- 四种模型协议均有真实 HTTP 超时回归；隔离 Windows 桌面覆盖停止、恢复、重载及四种外观、720 px 窗口。详细策略和发布验证见 `docs/PROVIDER_RELIABILITY.md`、`docs/RELEASE_1.3.81.md`。
+- 音频及 3D 独立资源版本不变，继续复用。
+
 ### v1.3.80：依赖移除与图片输入优化（已正式发布）
 
 - 音频和 3D 工作台在「环境与下载」新增依赖移除与确认，在线下载和离线导入均适用。音频按引擎、3D 按当前平台和资源版本清理，保留作品、历史、参考文件及原始离线包。
@@ -111,7 +119,7 @@ gh release edit music-workbench-resources --draft=false --prerelease --latest=fa
 
 ### 从 v1.2.71 起：应用和 3D 通用资源分别发布
 
-应用安装包继续通过 `vX.Y.Z` tag 触发四平台构建，本次应用版本为 `1.3.80`。
+应用安装包继续通过 `vX.Y.Z` tag 触发四平台构建，本次应用版本为 `1.3.81`。
 Python / PyTorch / CUDA、TripoSG、SD2.1 + MV-Adapter、Blender 不进入应用安装包，
 也不再随每个应用版本重复打包或上传。所有额外资源固定放在同一个 Release：
 
@@ -126,7 +134,7 @@ https://github.com/TippingGame/LevelUpAgent/releases/tag/model-workbench-resourc
 - 清单名为 `model-workbench-<资源版本>-<目标>.json`，分片名也包含独立资源版本，每片小于 2 GB。
   初始清单：`model-workbench-2026.10.1-linux-x64-cu118.json`。
 - 资源 Release 使用 prerelease 且 `--latest=false`，只用于把通用资源与应用更新渠道分开，
-  不能上传 `latest.json`；应用正式版（本次 `v1.3.80`）设为 Latest。
+  不能上传 `latest.json`；应用正式版（本次 `v1.3.81`）设为 Latest。
 - 只有模型、CUDA 或依赖内容变化时才增加资源版本并上传新资产，旧资产保留。
   不覆盖已公开的分片或清单；同名同哈希文件复用，同名不同哈希必须改资源版本。
 - 上传顺序：本地校验所有分片与完整归档 → 上传分片并核对 GitHub digest → 最后上传清单。
