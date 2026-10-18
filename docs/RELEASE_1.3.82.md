@@ -18,8 +18,20 @@
 - 隔离 Windows 原生应用使用独立 identifier、合成凭据和本地 HTTP 服务，验证真实 Tauri IPC／系统凭据读取、无文字模型连接的余额、媒体模型保存、删除后上一项与新连接备用默认值；四种外观、720 px WebView 视口及桌宠名字栏通过。等级后不含状态，长名字不挤压等级，名字栏高度 28 px、进度条至少 38 px。
 - 5 份独立资源清单和 48 个分卷公开可用；本版不重新发布大型模型资源。
 
-证据目录：`research/release-1.3.82-2026-10-18`。余额回归使用合成数据验证连接路由；未消耗用户账号额度。跨平台构建与正式发布记录在资产验收后补充。
+证据目录：`research/release-1.3.82-2026-10-18`。余额回归使用合成数据验证连接路由；未消耗用户账号额度。三平台 CI 与四平台发布构建均通过；未进行 macOS／Linux 实机安装或用户正式环境覆盖升级。
 
 ## 平台与签名
 
 Windows x64 提供 NSIS / MSI 与 Tauri updater 签名；macOS Apple Silicon / Intel 提供 ad-hoc 签名 DMG，未公证；Linux x64 提供 AppImage / DEB / RPM。主安装包不包含大型音频和 3D 模型及运行环境。
+
+## 正式发布记录
+
+- 发布时间：2026-10-18 21:01:06（Asia/Shanghai），已设为 Latest。
+- 构建提交：329e046b6c6fcd594741279d3c88c3c84164849b；tag：v1.3.82。
+- CI：[39127546685](https://github.com/TippingGame/LevelUpAgent/actions/runs/39127546685)；Release：[39127550436](https://github.com/TippingGame/LevelUpAgent/actions/runs/39127550436)，均成功。
+- 10 个资产完整下载并验证大小和 GitHub SHA256 digest；Windows EXE／MSI updater 及可信注释签名有效，latest.json 的版本、URL 与签名一致。
+- Windows EXE 解包通过，安装器与主程序版本均为 1.3.82，x64 架构、生产 CSP／更新地址／公钥及全部打包资源已核对，未混入 QA 配置。
+- 公开发布页及 latest.json 返回 HTTP 200，更新清单版本为 1.3.82。
+- 正式 EXE 已同步 G:/Work/LevelUpAgent/安装包，版本及总 SHA256 清单已更新；旧安装包保留。
+
+发布页：https://github.com/TippingGame/LevelUpAgent/releases/tag/v1.3.82
