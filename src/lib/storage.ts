@@ -14,6 +14,7 @@ import { tr } from "./i18n";
 
 const PROFILE_KEY = "levelup-agent.profiles.v1";
 const ACTIVE_PROFILE_KEY = "levelup-agent.active-profile.v1";
+const BALANCE_PROFILE_KEY = "levelup-agent.balance-profile.v1";
 const THREAD_KEY = "levelup-agent.threads.v1";
 const ACTIVE_THREAD_KEY = "levelup-agent.active-thread.v1";
 const PERMISSION_LEVEL_KEY = "levelup-agent.permission-level.v1";
@@ -59,7 +60,7 @@ export const defaultProfile: ProviderProfile = {
   protocol: "openai_responses",
   allowUnauthenticated: false,
   priority: 10,
-  failoverEnabled: true,
+  failoverEnabled: false,
 };
 
 function readJson<T>(key: string, fallback: T): T {
@@ -240,6 +241,15 @@ export function loadActiveProfileId(profiles: ProviderProfile[]): string {
 
 export function saveActiveProfileId(profileId: string) {
   writeStorageValue(ACTIVE_PROFILE_KEY, profileId);
+}
+
+export function loadBalanceProfileId(): string | null {
+  return readStorageValue(BALANCE_PROFILE_KEY);
+}
+
+export function saveBalanceProfileId(profileId: string | null) {
+  if (profileId) writeStorageValue(BALANCE_PROFILE_KEY, profileId);
+  else removeStorageValue(BALANCE_PROFILE_KEY);
 }
 
 export function clearLegacyProfiles() {

@@ -240,9 +240,16 @@ export function isTextGenerationModel(model: Pick<ModelInfo, "id" | "outputModal
     || outputModalities.some((modality) => modality.toLocaleLowerCase() === "text");
 }
 
-/** A blank model represents a connection reserved for Media Studio. */
+/** Text task eligibility is independent of which model a connection can save. */
 export function profileHasTextModel(profile: Pick<ProviderProfile, "model">) {
   return isTextGenerationModel({ id: profile.model });
+}
+
+/** Keep selection next to a removed connection, preferring its predecessor. */
+export function profileAfterRemoval<T extends Pick<ProviderProfile, "id">>(profiles: readonly T[], removedId: string): T | undefined {
+  const index = profiles.findIndex((profile) => profile.id === removedId);
+  if (index < 0) return undefined;
+  return profiles[index - 1] ?? profiles[index + 1];
 }
 
 function modelMatches(id: string, preferredId: string) {
@@ -282,6 +289,13 @@ function newestGeneralModel(models: ModelInfo[]) {
     if (qualityDifference !== 0) return qualityDifference;
     return right.id.localeCompare(left.id, undefined, { numeric: true, sensitivity: "base" });
   })[0];
+}
+
+/** Connection settings accept every modality and retain a detected selection. */
+export function preferredConnectionModel(profile: ProviderProfile, models: ModelInfo[]): ModelInfo | undefined {
+  return models.find((model) => model.id === profile.model.trim())
+    ?? preferredDetectedModel(profile, models)
+    ?? models[0];
 }
 
 /** Select the preferred, recent chat model from a freshly detected model list. */

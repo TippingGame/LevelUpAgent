@@ -205,6 +205,7 @@ import {
   MIN_INSPECTOR_WIDTH,
   MIN_COMPOSER_HEIGHT,
   loadActiveProfileId,
+  loadBalanceProfileId,
   loadArmorMode,
   loadArmorModeLevel,
   loadArmorModeSkills,
@@ -236,6 +237,7 @@ import {
   savePinnedThreadIds,
   saveTaskCompletionNotices,
   saveActiveProfileId,
+  saveBalanceProfileId,
   saveActiveThreadId,
   saveComposerHeight,
   saveCreativeStudioView,
@@ -308,7 +310,8 @@ import {
 import {
   isTextGenerationModel,
   opencodeWireProtocol,
-  preferredDetectedModel,
+  preferredConnectionModel,
+  profileAfterRemoval,
   profileHasTextModel,
   reasoningEffortForProfile,
   reasoningEffortsForProfile,
@@ -852,6 +855,9 @@ function App() {
   const [logsOpen, setLogsOpen] = useState(false);
   const [keyConfigured, setKeyConfigured] = useState(false);
   const [keyStatusLoaded, setKeyStatusLoaded] = useState(false);
+  const [balanceProfileId, setBalanceProfileId] = useState(loadBalanceProfileId);
+  const [balanceKeyProfileId, setBalanceKeyProfileId] = useState<string | null>(null);
+  const balanceRequestRef = useRef(0);
   const [balanceDiagnostics, setBalanceDiagnostics] = useState<GatewayDiagnostics | null>(null);
   const [balanceBusy, setBalanceBusy] = useState(false);
   const [balanceError, setBalanceError] = useState<string | null>(null);
@@ -973,6 +979,11 @@ function App() {
     () => profiles.find((profile) => profile.id === activeProfileId) ?? profiles[0],
     [profiles, activeProfileId],
   );
+  // Account usage belongs to the selected connection, even without a chat model.
+  const balanceProfile = profiles.find((profile) => profile.id === balanceProfileId) ?? activeProfile;
+  const balanceProfileRef = useRef(balanceProfile);
+  balanceProfileRef.current = balanceProfile;
+  const balanceKeyConfigured = balanceKeyProfileId === balanceProfile.id;
   const reasoningEfforts = useMemo(
     () => reasoningEffortsForProfile(activeProfile),
     [activeProfile.model, activeProfile.protocol],
@@ -2090,8 +2101,6 @@ function App() {
     let disposed = false;
     setKeyStatusLoaded(false);
     setKeyConfigured(false);
-    setBalanceDiagnostics(null);
-    setBalanceError(null);
     hasApiKey(activeProfile.id)
       .then((configured) => {
         if (!disposed) {
@@ -2110,21 +2119,42 @@ function App() {
     };
   }, [activeProfile.id]);
 
+  useEffect(() => {
+    saveBalanceProfileId(balanceProfileId);
+  }, [balanceProfileId]);
+
+  useEffect(() => {
+    let disposed = false;
+    balanceRequestRef.current += 1;
+    setBalanceKeyProfileId(null);
+    setBalanceDiagnostics(null);
+    setBalanceError(null);
+    setBalanceBusy(false);
+    hasApiKey(balanceProfile.id)
+      .then((configured) => {
+        if (!disposed) setBalanceKeyProfileId(configured ? balanceProfile.id : null);
+      })
+      .catch(() => undefined);
+    return () => { disposed = true; };
+  }, [balanceProfile]);
+
   const refreshBalance = useCallback(async () => {
-    if (!isDesktop() || !keyConfigured) return;
-    const profileId = activeProfile.id;
+    if (!isDesktop() || !balanceKeyConfigured) return;
+    const profile = balanceProfile;
+    const requestId = ++balanceRequestRef.current;
+    const isCurrent = () => balanceProfileRef.current === profile && balanceRequestRef.current === requestId;
     setBalanceBusy(true);
     try {
-      const diagnostics = await getGatewayDiagnostics(activeProfile);
-      if (activeProfileIdRef.current !== profileId) return;
+      const diagnostics = await getGatewayDiagnostics(profile);
+      if (!isCurrent()) return;
       setBalanceDiagnostics(diagnostics);
       setBalanceError(null);
     } catch (error) {
-      if (activeProfileIdRef.current === profileId) setBalanceError(errorText(error));
+      if (isCurrent()) setBalanceError(errorText(error));
     } finally {
-      if (activeProfileIdRef.current === profileId) setBalanceBusy(false);
+      if (isCurrent()) setBalanceBusy(false);
     }
-  }, [activeProfile, keyConfigured]);
+  }, [balanceProfile, balanceKeyConfigured]);
 
   const installAvailableUpdate = async () => {
     if (!availableAppUpdate || updateInstalling) return;
@@ -2141,14 +2171,14 @@ function App() {
   };
 
   useEffect(() => {
-    if (!keyConfigured || !isDesktop()) {
+    if (!balanceKeyConfigured || !isDesktop()) {
       setBalanceBusy(false);
       return;
     }
     void refreshBalance();
     const interval = window.setInterval(() => void refreshBalance(), 60_000);
     return () => window.clearInterval(interval);
-  }, [keyConfigured, refreshBalance]);
+  }, [balanceKeyConfigured, refreshBalance]);
 
   useEffect(() => {
     if (!profileMenuOpen) return;
@@ -3550,6 +3580,7 @@ function App() {
     setMediaCatalogRevision((current) => current + 1);
     activeProfileIdRef.current = profileId;
     setActiveProfileId(profileId);
+    setBalanceProfileId(profileId);
     setProfileMenuOpen(false);
     setKeyStatusLoaded(false);
     setKeyConfigured(await hasApiKey(profileId).catch(() => false));
@@ -4836,6 +4867,7 @@ function App() {
     activeProfileIdRef.current = nextActiveProfileId;
     setProfiles(updated);
     setActiveProfileId(nextActiveProfileId);
+    setBalanceProfileId(profile.id);
     setKeyConfigured(await hasApiKey(nextActiveProfileId));
     setKeyStatusLoaded(true);
     setSettingsOpen(false);
@@ -4843,9 +4875,12 @@ function App() {
 
   const removeProfile = async (profileId: string) => {
     if (profiles.length <= 1) return;
+    const fallback = profileAfterRemoval(profiles, profileId);
+    if (!fallback) return;
     const updated = profiles.filter((profile) => profile.id !== profileId);
     const nextActiveProfileId = activeProfileId === profileId
-      ? (updated.find(profileHasTextModel) ?? updated[0]).id
+      ? (profileAfterRemoval(profiles.filter(profileHasTextModel), profileId)
+        ?? updated.find(profileHasTextModel) ?? fallback).id
       : activeProfileId;
     if (isDesktop() && databaseReadyRef.current) {
       await saveProviderSettings({ profiles: updated, activeProfileId: nextActiveProfileId });
@@ -4857,6 +4892,7 @@ function App() {
     profilesRef.current = updated;
     activeProfileIdRef.current = nextActiveProfileId;
     setProfiles(updated);
+    if (balanceProfile.id === profileId) setBalanceProfileId(fallback.id);
     if (activeProfileId === profileId) {
       setActiveProfileId(nextActiveProfileId);
       setKeyStatusLoaded(false);
@@ -5046,11 +5082,11 @@ function App() {
     : formatCoinBalance(coinBalance, locale);
   const balanceHint = balanceError
     ? `${tr("余额读取失败", "Balance unavailable")}: ${balanceError}`
-    : !keyConfigured
-      ? activeProfile.allowUnauthenticated
+    : !balanceKeyConfigured
+      ? balanceProfile.allowUnauthenticated
         ? tr("无密钥兼容连接不提供余额查询", "Balance lookup is unavailable for a keyless compatible connection")
         : tr("请先配置当前连接的 API Key", "Configure an API key for this connection")
-      : tr("点击刷新，余额每 60 秒自动更新", "Click to refresh; updates automatically every 60 seconds");
+      : `${balanceProfile.name}: ${tr("点击刷新，余额每 60 秒自动更新", "Click to refresh; updates automatically every 60 seconds")}`;
   const qq2007Title = localizedThreadTitle(activeThread.title);
   const sidebarCollapsed = sidebarWidth === COLLAPSED_SIDEBAR_WIDTH;
   const dockedInspectorLayout = !activeLayout.definition.root.className?.includes("qq2007-layout");
@@ -5095,7 +5131,7 @@ function App() {
             type="button"
             aria-label={`${tr("LevelUpAPI 余额", "LevelUpAPI balance")}: ${balanceLabel} coins`}
             title={balanceHint}
-            disabled={!keyConfigured || balanceBusy}
+            disabled={!balanceKeyConfigured || balanceBusy}
             onClick={() => void refreshBalance()}
           >
             <span className="coin-glyph" aria-hidden="true" />
@@ -5946,9 +5982,10 @@ function App() {
       {settingsOpen && (
         <ConnectionDialog
           profiles={profiles}
-          profile={activeProfile}
+          profile={balanceProfile}
           reasoningEffort={effectiveReasoningEffort}
-          keyConfigured={keyConfigured}
+          keyConfigured={balanceKeyConfigured}
+          onSelect={setBalanceProfileId}
           diffViewSettings={diffViewSettings}
           onDiffViewSettingsChange={updateDiffViewSettings}
           chatAppearance={chatAppearance}
@@ -5983,6 +6020,12 @@ function App() {
           onDeleteKey={async (profileId) => {
             await deleteApiKey(profileId);
             setMediaCatalogRevision((current) => current + 1);
+            if (profileId === balanceProfile.id) {
+              balanceRequestRef.current += 1;
+              setBalanceKeyProfileId(null);
+              setBalanceDiagnostics(null);
+              setBalanceError(null);
+            }
             if (profileId === activeProfile.id) {
               setKeyConfigured(false);
               setKeyStatusLoaded(true);
@@ -9108,6 +9151,7 @@ function ConnectionDialog({
   onOpenPet,
   onOpenThemes,
   onSave,
+  onSelect,
   onRemove,
   onDeleteKey,
 }: {
@@ -9127,6 +9171,7 @@ function ConnectionDialog({
   onOpenPet: () => void;
   onOpenThemes: () => void;
   onSave: (profile: ProviderProfile, key: string) => Promise<void>;
+  onSelect: (profileId: string) => void;
   onRemove: (profileId: string) => Promise<void>;
   onDeleteKey: (profileId: string) => Promise<void>;
 }) {
@@ -9155,6 +9200,15 @@ function ConnectionDialog({
     void refreshHealth().catch(() => undefined);
   }, []);
 
+  useEffect(() => {
+    let disposed = false;
+    setLocalKeyConfigured(false);
+    hasApiKey(draftProfile.id)
+      .then((configured) => { if (!disposed) setLocalKeyConfigured(configured); })
+      .catch(() => undefined);
+    return () => { disposed = true; };
+  }, [draftProfile.id]);
+
   const update = <K extends keyof ProviderProfile>(key: K, value: ProviderProfile[K]) => {
     setDraftProfile((current) => ({ ...current, [key]: value }));
   };
@@ -9169,16 +9223,17 @@ function ConnectionDialog({
     }));
   };
 
-  const selectProfile = async (profileId: string) => {
+  const selectProfile = (profileId: string) => {
     const selected = profiles.find((item) => item.id === profileId);
     if (!selected) return;
     setDraftProfile(selected);
+    onSelect(selected.id);
     setApiKey("");
     setModels([]);
     setModelsDetected(false);
     setDiagnostics(null);
     setError(null);
-    setLocalKeyConfigured(await hasApiKey(selected.id));
+    setLocalKeyConfigured(false);
   };
 
   const addProfile = () => {
@@ -9190,7 +9245,7 @@ function ConnectionDialog({
       protocol: profile.protocol,
       allowUnauthenticated: false,
       priority: Math.max(10, ...profiles.map((item) => item.priority + 10)),
-      failoverEnabled: true,
+      failoverEnabled: false,
     });
     setApiKey("");
     setModels([]);
@@ -9245,7 +9300,7 @@ function ConnectionDialog({
       const result = await fetchModels(draftProfile, apiKey);
       setModels(result);
       setModelsDetected(true);
-      const preferredModel = preferredDetectedModel(draftProfile, result);
+      const preferredModel = preferredConnectionModel(draftProfile, result);
       if (preferredModel) {
         setDraftProfile((current) => ({
           ...current,
@@ -9254,8 +9309,6 @@ function ConnectionDialog({
             ? current.protocol
             : preferredModel.protocol ?? current.protocol,
         }));
-      } else {
-        setDraftProfile((current) => ({ ...current, model: "", failoverEnabled: false }));
       }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -9271,7 +9324,7 @@ function ConnectionDialog({
       validateProviderBaseUrl(draftProfile.baseUrl);
       await onSave({
         ...draftProfile,
-        model: hasTextModel ? draftProfile.model.trim() : "",
+        model: draftProfile.model.trim(),
         failoverEnabled: hasTextModel && draftProfile.failoverEnabled,
       }, apiKey);
     } catch (reason) {
@@ -9372,29 +9425,37 @@ function ConnectionDialog({
           <div className="connection-picker wide">
             <select
               aria-label={tr("当前连接", "Current connection")}
+              disabled={busy}
               value={profiles.some((item) => item.id === draftProfile.id) ? draftProfile.id : ""}
               onChange={(event) => selectProfile(event.target.value)}
             >
               {!profiles.some((item) => item.id === draftProfile.id) && <option value="">{tr("新连接", "New connection")}</option>}
               {profiles.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
             </select>
-            <button className="secondary-button" type="button" onClick={addProfile}>
+            <button className="secondary-button" type="button" onClick={addProfile} disabled={busy}>
               {tr("添加连接", "Add connection")}
             </button>
             <IconButton label={tr("扫描外部配置", "Scan external configs")} onClick={scanConfigs} disabled={scanning}>
               <FileInput size={17} className={scanning ? "spin" : ""} />
             </IconButton>
-            <IconButton label={tr("复制当前连接（不复制密钥）", "Duplicate connection without API key")} onClick={duplicateProfile}><Copy size={16} /></IconButton>
+            <IconButton label={tr("复制当前连接（不复制密钥）", "Duplicate connection without API key")} onClick={duplicateProfile} disabled={busy}><Copy size={16} /></IconButton>
             <IconButton
               label={tr("删除连接", "Delete connection")}
-              disabled={profiles.length <= 1 || !profiles.some((item) => item.id === draftProfile.id)}
+              disabled={busy || profiles.length <= 1 || !profiles.some((item) => item.id === draftProfile.id)}
               onClick={async () => {
                 const removedId = draftProfile.id;
-                const fallback = profiles.find((item) => item.id !== removedId);
+                const fallback = profileAfterRemoval(profiles, removedId);
                 if (!fallback) return;
-                await onRemove(removedId);
-                setDraftProfile(fallback);
-                setLocalKeyConfigured(await hasApiKey(fallback.id));
+                setBusy(true);
+                setError(null);
+                try {
+                  await onRemove(removedId);
+                  selectProfile(fallback.id);
+                } catch (reason) {
+                  setError(errorText(reason));
+                } finally {
+                  setBusy(false);
+                }
               }}
             ><Trash2 size={16} /></IconButton>
           </div>

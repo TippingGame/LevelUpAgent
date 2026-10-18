@@ -503,7 +503,7 @@ export function PetOverlay() {
         />
       </button>
       <div className="pet-overlay-status">
-        <span><strong>{activePet.displayName}</strong><small>Lv.{dashboard.progress.level} · {petBehaviorLabel(dashboard.life.behavior.state, locale)}</small></span>
+        <span><strong>{activePet.displayName}</strong><small>Lv.{dashboard.progress.level}</small></span>
         <i><b style={{ width: `${Math.round(dashboard.progress.progress * 100)}%` }} /></i>
       </div>
     </main>

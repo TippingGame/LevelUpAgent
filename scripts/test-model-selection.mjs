@@ -164,6 +164,37 @@ test("media-only connections have no text default and cannot be text fallbacks",
   }
 });
 
+test("removing a connection selects its predecessor, including media-only connections", () => {
+  const profiles = [
+    { id: "first", model: "text-model" },
+    { id: "media", model: "" },
+    { id: "middle", model: "text-model" },
+    { id: "last", model: "text-model" },
+  ];
+  assert.equal(selection.profileAfterRemoval(profiles, "last"), profiles[2]);
+  assert.equal(selection.profileAfterRemoval(profiles, "middle"), profiles[1]);
+  assert.equal(selection.profileAfterRemoval(profiles, "media"), profiles[0]);
+  assert.equal(selection.profileAfterRemoval(profiles, "first"), profiles[1]);
+  assert.equal(selection.profileAfterRemoval(profiles, "missing"), undefined);
+  assert.equal(selection.profileAfterRemoval([profiles[0]], "first"), undefined);
+  assert.equal(selection.profileAfterRemoval([], "first"), undefined);
+  assert.deepEqual(profiles.map((profile) => profile.id), ["first", "media", "middle", "last"]);
+});
+
+test("connection detection accepts media-only catalogs and preserves any selected modality", () => {
+  const image = { id: "gpt-image-2", outputModalities: ["image"] };
+  const video = { id: "Seedance-2.5", outputModalities: ["video"] };
+  const audio = { id: "tts-1", outputModalities: ["audio"] };
+  const text = { id: "gpt-6-astra", outputModalities: ["text"] };
+  const profile = { ...grokProfile, name: "Composite", model: "" };
+  for (const model of [image, video, audio]) {
+    assert.equal(selection.preferredConnectionModel(profile, [model]), model);
+    assert.equal(selection.preferredConnectionModel({ ...profile, model: ` ${model.id} ` }, [text, image, video, audio]), model);
+  }
+  assert.equal(selection.preferredConnectionModel(profile, [image, text]), text);
+  assert.equal(selection.preferredConnectionModel(profile, []), undefined);
+});
+
 test("OpenCode Go strips config prefixes and routes every documented model family", () => {
   assert.equal(selection.normalizeOpenCodeModelId("models/OpenCode-Go/gpt-5.6-luna"), "gpt-5.6-luna");
 

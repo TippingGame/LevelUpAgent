@@ -59,7 +59,7 @@ pnpm tauri dev
 
 </details>
 
-<sub>本地音乐支持 Windows x64：ACE-Step 1.5 使用 MIT／Qwen3 Apache-2.0；YuE2 INT8 支持参考旋律改编，YuE2 与 MusicGen 权重为 CC-BY-NC-4.0，仅限非商业用途。音频与 3D 大型资源按需下载。[功能与运行条件](docs/FEATURES.md) · [1.3.81 更新说明及平台签名情况](docs/RELEASE_1.3.81.md)</sub>
+<sub>本地音乐支持 Windows x64：ACE-Step 1.5 使用 MIT／Qwen3 Apache-2.0；YuE2 INT8 支持参考旋律改编，YuE2 与 MusicGen 权重为 CC-BY-NC-4.0，仅限非商业用途。音频与 3D 大型资源按需下载。[功能与运行条件](docs/FEATURES.md) · [1.3.82 更新说明及平台签名情况](docs/RELEASE_1.3.82.md)</sub>
 
 ---
 
