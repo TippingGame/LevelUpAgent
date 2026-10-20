@@ -22,7 +22,7 @@ Draft，因此 `v1.0.32` 继续显示 `Latest`；在核对资产并正式发布�
 
 ## 零、以后每次发布速查
 
-### v1.4.83：钉钉后台窗口收发与干净创作提示词
+### v1.4.83：钉钉后台窗口收发与干净创作提示词（已正式发布）
 
 - 后台定向输入及鼠标键盘并行干扰实测通过，限制见 docs/DINGTALK_BACKGROUND_1.4.83.md。
 - 破甲只影响会话，创作皮肤保留；上游参数适配仅在独立 LevelUpAPI。
@@ -172,6 +172,10 @@ Linux/WSL 必须覆盖真实进程组取消和目录链接恢复，Windows 原�
 选择和清理确认状态。正式应用发布前检查资源 Release 不会抢占 Latest。
 
 本文的仓库内同步副本为 `LevelUpAgent/docs/RELEASE_GUIDE.md`，修改发布规范时同时更新两份。
+
+已验证记录：v1.4.83 已于 2026-10-21 01:20:41（Asia/Shanghai）正式发布并设为 Latest。构建提交 186ba55f6ea77fc04137327a7e81f9ce6d66e92e，三平台 CI run 39462052648 与四平台 Release run 39462059272 均成功。10 个资产完整下载并通过 GitHub SHA256 digest 校验；Windows EXE/MSI updater 签名及可信注释签名有效，公开发布页和 latest.json 均返回 HTTP 200、版本为 1.4.83。
+正式 EXE 已同步安装包目录并更新 SHA256 清单。钉钉后台发送键鼠干扰实测、隔离原生四种外观与干净创作提示词通过；5 份资源清单和 48 个分卷公开可用。
+详情：LevelUpAgent/docs/RELEASE_1.4.83.md；证据：research/release-1.4.83-2026-10-21。
 
 已验证记录：v1.3.82 已于 2026-10-18 21:01:06（Asia/Shanghai）正式发布并设为 Latest。构建提交 329e046b6c6fcd594741279d3c88c3c84164849b，三平台 CI run 39127546685 与四平台 Release run 39127550436 均成功。10 个资产完整下载并通过 GitHub SHA256 digest 校验；Windows EXE/MSI updater 签名及可信注释签名有效，公开发布页和 latest.json 均返回 HTTP 200、版本为 1.3.82。
 正式 EXE 已同步安装包目录并更新 SHA256 清单。1.3.82 隔离原生回归、四种外观与 720 px WebView 视口通过；5 份资源清单和 48 个分卷公开可用。
