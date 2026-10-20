@@ -91,7 +91,7 @@ export function appearanceFindings(root) {
   const issues = [];
   for (const name of readdirSync(path.join(root, "src"), { recursive: true }).filter(f => /\.(?:css|tsx)$/.test(f)).sort()) {
     const file = `src/${name.replaceAll("\\", "/")}`;
-    // The fixed cyber skin and its preview screen intentionally own a palette.
+    // The existing fixed cyber skin intentionally owns a palette.
     if (file === "src/ArmorStudio.css") continue;
     const source = readFileSync(path.join(root, file), "utf8");
     const problems = file.endsWith(".css") ? inspectCss(source, file) : inspectTsx(source, file);

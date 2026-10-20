@@ -81,14 +81,6 @@ import {
   refreshMediaAsset,
 } from "../lib/bridge";
 import {
-  armorModeMediaInstructions,
-  armorModeMediaPrompt,
-  armorModeWritingInstructions,
-  type ArmorModeLevel,
-  type ArmorSkillState,
-  type ArmorWritingIntensity,
-} from "../lib/armorMode";
-import {
   autoLayoutConstellation,
   BUILT_IN_CONSTELLATION_BLUEPRINTS,
   CONSTELLATION_BLUEPRINTS_KEY,
@@ -175,10 +167,6 @@ import { isDesktop } from "../lib/bridge";
 interface ConstellationStudioProps {
   active: boolean;
   locale: string;
-  armorMode: boolean;
-  armorModeLevel: ArmorModeLevel;
-  armorModeSkills: ArmorSkillState;
-  armorWritingIntensity: ArmorWritingIntensity;
   activeProfile: ProviderProfile;
   profiles: ProviderProfile[];
   reasoningEffort: ReasoningEffort;
@@ -242,9 +230,8 @@ interface ConstellationProjectPayload {
 }
 
 export function ConstellationStudio(props: ConstellationStudioProps) {
-  const armorClassName = props.armorMode ? ` armor-mode armor-level-${props.armorModeLevel}` : "";
   return (
-    <main className={`constellation-studio creative-studio${armorClassName}`} data-armor-level={props.armorMode ? props.armorModeLevel : undefined} hidden={!props.active}>
+    <main className={`constellation-studio creative-studio`} hidden={!props.active}>
       <ReactFlowProvider>
         <ConstellationStudioInner {...props} />
       </ReactFlowProvider>
@@ -255,10 +242,6 @@ export function ConstellationStudio(props: ConstellationStudioProps) {
 function ConstellationStudioInner({
   active,
   locale,
-  armorMode,
-  armorModeLevel,
-  armorModeSkills,
-  armorWritingIntensity,
   activeProfile,
   profiles,
   reasoningEffort,
@@ -1492,12 +1475,7 @@ function ConstellationStudioInner({
           false,
           undefined,
           undefined,
-          armorModeWritingInstructions(armorMode, armorModeLevel, armorWritingIntensity, {
-            model: profile.model,
-            protocol: profile.protocol,
-            skills: armorModeSkills,
-            surface: "constellation",
-          }),
+          undefined,
           reasoningEffortForProfile(profile, reasoningEffort),
           () => {
             if (runEpochRef.current !== epoch) return;
@@ -1576,12 +1554,7 @@ function ConstellationStudioInner({
       profileId: route.profileId,
       model: route.model,
       protocol: route.protocol,
-      prompt: armorModeMediaPrompt(armorMode, armorModeLevel, mediaKind, effectivePrompt, {
-        model: route.model,
-        protocol: route.protocol,
-        skills: armorModeSkills,
-        surface: "constellation",
-      }),
+      prompt: effectivePrompt,
       count: Math.max(1, Math.min(mediaKind === "image" ? 8 : 4, node.data.count ?? 1)),
       size: mediaKind === "image"
         ? imageSize !== "auto" ? imageSize : undefined
@@ -1590,18 +1563,7 @@ function ConstellationStudioInner({
       outputFormat: mediaKind === "video" || mediaKind === "image" && imageCapabilities.minimax ? undefined : node.data.outputFormat,
       background: mediaKind === "image" && !imageCapabilities.minimax && node.data.background !== "auto" ? node.data.background : undefined,
       voice: mediaKind === "audio" ? node.data.voice?.trim() || undefined : undefined,
-      instructions: armorModeMediaInstructions(
-        armorMode,
-        armorModeLevel,
-        mediaKind,
-        mediaKind === "audio" ? node.data.instruction?.trim() || undefined : undefined,
-        {
-          model: route.model,
-          protocol: route.protocol,
-          skills: armorModeSkills,
-          surface: "constellation",
-        },
-      ),
+      instructions: mediaKind === "audio" ? node.data.instruction?.trim() || undefined : undefined,
       seconds: mediaKind === "video" ? videoOptions.seconds : undefined,
       videoMode: mediaKind === "video" && videoHasOutputControls ? videoMode : "text",
       videoResolution: videoHasOutputControls ? videoOptions.resolution : undefined,

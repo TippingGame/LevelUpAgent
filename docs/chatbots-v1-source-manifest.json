@@ -1,0 +1,157 @@
+{
+  "implementationRevision": "chatbots-v1.1-local-20261019",
+  "acceptanceDate": "2026-10-19",
+  "acceptanceTimezone": "Asia/Shanghai",
+  "capturedAt": "2026-10-18T23:43:49.641177+00:00",
+  "status": "uncommitted working tree; not a release",
+  "applicationVersion": "1.3.82",
+  "databaseSchema": 21,
+  "gatewayProtocol": 1,
+  "baselineCommit": "946af37f807d1fdb6d5f6ddfff627aa28b74ed1b",
+  "dependencies": {
+    "lark-oapi": "1.7.5",
+    "dingtalk-stream": "0.24.3",
+    "qq-botpy": "1.2.1",
+    "websockets": "12.0",
+    "httpx": "0.28.1"
+  },
+  "localAcceptance": "complete; runtime source unchanged from chatbots-v1.1-20261018",
+  "livePlatformValidation": "deferred by user on 2026-10-19; not part of this local delivery; not tested",
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 4234,
+      "sha256": "9c99839fc9e21cc91e0c16ac3f04034cf649f06d056ac3f10140204bf644430f"
+    },
+    {
+      "path": "docs/CHATBOTS.md",
+      "bytes": 7457,
+      "sha256": "d7a8cbb6d470b07d338edcf5c12f96d37b71d2a948757e5063a140622ae33ec3"
+    },
+    {
+      "path": "docs/CHATBOTS_IMPLEMENTATION.md",
+      "bytes": 9688,
+      "sha256": "f8b0bdfb04c95634305d510e6c8314c5d432097687a4e15a57adfecda96bc0de"
+    },
+    {
+      "path": "docs/CHATBOTS_LOCAL_ACCEPTANCE_2026-10-19.md",
+      "bytes": 3902,
+      "sha256": "e9c99e041060b04a3f421635e871adb9f41caa58bf90fb0536ec113fa6db39ea"
+    },
+    {
+      "path": "docs/CHATBOTS_VALIDATION_2026-10-18.md",
+      "bytes": 5253,
+      "sha256": "cc1661d0e4b8cb681fd5adf9574e6aa9047e59917d2500d78399b5c09fbe0175"
+    },
+    {
+      "path": "docs/README.md",
+      "bytes": 3460,
+      "sha256": "798f3ca51c35b95c6fb1e6092107c4e62ceb8c013667716b9c28d86893b4e67d"
+    },
+    {
+      "path": "modules/chat_gateway/README.md",
+      "bytes": 1865,
+      "sha256": "262772a9f40b3c1a98a69a9255312b92921bf3138e5d29069ccdaa75020faf06"
+    },
+    {
+      "path": "modules/chat_gateway/gateway.py",
+      "bytes": 19812,
+      "sha256": "331a6e3ca7cf4ca3cda55bb122e4917d09a38d3e6b525a71a3c9f8c5ad450287"
+    },
+    {
+      "path": "modules/chat_gateway/requirements-lock-windows-py310.txt",
+      "bytes": 562,
+      "sha256": "6f7827b15e8cc02ae6c41dcda263dd5e061496c6af40eab0874a66fb58bf1e83"
+    },
+    {
+      "path": "modules/chat_gateway/requirements.txt",
+      "bytes": 172,
+      "sha256": "3e6ebef6cc84623f45c8a10297980c383bc104d7d760db399343fe0b74686969"
+    },
+    {
+      "path": "modules/chat_gateway/test_gateway.py",
+      "bytes": 15273,
+      "sha256": "cba8b380f1c0242e8b9f39119be12fa72cfb621db9e37ead1c4ec99edce8e408"
+    },
+    {
+      "path": "scripts/chatbots-mock-platform.py",
+      "bytes": 2765,
+      "sha256": "5b55a7399ba5b2367255a2f7592b7270d4bb2a916a25d226137315458b0873dd"
+    },
+    {
+      "path": "scripts/verify-chatbots.mjs",
+      "bytes": 19611,
+      "sha256": "5a59fc68b35508fb58592d737ca08a6c5a5e0d66929231d2b1da54190cd692e6"
+    },
+    {
+      "path": "src-tauri/THIRD_PARTY_NOTICES.md",
+      "bytes": 5157,
+      "sha256": "0b9abc15aeca7d340da6f438d9e99bdb3ad3036bae91017210a231315c52d5c9"
+    },
+    {
+      "path": "src-tauri/src/agent.rs",
+      "bytes": 311590,
+      "sha256": "de2a1a997b7ed371554fc2c220b341061bf9833be56e9e9b6d3398a043334968"
+    },
+    {
+      "path": "src-tauri/src/chatbots/gateway.rs",
+      "bytes": 12537,
+      "sha256": "06e79e94529b27de0277986bb4c20b7e3250840da343c820d9865286cbae6b0b"
+    },
+    {
+      "path": "src-tauri/src/chatbots/mod.rs",
+      "bytes": 10387,
+      "sha256": "8d2d077afa917938c4fdc42a2e369158c6af3d7e2e41cd189736812267d8f818"
+    },
+    {
+      "path": "src-tauri/src/chatbots/types.rs",
+      "bytes": 3624,
+      "sha256": "4b104ab9878b23f9fa8b291c7d0c80721e9e9d9ff57957a30c1f422b5d131bdf"
+    },
+    {
+      "path": "src-tauri/src/database.rs",
+      "bytes": 224830,
+      "sha256": "90c90b67e51af6251ead361f23bb41cdbcc0c6299f3de9501faf3fef19756d8d"
+    },
+    {
+      "path": "src-tauri/src/database/chatbots.rs",
+      "bytes": 34570,
+      "sha256": "23120b83bd6b4e4eba90359db28c8ed0244c1911d58af0c93cf54701eb1bb0fa"
+    },
+    {
+      "path": "src-tauri/src/database/chatbots_tests.rs",
+      "bytes": 14725,
+      "sha256": "16ccf2e17cf89be60c656428c8ae5aa7aa985759a215d305593291c7faef7849"
+    },
+    {
+      "path": "src-tauri/src/lib.rs",
+      "bytes": 631784,
+      "sha256": "3a87d71cd75acd737bf06f45f1617d47ebe5dd8360af63fc930f4acfe72ae570"
+    },
+    {
+      "path": "src-tauri/tauri.conf.json",
+      "bytes": 3979,
+      "sha256": "7e9538761f8641986c85574b2b18ceb9286987b6d96b2d61dd4f5efb30a50b27"
+    },
+    {
+      "path": "src/components/ChatBotWorkspace.css",
+      "bytes": 4045,
+      "sha256": "d07dfad00a1812e0fd3bc1573f5af93b1994c0e1766785e5a4942e79a4b7d4c5"
+    },
+    {
+      "path": "src/components/ChatBotWorkspace.tsx",
+      "bytes": 26418,
+      "sha256": "0e788a4f40e816a5f56081fab5ad28ee69608e04e8cac6e3fd40f6e28f25e745"
+    },
+    {
+      "path": "src/components/PetStudio.tsx",
+      "bytes": 28304,
+      "sha256": "0a319bbef9f227be529fee2d552742df3156dcd026d676375d6eb62615ff5cdf"
+    },
+    {
+      "path": "src/lib/chatbots.ts",
+      "bytes": 2702,
+      "sha256": "571194cb063d46d8a094c73b67188c970707bdcf3ae3c299e952537860755485"
+    }
+  ]
+}

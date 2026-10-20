@@ -22,6 +22,12 @@ Draft，因此 `v1.0.32` 继续显示 `Latest`；在核对资产并正式发布�
 
 ## 零、以后每次发布速查
 
+### v1.4.83：钉钉后台窗口收发与干净创作提示词
+
+- 后台定向输入及鼠标键盘并行干扰实测通过，限制见 docs/DINGTALK_BACKGROUND_1.4.83.md。
+- 破甲只影响会话，创作皮肤保留；上游参数适配仅在独立 LevelUpAPI。
+- 发布记录见 docs/RELEASE_1.4.83.md，大型资源继续复用。
+
 ### v1.3.82：模型连接与桌宠名字栏修复（已正式发布）
 
 - 模型连接支持保存全部模型类型，余额查询独立于文字模型，删除后选中上一项。新连接默认不作为文字备用连接。
@@ -125,7 +131,7 @@ gh release edit music-workbench-resources --draft=false --prerelease --latest=fa
 
 ### 从 v1.2.71 起：应用和 3D 通用资源分别发布
 
-应用安装包继续通过 `vX.Y.Z` tag 触发四平台构建，本次应用版本为 `1.3.82`。
+应用安装包继续通过 `vX.Y.Z` tag 触发四平台构建，本次应用版本为 `1.4.83`。
 Python / PyTorch / CUDA、TripoSG、SD2.1 + MV-Adapter、Blender 不进入应用安装包，
 也不再随每个应用版本重复打包或上传。所有额外资源固定放在同一个 Release：
 
@@ -140,7 +146,7 @@ https://github.com/TippingGame/LevelUpAgent/releases/tag/model-workbench-resourc
 - 清单名为 `model-workbench-<资源版本>-<目标>.json`，分片名也包含独立资源版本，每片小于 2 GB。
   初始清单：`model-workbench-2026.10.1-linux-x64-cu118.json`。
 - 资源 Release 使用 prerelease 且 `--latest=false`，只用于把通用资源与应用更新渠道分开，
-  不能上传 `latest.json`；应用正式版（本次 `v1.3.82`）设为 Latest。
+  不能上传 `latest.json`；应用正式版（本次 `v1.4.83`）设为 Latest。
 - 只有模型、CUDA 或依赖内容变化时才增加资源版本并上传新资产，旧资产保留。
   不覆盖已公开的分片或清单；同名同哈希文件复用，同名不同哈希必须改资源版本。
 - 上传顺序：本地校验所有分片与完整归档 → 上传分片并核对 GitHub digest → 最后上传清单。

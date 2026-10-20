@@ -5,7 +5,7 @@ export const CLIENT_ACTION_CAPABILITY_ID = manifest.capabilityId;
 export const CLIENT_ACTION_CONTRACT_VERSION = manifest.version;
 
 export type ClientWorkspaceView = "chat" | "media" | "writing" | "constellation" | "spine";
-export type ClientDialog = "settings" | "themes" | "extensions" | "skills" | "instructions" | "logs" | "pet" | "armor";
+export type ClientDialog = "settings" | "themes" | "extensions" | "skills" | "instructions" | "logs" | "pet";
 
 export interface ClientActionEvent {
   capabilityId: string;
@@ -80,9 +80,6 @@ export function dispatchClientAction(action: unknown, target: ClientActionTarget
       return true;
     case "dialog.pet":
       target.showDialog("pet");
-      return true;
-    case "dialog.armor":
-      target.showDialog("armor");
       return true;
     default:
       return false;

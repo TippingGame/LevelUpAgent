@@ -1,0 +1,5 @@
+# Windows desktop channel; no DingTalk SDK, App ID, secret, or organization API.
+# OCR models ship in the wheel and run locally. Python 3.10-3.12.
+rapidocr-onnxruntime==1.4.4
+Pillow==11.3.0
+uiautomation==2.0.29

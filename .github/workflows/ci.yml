@@ -48,6 +48,11 @@ jobs:
           python -B -m unittest discover -s modules/model_workbench/tests -v
       - name: Test audio queue, editing, and service lifecycle
         run: python -B -m unittest discover -s modules/music_workbench/tests -v
+      - name: Test bot gateways and background desktop transport
+        if: runner.os == 'Windows'
+        run: |
+          python -m pip install -r modules/chat_gateway/requirements-lock-windows-py310.txt -r modules/chat_gateway/requirements-desktop-lock-windows-py310.txt
+          python -B -m unittest discover -s modules/chat_gateway -v
       - run: pnpm build
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings

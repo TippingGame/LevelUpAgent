@@ -77,3 +77,31 @@ SOFTWARE.
   `EncodingDetector` API as a secondary signal for no-BOM legacy text. No
   upstream source is copied; ambiguous short inputs are rejected and require an
   explicit encoding hint.
+
+## Optional chat gateway SDKs
+
+The original modules/chat_gateway adapter installs these packages on demand in
+an isolated Python environment. Their distributions retain upstream licenses:
+
+- lark-oapi 1.7.5 — MIT, https://github.com/larksuite/oapi-sdk-python
+- dingtalk-stream 0.24.3 — MIT, https://github.com/open-dingtalk/dingtalk-stream-sdk-python
+- qq-botpy 1.2.1 — MIT, https://github.com/tencent-connect/botpy
+- websockets 12.0 — BSD-3-Clause, https://github.com/python-websockets/websockets
+- httpx 0.28.1 — BSD-3-Clause, https://github.com/encode/httpx
+
+Direct requirements and the tested Windows/Python 3.10 transitive snapshot are
+recorded in modules/chat_gateway. The source references and protocol notes are
+in that directory's README. OneBot v11 is an external compatibility interface.
+NapCat, AstrBot, MaiBot and WeChat account-hook implementations are not bundled.
+
+The optional Windows DingTalk desktop adapter installs these packages in a
+separate local Python runtime; upstream license files remain in the installed
+distributions. It does not embed or modify the DingTalk client.
+
+- rapidocr-onnxruntime 1.4.4 — Apache-2.0, https://github.com/RapidAI/RapidOCR
+- Pillow 11.3.0 — MIT-CMU, https://github.com/python-pillow/Pillow
+- uiautomation 2.0.29 — Apache-2.0, https://github.com/yinkaisheng/Python-UIAutomation-for-Windows
+
+Transitive packages and OCR models are installed by their Python distributions.
+See modules/chat_gateway/requirements-desktop-lock-windows-py310.txt for the
+tested dependency closure; this lock is a Windows/Python 3.10 snapshot.

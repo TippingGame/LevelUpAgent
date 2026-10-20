@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
+mod chatbots;
 mod conversations;
 pub use conversations::{ComposerDraft, ThreadListQuery, ThreadPage};
 
@@ -19,7 +20,7 @@ use crate::models::{
     WritingProjectRecord,
 };
 
-const SCHEMA_VERSION: i64 = 20;
+const SCHEMA_VERSION: i64 = 21;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HarnessRecoverySummary {
@@ -497,6 +498,7 @@ impl Database {
                    ON constellation_projects(updated_at DESC);",
             )
             .map_err(database_error)?;
+        chatbots::migrate(&connection)?;
         connection
             .pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(database_error)?;

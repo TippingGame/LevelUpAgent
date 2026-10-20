@@ -19,7 +19,6 @@
     { "id": "dialog.instructions", "description": "Open custom Instructions." },
     { "id": "dialog.logs", "description": "Open provider request logs." },
     { "id": "dialog.pet", "description": "Open the Starlight Echo workspace." },
-    { "id": "dialog.armor", "description": "Open the Armor Mode console." },
     { "id": "dialog.close", "description": "Close all application dialogs." }
   ]
 }

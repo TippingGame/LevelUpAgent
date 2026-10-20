@@ -571,9 +571,6 @@ test("constellation requests honor model order and share validated studio output
   const requestSource = studioSource.slice(studioSource.indexOf("    const route = resolveMediaRoute(node, mediaCatalog"), studioSource.indexOf("    setMediaPending((value) => value + request.count)"));
   const host = {
     ...mediaCapabilities, ...constellation, tr: (_zh, en) => en,
-    armorMode: false, armorModeLevel: "standard", armorModeSkills: {},
-    armorModeMediaPrompt: (_enabled, _level, _kind, prompt) => prompt,
-    armorModeMediaInstructions: (_enabled, _level, _kind, instructions) => instructions,
   };
   const compiled = ts.transpileModule(`${routeSource}\nfunction build(node, mediaCatalog, attachments = []) { const mediaKind = node.data.kind; const prompt = 'test'; const operation = 'generate'; const maskAttachment = undefined; ${requestSource} return request; }`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
   const build = new Function(...Object.keys(host), `${compiled}\nreturn build;`)(...Object.values(host));

@@ -30,6 +30,7 @@ import {
 import { IconButton } from "./IconButton";
 import { getPixelAlignedPetSize, PetAvatar, PetSprite, type PetSpriteState } from "./PetSprite";
 import { PetLifeWorkspace, type PetLifeView } from "./PetLifeWorkspace";
+import { ChatBotWorkspace } from "./ChatBotWorkspace";
 import { petBehaviorLabel, petBehaviorSprite } from "../lib/petAutonomy";
 import {
   configurePetHatch,
@@ -111,7 +112,7 @@ export function PetStudio({
   const [environment, setEnvironment] = useState<HatchEnvironment | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
-  const [panel, setPanel] = useState<"hatch" | "memory" | "preview" | PetLifeView>(panelRequest?.view ?? "life");
+  const [panel, setPanel] = useState<"bots" | "hatch" | "memory" | "preview" | PetLifeView>(panelRequest?.view ?? "life");
   const [previewState, setPreviewState] = useState<PetSpriteState | null>(null);
   const [petName, setPetName] = useState("");
   const [description, setDescription] = useState("");
@@ -357,6 +358,7 @@ export function PetStudio({
     "--pet-stage-head-offset": `${18 + previewSize.height}px`,
   };
 
+  if (panel === "bots") return <ChatBotWorkspace pets={dashboard.pets} initialPetId={activePet.id} locale={locale} onBack={() => setPanel("life")} />;
   return (
     <main className="pet-studio">
       <header className="pet-studio-header" data-tauri-drag-region>
@@ -365,6 +367,7 @@ export function PetStudio({
           <div><strong>{text("摇光残影", "Starlight Echoes")}</strong><small>{activePet.displayName} · Lv.{dashboard.progress.level}</small></div>
         </div>
         <div className="pet-studio-actions">
+          <button type="button" className="primary-button" onClick={() => setPanel("bots")}><MessageCircle size={15} />{text("自动机器人", "Chat bots")}</button>
           <IconButton label={dashboard.overlayVisible ? text("隐藏桌面残影", "Hide Starlight Echo") : text("显示桌面残影", "Show Starlight Echo")} onClick={() => void toggleOverlay()} disabled={busy === "overlay"}>
             {dashboard.overlayVisible ? <Eye size={17} /> : <EyeOff size={17} />}
           </IconButton>

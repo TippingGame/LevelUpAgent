@@ -1,6 +1,6 @@
 # 文档
 
-当前应用版本：`1.3.82`。模型连接与桌宠名字栏于 2026-10-18 更新；其余专题保留各自的验证日期。文档中的“支持”指代码具备该能力；外部模型可用性、实际质量和平台认证需分别验证。
+当前应用版本：`1.4.83`。钉钉后台窗口收发与会话专用破甲于 2026-10-21 更新；其余专题保留各自的验证日期。文档中的“支持”指代码具备该能力；外部模型可用性、实际质量和平台认证需分别验证。
 
 | 内容 | 入口 |
 | --- | --- |
@@ -22,10 +22,15 @@
 | 剧情图与试玩 | [剧情图](STORY_GRAPH_UX.md) |
 | 执行提示配置 | [Armor Mode](ARMOR_MODE.md) |
 | 桌面陪伴、记忆、孵化与备份 | [摇光残影](DESKTOP_PETS.md) |
+| 每个残影独立的飞书、钉钉、QQ 与 OneBot 自动答复（开发版） | [机器人使用](CHATBOTS.md)、[实施台账](CHATBOTS_IMPLEMENTATION.md)、[验证记录](CHATBOTS_VALIDATION_2026-10-18.md)、[本地交付](CHATBOTS_LOCAL_ACCEPTANCE_2026-10-19.md) |
+| 钉钉免开发者权限后台窗口收发（实验版） | [后台实现与验证](DINGTALK_BACKGROUND_1.4.83.md)、[本地验收](CHATBOTS_DESKTOP_ACCEPTANCE_2026-10-20.md) |
+| 机器人自动识别并复用已有 Python（build3） | [变更与验证](CHATBOTS_PYTHON_DETECTION_2026-10-20.md) |
+| 钉钉桌面自动校准、读取与启动修复（build4） | [实机验收及限制](CHATBOTS_LIVE_ACCEPTANCE_2026-10-20.md) |
+| 机器人私聊/群聊勾选、列表全选与后台限制（build6） | [范围与验收记录](CHATBOTS_SCOPES_2026-10-20.md) |
 | 主题包和声明式布局 | [Themes](THEMES.md)、[Layouts](LAYOUTS.md) |
 | 主题制作与验收约束 | [开发规范](THEME_DEVELOPMENT.md)、[Agent 工作流程](THEME_AGENT_WORKFLOW.md) |
 | 开发优先级与已知缺口 | [路线图](ROADMAP.md) |
-| 安装包、签名与更新 | [发布](RELEASE.md)、[发布手册](RELEASE_GUIDE.md)、[1.3.82 发布记录](RELEASE_1.3.82.md) |
+| 安装包、签名与更新 | [发布](RELEASE.md)、[发布手册](RELEASE_GUIDE.md)、[1.4.83 发布记录](RELEASE_1.4.83.md) |
 | 参考来源与适配范围 | [参考研究](REFERENCE_RESEARCH.md) |
 | 生图到 Unity 网格、本地与云端 3D 任务方案（调研／未实现） | [高斯泼溅与生模型工作流](GAUSSIAN_3D_WORKFLOW_RESEARCH.md) |
 | 可拆卸 3D 模块、体积核算与验证工具 | [模块验证方案](MODEL3D_MODULE_VALIDATION.md)、[逐步验证日志](MODEL3D_VALIDATION_LOG.md) |
@@ -35,3 +40,5 @@
 `VERSION_*.md`、[提示链路基线](PROMPT_PIPELINE_BASELINE.md)、[创作空间对照](CREATIVE_STUDIO_AUDIT.md)、[XiaoLu 迁移](XIAOLU_MIGRATION.md)保留当时的版本与验证记录，不代表本轮重新验证。
 [Harness 设计](HARNESS_DESIGN.md)同时包含原设计与当前实现映射，阅读时以其状态说明和当前架构为准。
 [模型头像提示](MODEL_AVATAR_PROMPTS.md)及 `avatar-generation.json` 是素材制作记录。
+
+- [钉钉群 @ 修复与验收（build5，2026-10-20）](CHATBOTS_GROUP_ACCEPTANCE_2026-10-20.md)

@@ -2935,7 +2935,7 @@ fn effective_image_prompt(request: &MediaGenerationRequest) -> String {
         return prompt.to_owned();
     };
     format!(
-        "{prompt}\n\n[Image output requirement: {requirement}. Treat this as a hard composition constraint. Fill the canvas edge to edge without letterboxing, blank margins, or decorative borders.]"
+        "{prompt}\n\n[Image output requirement: {requirement}. Preserve the user's requested composition, including any requested margins or borders.]"
     )
 }
 
@@ -2957,6 +2957,8 @@ fn image_output_requirement(size: &str) -> Option<&'static str> {
         "2160x3840" => Some("render at 2160x3840 pixels with a 9:16 portrait aspect ratio"),
         "16:9" => Some("use an exact 16:9 widescreen aspect ratio"),
         "9:16" => Some("use an exact 9:16 portrait aspect ratio"),
+        "4:3" => Some("use an exact 4:3 landscape aspect ratio"),
+        "3:4" => Some("use an exact 3:4 portrait aspect ratio"),
         "21:9" => Some("use an exact 21:9 ultrawide aspect ratio"),
         "9:21" => Some("use an exact 9:21 ultra-tall portrait aspect ratio"),
         _ => None,
@@ -2971,6 +2973,8 @@ fn gemini_aspect_ratio(size: &str) -> Option<&'static str> {
         "2048x2048" => Some("1:1"),
         "2048x1152" | "3840x2160" | "16:9" => Some("16:9"),
         "1152x2048" | "2160x3840" | "9:16" => Some("9:16"),
+        "4:3" => Some("4:3"),
+        "3:4" => Some("3:4"),
         "21:9" => Some("21:9"),
         "9:21" => Some("9:21"),
         _ => None,
@@ -3463,8 +3467,15 @@ mod tests {
         let prompt = effective_image_prompt(&request);
         assert!(prompt.starts_with("A cinematic city"));
         assert!(prompt.contains("exact 21:9 ultrawide aspect ratio"));
+        assert!(!prompt.contains("without letterboxing, blank margins"));
+        assert!(prompt.contains("Preserve the user's requested composition"));
         assert_eq!(gemini_aspect_ratio("21:9"), Some("21:9"));
         assert_eq!(gemini_aspect_ratio("9:21"), Some("9:21"));
+        for ratio in ["4:3", "3:4"] {
+            request.size = Some(ratio.to_owned());
+            assert!(effective_image_prompt(&request).contains(ratio));
+            assert_eq!(gemini_aspect_ratio(ratio), Some(ratio));
+        }
 
         request.size = Some("1024x1536".to_owned());
         assert!(effective_image_prompt(&request).contains("1024x1536 pixels"));
@@ -3594,6 +3605,104 @@ mod tests {
         assert_eq!(&wav[0..4], b"RIFF");
         assert_eq!(&wav[8..12], b"WAVE");
         assert_eq!(wav.len(), 48);
+    }
+
+    #[tokio::test]
+    async fn openai_image_controls_preserve_existing_fields_for_json_and_multipart() {
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\nmock-image");
+        for model in ["gpt-image-2", "gpt-image-2.5"] {
+            for with_reference in [false, true] {
+                for (size, quality, size_key, quality_key, expected_quality) in [
+                    ("16:9", "2K", "size", "quality", "2K"),
+                    ("3:4", "4k", "size", "quality", "4k"),
+                    ("2048x1152", "high", "size", "quality", "high"),
+                ] {
+                    let (base_url, server) =
+                        mock_sequence_inspecting(
+                            vec![MockResponse {
+                                method: "POST",
+                                path: if with_reference {
+                                    "/v1/images/edits"
+                                } else {
+                                    "/v1/images/generations"
+                                },
+                                status: 200,
+                                content_type: "application/json",
+                                body: json!({ "data": [{ "b64_json": encoded }] })
+                                    .to_string()
+                                    .into_bytes(),
+                            }],
+                            move |_, bytes| {
+                                let raw = String::from_utf8_lossy(bytes);
+                                let (headers, body) = raw.split_once("\r\n\r\n").unwrap();
+                                if with_reference {
+                                    assert!(
+                                        headers
+                                            .to_ascii_lowercase()
+                                            .contains("multipart/form-data; boundary=")
+                                    );
+                                    assert!(body.contains(&format!(
+                                        "name=\"{size_key}\"\r\n\r\n{size}\r\n"
+                                    )));
+                                    assert!(body.contains(&format!(
+                                        "name=\"{quality_key}\"\r\n\r\n{expected_quality}\r\n"
+                                    )));
+                                    assert!(
+                                        body.contains("name=\"image\"; filename=\"reference.png\"")
+                                    );
+                                    assert!(body.contains("exact-reference-bytes"));
+                                    assert!(body.contains("两只杯子，左红右蓝，保留白边"));
+                                    assert!(!body.contains("name=\"aspect_ratio\""));
+                                    assert!(!body.contains("name=\"resolution\""));
+                                } else {
+                                    let value: Value = serde_json::from_str(body).unwrap();
+                                    assert_eq!(value[size_key], size);
+                                    assert_eq!(value[quality_key], expected_quality);
+                                    assert_eq!(value["model"], model);
+                                    assert!(value.get("aspect_ratio").is_none());
+                                    assert!(value.get("resolution").is_none());
+                                    assert_eq!(value["n"], 1);
+                                    assert!(
+                                        value["prompt"]
+                                            .as_str()
+                                            .unwrap()
+                                            .starts_with("两只杯子，左红右蓝，保留白边")
+                                    );
+                                }
+                            },
+                        );
+                    let mut provider = provider("primary", model);
+                    provider.profile.base_url = base_url;
+                    let mut request = request(MediaKind::Image, 1);
+                    request.prompt = "两只杯子，左红右蓝，保留白边".to_owned();
+                    request.size = Some(size.to_owned());
+                    request.quality = Some(quality.to_owned());
+                    let references = if with_reference {
+                        vec![ManagedReference {
+                            file_name: "reference.png".to_owned(),
+                            mime_type: "image/png".to_owned(),
+                            bytes: b"exact-reference-bytes".to_vec(),
+                            kind: AttachmentKind::Image,
+                        }]
+                    } else {
+                        Vec::new()
+                    };
+                    let blobs = call_openai_images(
+                        &Client::new(),
+                        &provider,
+                        model,
+                        &request,
+                        &references,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(blobs.len(), 1);
+                    server.join().unwrap();
+                }
+            }
+        }
     }
 
     #[tokio::test]

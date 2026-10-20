@@ -2,13 +2,10 @@ import type { AgentMessage, AgentThread, DiffViewSettings, ImageAttachment, Perm
 import { normalizeTaskCompletionNotices, type TaskCompletionNotice } from "./taskCompletion";
 import {
   DEFAULT_ARMOR_MODE_LEVEL,
-  DEFAULT_ARMOR_WRITING_INTENSITY,
   isArmorModeLevel,
-  isArmorWritingIntensity,
   normalizeArmorModeSkills,
   type ArmorModeLevel,
   type ArmorSkillState,
-  type ArmorWritingIntensity,
 } from "./armorMode";
 import { tr } from "./i18n";
 
@@ -22,7 +19,6 @@ const REASONING_EFFORT_KEY = "levelup-agent.reasoning-effort.v1";
 const ARMOR_MODE_KEY = "levelup-agent.armor-mode.v1";
 const ARMOR_MODE_LEVEL_KEY = "levelup-agent.armor-mode-level.v1";
 const ARMOR_MODE_SKILLS_KEY = "levelup-agent.armor-mode-skills.v1";
-const ARMOR_MODE_WRITING_INTENSITY_KEY = "levelup-agent.armor-mode-writing-intensity.v1";
 const HIDDEN_PROJECTS_KEY = "levelup-agent.hidden-projects.v1";
 const PINNED_THREADS_KEY = "levelup-agent.pinned-threads.v1";
 const ACTIVE_THEME_KEY = "levelup-agent.active-theme.v1";
@@ -334,16 +330,6 @@ export function loadArmorModeSkills(): ArmorSkillState {
 
 export function saveArmorModeSkills(skills: ArmorSkillState) {
   writeStorageValue(ARMOR_MODE_SKILLS_KEY, JSON.stringify(normalizeArmorModeSkills(skills)));
-}
-
-export function loadArmorWritingIntensity(): ArmorWritingIntensity {
-  const stored = readStorageValue(ARMOR_MODE_WRITING_INTENSITY_KEY);
-  return isArmorWritingIntensity(stored) ? stored : DEFAULT_ARMOR_WRITING_INTENSITY;
-}
-
-export function saveArmorWritingIntensity(intensity: ArmorWritingIntensity) {
-  if (intensity === DEFAULT_ARMOR_WRITING_INTENSITY) removeStorageValue(ARMOR_MODE_WRITING_INTENSITY_KEY);
-  else writeStorageValue(ARMOR_MODE_WRITING_INTENSITY_KEY, intensity);
 }
 
 export function loadHiddenProjectKeys(): Set<string> {

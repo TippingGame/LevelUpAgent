@@ -29,6 +29,8 @@
 | **故事与世界** | 写作工作台 · 设定与参考库 · 剧情试玩 · Spine · 3D |
 | **自己的工作方式** | Skills · MCP · 星图工作流 · 主题与布局 · 桌宠陪伴 |
 
+开发中的 [摇光残影自动机器人](docs/CHATBOTS.md)：每个形象独立绑定模型、人格、知识和聊天路由，接入飞书、钉钉、QQ 官方机器人与实验 OneBot。代码与本地模拟验收已完成，真实平台应用仍待联调；尚未包含在已发布的 1.4.83 安装包中。
+
 ## 灵感，有地方落地
 
 写下画面，带上参考图，开始创作。提示词、参数与生成历史留在本机，下一次灵感可以接着上一次继续。
@@ -59,7 +61,7 @@ pnpm tauri dev
 
 </details>
 
-<sub>本地音乐支持 Windows x64：ACE-Step 1.5 使用 MIT／Qwen3 Apache-2.0；YuE2 INT8 支持参考旋律改编，YuE2 与 MusicGen 权重为 CC-BY-NC-4.0，仅限非商业用途。音频与 3D 大型资源按需下载。[功能与运行条件](docs/FEATURES.md) · [1.3.82 更新说明及平台签名情况](docs/RELEASE_1.3.82.md)</sub>
+<sub>本地音乐支持 Windows x64：ACE-Step 1.5 使用 MIT／Qwen3 Apache-2.0；YuE2 INT8 支持参考旋律改编，YuE2 与 MusicGen 权重为 CC-BY-NC-4.0，仅限非商业用途。音频与 3D 大型资源按需下载。[功能与运行条件](docs/FEATURES.md) · [1.4.83 更新说明及平台签名情况](docs/RELEASE_1.4.83.md)</sub>
 
 ---
 

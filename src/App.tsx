@@ -209,7 +209,6 @@ import {
   loadArmorMode,
   loadArmorModeLevel,
   loadArmorModeSkills,
-  loadArmorWritingIntensity,
   loadActiveThreadId,
   loadLastActiveThreadId,
   loadComposerHeight,
@@ -230,8 +229,6 @@ import {
   saveProfiles,
   saveArmorMode,
   saveArmorModeLevel,
-  saveArmorModeSkills,
-  saveArmorWritingIntensity,
   savePermissionLevel,
   saveReasoningEffort,
   savePinnedThreadIds,
@@ -252,12 +249,9 @@ import {
 import {
   ARMOR_MODE_LEVELS,
   ARMOR_MODE_PROFILES,
-  armorModeMediaInstructions,
-  armorModeMediaPrompt,
   armorModeRunInstructions,
   type ArmorModeLevel,
   type ArmorSkillState,
-  type ArmorWritingIntensity,
 } from "./lib/armorMode";
 import { getAppLocale, setAppLocale, tr, type AppLocale } from "./lib/i18n";
 import { executeCallsWithParallelMedia } from "./lib/mediaConcurrency";
@@ -403,7 +397,6 @@ const MediaStudio = lazy(() => import("./components/MediaStudio").then((module) 
 const MediaAssetCard = lazy(() => import("./components/MediaStudio").then((module) => ({ default: module.MediaAssetCard })));
 const WritingStudio = lazy(() => import("./components/WritingStudio").then((module) => ({ default: module.WritingStudio })));
 const ConstellationStudio = lazy(() => import("./components/ConstellationStudio").then((module) => ({ default: module.ConstellationStudio })));
-const ArmorStudio = lazy(() => import("./components/ArmorStudio").then((module) => ({ default: module.ArmorStudio })));
 const PetStudio = lazy(() => import("./components/PetStudio").then((module) => ({ default: module.PetStudio })));
 const MarkdownRenderer = lazy(() => import("./components/MarkdownRenderer"));
 
@@ -821,9 +814,7 @@ function App() {
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>(loadReasoningEffort);
   const [armorMode, setArmorMode] = useState(loadArmorMode);
   const [armorModeLevel, setArmorModeLevel] = useState<ArmorModeLevel>(loadArmorModeLevel);
-  const [armorModeSkills, setArmorModeSkills] = useState<ArmorSkillState>(loadArmorModeSkills);
-  const [armorWritingIntensity, setArmorWritingIntensity] = useState<ArmorWritingIntensity>(loadArmorWritingIntensity);
-  const [armorStudioOpen, setArmorStudioOpen] = useState(false);
+  const [armorModeSkills] = useState<ArmorSkillState>(loadArmorModeSkills);
   const { snapshot: composerDraft, error: draftError, setContent: setDraft, store: draftStore } = useComposerDraft(activeThreadId);
   const draft = composerDraft.content;
   const draftAttachments = composerDraft.attachments;
@@ -1480,29 +1471,12 @@ function App() {
       if (generationRequest.backgroundMode === "ai") {
         const mediaResult = await generateMedia({
           kind: "image",
-          prompt: armorModeMediaPrompt(
-            armorMode,
-            armorModeLevel,
-            "image",
-            themeGenerationBackgroundPrompt(generationRequest, locale),
-            {
-              model: activeProfile.model,
-              protocol: activeProfile.protocol,
-              skills: armorModeSkills,
-              surface: "image",
-            },
-          ),
+          prompt: themeGenerationBackgroundPrompt(generationRequest, locale),
           count: 1,
           size: "1536x1024",
           quality: "medium",
           outputFormat: "webp",
           referenceAttachmentIds: generationRequest.references.slice(0, 3).map((attachment) => attachment.id),
-          instructions: armorModeMediaInstructions(armorMode, armorModeLevel, "image", undefined, {
-          model: activeProfile.model,
-          protocol: activeProfile.protocol,
-          skills: armorModeSkills,
-          surface: "image",
-        }),
         }, created.id);
         const backgroundAsset = mediaResult.assets.find((asset) => (
           asset.kind === "image"
@@ -1882,14 +1856,6 @@ function App() {
   useEffect(() => {
     saveArmorModeLevel(armorModeLevel);
   }, [armorModeLevel]);
-
-  useEffect(() => {
-    saveArmorModeSkills(armorModeSkills);
-  }, [armorModeSkills]);
-
-  useEffect(() => {
-    saveArmorWritingIntensity(armorWritingIntensity);
-  }, [armorWritingIntensity]);
 
   useEffect(() => {
     saveHiddenProjectKeys(hiddenProjectKeys);
@@ -3488,7 +3454,6 @@ function App() {
       setInstructionsOpen(dialog === "instructions");
       setLogsOpen(dialog === "logs");
       setPetOpen(dialog === "pet");
-      setArmorStudioOpen(dialog === "armor");
     };
     void import("@tauri-apps/api/event")
       .then(({ listen }) => listen<unknown>(CLIENT_ACTION_EVENT, (event) => {
@@ -5349,9 +5314,6 @@ function App() {
         onMusic={() => setWorkspaceView("music")} onModel3d={() => setWorkspaceView("model3d")}
         active={workspaceView === "media"}
         locale={locale}
-        armorMode={armorMode}
-        armorModeLevel={armorModeLevel}
-        armorModeSkills={armorModeSkills}
         mediaCatalogRevision={mediaCatalogRevision}
         dropActive={workspaceView === "media" && fileDragActive}
         referenceDrop={mediaReferenceDrop}
@@ -5368,10 +5330,6 @@ function App() {
         onMusic={() => setWorkspaceView("music")} onModel3d={() => setWorkspaceView("model3d")}
         active={workspaceView === "writing"}
         locale={locale}
-        armorMode={armorMode}
-        armorModeLevel={armorModeLevel}
-        armorModeSkills={armorModeSkills}
-        armorWritingIntensity={armorWritingIntensity}
         activeProfile={activeProfile}
         profiles={profiles}
         reasoningEffort={effectiveReasoningEffort}
@@ -5392,10 +5350,6 @@ function App() {
         onOpenConversation={activateThread}
         onRunConversation={runConstellationConversation}
         locale={locale}
-        armorMode={armorMode}
-        armorModeLevel={armorModeLevel}
-        armorModeSkills={armorModeSkills}
-        armorWritingIntensity={armorWritingIntensity}
         activeProfile={activeProfile}
         profiles={profiles}
         reasoningEffort={effectiveReasoningEffort}
@@ -5562,7 +5516,6 @@ function App() {
             <code>GEMINI</code>
             <code>GROK</code>
             <i>{tr("高强度执行链路在线", "High-intensity execution chain online")}</i>
-            <button type="button" onClick={() => setArmorStudioOpen(true)}>{tr("控制台", "Console")}</button>
           </div>
         )}
 
@@ -5725,7 +5678,6 @@ function App() {
           onPermissionChange={setPermissionLevel}
           onArmorModeChange={setArmorMode}
           onArmorModeLevelChange={setArmorModeLevel}
-          onArmorStudioOpen={() => setArmorStudioOpen(true)}
           onSend={send}
           onStop={stopAgent}
         />
@@ -6032,24 +5984,6 @@ function App() {
             }
           }}
         />
-      )}
-
-      {armorStudioOpen && (
-        <Suspense fallback={<WorkspaceLoading />}>
-        <ArmorStudio
-          armorMode={armorMode}
-          armorModeLevel={armorModeLevel}
-          armorModeSkills={armorModeSkills}
-          armorWritingIntensity={armorWritingIntensity}
-          model={activeProfile.model}
-          protocol={activeProfile.protocol}
-          onArmorModeChange={setArmorMode}
-          onArmorModeLevelChange={setArmorModeLevel}
-          onArmorModeSkillsChange={setArmorModeSkills}
-          onArmorWritingIntensityChange={setArmorWritingIntensity}
-          onClose={() => setArmorStudioOpen(false)}
-        />
-        </Suspense>
       )}
 
       {petOpen && (
@@ -7502,7 +7436,6 @@ function Composer({
   onPermissionChange,
   onArmorModeChange,
   onArmorModeLevelChange,
-  onArmorStudioOpen,
   onSend,
   onStop,
 }: {
@@ -7529,7 +7462,6 @@ function Composer({
   onPermissionChange: (value: PermissionLevel) => void;
   onArmorModeChange: (value: boolean) => void;
   onArmorModeLevelChange: (value: ArmorModeLevel) => void;
-  onArmorStudioOpen: () => void;
   onSend: () => void;
   onStop: () => void;
 }) {
@@ -7736,7 +7668,7 @@ function Composer({
               className={`armor-toggle${armorMode ? " active" : ""}`}
               aria-pressed={armorMode}
               title={armorMode
-                ? tr("一键破甲已开启：对当前会话注入高强度执行指令", "Armor Mode is enabled: high-intensity execution instructions are injected into this conversation")
+                ? tr("一键破甲已开启：仅增强会话，不影响创作空间生成", "Armor Mode is enabled for conversations only; Creative Studio generation stays unchanged")
                 : tr("开启一键破甲：增强行动优先、工具验证和跨模型一致性", "Enable Armor Mode: strengthen action-first execution, tool verification, and cross-model consistency")}
               disabled={disabled}
               onClick={() => onArmorModeChange(!armorMode)}
@@ -7784,19 +7716,6 @@ function Composer({
                           </button>
                         );
                       })}
-                      <button
-                        type="button"
-                        role="menuitem"
-                        className="armor-level-menu-manage"
-                        onClick={() => {
-                          setArmorLevelMenuOpen(false);
-                          onArmorStudioOpen();
-                        }}
-                      >
-                        <span className="armor-level-option-icon"><ShieldCheck size={15} /></span>
-                        <span><strong>{tr("打开控制台", "Open console")}</strong><small>{tr("管理 Skill、写作强度和媒体编译", "Manage Skills, writing intensity, and media compilation")}</small></span>
-                        <ChevronRight size={14} />
-                      </button>
                     </div>
                   )}
                 </div>

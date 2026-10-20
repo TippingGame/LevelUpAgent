@@ -2,6 +2,7 @@ mod agent;
 mod attachment;
 mod browser;
 mod capability;
+mod chatbots;
 mod composer;
 mod config_writeback;
 mod database;
@@ -3577,6 +3578,15 @@ fn remove_pet(
     manager: tauri::State<'_, pet::PetManager>,
     pet_id: String,
 ) -> Result<bool, String> {
+    if app
+        .state::<database::Database>()
+        .chat_dashboard()?
+        .bots
+        .iter()
+        .any(|b| b.pet_id == pet_id && b.enabled)
+    {
+        return Err("Pause this pet's chat bot before removing its package".into());
+    }
     let removed = manager.remove_package(&pet_id)?;
     if removed {
         emit_pet_dashboard(&app, &manager);
@@ -11944,6 +11954,7 @@ pub fn run() {
         .manage(model_workbench::ModelWorkbench::default())
         .manage(music_workbench::MusicWorkbench::default())
         .manage(mcp::McpManager::default())
+        .manage(chatbots::Runtime::default())
         .manage(browser::BrowserManager::default())
         .manage(sandbox::ProcessManager::default())
         .manage(subagent::SubagentManager::default())
@@ -12044,6 +12055,7 @@ pub fn run() {
             app.manage(database);
             app.manage(pet_manager);
             app.manage(pet::PetRuntime::default());
+            chatbots::start(app.handle().clone());
             if let Err(error) = sync_launch_at_login(app.handle(), launch_at_login) {
                 logging::write(
                     "warn",
@@ -12088,6 +12100,19 @@ pub fn run() {
     };
     let app = builder
         .invoke_handler(tauri::generate_handler![
+            chatbots::chat_dashboard,
+            chatbots::chat_save_bot,
+            chatbots::chat_save_account,
+            chatbots::chat_save_route,
+            chatbots::chat_save_routes,
+            chatbots::chat_save_knowledge,
+            chatbots::chat_save_memory,
+            chatbots::chat_delete,
+            chatbots::chat_resolve_delivery,
+            chatbots::chat_install_runtime,
+            chatbots::chat_detect_python,
+            chatbots::chat_desktop_probe,
+            chatbots::chat_reconnect,
             music_workbench::music_status,
             music_workbench::music_hardware,
             music_workbench::music_request,
@@ -12274,6 +12299,9 @@ pub fn run() {
             logging::write("info", "app", "event_loop_ready", serde_json::json!({}))
         }
         tauri::RunEvent::ExitRequested { code, .. } => {
+            if let Some(runtime) = app.try_state::<chatbots::Runtime>() {
+                tauri::async_runtime::block_on(runtime.close());
+            }
             persist_pet_position_before_exit(app);
             model_workbench::shutdown(app);
             if let Some(manager) = app.try_state::<music_workbench::MusicWorkbench>() {

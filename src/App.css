@@ -1194,8 +1194,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .workspace-shell.armor-mode .armor-level-menu > button.active,
 .workspace-shell.armor-mode .model-menu > button:hover,
 .workspace-shell.armor-mode .model-menu > button.active { background: rgba(34,211,238,.09); }
-.workspace-shell.armor-mode .armor-level-menu-manage { border-top-color: rgba(34,211,238,.18) !important; }
-.workspace-shell.armor-mode .armor-level-menu-manage > svg { color: #67e8f9; }
 .workspace-shell.armor-mode .reasoning-switcher.open .reasoning-pill { border-color: rgba(34,211,238,.4); background: rgba(15,23,42,.9); color: #67e8f9; }
 .workspace-shell.armor-mode .reasoning-pill > svg:first-child { color: #67e8f9; }
 .workspace-shell.armor-mode.armor-level-deep { --armor-glow: rgba(168,85,247,.32); --armor-grid: rgba(168,85,247,.11); }
@@ -1238,19 +1236,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .armor-hud span { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px; color: #a3e635; font-weight: 800; letter-spacing: .08em; }
 .armor-hud code { flex: 0 0 auto; padding: 2px 5px; border: 1px solid rgba(34,211,238,.18); border-radius: 999px; background: rgba(34,211,238,.08); color: #67e8f9; font-family: var(--font-mono); font-size: inherit; }
 .armor-hud i { min-width: 0; overflow: hidden; flex: 1 1 auto; color: rgba(226,232,240,.72); font-style: normal; text-overflow: ellipsis; }
-.armor-hud button {
-  flex: 0 0 auto;
-  min-height: 22px;
-  padding: 2px 7px;
-  border: 1px solid rgba(163,230,53,.26);
-  border-radius: 999px;
-  background: rgba(101,163,13,.14);
-  color: #d9f99d;
-  font-size: inherit;
-  font-weight: 720;
-  pointer-events: auto;
-}
-.armor-hud button:hover { border-color: rgba(163,230,53,.52); background: rgba(101,163,13,.24); }
 
 @media (max-width: 820px) {
   .armor-hud { left: 16px; max-width: calc(100% - 32px); }
@@ -1717,8 +1702,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .armor-level-menu { position: absolute; bottom: 36px; left: 0; z-index: 60; width: min(360px, calc(100vw - 48px)); padding: 6px; border: 1px solid rgba(255,255,255,.72); border-radius: 13px; background: rgba(255,255,255,.98); box-shadow: 0 18px 50px rgba(15,23,42,.18), 0 3px 10px rgba(15,23,42,.08); backdrop-filter: blur(18px); }
 .armor-level-menu > button { width: 100%; min-height: 54px; display: grid; grid-template-columns: 32px minmax(0, 1fr) 22px; align-items: center; gap: 8px; padding: 7px 9px; border: 0; border-radius: 9px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
 .armor-level-menu > button:hover, .armor-level-menu > button.active { background: rgba(8,145,178,.075); }
-.armor-level-menu-manage { margin-top: 4px; border-top: 1px solid rgba(148,163,184,.24) !important; border-radius: 0 0 9px 9px !important; }
-.armor-level-menu-manage > svg { justify-self: end; color: #0f766e; }
 .armor-level-option-icon { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 9px; background: rgba(8,145,178,.09); color: #0f766e; }
 .armor-level-menu > button > span:nth-child(2) { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .armor-level-menu strong { font-size: var(--font-body); font-weight: 700; }
@@ -3328,8 +3311,6 @@ button.detail-row { padding: 0; border: 0; background: transparent; text-align: 
   .armor-level-button:hover:not(:disabled), .armor-level-picker.active .armor-level-button { border-color: rgba(34,211,238,.24); background: rgba(15,23,42,.88); color: #67e8f9; }
   .armor-level-menu { border-color: rgba(255,255,255,.1); background: rgba(15,23,42,.98); }
   .armor-level-menu > button:hover, .armor-level-menu > button.active { background: rgba(34,211,238,.09); }
-  .armor-level-menu-manage { border-top-color: rgba(255,255,255,.1) !important; }
-  .armor-level-menu-manage > svg { color: #67e8f9; }
   .armor-level-option-icon { background: rgba(34,211,238,.1); color: #67e8f9; }
   .model-menu > button:hover, .model-menu > button.active { background: rgba(255,255,255,.06); }
   .reasoning-switcher.open .reasoning-pill { border-color: rgba(244,63,94,.28); background: rgba(255,255,255,.08); color: #fda4af; }

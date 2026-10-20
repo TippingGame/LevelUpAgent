@@ -83,12 +83,6 @@ import {
   saveWritingProject,
 } from "../lib/bridge";
 import { tr } from "../lib/i18n";
-import {
-  armorModeWritingInstructions,
-  type ArmorModeLevel,
-  type ArmorSkillState,
-  type ArmorWritingIntensity,
-} from "../lib/armorMode";
 import { isTextGenerationModel, profileHasTextModel, reasoningEffortForProfile } from "../lib/modelSelection";
 import type { AgentMessage, ProviderModelInfo, ProviderProfile, ReasoningEffort } from "../lib/types";
 import {
@@ -184,10 +178,6 @@ interface CompletionPreview {
 interface WritingStudioProps {
   active: boolean;
   locale: string;
-  armorMode: boolean;
-  armorModeLevel: ArmorModeLevel;
-  armorModeSkills: ArmorSkillState;
-  armorWritingIntensity: ArmorWritingIntensity;
   activeProfile: ProviderProfile;
   profiles: ProviderProfile[];
   reasoningEffort: ReasoningEffort;
@@ -220,10 +210,6 @@ const COMPLETION_ACTIONS: Array<{ intent: CompletionIntent; label: string; needs
 export function WritingStudio({
   active,
   locale: _locale,
-  armorMode,
-  armorModeLevel,
-  armorModeSkills,
-  armorWritingIntensity,
   activeProfile,
   profiles,
   reasoningEffort,
@@ -596,12 +582,7 @@ export function WritingStudio({
         false,
         undefined,
         undefined,
-        armorModeWritingInstructions(armorMode, armorModeLevel, armorWritingIntensity, {
-          model: writingRunProfile.model,
-          protocol: writingRunProfile.protocol,
-          skills: armorModeSkills,
-          surface: "writing",
-        }),
+        undefined,
         reasoningEffortForProfile(writingRunProfile, reasoningEffort),
         () => setCompletion((current) => completionEpochRef.current === epoch && current?.id === previewId
           ? { ...current, text: "" }
@@ -982,12 +963,7 @@ export function WritingStudio({
         false,
         undefined,
         undefined,
-        armorModeWritingInstructions(armorMode, armorModeLevel, armorWritingIntensity, {
-          model: writingRunProfile.model,
-          protocol: writingRunProfile.protocol,
-          skills: armorModeSkills,
-          surface: "writing",
-        }),
+        undefined,
         reasoningEffortForProfile(writingRunProfile, reasoningEffort),
         () => {
           if (goalEpochRef.current !== epoch || goalOperationRef.current !== operationId) return;
@@ -1280,12 +1256,10 @@ export function WritingStudio({
     if (goalOperationId) void cancelAgentTurn(goalOperationId).catch(() => false);
   }, []);
 
-  const armorClassName = armorMode ? ` armor-mode armor-level-${armorModeLevel}` : "";
-  const armorDataLevel = armorMode ? armorModeLevel : undefined;
 
-  if (!active) return <main className={`writing-studio${armorClassName}`} data-armor-level={armorDataLevel} hidden />;
+  if (!active) return <main className={`writing-studio`} hidden />;
   if (loading || !activeProject) return (
-    <main className={`writing-studio writing-loading${armorClassName}`} data-armor-level={armorDataLevel}>
+    <main className={`writing-studio writing-loading`}>
       <LoaderCircle className="spin" size={24} />
       <span>{tr("正在打开写作空间…", "Opening writing studio…")}</span>
     </main>
@@ -1295,7 +1269,7 @@ export function WritingStudio({
   const selectedTextLength = Math.max(0, selection.end - selection.start);
 
   return (
-    <main className={`writing-studio creative-studio${armorClassName}`} data-armor-level={armorDataLevel}>
+    <main className={`writing-studio creative-studio`}>
       <CreativeStudioHeader mode="writing" onModel3d={onModel3d} onMusic={onMusic} onSpine={onSpine} className="writing-topbar" subtitle={saving ? tr("正在保存…", "Saving…") : savedAt ? tr("已自动保存", "Autosaved") : tr("本地写作项目", "Local writing projects")} onMedia={onMedia} onConstellation={onConstellation} context={<button
             type="button"
             className="writing-navigator-toggle"

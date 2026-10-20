@@ -1,0 +1,6 @@
+# Official SDK versions researched 2026-10-18. No third-party login implementation.
+lark-oapi==1.7.5
+dingtalk-stream==0.24.3
+qq-botpy==1.2.1
+websockets==12.0
+httpx==0.28.1

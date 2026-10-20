@@ -4,7 +4,7 @@
    retain the older media, writing and constellation decoration. */
 
 html body .app-shell.armor-mode,
-html body .media-image-lightbox.armor-mode {
+html:has(.app-shell.armor-mode) body .media-image-lightbox {
   --studio-bg: #020617;
   --studio-panel: rgba(2, 6, 23, .82);
   --studio-panel-strong: rgba(7, 17, 31, .94);
@@ -25,7 +25,7 @@ html body .media-image-lightbox.armor-mode {
 }
 
 html body .app-shell.armor-mode .creative-studio,
-html body .media-image-lightbox.armor-mode {
+html:has(.app-shell.armor-mode) body .media-image-lightbox {
   color-scheme: dark;
   color: var(--studio-text);
   font-family: var(--studio-font);
@@ -37,7 +37,7 @@ html body .media-image-lightbox.armor-mode {
 }
 
 html body .app-shell.armor-mode .creative-studio :is(button, input, textarea, select),
-html body .media-image-lightbox.armor-mode :is(button, input, textarea, select) {
+html:has(.app-shell.armor-mode) body .media-image-lightbox :is(button, input, textarea, select) {
   font-family: inherit;
   accent-color: var(--studio-accent);
 }
@@ -233,26 +233,26 @@ html body .app-shell.armor-mode :is(.media-generate-button, .media-configure-but
   box-shadow: 0 0 24px rgba(34, 211, 238, .20), 0 10px 28px rgba(0, 0, 0, .20);
 }
 
-html body .media-image-lightbox.armor-mode .media-image-lightbox-dialog {
+html:has(.app-shell.armor-mode) body .media-image-lightbox .media-image-lightbox-dialog {
   border-color: var(--studio-line-strong);
   background: linear-gradient(180deg, rgba(2, 6, 23, .98), rgba(7, 18, 33, .98));
   color: var(--studio-text);
   box-shadow: 0 30px 90px rgba(0, 0, 0, .48), 0 0 42px rgba(34, 211, 238, .14);
 }
 
-html body .media-image-lightbox.armor-mode .media-image-lightbox-dialog > header,
-html body .media-image-lightbox.armor-mode .media-image-lightbox-dialog > footer {
+html:has(.app-shell.armor-mode) body .media-image-lightbox .media-image-lightbox-dialog > header,
+html:has(.app-shell.armor-mode) body .media-image-lightbox .media-image-lightbox-dialog > footer {
   border-color: var(--studio-line);
   background: rgba(2, 6, 23, .82);
 }
 
-html body .media-image-lightbox.armor-mode :is(.media-image-lightbox-dialog > header button, .media-image-lightbox-nav, .media-image-lightbox-toolbar, .media-image-pan-hint) {
+html:has(.app-shell.armor-mode) body .media-image-lightbox :is(.media-image-lightbox-dialog > header button, .media-image-lightbox-nav, .media-image-lightbox-toolbar, .media-image-pan-hint) {
   border-color: var(--studio-line);
   background: rgba(15, 23, 42, .82);
   color: var(--studio-muted);
 }
 
-html body .media-image-lightbox.armor-mode .media-image-lightbox-canvas {
+html:has(.app-shell.armor-mode) body .media-image-lightbox .media-image-lightbox-canvas {
   background-color: #07111f;
   background-image:
     linear-gradient(45deg, rgba(34, 211, 238, .045) 25%, transparent 25%),
@@ -261,11 +261,11 @@ html body .media-image-lightbox.armor-mode .media-image-lightbox-canvas {
     linear-gradient(-45deg, transparent 75%, rgba(163, 230, 53, .04) 75%);
 }
 
-html body .media-image-lightbox.armor-mode :is(.media-image-lightbox-toolbar button, .media-image-lightbox-toolbar output, .media-image-lightbox-dialog > header p, .media-image-lightbox-dialog > footer small) {
+html:has(.app-shell.armor-mode) body .media-image-lightbox :is(.media-image-lightbox-toolbar button, .media-image-lightbox-toolbar output, .media-image-lightbox-dialog > header p, .media-image-lightbox-dialog > footer small) {
   color: var(--studio-muted);
 }
 
-html body .media-image-lightbox.armor-mode .media-image-lightbox-dialog > footer span {
+html:has(.app-shell.armor-mode) body .media-image-lightbox .media-image-lightbox-dialog > footer span {
   background: rgba(34, 211, 238, .10);
   color: var(--studio-accent);
 }
@@ -605,514 +605,4 @@ html body .app-shell.armor-mode .constellation-node-run {
 
 html body .app-shell.armor-mode :is(.constellation-source-picker-backdrop, .constellation-dialog-backdrop, .constellation-canvas-modal) {
   background: rgba(2, 6, 23, .68);
-}
-
-/* Armor Mode control center */
-.armor-studio-dialog {
-  width: min(1060px, calc(100vw - 32px));
-  max-height: min(860px, calc(100vh - 32px));
-  border-color: rgba(34, 211, 238, .26);
-  background:
-    radial-gradient(circle at 85% 0%, rgba(34, 211, 238, .10), transparent 28%),
-    radial-gradient(circle at 0% 100%, rgba(163, 230, 53, .07), transparent 32%),
-    #07111f;
-  color: #e5f6ff;
-  box-shadow: 0 28px 100px rgba(0, 0, 0, .58), 0 0 44px rgba(34, 211, 238, .12);
-}
-
-.armor-studio-header {
-  border-bottom-color: rgba(34, 211, 238, .18);
-  background: rgba(2, 6, 23, .82);
-}
-
-.armor-studio-header strong {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  color: #f0fdf4;
-}
-
-.armor-studio-header span {
-  color: #93b7c7;
-}
-
-.armor-studio-close {
-  width: 34px;
-  height: 34px;
-  display: grid;
-  place-items: center;
-  border: 1px solid rgba(34, 211, 238, .20);
-  border-radius: 10px;
-  background: rgba(15, 23, 42, .76);
-  color: #b9dce8;
-}
-
-.armor-studio-close:hover {
-  border-color: rgba(163, 230, 53, .42);
-  color: #f0fdf4;
-}
-
-.armor-studio-body {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 14px;
-  padding: 18px;
-  overflow: auto;
-}
-
-.armor-studio-overview,
-.armor-studio-section {
-  min-width: 0;
-  border: 1px solid rgba(34, 211, 238, .18);
-  border-radius: 14px;
-  background: rgba(2, 12, 24, .72);
-}
-
-.armor-studio-overview {
-  grid-column: 1 / -1;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 12px;
-  padding: 15px;
-}
-
-.armor-studio-status-icon {
-  width: 42px;
-  height: 42px;
-  display: grid;
-  place-items: center;
-  border: 1px solid rgba(148, 163, 184, .24);
-  border-radius: 12px;
-  background: rgba(30, 41, 59, .68);
-  color: #94a3b8;
-}
-
-.armor-studio-overview.active .armor-studio-status-icon {
-  border-color: rgba(163, 230, 53, .34);
-  background: rgba(101, 163, 13, .13);
-  color: #bef264;
-  box-shadow: 0 0 18px rgba(163, 230, 53, .10);
-}
-
-.armor-studio-overview > div {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.armor-studio-overview strong {
-  color: #f0fdf4;
-  font-size: 15px;
-}
-
-.armor-studio-overview small,
-.armor-studio-section header small,
-.armor-skill-list small,
-.armor-skill-list em,
-.armor-coverage-grid small,
-.armor-profile-grid small,
-.armor-writing-intensity small,
-.armor-health-list small {
-  color: #93b7c7;
-  font-size: 12px;
-  line-height: 1.4;
-}
-
-.armor-studio-master-toggle {
-  min-width: 100px;
-  height: 36px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 9px;
-  padding: 0 11px;
-  border: 1px solid rgba(148, 163, 184, .26);
-  border-radius: 10px;
-  background: rgba(15, 23, 42, .78);
-  color: #cbd5e1;
-  font-weight: 740;
-}
-
-.armor-studio-master-toggle i,
-.armor-skill-switch {
-  width: 24px;
-  height: 14px;
-  position: relative;
-  display: inline-flex;
-  flex: 0 0 auto;
-  border-radius: 999px;
-  background: rgba(100, 116, 139, .46);
-  box-shadow: inset 0 0 0 1px rgba(148, 163, 184, .25);
-}
-
-.armor-studio-master-toggle i::after,
-.armor-skill-switch i {
-  width: 9px;
-  height: 9px;
-  position: absolute;
-  top: 2.5px;
-  left: 3px;
-  border-radius: 50%;
-  background: #cbd5e1;
-  content: "";
-  transition: transform .18s ease, background .18s ease;
-}
-
-.armor-studio-master-toggle.active {
-  border-color: rgba(163, 230, 53, .42);
-  background: linear-gradient(135deg, rgba(8, 145, 178, .36), rgba(101, 163, 13, .32));
-  color: #f0fdf4;
-}
-
-.armor-studio-master-toggle.active i {
-  background: rgba(163, 230, 53, .54);
-}
-
-.armor-studio-master-toggle.active i::after {
-  transform: translateX(9px);
-  background: #f7fee7;
-}
-
-.armor-studio-section > header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 13px 14px 10px;
-  border-bottom: 1px solid rgba(34, 211, 238, .11);
-}
-
-.armor-studio-section > header > span {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  color: #dff8ff;
-}
-
-.armor-studio-section > header strong {
-  font-size: 14px;
-}
-
-.armor-studio-section > header > button {
-  flex: 0 0 auto;
-}
-
-.armor-profile-grid,
-.armor-writing-intensity {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 7px;
-  padding: 12px;
-}
-
-.armor-profile-grid button,
-.armor-writing-intensity button {
-  min-height: 76px;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  padding: 10px;
-  border: 1px solid rgba(100, 116, 139, .32);
-  border-radius: 10px;
-  background: rgba(15, 23, 42, .54);
-  color: #cbd5e1;
-  text-align: left;
-}
-
-.armor-profile-grid button:hover,
-.armor-writing-intensity button:hover,
-.armor-profile-grid button.active,
-.armor-writing-intensity button.active {
-  border-color: rgba(34, 211, 238, .48);
-  background: rgba(8, 145, 178, .16);
-  color: #f0fdf4;
-}
-
-.armor-profile-grid button.active,
-.armor-writing-intensity button.active {
-  box-shadow: inset 0 0 0 1px rgba(163, 230, 53, .20), 0 0 18px rgba(34, 211, 238, .08);
-}
-
-.armor-profile-grid strong,
-.armor-writing-intensity strong,
-.armor-coverage-grid strong,
-.armor-skill-list strong,
-.armor-health-list strong {
-  font-size: 13px;
-}
-
-.armor-coverage-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 7px;
-  padding: 12px;
-}
-
-.armor-coverage-grid > div {
-  min-height: 70px;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  grid-template-rows: auto 1fr;
-  column-gap: 7px;
-  padding: 9px;
-  border: 1px solid rgba(100, 116, 139, .24);
-  border-radius: 10px;
-  background: rgba(15, 23, 42, .46);
-  color: #94a3b8;
-}
-
-.armor-coverage-grid > div > span {
-  grid-row: 1 / -1;
-  color: #64748b;
-}
-
-.armor-coverage-grid > div.active {
-  border-color: rgba(163, 230, 53, .28);
-  background: rgba(22, 101, 52, .10);
-  color: #e5f6ff;
-}
-
-.armor-coverage-grid > div.active > span {
-  color: #bef264;
-}
-
-.armor-skill-section,
-.armor-media-compiler,
-.armor-health-section {
-  grid-column: 1 / -1;
-}
-
-.armor-skill-list {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 7px;
-  padding: 12px;
-}
-
-.armor-skill-list > button {
-  min-height: 90px;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: flex-start;
-  gap: 9px;
-  padding: 11px;
-  border: 1px solid rgba(100, 116, 139, .28);
-  border-radius: 11px;
-  background: rgba(15, 23, 42, .48);
-  color: #94a3b8;
-  text-align: left;
-}
-
-.armor-skill-list > button:hover,
-.armor-skill-list > button.active {
-  border-color: rgba(34, 211, 238, .42);
-  background: rgba(8, 145, 178, .12);
-  color: #e5f6ff;
-}
-
-.armor-skill-list > button > span:nth-child(2) {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.armor-skill-list em {
-  margin-top: 2px;
-  color: #67e8f9;
-  font-style: normal;
-}
-
-.armor-skill-list > button.active .armor-skill-switch {
-  background: rgba(163, 230, 53, .52);
-}
-
-.armor-skill-list > button.active .armor-skill-switch i {
-  transform: translateX(9px);
-  background: #f7fee7;
-}
-
-.armor-skill-check {
-  color: #bef264;
-}
-
-.armor-writing-intensity {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.armor-media-compiler > textarea {
-  width: calc(100% - 24px);
-  min-height: 64px;
-  margin: 0 12px 10px;
-  resize: vertical;
-  border: 1px solid rgba(34, 211, 238, .22);
-  border-radius: 10px;
-  background: rgba(2, 6, 23, .68);
-  color: #e5f6ff;
-  padding: 10px;
-}
-
-.armor-media-kind-picker {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 12px 12px 8px;
-}
-
-.armor-media-kind-picker button {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  min-height: 31px;
-  padding: 0 9px;
-  border: 1px solid rgba(100, 116, 139, .30);
-  border-radius: 8px;
-  background: rgba(15, 23, 42, .58);
-  color: #a8c8d5;
-  font-size: 12px;
-}
-
-.armor-media-kind-picker button.active,
-.armor-media-kind-picker button:hover {
-  border-color: rgba(34, 211, 238, .42);
-  background: rgba(8, 145, 178, .16);
-  color: #e5f6ff;
-}
-
-.armor-compiled-preview {
-  margin: 0 12px 12px;
-  overflow: hidden;
-  border: 1px solid rgba(34, 211, 238, .16);
-  border-radius: 10px;
-  background: rgba(2, 6, 23, .72);
-}
-
-.armor-compiled-preview > div {
-  min-height: 38px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 8px 10px;
-  border-bottom: 1px solid rgba(34, 211, 238, .13);
-  color: #dff8ff;
-  font-size: 13px;
-}
-
-.armor-compiled-preview button {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  border: 0;
-  background: transparent;
-  color: #67e8f9;
-  font-size: 12px;
-}
-
-.armor-compiled-preview pre {
-  max-height: 210px;
-  margin: 0;
-  overflow: auto;
-  padding: 11px;
-  color: #b7d7e4;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1.52;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.armor-health-section > p {
-  margin: 0;
-  padding: 12px;
-  color: #93b7c7;
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.armor-health-list {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 7px;
-  padding: 12px;
-}
-
-.armor-health-list > div {
-  min-height: 58px;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  grid-template-rows: auto 1fr;
-  column-gap: 7px;
-  padding: 9px;
-  border: 1px solid rgba(100, 116, 139, .24);
-  border-radius: 9px;
-  background: rgba(15, 23, 42, .46);
-}
-
-.armor-health-list > div > span {
-  grid-row: 1 / -1;
-}
-
-.armor-health-list > div.ready {
-  border-color: rgba(163, 230, 53, .26);
-}
-
-.armor-health-list > div.ready > span {
-  color: #bef264;
-}
-
-.armor-health-list > div.disabled > span {
-  color: #94a3b8;
-}
-
-.armor-health-list > div.failed {
-  border-color: rgba(251, 191, 36, .34);
-}
-
-.armor-health-list > div.failed > span {
-  color: #fbbf24;
-}
-
-html body .app-shell.armor-mode .armor-studio-dialog {
-  border-color: rgba(34, 211, 238, .36);
-}
-
-@media (max-width: 760px) {
-  .armor-studio-dialog {
-    width: min(100vw - 16px, 700px);
-    max-height: calc(100vh - 16px);
-  }
-
-  .armor-studio-body,
-  .armor-skill-list,
-  .armor-health-list {
-    grid-template-columns: 1fr;
-  }
-
-  .armor-profile-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .armor-coverage-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 460px) {
-  .armor-studio-overview {
-    grid-template-columns: auto minmax(0, 1fr);
-  }
-
-  .armor-studio-master-toggle {
-    grid-column: 1 / -1;
-    justify-self: stretch;
-  }
-
-  .armor-profile-grid,
-  .armor-writing-intensity,
-  .armor-coverage-grid {
-    grid-template-columns: 1fr;
-  }
 }
