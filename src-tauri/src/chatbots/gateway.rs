@@ -459,13 +459,20 @@ pub async fn desktop_probe(app: &tauri::AppHandle, request: Value) -> Result<Val
     if !cfg!(windows) || !ready_for(app, true) {
         return Err("Install the Windows desktop runtime first".into());
     }
-    if app
-        .state::<Database>()
-        .chat_accounts()?
-        .iter()
-        .any(|a| a.platform == "dingtalk_desktop" && a.enabled)
+    // Enumerating windows is read-only and must remain available even when a
+    // saved desktop account is waiting for a missing/stale window selection.
+    // Captures/calibration still require an explicitly paused controller.
+    let captures_window = request["windowTitle"]
+        .as_str()
+        .is_some_and(|s| !s.is_empty());
+    if captures_window
+        && app
+            .state::<Database>()
+            .chat_accounts()?
+            .iter()
+            .any(|a| a.platform == "dingtalk_desktop" && a.enabled)
     {
-        return Err("Disconnect the desktop account before preview/calibration".into());
+        return Err("请先点击「暂停连接并校准」，再读取预览；检测窗口无需断开账号。".into());
     }
     let mut cmd = Command::new(python_for(app, true)?);
     cmd.arg(source(app)?.join("desktop_gateway.py"))

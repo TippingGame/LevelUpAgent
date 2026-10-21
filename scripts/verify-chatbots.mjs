@@ -297,7 +297,64 @@ try {
   await invoke('chat_save_route', { route:{...desktopDirect,id:'',chatId:'Desktop QA all',chatType:'group',mode:'all'} });
   await assert.rejects(() => invoke('chat_save_route', { route:{...desktopDirect,id:'',scope:'all',chatId:'*'} }));
   await until(async () => (await dashboard()).connections.some(c => c.accountId===desktop.id && c.status==='waiting' && c.detail.includes('钉钉窗口')));
-  await invoke('chat_save_account', { account:{...desktop,enabled:false} });
+  // Regression: an enabled/waiting account previously blocked even enumeration,
+  // while the editor's checkbox could disagree with the persisted connection.
+  const connectedWindows = await invoke('chat_desktop_probe', { request: {} });
+  assert.ok(Array.isArray(connectedWindows.windows));
+  await assert.rejects(() => invoke('chat_desktop_probe', { request: { windowTitle: desktopConfig.windowTitle } }), /暂停连接并校准/);
+  await invoke('open_pet_workspace',{petId:'yui',view:'life'});
+  await page.getByRole('button',{name:'Chat bots',exact:true}).click();
+  await page.getByRole('button',{name:'Accounts',exact:true}).click();
+  await page.setViewportSize({width:720,height:920});
+  const desktopCard = () => page.locator('article.chatbot-card').filter({hasText:'Desktop QA'});
+  await desktopCard().getByRole('button',{name:'Edit',exact:true}).click();
+  const detectWindow = page.getByRole('button',{name:'Detect DingTalk windows',exact:true});
+  const autoPreview = page.getByRole('button',{name:'Detect regions and preview (no sending)',exact:true});
+  assert.equal(await detectWindow.isEnabled(),true);
+  await detectWindow.click();
+  await until(() => detectWindow.isEnabled());
+  for (const window of connectedWindows.windows) assert.ok((await page.getByLabel('DingTalk window',{exact:false}).textContent()).includes(window.title));
+  assert.equal(await autoPreview.isDisabled(),true);
+  await page.getByLabel('Connect and start with app',{exact:true}).uncheck();
+  assert.equal(await autoPreview.isDisabled(),true,'Unsaved checkbox must not bypass the running controller guard');
+  await page.getByLabel('Display name',{exact:true}).fill('Desktop QA edited draft');
+  await page.getByRole('button',{name:'Pause connection and calibrate',exact:true}).click();
+  await until(async () => !(await dashboard()).accounts.find(a=>a.id===desktop.id).enabled);
+  await until(() => autoPreview.isEnabled());
+  assert.equal(await page.getByLabel('Display name',{exact:true}).inputValue(),'Desktop QA edited draft','Pausing preserves unsaved edits');
+  await page.getByLabel('Connect and start with app',{exact:true}).check();
+  assert.equal(await autoPreview.isEnabled(),true,'Future startup preference must not lock offline calibration');
+  await desktopCard().getByRole('button',{name:'Connect',exact:true}).click();
+  await until(() => autoPreview.isDisabled());
+  await desktopCard().getByRole('button',{name:'Disconnect',exact:true}).click();
+  await until(() => autoPreview.isEnabled());
+  assert.equal(await page.getByLabel('Connect and start with app',{exact:true}).isChecked(),false);
+  assert.equal(await page.getByLabel('Display name',{exact:true}).inputValue(),'Desktop QA edited draft');
+  await detectWindow.click();
+  await until(() => detectWindow.isEnabled());
+  if (connectedWindows.windows.length === 1) assert.equal(await page.getByLabel('DingTalk window',{exact:false}).inputValue(),connectedWindows.windows[0].title,'Single detected window replaces the stale saved title');
+  // Reopening setup from a new form must still offer recovery of the one
+  // persisted controller; no duplicate account or hidden global guard.
+  for (const scheme of ['light','dark']) for (const armor of [false,true]) {
+    await invoke('chat_save_account',{account:{...desktop,enabled:true}});
+    await page.emulateMedia({colorScheme:scheme});
+    await page.getByRole('button',{name:'Close Starlight Echoes',exact:true}).click();
+    const toggle=page.locator('.armor-toggle');
+    if ((await toggle.getAttribute('aria-pressed')==='true')!==armor) await toggle.click();
+    await invoke('open_pet_workspace',{petId:'yui',view:'life'});
+    await page.getByRole('button',{name:'Chat bots',exact:true}).click();
+    await page.getByRole('button',{name:'Accounts',exact:true}).click();
+    await page.getByLabel('Platform',{exact:true}).selectOption('dingtalk_desktop');
+    const pause=page.getByRole('button',{name:'Pause connection and calibrate',exact:true});
+    await pause.waitFor();
+    await pause.scrollIntoViewIfNeeded(); await pause.hover(); await pause.focus();
+    await page.screenshot({path:resolve(output,'setup-recovery-'+scheme+'-armor-'+armor+'.png'),fullPage:true});
+    assert.equal(await page.locator('.chatbot-main').evaluate(el=>el.scrollWidth>el.clientWidth+2),false);
+    await pause.click();
+    await until(() => page.getByRole('heading',{name:'Edit account',exact:true}).isVisible());
+    assert.equal(await page.getByLabel('Platform',{exact:true}).isDisabled(),true);
+    await until(() => page.getByRole('button',{name:'Detect regions and preview (no sending)',exact:true}).isEnabled());
+  }
   await invoke('open_pet_workspace',{petId:'yui',view:'life'});
   await page.getByRole('button',{name:'Chat bots',exact:true}).click();
   await page.getByRole('button',{name:'Routes',exact:true}).click();
@@ -369,6 +426,20 @@ try {
     assert.ok((await page.getByTestId('desktop-editor-diagnostic').innerText()).includes('UIA 与画面对照'));
     calibratedDesktop = true;
   }
+  // Saving must retain the existing ID/settings, instead of resetting to an
+  // empty form that can accidentally create a second desktop controller.
+  await page.getByRole('button',{name:'Reset form',exact:true}).click();
+  await page.locator('article.chatbot-card').filter({hasText:'Desktop QA'}).getByRole('button',{name:'Edit',exact:true}).click();
+  await page.getByLabel('Display name',{exact:true}).fill('Desktop QA recovered');
+  await page.getByRole('button',{name:'Save account',exact:true}).click();
+  await until(() => page.getByText('Account saved.',{exact:true}).isVisible());
+  assert.equal(await page.getByRole('heading',{name:'Edit account',exact:true}).isVisible(),true);
+  assert.equal(await page.getByLabel('Display name',{exact:true}).inputValue(),'Desktop QA recovered');
+  assert.equal((await dashboard()).accounts.find(a=>a.id===desktop.id).name,'Desktop QA recovered');
+  assert.equal((await dashboard()).accounts.filter(a=>a.platform==='dingtalk_desktop').length,1);
+  await page.reload(); await page.locator('.composer textarea').waitFor();
+  assert.equal((await dashboard()).accounts.find(a=>a.id===desktop.id).name,'Desktop QA recovered');
+  await invoke('open_pet_workspace',{petId:'yui',view:'life'});
   for (const scheme of ['light','dark']) for (const armor of [false,true]) {
     await page.emulateMedia({colorScheme:scheme});
     await page.getByRole('button',{name:'Close Starlight Echoes',exact:true}).click();
@@ -399,6 +470,8 @@ try {
   report.cases.push('all private scope saved through UI delivers new private chat','paused exact override blocks all scope','all group scope preserves mention trigger','knowledge visibility names account and private/group scope');
   report.cases.push('private selection and individual exclusion through UI','group select all and batch pause through UI','desktop all-new-text opt-in','desktop wildcard disabled and rejected','selection in four appearance combinations');
   report.cases.push('desktop runtime installed separately','desktop account connects without credentials','real local window enumeration','missing DingTalk waits without sending','desktop direct and mention routing validation','desktop setup UI in four appearance combinations');
+  report.cases.push('enabled/waiting desktop still enumerates windows','unsaved connection checkbox does not control calibration lock','pause setup preserves edits and disconnects persisted controller','card connect/disconnect immediately updates editor','single detected window replaces stale selection','new form recovers existing controller in four appearance combinations');
+  report.cases.push('saved account retains stable ID and editor instead of resetting form','desktop recovery settings survive native reload');
   report.desktop = { windowsFound:desktopWindows.windows.length, calibratedDesktop, liveMessaging:'separate scoped live transport test; this native QA does not send to DingTalk', version:await invoke('plugin:app|version') };
   if (calibratedDesktop) report.cases.push('real DingTalk automatic layout and editor preview through native UI');
   report.cases.push('auto-detect installed Python', 'auto setup without manual interpreter path', 'invalid Python preserves working runtime marker', 'existing venv reused without recreation', 'automatic check through native UI');
