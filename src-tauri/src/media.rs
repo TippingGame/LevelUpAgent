@@ -4790,11 +4790,14 @@ mod tests {
 
     #[tokio::test]
     async fn minimax_gateway_jobs_use_compatible_create_poll_and_content_routes() {
-        for model in [
-            "MiniMax-H3",
-            "MiniMax-H3-Max",
-            "MiniMax-H3-2K",
-            "MiniMax-H3-Max-2K",
+        for (model, resolution) in [
+            ("MiniMax-H3", "768P"),
+            ("MiniMax-H3-Max", "768P"),
+            ("MiniMax-H3-2K", "2K"),
+            ("MiniMax-H3-Max-768P", "768P"),
+            ("无限制-MiniMax-H3-1080P", "1080P"),
+            ("无限制-MiniMax-H3-1K", "1K"),
+            ("无限制-MiniMax-H3-2K", "2K"),
         ] {
             let (base_url, server) = mock_sequence_inspecting(
                 vec![
@@ -4835,7 +4838,8 @@ mod tests {
                         assert_eq!(body["first_image"], "https://cdn.test/first.png");
                         assert_eq!(body["last_image"], "https://cdn.test/last.png");
                         assert_eq!(body["ratio"], "adaptive");
-                        assert_eq!(body["resolution"], "768P");
+                        assert_eq!(body["resolution"], resolution);
+                        assert!(text.contains("application/json"));
                     }
                 },
             );
@@ -5206,6 +5210,11 @@ mod tests {
     #[tokio::test]
     async fn media_catalog_keeps_custom_names_and_their_routes() {
         let ids = [
+            ("无限制-MiniMax-H3-1080P", MediaKind::Video),
+            ("无限制-MiniMax-H3-1K", MediaKind::Video),
+            ("无限制-MiniMax-H3-2K", MediaKind::Video),
+            ("优惠-Seedance-2.5-720P", MediaKind::Video),
+            ("seedance/Seedance-2.5", MediaKind::Video),
             ("MiniMax-H3-2K", MediaKind::Video),
             ("MiniMax-H3-Max-2K", MediaKind::Video),
             ("Seedance-2.5-custom", MediaKind::Video),

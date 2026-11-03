@@ -22,7 +22,8 @@ export const VIDEO_SIZE_OPTIONS = ["1280x720", "720x1280", "16:9", "9:16"];
 // Resolve capabilities only; requests and saved selections keep the full model ID.
 export function mediaModelBaseId(model: string) {
   const id = model.trim().replace(/^models\//i, "").toLowerCase();
-  return ["minimax-h3-max", "minimax-h3", "seedance-2.5", "seedance-2.0", "seedance-2", "image-01-live", "image-01"]
+  const video = id.match(/(?:^|[^a-z0-9])(minimax-h3(?:-max)?|seedance-2(?:\.0|\.5)?)(?=$|[^a-z0-9.])/i)?.[1];
+  return video ?? ["image-01-live", "image-01"]
     .find((base) => id === base || id.startsWith(`${base}-`)) ?? id;
 }
 
@@ -106,7 +107,9 @@ export function videoModelCapabilities(model: string, mode: VideoGenerationMode 
   const modes: VideoGenerationMode[] = native
     ? max ? ["text", "image", "first_last"] : ["text", "image", "first_last", "reference"]
     : grok15 ? ["image"] : grok ? ["text", "image", "reference", "video"] : ["text"];
-  const resolutions = minimax ? max ? ["480p", "768p"] : ["768p", "2K"]
+  const fixedResolution = native ? model.trim().match(/[-_/](480p|720p|768p|1080p|1k|2k|4k)$/i)?.[1].toLowerCase() : undefined;
+  const resolutions = fixedResolution ? [fixedResolution.endsWith("k") ? fixedResolution.toUpperCase() : fixedResolution]
+    : minimax ? max ? ["480p", "768p"] : ["768p", "2K"]
     : seedance ? version25 ? ["480p", "720p", "1080p"] : ["480p", "720p", "1080p", "4K"]
     : grok15 ? ["480p", "720p", "1080p"] : ["480p", "720p"];
   const durations = native ? [max ? 5 : 4, ...(max ? [] : [5]), 8, 10, 12, 15, ...(version25 ? [20, 30] : [])]

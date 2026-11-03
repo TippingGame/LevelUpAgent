@@ -33,7 +33,7 @@ test("video output controls normalize saved options while retaining supported ch
 test("suffixed aliases inherit the most specific base capabilities", () => {
   for (const base of ["MiniMax-H3", "MiniMax-H3-Max", "Seedance-2", "Seedance-2.0", "Seedance-2.5", "grok-imagine-video-1.5"]) {
     for (const mode of ["text", "image", "first_last", "reference", "video"]) {
-      assert.deepEqual(videoModelCapabilities(`${base}-2K`, mode), videoModelCapabilities(base, mode));
+      assert.deepEqual(videoModelCapabilities(`${base}-custom`, mode), videoModelCapabilities(base, mode));
     }
   }
   assert.equal(mediaModelBaseId("models/IMAGE-01-LIVE-2K"), "image-01-live");
@@ -46,6 +46,22 @@ test("suffixed aliases inherit the most specific base capabilities", () => {
   assert.equal(isMiniMaxImageModel("image-010-2K"), false);
   const alias = { id: "MiniMax-H3-2K", profileId: "minimax" };
   assert.equal(selectStudioMediaModel([alias], "minimax::MiniMax-H3-2K"), alias);
+});
+
+test("prefixed MiniMax aliases remain native and select their fixed resolution", () => {
+  for (const [suffix, resolution] of [["1080P", "1080p"], ["1K", "1K"], ["2K", "2K"]]) {
+    const model = "无限制-MiniMax-H3-" + suffix;
+    assert.equal(mediaModelBaseId(model), "minimax-h3");
+    assert.equal(videoModelCapabilities(model).native, true);
+    assert.deepEqual(videoModelCapabilities(model).resolutions, [resolution]);
+    assert.equal(videoOutputOptions(model, "text", { videoResolution: "720p" }).resolution, resolution);
+    assert.equal(videoOutputOptions(model, "first_last", {}).aspectRatio, "adaptive");
+  }
+  assert.equal(mediaModelBaseId("seedance/Seedance-2.5"), "seedance-2.5");
+  assert.equal(videoModelCapabilities("专线-MiniMax-H3-Max-768P").modes.includes("reference"), false);
+  for (const model of ["notminimax-h3", "Seedance-2.6", "MiniMax-H30"]) {
+    assert.equal(videoModelCapabilities(model).native, false);
+  }
 });
 
 test("studio follows list order and preserves explicit model choice without recommendation bias", () => {

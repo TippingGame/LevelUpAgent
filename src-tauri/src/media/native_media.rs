@@ -19,10 +19,18 @@ pub(super) fn native_model_base_id(model: &str) -> String {
     ]
     .into_iter()
     .find(|base| {
-        id == *base
-            || id
-                .strip_prefix(base)
-                .is_some_and(|suffix| suffix.starts_with('-'))
+        if base.starts_with("image-") {
+            return id == *base
+                || id
+                    .strip_prefix(base)
+                    .is_some_and(|suffix| suffix.starts_with('-'));
+        }
+        id.match_indices(*base).any(|(start, _)| {
+            let before = id[..start].chars().next_back();
+            let after = id[start + base.len()..].chars().next();
+            before.is_none_or(|ch| !ch.is_ascii_alphanumeric())
+                && after.is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != '.')
+        })
     })
     .unwrap_or(&id)
     .to_owned()
@@ -47,6 +55,33 @@ pub(super) fn is_seedance_video_model(model: &str) -> bool {
         native_model_base_id(model).as_str(),
         "seedance-2" | "seedance-2.0" | "seedance-2.5"
     )
+}
+
+fn model_video_resolution(model: &str) -> Option<String> {
+    let id = model.trim().to_ascii_lowercase();
+    let (prefix, tier) = id.rsplit_once(['-', '_', '/'])?;
+    (!prefix.is_empty()
+        && matches!(
+            tier,
+            "480p" | "720p" | "768p" | "1080p" | "1k" | "2k" | "4k"
+        ))
+    .then(|| tier.to_owned())
+}
+
+fn native_video_resolution(model: &str, request: &MediaGenerationRequest) -> String {
+    request
+        .video_resolution
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .or_else(|| model_video_resolution(model))
+        .unwrap_or_else(|| {
+            if is_seedance_video_model(model) {
+                "480p"
+            } else {
+                "768p"
+            }
+            .to_owned()
+        })
 }
 
 pub(super) fn native_endpoint(base_url: &str, path: &str) -> Result<reqwest::Url, String> {
@@ -122,19 +157,21 @@ pub(super) fn validate_native_video_request(
             if version_25 { 30 } else { 15 }
         ));
     }
-    let default_resolution = if seedance { "480p" } else { "768p" };
-    let resolution = request
-        .video_resolution
-        .as_deref()
-        .unwrap_or(default_resolution)
-        .to_ascii_lowercase();
+    let resolution = native_video_resolution(model, request);
+    if let Some(fixed) = model_video_resolution(model)
+        && resolution != fixed
+    {
+        return Err(format!(
+            "Resolution must match the selected model's {fixed} tier"
+        ));
+    }
     let supported = if seedance {
         matches!(resolution.as_str(), "480p" | "720p" | "1080p")
             || (!version_25 && resolution == "4k")
     } else if max {
         matches!(resolution.as_str(), "480p" | "768p")
     } else {
-        matches!(resolution.as_str(), "768p" | "2k")
+        matches!(resolution.as_str(), "720p" | "768p" | "1080p" | "1k" | "2k")
     };
     if !supported {
         return Err(format!("{model} does not support resolution {resolution}"));
@@ -251,7 +288,7 @@ pub(super) fn native_video_body(
         })));
         Ok(
             json!({"model": model, "content": content, "duration": request.seconds.unwrap_or(5),
-            "resolution": request.video_resolution.as_deref().unwrap_or("768P").to_ascii_uppercase(),
+            "resolution": native_video_resolution(model, request).to_ascii_uppercase(),
             "ratio": if frame_mode { "adaptive" } else { request.video_aspect_ratio.as_deref().unwrap_or("16:9") }}),
         )
     } else {
@@ -261,7 +298,7 @@ pub(super) fn native_video_body(
             );
         }
         let mut body = json!({"model": model, "prompt": prompt, "duration": request.seconds.unwrap_or(5),
-            "resolution": request.video_resolution.as_deref().unwrap_or("480p")});
+            "resolution": native_video_resolution(model, request)});
         // Anyu normalizes historical Auto to an omitted ratio for frame inputs.
         if !frame_mode {
             body["ratio"] = json!(request.video_aspect_ratio.as_deref().unwrap_or("16:9"));
@@ -286,6 +323,15 @@ pub(super) async fn create_native_video(
     references: &[ManagedReference],
 ) -> Result<RemoteVideoJob, String> {
     let direct_minimax = is_minimax_video_model(model) && uses_direct_minimax_media(provider);
+    if direct_minimax
+        && native_model_base_id(model) == "minimax-h3"
+        && !matches!(
+            native_video_resolution(model, request).as_str(),
+            "768p" | "2k"
+        )
+    {
+        return Err("720p, 1080p and 1K H3 require a compatible relay connection".to_owned());
+    }
     let mut body = native_video_body(model, request, references)?;
     if is_minimax_video_model(model) && !direct_minimax {
         // Gateways expose the same compatible contract used by the web studio.
@@ -538,6 +584,34 @@ fn minimax_image_sources(value: &Value) -> Result<Vec<BlobSource>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prefixed_video_aliases_keep_ids_and_fixed_resolution() {
+        for tier in ["1080P", "1K", "2K"] {
+            let model = format!("无限制-MiniMax-H3-{tier}");
+            assert!(is_minimax_video_model(&model));
+            let mut request = request(&model);
+            let body = native_video_body(&model, &request, &[]).unwrap();
+            assert_eq!(body["model"], model);
+            assert_eq!(body["resolution"], tier);
+            request.video_resolution = Some("768p".into());
+            assert!(
+                native_video_body(&model, &request, &[])
+                    .unwrap_err()
+                    .contains("must match")
+            );
+        }
+        assert!(is_seedance_video_model("优惠-Seedance-2.5-720P"));
+        for model in [
+            "MiniMax-H30",
+            "notminimax-h3",
+            "Seedance-20",
+            "Seedance-2.6",
+        ] {
+            assert!(!is_minimax_video_model(model));
+            assert!(!is_seedance_video_model(model));
+        }
+    }
 
     #[test]
     fn suffixed_models_preserve_ids_and_base_validation() {
