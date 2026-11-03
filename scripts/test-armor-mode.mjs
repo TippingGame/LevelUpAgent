@@ -83,7 +83,7 @@ test("conversation controls remain while the console and creative injections are
   }
   const media = read("src/components/MediaStudio.tsx");
   assert.match(media, /prompt: task.prompt,/);
-  assert.ok(media.includes('instructions: kind === "audio" && instructions.trim() ? instructions.trim() : undefined'));
+  assert.ok(media.includes('instructions: kind === "audio" && !grokAudio && instructions.trim() ? instructions.trim() : undefined'));
   const constellation = read("src/components/ConstellationStudio.tsx");
   assert.match(constellation, /prompt: effectivePrompt,/);
   assert.ok(constellation.includes('instructions: mediaKind === "audio" ? node.data.instruction?.trim() || undefined : undefined'));
