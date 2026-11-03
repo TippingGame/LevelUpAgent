@@ -20,6 +20,7 @@ use crate::models::{
 
 mod native_media;
 use native_media::*;
+mod grok_audio;
 mod refresh;
 #[cfg(test)]
 mod video_recovery_tests;
@@ -1496,7 +1497,9 @@ async fn generate_audio(
     batch_id: String,
 ) -> Result<MediaBatchResult, String> {
     let calls = (0..request.count).map(|_| async {
-        if matches!(selection.protocol, ProviderProtocol::GeminiGenerateContent) {
+        if selection.model.eq_ignore_ascii_case("grok-voice-tts") {
+            grok_audio::call_grok_audio(client, &selection.provider, request).await
+        } else if matches!(selection.protocol, ProviderProtocol::GeminiGenerateContent) {
             call_gemini_audio(client, &selection.provider, &selection.model, request).await
         } else {
             call_openai_audio(client, &selection.provider, &selection.model, request).await

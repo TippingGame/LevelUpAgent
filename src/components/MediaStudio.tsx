@@ -204,6 +204,7 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
   // a temporarily unavailable user choice.
   const selected = selectStudioMediaModel(eligibleModels, selectedKey);
   const selectedModelId = mediaModelBaseId(selected?.id ?? "");
+  const grokAudio = kind === "audio" && selectedModelId === "grok-voice-tts";
   const imageCapabilities = imageModelCapabilities(selectedModelId);
   const minimaxImage = kind === "image" && imageCapabilities.minimax;
   const transparentBackgroundSupported = !selectedModelId.includes("gpt-image-2") && !minimaxImage;
@@ -368,9 +369,11 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
     } else if (kind === "video") {
       setSize((current) => VIDEO_SIZE_OPTIONS.includes(current) ? current : "1280x720");
     } else {
-      setOutputFormat((current) => ["mp3", "wav", "aac", "flac", "opus"].includes(current) ? current : "mp3");
+      setOutputFormat((current) => (grokAudio ? ["mp3", "wav"] : ["mp3", "wav", "aac", "flac", "opus"]).includes(current) ? current : "mp3");
     }
-  }, [kind]);
+  }, [kind, grokAudio]);
+
+  useEffect(() => { setVoice(""); }, [grokAudio]);
 
   useEffect(() => onMediaAssetUpdate((asset) => {
     setAssets((current) => mergeAssets(current, [asset]));
@@ -761,7 +764,7 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
       outputFormat: kind === "video" || minimaxImage ? undefined : outputFormat,
       background: kind === "image" && !minimaxImage && background !== "auto" ? background : undefined,
       voice: kind === "audio" && voice.trim() ? voice.trim() : undefined,
-      instructions: kind === "audio" && instructions.trim() ? instructions.trim() : undefined,
+      instructions: kind === "audio" && !grokAudio && instructions.trim() ? instructions.trim() : undefined,
       seconds: kind === "video" && activeVideoMode !== "video" ? seconds : undefined,
       videoMode: kind === "video" && hasVideoControls ? activeVideoMode : "text",
       videoResolution: videoHasOutputControls ? videoResolution : undefined,
@@ -1044,13 +1047,13 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
               <option value="transparent" disabled={!transparentBackgroundSupported}>{transparentBackgroundSupported ? "transparent" : tr("transparent（当前模型不支持）", "transparent (unsupported by this model)")}</option>
               <option value="opaque">opaque</option>
             </select></label>}
-            {kind !== "video" && !minimaxImage && <label><span>{tr("格式", "Format")}</span><select value={outputFormat} onChange={(event) => setOutputFormat(event.target.value)}>{(kind === "image" ? ["png", "webp", "jpeg"] : ["mp3", "wav", "aac", "flac", "opus"]).map((value) => <option key={value}>{value}</option>)}</select></label>}
+            {kind !== "video" && !minimaxImage && <label><span>{tr("格式", "Format")}</span><select value={outputFormat} onChange={(event) => setOutputFormat(event.target.value)}>{(kind === "image" ? ["png", "webp", "jpeg"] : grokAudio ? ["mp3", "wav"] : ["mp3", "wav", "aac", "flac", "opus"]).map((value) => <option key={value}>{value}</option>)}</select></label>}
             {kind === "video" && activeVideoMode !== "video" && <label><span>{tr("时长", "Duration")}</span><select value={seconds} onChange={(event) => setSeconds(Number(event.target.value))}>{videoDurationOptions.map((value) => <option value={value} key={value}>{value}s</option>)}</select></label>}
             <label><span>{tr("每条数量", "Outputs each")}</span><select value={count} onChange={(event) => setCount(Number(event.target.value))}>{Array.from({ length: kind === "image" ? 8 : 4 }, (_, index) => index + 1).map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
-            {kind === "audio" && <label><span>{tr("声音", "Voice")}</span><input value={voice} placeholder={tr("留空自动选择", "Automatic when empty")} onChange={(event) => setVoice(event.target.value)} /></label>}
+            {kind === "audio" && <label><span>{tr("声音", "Voice")}</span><input value={voice} placeholder={grokAudio ? "eve" : tr("留空自动选择", "Automatic when empty")} onChange={(event) => setVoice(event.target.value)} /></label>}
           </div>
 
-          {kind === "audio" && <label className="media-wide-field"><span>{tr("演绎要求", "Delivery instructions")}</span><input value={instructions} placeholder={tr("例如：温暖、自然、稍慢", "For example: warm, natural, slightly slower")} onChange={(event) => setInstructions(event.target.value)} /></label>}
+          {kind === "audio" && !grokAudio && <label className="media-wide-field"><span>{tr("演绎要求", "Delivery instructions")}</span><input value={instructions} placeholder={tr("例如：温暖、自然、稍慢", "For example: warm, natural, slightly slower")} onChange={(event) => setInstructions(event.target.value)} /></label>}
 
           {kind === "image" && (
             <div className="media-reference-row">
