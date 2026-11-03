@@ -107,12 +107,41 @@ pub async fn discover_catalog(
                 Vec::new()
             }
         };
-        for model in discovered {
+        // Public Nano Banana aliases may add gemini- / -image around the
+        // native catalog ID. Confirm the same model, not merely that another
+        // model on this connection offers a Gemini endpoint.
+        let native_image_aliases: HashSet<String> = discovered
+            .iter()
+            .filter(|model| {
+                model
+                    .protocols
+                    .contains(&ProviderProtocol::GeminiGenerateContent)
+                    || model.protocol == Some(ProviderProtocol::GeminiGenerateContent)
+            })
+            .filter(|model| {
+                classify_catalog_media_model(model)
+                    .iter()
+                    .any(|(kind, _)| *kind == MediaKind::Image)
+            })
+            .map(|model| gemini_image_catalog_id(&model.id))
+            .collect();
+        for mut model in discovered {
             let id = model.id.trim().trim_start_matches("models/").to_owned();
             if id.is_empty() {
                 continue;
             }
-            for (kind, rank) in classify_media_model(&id) {
+            for (kind, rank) in classify_catalog_media_model(&model) {
+                if kind == MediaKind::Image
+                    && native_image_aliases.contains(&gemini_image_catalog_id(&id))
+                    && is_native_gemini_media_family(&id, &kind)
+                    && !model
+                        .protocols
+                        .contains(&ProviderProtocol::GeminiGenerateContent)
+                {
+                    model
+                        .protocols
+                        .push(ProviderProtocol::GeminiGenerateContent);
+                }
                 let protocol = preferred_media_protocol(&model, &kind, &provider.profile.protocol);
                 if seen.insert((provider.profile.id.clone(), kind.clone(), id.clone())) {
                     models.push(MediaModelInfo {
@@ -555,24 +584,17 @@ enum VideoPoll {
 }
 
 fn classify_media_model(model: &str) -> Vec<(MediaKind, i64)> {
-    let id = model.to_ascii_lowercase();
-    let mut kinds = Vec::new();
-    // Relays can expose custom image model names; video aliases take precedence.
-    if !id.contains("video")
-        && (id.contains("image")
-            || id.contains("seedream")
-            || id.contains("novelai")
-            || id.contains("dall-e")
-            || is_grok_image_model(&id))
-    {
-        kinds.push((MediaKind::Image, image_rank(&id)));
+    let id = model
+        .trim()
+        .trim_start_matches("models/")
+        .to_ascii_lowercase();
+    // Recognize output families, not the absence of an "-image" suffix.
+    // Exclude transcription, and resolve speech/video before image aliases.
+    if id.contains("transcri") || id.contains("speech-to-text") || id.contains("whisper") {
+        return Vec::new();
     }
-    if !id.contains("transcri")
-        && !id.contains("speech-to-text")
-        && !id.contains("whisper")
-        && (id.contains("tts") || id.contains("text-to-speech") || id.contains("speech-generation"))
-    {
-        kinds.push((MediaKind::Audio, audio_rank(&id)));
+    if id.contains("tts") || id.contains("text-to-speech") || id.contains("speech-generation") {
+        return vec![(MediaKind::Audio, audio_rank(&id))];
     }
     if id.starts_with("sora")
         || id.starts_with("veo")
@@ -582,7 +604,37 @@ fn classify_media_model(model: &str) -> Vec<(MediaKind, i64)> {
         || is_minimax_video_model(&id)
         || is_seedance_video_model(&id)
     {
-        kinds.push((MediaKind::Video, video_rank(&id)));
+        return vec![(MediaKind::Video, video_rank(&id))];
+    }
+    if !id.contains("video")
+        && (id.contains("image")
+            || id.contains("seedream")
+            || id.contains("novelai")
+            || id.contains("nano-banana")
+            || id.contains("dall-e")
+            || is_grok_image_model(&id))
+    {
+        return vec![(MediaKind::Image, image_rank(&id))];
+    }
+    Vec::new()
+}
+
+fn classify_catalog_media_model(model: &ModelInfo) -> Vec<(MediaKind, i64)> {
+    let mut kinds = classify_media_model(&model.id);
+    // Image *input* support does not imply image generation. Explicit output
+    // metadata wins over a name heuristic; catalogs without it keep aliases.
+    if !model.output_modalities.is_empty() {
+        kinds.retain(|(kind, _)| {
+            let output = match kind {
+                MediaKind::Image => "image",
+                MediaKind::Video => "video",
+                MediaKind::Audio => "audio",
+            };
+            model
+                .output_modalities
+                .iter()
+                .any(|value| value.trim().eq_ignore_ascii_case(output))
+        });
     }
     kinds
 }
@@ -614,9 +666,22 @@ fn preferred_media_protocol(
 fn is_native_gemini_media_family(model: &str, kind: &MediaKind) -> bool {
     let id = model.trim_start_matches("models/").to_ascii_lowercase();
     match kind {
-        MediaKind::Image => id.contains("gemini") || id.contains("imagen"),
+        MediaKind::Image => {
+            id.contains("gemini") || id.contains("imagen") || id.contains("nano-banana")
+        }
         MediaKind::Video => id.starts_with("veo"),
         MediaKind::Audio => id.contains("gemini"),
+    }
+}
+
+fn gemini_image_catalog_id(model: &str) -> String {
+    let id = model.trim().to_ascii_lowercase();
+    let id = id.trim_start_matches("models/");
+    let banana = id.strip_prefix("gemini-").unwrap_or(id);
+    if banana.starts_with("nano-banana") {
+        banana.strip_suffix("-image").unwrap_or(banana).to_owned()
+    } else {
+        id.to_owned()
     }
 }
 
@@ -1158,7 +1223,8 @@ async fn call_openai_images(
         Err(primary_error)
             if references.is_empty()
                 && (model.to_ascii_lowercase().contains("gemini")
-                    || model.to_ascii_lowercase().contains("imagen")) =>
+                    || model.to_ascii_lowercase().contains("imagen")
+                    || model.to_ascii_lowercase().contains("nano-banana")) =>
         {
             call_openai_chat_image(client, provider, model, request)
                 .await
@@ -1181,12 +1247,22 @@ async fn call_openai_chat_image(
 ) -> Result<Value, String> {
     let url = agent::endpoint(&provider.profile.base_url, "/v1/chat/completions")?;
     let prompt = effective_image_prompt(request);
-    let body = json!({
+    let mut body = json!({
         "model": model,
         "messages": [{ "role": "user", "content": prompt }],
         "modalities": ["text", "image"],
         "n": request.count
     });
+    let mut image_config = serde_json::Map::new();
+    if let Some(ratio) = request.size.as_deref().and_then(gemini_aspect_ratio) {
+        image_config.insert("aspect_ratio".to_owned(), json!(ratio));
+    }
+    if let Some(size) = request.quality.as_deref().and_then(gemini_image_size) {
+        image_config.insert("image_size".to_owned(), json!(size));
+    }
+    if !image_config.is_empty() {
+        body["image_config"] = Value::Object(image_config);
+    }
     send_json(bearer_auth_if_present(client.post(url), provider).json(&body)).await
 }
 
@@ -3150,6 +3226,20 @@ mod tests {
 
     #[test]
     fn classifies_and_ranks_current_generation_models() {
+        for id in [
+            "gemini-nano-banana-2.1",
+            "gemini-nano-banana-2.1-image",
+            "nano-banana-2.1",
+            "GEMINI-NANO-BANANA-2.1",
+        ] {
+            assert_eq!(classify_media_model(id)[0].0, MediaKind::Image, "{id}");
+        }
+        assert!(classify_media_model("gemini-3.1-pro").is_empty());
+        assert!(
+            !classify_media_model("nano-banana-video")
+                .iter()
+                .any(|(kind, _)| *kind == MediaKind::Image)
+        );
         assert_eq!(classify_media_model("gpt-image-2")[0].0, MediaKind::Image);
         assert!(image_rank("gpt-image-2") > image_rank("gpt-image-1.5"));
         assert!(image_rank("gpt-image-2.5-sunburst") > image_rank("gpt-image-2"));
@@ -3195,6 +3285,58 @@ mod tests {
             MediaKind::Video
         );
         assert!(video_rank("veo-3.1-generate-preview") > video_rank("veo-3.0-generate-preview"));
+    }
+
+    #[test]
+    fn nano_banana_image_catalog_excludes_text_audio_and_video_models() {
+        assert_eq!(
+            gemini_image_catalog_id("models/gemini-nano-banana-2.1-image"),
+            gemini_image_catalog_id("nano-banana-2.1")
+        );
+        assert_ne!(
+            gemini_image_catalog_id("gemini-nano-banana-2.1"),
+            gemini_image_catalog_id("gemini-3.1-flash-image")
+        );
+        for id in [
+            "gemini-3.1-pro",
+            "gemini-3.8-flash",
+            "gpt-5.5",
+            "claude-sonnet-4-5",
+            "veo-3.1-image-to-video",
+            "sora-image",
+            "Seedance-2.5-image",
+            "MiniMax-H3-image",
+            "nano-banana-video",
+            "nano-banana-tts",
+            "image-transcription",
+        ] {
+            assert!(
+                !classify_media_model(id)
+                    .iter()
+                    .any(|(kind, _)| *kind == MediaKind::Image),
+                "{id} must not appear in Images"
+            );
+        }
+        let mut model = ModelInfo {
+            id: "gemini-nano-banana-2.1".to_owned(),
+            owned_by: None,
+            protocol: Some(ProviderProtocol::OpenaiChat),
+            protocols: vec![ProviderProtocol::OpenaiChat],
+            supported_generation_methods: Vec::new(),
+            input_modalities: vec!["IMAGE".to_owned()],
+            output_modalities: vec!["TEXT".to_owned()],
+        };
+        assert!(classify_catalog_media_model(&model).is_empty());
+        model.output_modalities = vec!["VIDEO".to_owned()];
+        assert!(classify_catalog_media_model(&model).is_empty());
+        model.output_modalities = vec!["TEXT".to_owned(), "IMAGE".to_owned()];
+        assert_eq!(classify_catalog_media_model(&model)[0].0, MediaKind::Image);
+        model.output_modalities.clear();
+        assert_eq!(classify_catalog_media_model(&model)[0].0, MediaKind::Image);
+        assert_eq!(
+            preferred_media_protocol(&model, &MediaKind::Image, &ProviderProtocol::OpenaiChat),
+            ProviderProtocol::OpenaiChat
+        );
     }
 
     #[test]
@@ -4205,6 +4347,88 @@ mod tests {
         server.join().unwrap();
         drop(database);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn nano_banana_catalog_alias_uses_confirmed_native_route_and_image_options() {
+        let (base_url, server) = mock_sequence_inspecting(
+            vec![
+                MockResponse { method: "GET", path: "/v1/models", status: 200, content_type: "application/json", body: br#"{"data":[{"id":"gemini-nano-banana-2.1"}]}"#.to_vec() },
+                MockResponse { method: "GET", path: "/v1beta/models", status: 200, content_type: "application/json", body: br#"{"models":[{"name":"models/nano-banana-2.1","supportedGenerationMethods":["generateContent"]}]}"#.to_vec() },
+                MockResponse { method: "POST", path: "/v1beta/models/gemini-nano-banana-2.1:generateContent", status: 200, content_type: "application/json", body: br#"{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"aW1hZ2U="}}]}}]}"#.to_vec() },
+            ],
+            |index, request| {
+                if index != 2 { return; }
+                let text = String::from_utf8_lossy(request);
+                let body: Value = serde_json::from_str(text.split_once("\r\n\r\n").unwrap().1).unwrap();
+                assert_eq!(body["generationConfig"]["responseModalities"], json!(["TEXT", "IMAGE"]));
+                assert_eq!(body["generationConfig"]["imageConfig"]["imageSize"], "2K");
+                assert_eq!(body["generationConfig"]["imageConfig"]["aspectRatio"], "16:9");
+            },
+        );
+        let mut provider = provider("primary", "gemini-nano-banana-2.1");
+        provider.profile.base_url = format!("{base_url}/v1");
+        provider.profile.protocol = ProviderProtocol::OpenaiChat;
+        let providers = vec![provider];
+        let client = Client::new();
+        let catalog = discover_catalog(&client, &providers, "primary").await;
+        assert!(catalog.errors.is_empty());
+        let mut req = request(MediaKind::Image, 1);
+        req.model = Some("gemini-nano-banana-2.1".to_owned());
+        req.quality = Some("high".to_owned());
+        req.size = Some("2048x1152".to_owned());
+        let selections = selection_candidates(&providers, &catalog, &req);
+        let selection = &selections[0];
+        assert_eq!(selection.model, "gemini-nano-banana-2.1");
+        assert_eq!(selection.protocol, ProviderProtocol::GeminiGenerateContent);
+        let (root, database) = temp_storage("nano-banana-native");
+        let result = generate_batch(
+            &client,
+            &root.join("media"),
+            &database,
+            selection,
+            &req,
+            None,
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.assets.len(), 1);
+        server.join().unwrap();
+        drop(database);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn nano_banana_chat_fallback_preserves_image_options() {
+        let (base_url, server) = mock_sequence_inspecting(
+            vec![MockResponse {
+                method: "POST",
+                path: "/v1/chat/completions",
+                status: 200,
+                content_type: "application/json",
+                body: br#"{"choices":[]}"#.to_vec(),
+            }],
+            |_, request| {
+                let text = String::from_utf8_lossy(request);
+                let body: Value =
+                    serde_json::from_str(text.split_once("\r\n\r\n").unwrap().1).unwrap();
+                assert_eq!(body["model"], "gemini-nano-banana-2.1");
+                assert_eq!(
+                    body["image_config"],
+                    json!({"image_size":"4K", "aspect_ratio":"9:16"})
+                );
+            },
+        );
+        let mut provider = provider("primary", "gemini-nano-banana-2.1");
+        provider.profile.base_url = base_url;
+        let mut req = request(MediaKind::Image, 1);
+        req.quality = Some("ultra".to_owned());
+        req.size = Some("9:16".to_owned());
+        call_openai_chat_image(&Client::new(), &provider, "gemini-nano-banana-2.1", &req)
+            .await
+            .unwrap();
+        server.join().unwrap();
     }
 
     #[tokio::test]

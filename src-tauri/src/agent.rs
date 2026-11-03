@@ -385,7 +385,10 @@ fn model_id_looks_gemini(model: &str) -> bool {
         .trim()
         .trim_start_matches("models/")
         .to_ascii_lowercase();
-    model.starts_with("gemini") || model.starts_with("imagen") || model.starts_with("veo")
+    model.starts_with("gemini")
+        || model.starts_with("imagen")
+        || model.starts_with("veo")
+        || model.contains("nano-banana")
 }
 
 async fn fetch_models_at(
