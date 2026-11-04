@@ -298,6 +298,44 @@ export function preferredConnectionModel(profile: ProviderProfile, models: Model
     ?? models[0];
 }
 
+/** One-shot suggestion after discovery; /v1/models alone does not prove a wire protocol. */
+export function preferredConnectionProtocol(profile: ProviderProfile, model: ModelInfo): ProviderProtocol {
+  let endpoint: URL;
+  try { endpoint = new URL(profile.baseUrl); } catch { return profile.protocol; }
+  const host = endpoint.hostname.toLowerCase();
+  const path = endpoint.pathname.replace(/\/+$/, "").toLowerCase();
+  // Explicit endpoint paths and compatibility services take priority over model branding.
+  if (path.endsWith("/chat/completions")) return "openai_chat";
+  if (path.endsWith("/responses")) return "openai_responses";
+  if (path.endsWith("/messages")) return "anthropic_messages";
+  if (host === "opencode.ai" && /^\/zen\/go(?:\/|$)/.test(path)) return "opencode_go";
+  if (profile.protocol === "opencode_go") return "opencode_go";
+  if (host === "generativelanguage.googleapis.com") {
+    return /\/openai(?:\/|$)/.test(path) ? "openai_chat" : "gemini_generate_content";
+  }
+  if (/\/v1beta(?:\/|$)/.test(path)) return "gemini_generate_content";
+  if (host === "api.anthropic.com" || /\/anthropic(?:\/|$)/.test(path)) return "anthropic_messages";
+  if (["openrouter.ai", "api.groq.com", "api.together.xyz", "api.together.ai", "api.deepseek.com",
+    "api.moonshot.cn", "api.moonshot.ai", "api.mistral.ai", "api.z.ai", "open.bigmodel.cn",
+    "api.siliconflow.cn", "api.siliconflow.com"].includes(host)
+    || /\/compatible-mode(?:\/|$)/.test(path)) return "openai_chat";
+
+  // Native discovery is evidence; standard discovery currently echoes the configured protocol.
+  if (model.supportedGenerationMethods?.some((method) => /generatecontent/i.test(method))
+    || model.protocols?.includes("gemini_generate_content") && profile.protocol !== "gemini_generate_content") {
+    return "gemini_generate_content";
+  }
+  if (!isTextGenerationModel(model)) return model.protocol ?? profile.protocol;
+  const id = bareModelId(model.id);
+  if (/^(?:gpt|o[134])(?:[._-]|$)/.test(id)) return "openai_responses";
+  if (/^(?:claude|minimax)(?:[._-]|$)/.test(id)) return "anthropic_messages";
+  if (/^(?:grok|deepseek|qwen\d*|glm|kimi|moonshot|mistral|codestral|llama|gemini)(?:[._-]|$)/.test(id)) {
+    // Gemini exposed only by a standard catalog may be a Chat Completions proxy.
+    return "openai_chat";
+  }
+  return model.protocol ?? profile.protocol;
+}
+
 /** Select the preferred, recent chat model from a freshly detected model list. */
 export function preferredDetectedModel(profile: ProviderProfile, models: ModelInfo[]): ModelInfo | undefined {
   models = models.filter(isTextGenerationModel);

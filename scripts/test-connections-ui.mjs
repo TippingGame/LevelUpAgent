@@ -61,7 +61,8 @@ try {
           if (command === "get_custom_instructions") return "";
           if (command === "get_media_catalog" || command === "get_model_catalog") return { models: [], errors: [] };
           if (command === "list_media_assets") return { assets: [], total: 0 };
-          if (command === "fetch_models") return [
+          if (command === "fetch_models" && state.holdModels) return new Promise((resolve) => { state.releaseModels = resolve; });
+          if (command === "fetch_models") return state.catalog ?? [
             { id: "gpt-image-2", outputModalities: ["image"] },
             { id: "Seedance-2.5", outputModalities: ["video"] },
             { id: "tts-1", outputModalities: ["audio"] },
@@ -111,6 +112,42 @@ try {
         await page.locator(".account-button").click();
         assert.equal(await modelInput.inputValue(), model);
       }
+
+      // Refresh corrects a stale protocol, while subsequent manual choices stay in control.
+      await page.evaluate(() => { window.connectionTest.catalog = [
+        { id: "gpt-6-astra", protocol: "anthropic_messages", protocols: ["anthropic_messages"] },
+      ]; });
+      const protocols = page.getByRole("radiogroup", { name: "连接协议" });
+      await protocols.getByRole("radio", { name: /^Anthropic Messages/ }).click();
+      await modelInput.fill("gpt-6-astra");
+      await page.getByRole("button", { name: "检测模型", exact: true }).click();
+      await protocols.getByRole("radio", { name: /^Responses/, checked: true }).waitFor();
+      await protocols.getByText("已选中", { exact: true }).waitFor();
+      await protocols.getByRole("radio", { name: /^Chat Completions/ }).click();
+      await modelInput.fill("gpt-6-astra-custom");
+      assert.equal(await protocols.getByRole("radio", { name: /^Chat Completions/ }).getAttribute("aria-checked"), "true");
+      await protocols.getByRole("radio", { name: /^Responses/ }).hover();
+      await protocols.getByRole("radio", { name: /^Chat Completions/ }).focus();
+      await protocols.scrollIntoViewIfNeeded();
+      await page.screenshot({ path: resolve(output, `${colorScheme}-armor-${armor}-protocols.png`) });
+      await page.setViewportSize({ width: 720, height: 820 });
+      await protocols.scrollIntoViewIfNeeded();
+      await page.screenshot({ path: resolve(output, `${colorScheme}-armor-${armor}-protocols-720.png`) });
+      await page.setViewportSize({ width: 1200, height: 900 });
+
+      // An old discovery cannot overwrite a model/protocol edited while waiting.
+      await page.evaluate(() => { window.connectionTest.holdModels = true; });
+      await page.getByRole("button", { name: "检测模型", exact: true }).click();
+      await page.waitForFunction(() => !!window.connectionTest.releaseModels);
+      await modelInput.fill("custom-model");
+      await protocols.getByRole("radio", { name: /^Responses/ }).click();
+      await page.evaluate(() => window.connectionTest.releaseModels([{ id: "claude-opus-4-6" }]));
+      await page.waitForFunction(() => !document.querySelector(".connection-test button").disabled);
+      assert.equal(await modelInput.inputValue(), "custom-model");
+      assert.equal(await protocols.getByRole("radio", { name: /^Responses/ }).getAttribute("aria-checked"), "true");
+      await page.evaluate(() => { window.connectionTest.holdModels = false; window.connectionTest.catalog = null; });
+      await picker.selectOption("first");
+      await picker.selectOption("media");
 
       // A delayed result from the previous selection must not overwrite this one.
       await page.evaluate(() => { window.connectionTest.hold = "middle"; });

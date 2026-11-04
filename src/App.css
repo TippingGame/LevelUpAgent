@@ -2357,6 +2357,19 @@ button.detail-row { padding: 0; border: 0; background: transparent; text-align: 
 .connection-dialog .protocol-options .protocol-option { min-height: 82px; gap: 9px; padding: 10px 12px; }
 .connection-dialog .protocol-option-heading strong { font-size: var(--font-body); }
 .connection-dialog .protocol-option-heading em { padding: 3px 6px; font-size: var(--font-caption); }
+.app-shell .connection-dialog .protocol-options { background: var(--surface-soft); }
+.app-shell .connection-dialog .protocol-options .protocol-option { background: var(--surface); border-color: var(--line); color: var(--text); }
+.app-shell .connection-dialog .protocol-options .protocol-option:hover { background: var(--surface-soft); border-color: var(--line-strong); }
+.app-shell .connection-dialog .protocol-options .protocol-option.active {
+  background: color-mix(in srgb, var(--info-text) 16%, var(--surface));
+  border-color: var(--info-text);
+  box-shadow: inset 0 0 0 1px var(--info-text);
+}
+.app-shell .connection-dialog .protocol-options .protocol-option:focus-visible { outline: 2px solid var(--info-text); outline-offset: 2px; }
+.connection-dialog .protocol-option-heading { flex-wrap: wrap; }
+.connection-dialog .protocol-selected { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; color: var(--info-text); font-size: var(--font-caption); font-weight: 750; white-space: nowrap; }
+.connection-dialog .model-id-options > li[aria-selected="true"] { background: var(--info-soft); color: var(--text); box-shadow: inset 3px 0 var(--info-text); font-weight: 700; }
+.connection-dialog .model-id-options > li[aria-selected="true"] > svg { color: var(--info-text); }
 .connection-dialog .protocol-platforms { gap: 5px; }
 .connection-dialog .platform-pill { min-height: 22px; padding: 3px 7px; font-size: var(--font-caption); }
 .connection-dialog .protocol-help { margin-top: 8px; font-size: var(--font-caption); line-height: 1.6; }

@@ -195,6 +195,35 @@ test("connection detection accepts media-only catalogs and preserves any selecte
   assert.equal(selection.preferredConnectionModel(profile, []), undefined);
 });
 
+test("connection refresh corrects inherited protocol metadata using models and endpoint constraints", () => {
+  const profile = { ...grokProfile, baseUrl: "https://gateway.example/v1", protocol: "anthropic_messages" };
+  const inherited = (id) => ({ id, protocol: profile.protocol, protocols: [profile.protocol] });
+  for (const [id, expected] of [
+    ["openai/gpt-6-astra", "openai_responses"], ["o3", "openai_responses"],
+    ["claude-opus-4-6", "anthropic_messages"], ["MiniMax-M3", "anthropic_messages"],
+    ["qwen3.8-max", "openai_chat"], ["deepseek-v4-pro", "openai_chat"],
+    ["gemini-3.1-pro", "openai_chat"], ["unknown-model", "anthropic_messages"],
+  ]) assert.equal(selection.preferredConnectionProtocol(profile, inherited(id)), expected, id);
+  for (const [baseUrl, expected] of [
+    ["https://openrouter.ai/api/v1", "openai_chat"],
+    ["https://generativelanguage.googleapis.com/v1beta/openai", "openai_chat"],
+    ["https://generativelanguage.googleapis.com", "gemini_generate_content"],
+    ["https://gateway.example/v1beta", "gemini_generate_content"],
+    ["https://opencode.ai/zen/go/v1", "opencode_go"],
+    ["https://api.deepseek.com", "openai_chat"],
+    ["https://gateway.example/anthropic", "anthropic_messages"],
+    ["https://gateway.example/v1/chat/completions", "openai_chat"],
+    ["https://gateway.example/v1/responses", "openai_responses"],
+    ["https://gateway.example/v1/messages", "anthropic_messages"],
+  ]) assert.equal(selection.preferredConnectionProtocol({ ...profile, baseUrl }, inherited("gpt-6-astra")), expected, baseUrl);
+  assert.equal(selection.preferredConnectionProtocol(profile, {
+    ...inherited("gemini-3.1-pro"), supportedGenerationMethods: ["generateContent"],
+  }), "gemini_generate_content");
+  assert.equal(selection.preferredConnectionProtocol(openCodeProfile, inherited("gpt-6-astra")), "opencode_go");
+  assert.equal(selection.preferredConnectionProtocol(profile, inherited("gpt-image-2")), profile.protocol);
+  assert.equal(selection.preferredConnectionProtocol({ ...profile, baseUrl: "invalid" }, inherited("gpt-6-astra")), profile.protocol);
+});
+
 test("OpenCode Go strips config prefixes and routes every documented model family", () => {
   assert.equal(selection.normalizeOpenCodeModelId("models/OpenCode-Go/gpt-5.6-luna"), "gpt-5.6-luna");
 

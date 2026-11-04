@@ -305,6 +305,7 @@ import {
   isTextGenerationModel,
   opencodeWireProtocol,
   preferredConnectionModel,
+  preferredConnectionProtocol,
   profileAfterRemoval,
   profileHasTextModel,
   reasoningEffortForProfile,
@@ -9098,6 +9099,8 @@ function ConnectionDialog({
   const [draftProfile, setDraftProfile] = useState(profile);
   const [apiKey, setApiKey] = useState("");
   const [localKeyConfigured, setLocalKeyConfigured] = useState(keyConfigured);
+  const detectionDraftRef = useRef({ profile: draftProfile, apiKey });
+  detectionDraftRef.current = { profile: draftProfile, apiKey };
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelsDetected, setModelsDetected] = useState(false);
   const textModels = models.filter(isTextGenerationModel);
@@ -9217,6 +9220,8 @@ function ConnectionDialog({
     setError(null);
     try {
       const result = await fetchModels(draftProfile, apiKey);
+      // Ignore a response if the user switched connections or edited its inputs while waiting.
+      if (detectionDraftRef.current.profile !== draftProfile || detectionDraftRef.current.apiKey !== apiKey) return;
       setModels(result);
       setModelsDetected(true);
       const preferredModel = preferredConnectionModel(draftProfile, result);
@@ -9224,12 +9229,11 @@ function ConnectionDialog({
         setDraftProfile((current) => ({
           ...current,
           model: preferredModel.id,
-          protocol: current.protocol === "opencode_go"
-            ? current.protocol
-            : preferredModel.protocol ?? current.protocol,
+          protocol: preferredConnectionProtocol(current, preferredModel),
         }));
       }
     } catch (reason) {
+      if (detectionDraftRef.current.profile !== draftProfile || detectionDraftRef.current.apiKey !== apiKey) return;
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setBusy(false);
@@ -9452,10 +9456,11 @@ function ConnectionDialog({
           </div>
           <div className="field connection-test">
             <span>{tr("连接检查", "Connection check")}</span>
-            <button className="secondary-button" onClick={testModels} disabled={busy} title={tr("独立检测当前连接的标准与 Gemini 模型目录", "Discover standard and Gemini model catalogs independently from the generation protocol")}>
+            <button className="secondary-button" onClick={testModels} disabled={busy} title={tr("刷新模型目录，并根据服务地址和模型自动选择一次协议", "Refresh the model catalog and choose a protocol once using the service URL and model")}>
               <RefreshCw size={14} className={busy ? "spin" : ""} />
               {tr("检测模型", "Check models")}
             </button>
+            <small>{tr("检测后自动匹配一次协议，仍可手动调整。", "Detection selects a protocol once; you can still change it manually.")}</small>
           </div>
           <div className="field wide">
             <span>
@@ -9474,7 +9479,9 @@ function ConnectionDialog({
                 >
                   <span className="protocol-option-heading">
                     <strong>{option.label}</strong>
-                    {option.recommended && <em>{tr("推荐", "Recommended")}</em>}
+                    {draftProfile.protocol === option.value
+                      ? <span className="protocol-selected"><Check size={14} aria-hidden="true" />{tr("已选中", "Selected")}</span>
+                      : option.recommended && <em>{tr("推荐", "Recommended")}</em>}
                   </span>
                   <span className="protocol-platforms" aria-label={tr("支持平台", "Supported platforms")}>
                     {option.platforms.map((platform) => (

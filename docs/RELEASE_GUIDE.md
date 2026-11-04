@@ -22,6 +22,12 @@ Draft，因此 `v1.0.32` 继续显示 `Latest`；在核对资产并正式发布�
 
 ## 零、以后每次发布速查
 
+### v1.5.86：钉钉窗口识别与模型连接体验改进（准备发布）
+
+- 合并钉钉窗口检测 R2：进程快照备用识别、最小化窗口检测和结果诊断。
+- 模型列表刷新后自动匹配一次协议，并增强深色模式选中效果；识别 Nano Banana 图片别名。
+- 音频及 3D 独立资源继续复用；验证与发布记录见 docs/RELEASE_1.5.86.md。
+
 ### v1.4.85：MiniMax 视频模型识别与 Grok 语音修复（已正式发布）
 
 - 支持带前缀的 MiniMax / Seedance 视频模型并保留完整 ID 与固定清晰度档位。
@@ -143,7 +149,7 @@ gh release edit music-workbench-resources --draft=false --prerelease --latest=fa
 
 ### 从 v1.2.71 起：应用和 3D 通用资源分别发布
 
-应用安装包继续通过 `vX.Y.Z` tag 触发四平台构建，本次应用版本为 `1.4.85`。
+应用安装包继续通过 `vX.Y.Z` tag 触发四平台构建，本次应用版本为 `1.5.86`。
 Python / PyTorch / CUDA、TripoSG、SD2.1 + MV-Adapter、Blender 不进入应用安装包，
 也不再随每个应用版本重复打包或上传。所有额外资源固定放在同一个 Release：
 
@@ -158,7 +164,7 @@ https://github.com/TippingGame/LevelUpAgent/releases/tag/model-workbench-resourc
 - 清单名为 `model-workbench-<资源版本>-<目标>.json`，分片名也包含独立资源版本，每片小于 2 GB。
   初始清单：`model-workbench-2026.10.1-linux-x64-cu118.json`。
 - 资源 Release 使用 prerelease 且 `--latest=false`，只用于把通用资源与应用更新渠道分开，
-  不能上传 `latest.json`；应用正式版（本次 `v1.4.85`）设为 Latest。
+  不能上传 `latest.json`；应用正式版（本次 `v1.5.86`）设为 Latest。
 - 只有模型、CUDA 或依赖内容变化时才增加资源版本并上传新资产，旧资产保留。
   不覆盖已公开的分片或清单；同名同哈希文件复用，同名不同哈希必须改资源版本。
 - 上传顺序：本地校验所有分片与完整归档 → 上传分片并核对 GitHub digest → 最后上传清单。
