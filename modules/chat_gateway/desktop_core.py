@@ -66,6 +66,27 @@ class MessageTracker:
                             if old[-n:] == current[:n]), 0)
             if overlap:
                 additions = bubbles[overlap:]
+            else:
+                # Scrolling after an append can clip/reflow the first visible
+                # old bubble, changing only its OCR fingerprint. Require two
+                # exact trailing anchors before accepting text below them.
+                anchored = next((n for n in range(min(len(old), len(current)-1), 1, -1)
+                                 if old[-n:] == current[1:n+1]), 0)
+                if anchored:
+                    anchor = current[1:anchored+1]
+                    positions = [i for i in range(len(history)-anchored+1)
+                                 if history[i:i+anchored] == anchor]
+                    if positions and len(set(anchor)) >= 2:
+                        # A backwards scroll may expose a previously seen
+                        # continuation. Exclude that known sequence, while a
+                        # genuinely repeated message at the live tail remains new.
+                        known = history[positions[-1]+anchored:]
+                        tail = current[anchored+1:]
+                        seen = 0
+                        while seen < min(len(known), len(tail)) and known[seen] == tail[seen]:
+                            seen += 1
+                        if seen == len(known):
+                            additions = bubbles[anchored+1+seen:]
         elif initialized and not old and not history and current:
             additions = bubbles
         result = []

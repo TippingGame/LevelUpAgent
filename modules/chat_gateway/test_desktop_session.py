@@ -98,6 +98,50 @@ class DesktopSessionTests(unittest.TestCase):
         self.assertIn('仅 @', detail)
         self.assertNotIn('仅 @', self.session.scan_status(dict(group,mode='all'), bubbles)[1])
 
+    def test_clipped_first_old_bubble_does_not_swallow_new_incoming(self):
+        first=Bubble('original OCR spacing','outgoing')
+        anchors=[Bubble('test two','outgoing'),Bubble('test three','outgoing')]
+        self.observe([first]+anchors)
+        current=[Bubble('originalOCR spacing','outgoing')]+anchors+[Bubble('new question','incoming')]
+        self.session.observe(self.route,current)
+        self.assertEqual(self.session.store.data['pending'],[])
+        self.session.observe(self.route,current)
+        self.assertEqual([m['text'] for m in self.session.store.data['pending']],['new question'])
+        self.observe(current)
+        self.assertEqual(len(self.session.store.data['pending']),1)
+
+    def test_changed_top_with_only_one_anchor_still_rebaselines(self):
+        self.observe([Bubble('old top','outgoing'),Bubble('one anchor','incoming')])
+        self.observe([Bubble('changed top','outgoing'),Bubble('one anchor','incoming'),Bubble('uncertain','incoming')])
+        self.assertEqual(self.session.store.data['pending'],[])
+
+    def test_changed_top_during_backwards_scroll_never_replays_known_continuation(self):
+        a,b,c,d=[Bubble(text,'incoming') for text in ('a','b','c','d')]
+        self.observe([a,b,c,d])
+        self.observe([b,c])
+        self.observe([Bubble('a clipped','incoming'),b,c,d])
+        self.assertEqual(self.session.store.data['pending'],[])
+
+    def test_repeated_text_at_live_tail_after_changed_top_is_new(self):
+        first=Bubble('first','outgoing');anchors=[Bubble('anchor one','outgoing'),Bubble('anchor two','outgoing')]
+        repeated=Bubble('same answer','incoming')
+        self.observe([repeated,first]+anchors)
+        self.observe([Bubble('first clipped','outgoing')]+anchors+[repeated])
+        self.assertEqual([m['text'] for m in self.session.store.data['pending']],['same answer'])
+
+    def test_identical_common_anchors_do_not_establish_clipped_overlap(self):
+        common=Bubble('ok','incoming')
+        self.observe([Bubble('old top','outgoing'),common,common])
+        self.observe([Bubble('changed top','outgoing'),common,common,Bubble('uncertain','incoming')])
+        self.assertEqual(self.session.store.data['pending'],[])
+
+    def test_changed_top_with_diverging_known_continuation_rebaselines(self):
+        a,b,c,d,e=[Bubble(text,'incoming') for text in ('a','b','c','d','e')]
+        self.observe([a,b,c,d,e])
+        self.observe([b,c])
+        self.observe([Bubble('a clipped','incoming'),b,c,d,Bubble('changed e','incoming')])
+        self.assertEqual(self.session.store.data['pending'],[])
+
     def test_busy_before_input_defers_same_delivery_without_send_intent(self):
         self.driver.busy = True
         self.assertEqual(self.session.deliver(self.delivery()), 'deferred')
