@@ -158,13 +158,6 @@ pub(super) fn validate_native_video_request(
         ));
     }
     let resolution = native_video_resolution(model, request);
-    if let Some(fixed) = model_video_resolution(model)
-        && resolution != fixed
-    {
-        return Err(format!(
-            "Resolution must match the selected model's {fixed} tier"
-        ));
-    }
     let supported = if seedance {
         matches!(resolution.as_str(), "480p" | "720p" | "1080p")
             || (!version_25 && resolution == "4k")
@@ -586,7 +579,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prefixed_video_aliases_keep_ids_and_fixed_resolution() {
+    fn prefixed_video_aliases_default_to_suffix_but_allow_explicit_resolution() {
         for tier in ["1080P", "1K", "2K"] {
             let model = format!("无限制-MiniMax-H3-{tier}");
             assert!(is_minimax_video_model(&model));
@@ -595,11 +588,9 @@ mod tests {
             assert_eq!(body["model"], model);
             assert_eq!(body["resolution"], tier);
             request.video_resolution = Some("768p".into());
-            assert!(
-                native_video_body(&model, &request, &[])
-                    .unwrap_err()
-                    .contains("must match")
-            );
+            let body = native_video_body(&model, &request, &[]).unwrap();
+            assert_eq!(body["model"], model);
+            assert_eq!(body["resolution"], "768P");
         }
         assert!(is_seedance_video_model("优惠-Seedance-2.5-720P"));
         for model in [

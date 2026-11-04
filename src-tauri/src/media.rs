@@ -5017,14 +5017,15 @@ mod tests {
 
     #[tokio::test]
     async fn minimax_gateway_jobs_use_compatible_create_poll_and_content_routes() {
-        for (model, resolution) in [
-            ("MiniMax-H3", "768P"),
-            ("MiniMax-H3-Max", "768P"),
-            ("MiniMax-H3-2K", "2K"),
-            ("MiniMax-H3-Max-768P", "768P"),
-            ("无限制-MiniMax-H3-1080P", "1080P"),
-            ("无限制-MiniMax-H3-1K", "1K"),
-            ("无限制-MiniMax-H3-2K", "2K"),
+        for (model, requested_resolution, resolution) in [
+            ("MiniMax-H3", None, "768P"),
+            ("MiniMax-H3-Max", None, "768P"),
+            ("MiniMax-H3-2K", None, "2K"),
+            ("MiniMax-H3-Max-768P", None, "768P"),
+            ("无限制-MiniMax-H3-1080P", None, "1080P"),
+            ("无限制-MiniMax-H3-1K", None, "1K"),
+            ("无限制-MiniMax-H3-2K", None, "2K"),
+            ("无限制-MiniMax-H3-1K", Some("768p"), "768P"),
         ] {
             let (base_url, server) = mock_sequence_inspecting(
                 vec![
@@ -5080,6 +5081,7 @@ mod tests {
             let (root, database) = temp_storage(model);
             let mut request = request(MediaKind::Video, 1);
             request.seconds = Some(5);
+            request.video_resolution = requested_resolution.map(str::to_owned);
             request.video_mode = VideoGenerationMode::FirstLast;
             request.reference_urls = vec![
                 "https://cdn.test/first.png".into(),

@@ -58,7 +58,7 @@ import {
 import { tr } from "../lib/i18n";
 import { useImageCopy } from "./useImageCopy";
 import { copyText } from "../lib/clipboard";
-import { IMAGE_DIMENSION_OPTIONS, IMAGE_RATIO_OPTIONS, VIDEO_SIZE_OPTIONS, imageModelCapabilities, mediaModelBaseId, mediaModelSupportsExplicitImageMask, selectStudioMediaModel, sortStudioMediaModels, videoModelCapabilities } from "../lib/mediaCapabilities";
+import { IMAGE_DIMENSION_OPTIONS, IMAGE_RATIO_OPTIONS, VIDEO_SIZE_OPTIONS, imageModelCapabilities, mediaModelBaseId, mediaModelSupportsExplicitImageMask, selectStudioMediaModel, sortStudioMediaModels, videoModelCapabilities, videoOutputOptions } from "../lib/mediaCapabilities";
 import { createMediaReferenceUrl, imageEditInputs, moveMediaReference, orderedMediaReferenceUrls, type MediaReferenceUrl } from "../lib/mediaReferences";
 import { createMediaPoller } from "../lib/mediaPolling";
 import type {
@@ -208,15 +208,17 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
   const imageCapabilities = imageModelCapabilities(selectedModelId);
   const minimaxImage = kind === "image" && imageCapabilities.minimax;
   const transparentBackgroundSupported = !selectedModelId.includes("gpt-image-2") && !minimaxImage;
-  const videoCapabilities = videoModelCapabilities(selectedModelId, videoMode);
+  const videoModelId = selected?.id ?? "";
+  const videoCapabilities = videoModelCapabilities(videoModelId, videoMode);
   const isGrokVideo = kind === "video" && videoCapabilities.grok;
   const isGrokVideo15 = isGrokVideo && videoCapabilities.grok15;
   const isNativeVideo = kind === "video" && videoCapabilities.native;
   const hasVideoControls = isGrokVideo || isNativeVideo;
   const activeVideoMode: VideoGenerationMode = videoCapabilities.modes.includes(videoMode) ? videoMode : videoCapabilities.modes[0];
   const videoResolutionOptions = videoCapabilities.resolutions;
-  const videoDurationOptions = videoModelCapabilities(selectedModelId, activeVideoMode).durations;
-  const videoReferenceMaximum = videoModelCapabilities(selectedModelId, activeVideoMode).referenceLimit;
+  const videoDurationOptions = videoModelCapabilities(videoModelId, activeVideoMode).durations;
+  const videoReferenceMaximum = videoModelCapabilities(videoModelId, activeVideoMode).referenceLimit;
+  const selectedVideoResolution = videoOutputOptions(videoModelId, activeVideoMode, { videoResolution }).resolution;
   const useReferenceUrls = isNativeVideo && videoReferenceSource === "url";
   const enteredVideoUrls = orderedMediaReferenceUrls(videoReferenceUrls);
   const referenceCount = useReferenceUrls ? enteredVideoUrls.length : videoReferences.length;
@@ -331,7 +333,7 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
     if (!videoResolutionOptions.includes(videoResolution)) setVideoResolution(videoResolutionOptions[0]);
     if (!videoCapabilities.ratios.includes(videoAspectRatio)) setVideoAspectRatio("16:9");
     if (!videoDurationOptions.includes(seconds)) setSeconds(videoDurationOptions[0]);
-  }, [kind, selectedModelId, activeVideoMode, videoMode]);
+  }, [kind, videoModelId, activeVideoMode, videoMode]);
 
   useEffect(() => {
     if (!minimaxImage) return;
@@ -750,7 +752,7 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
     setError(null);
     const videoHasOutputControls = hasVideoControls && activeVideoMode !== "video";
     const selectedVideoRatio = isNativeVideo && (activeVideoMode === "image" || activeVideoMode === "first_last") ? "adaptive" : videoAspectRatio;
-    const videoSizeLabel = videoHasOutputControls ? `${videoResolution} · ${selectedVideoRatio}` : undefined;
+    const videoSizeLabel = videoHasOutputControls ? `${selectedVideoResolution} · ${selectedVideoRatio}` : undefined;
     const base: Omit<MediaGenerationRequest, "prompt"> = {
       kind,
       profileId: selected.profileId,
@@ -767,7 +769,7 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
       instructions: kind === "audio" && !grokAudio && instructions.trim() ? instructions.trim() : undefined,
       seconds: kind === "video" && activeVideoMode !== "video" ? seconds : undefined,
       videoMode: kind === "video" && hasVideoControls ? activeVideoMode : "text",
-      videoResolution: videoHasOutputControls ? videoResolution : undefined,
+      videoResolution: videoHasOutputControls ? selectedVideoResolution : undefined,
       videoAspectRatio: videoHasOutputControls ? selectedVideoRatio : undefined,
       referenceAttachmentIds: [],
       referenceUrls: useReferenceUrls && activeVideoMode !== "text" ? enteredVideoUrls : [],
@@ -1038,7 +1040,7 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
             {kind === "video" && !hasVideoControls && <label><span>{tr("尺寸 / 比例", "Size / ratio")}</span><select value={size} onChange={(event) => setSize(event.target.value)}>{VIDEO_SIZE_OPTIONS.map((value) => <option value={value} key={value}>{value}</option>)}</select></label>}
             {kind === "video" && hasVideoControls && activeVideoMode !== "video" && <>
               <label><span>{tr("画面比例", "Aspect ratio")}</span><select disabled={isNativeVideo && (activeVideoMode === "image" || activeVideoMode === "first_last")} value={isNativeVideo && (activeVideoMode === "image" || activeVideoMode === "first_last") ? "adaptive" : videoAspectRatio} onChange={(event) => setVideoAspectRatio(event.target.value)}>{isNativeVideo && (activeVideoMode === "image" || activeVideoMode === "first_last") && <option value="adaptive">{tr("跟随首帧", "Follow first frame")}</option>}{videoCapabilities.ratios.map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
-              <label><span>{tr("清晰度", "Resolution")}</span><select value={videoResolution} onChange={(event) => setVideoResolution(event.target.value)}>{videoResolutionOptions.map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
+              <label><span>{tr("清晰度", "Resolution")}</span><select value={selectedVideoResolution} onChange={(event) => setVideoResolution(event.target.value)}>{videoResolutionOptions.map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
             </>}
             {kind === "video" && isGrokVideo && activeVideoMode === "video" && <div className="media-inherited-video-size"><span>{tr("尺寸与时长", "Size and duration")}</span><strong>{tr("继承源视频 · 最高 720p", "Inherited from source · up to 720p")}</strong></div>}
             {kind === "image" && !minimaxImage && <label><span>{tr("质量", "Quality")}</span><select value={quality} onChange={(event) => setQuality(event.target.value)}>{["auto", "high", "medium", "2K", "4K"].map((value) => <option key={value}>{value}</option>)}</select></label>}
