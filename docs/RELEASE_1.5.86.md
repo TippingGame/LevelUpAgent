@@ -20,4 +20,15 @@
 
 Windows x64 提供 NSIS / MSI 与 updater 签名；macOS Apple Silicon / Intel 提供 ad-hoc 签名 DMG（未公证）；Linux x64 提供 AppImage / DEB / RPM。自动更新清单仅覆盖 Windows。
 
-正式发布与资产验证结果在完成后补充。
+## 正式发布记录
+
+- 发布时间：2026-11-04 11:40:20（Asia/Shanghai），已设为 Latest。
+- 构建提交：1ee911273d207e0f392a1ac3d366c784959a6225；tag：v1.5.86。
+- CI：41766115641；Release：41766120025，均成功。
+- 10 个资产完整下载并通过 GitHub SHA256 digest 校验；Windows EXE/MSI 更新签名及可信注释签名有效。
+- Windows 安装器归档、版本、x64 架构、生产 CSP/更新地址/公钥及打包资源验证通过。
+- 公开发布页和 latest.json 均 HTTP 200，更新清单版本为 1.5.86；正式 EXE 已同步安装包目录及 SHA256 清单。
+- 本地机器人 Python 全量 95 项通过；5 份音频与 3D 资源清单和 48 个分卷公开可用。
+- 本次未覆盖安装用户正式环境，未执行旧版本应用内升级或 macOS/Linux 实机安装；未调用真实供应商在线生成。
+
+发布页：https://github.com/TippingGame/LevelUpAgent/releases/tag/v1.5.86
