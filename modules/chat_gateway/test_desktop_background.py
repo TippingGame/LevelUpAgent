@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import sys
 import unittest
 from unittest.mock import patch
-from desktop_background import BackgroundDesktop
+from desktop_background import BackgroundDesktop, CompatibleDesktop, desktop_driver
 from desktop_core import Bubble, DEFAULT_LAYOUT
 from desktop_windows import DesktopDeferred, DesktopUnavailable
 from desktop_gateway import DesktopSession
@@ -16,6 +16,7 @@ class BackgroundTests(unittest.TestCase):
         d.stopped = lambda: False
         d.unlocked = lambda: True
         d.rect = lambda _: (0,0,1000,800)
+        d.resolve_layout = lambda hwnd, layout: layout
         d.user = SimpleNamespace(IsWindow=lambda _:True, IsIconic=lambda _:False,
             GetForegroundWindow=lambda:99, GetAncestor=lambda *_:99)
         d.last_input = lambda: self.fail('must not consult global input')
@@ -108,6 +109,62 @@ class BackgroundTests(unittest.TestCase):
             else:
                 with self.assertRaises(DesktopUnavailable):session.scan(dict(chatId='test'))
                 self.assertEqual(seen,[])
+
+    def test_scan_uses_resolved_regions_for_selection_messages_and_title(self):
+        d=self.driver();d.find=lambda _:1;d.capture=lambda _:'image'
+        native=dict(DEFAULT_LAYOUT,editor=[.38,.72,.99,.93])
+        d.resolve_layout=lambda *_:native
+        layouts=[]
+        d.select_chat=lambda h,l,t:layouts.append(l) or 'image'
+        d.messages=lambda i,l:layouts.append(l) or [Bubble('new','incoming')]
+        d.title=lambda i,l,t:layouts.append(l) or True
+        session=DesktopSession.__new__(DesktopSession)
+        session.driver=d;session.config=dict(windowTitle='x',layout=DEFAULT_LAYOUT)
+        session.observe=lambda *_:None
+        self.assertEqual(session.scan(dict(chatId='test')),[Bubble('new','incoming')])
+        self.assertEqual(layouts,[native,native,native])
+
+
+class CompatibleModeTests(unittest.TestCase):
+    def driver(self):
+        d=CompatibleDesktop.__new__(CompatibleDesktop)
+        d.stopped=lambda:False;d.unlocked=lambda:True;d.rect=lambda _:(0,0,1000,800)
+        d.last_input=lambda:7
+        d.user=SimpleNamespace(IsWindow=lambda _:True,IsIconic=lambda _:False,
+                               GetForegroundWindow=lambda:99,GetAncestor=lambda h,_:h)
+        return d
+
+    def test_legacy_accounts_remain_background_and_foreground_requires_selection(self):
+        with patch('desktop_background.BackgroundDesktop',return_value='background'),patch('desktop_background.CompatibleDesktop',return_value='foreground'):
+            self.assertEqual(desktop_driver({}),'background')
+            self.assertEqual(desktop_driver({'inputMode':'background'}),'background')
+            self.assertEqual(desktop_driver({'inputMode':'foreground'}),'foreground')
+            with self.assertRaises(ValueError):desktop_driver({'inputMode':'unknown'})
+
+    def test_reads_do_not_need_focus_but_input_requires_same_window_and_input_stamp(self):
+        d=self.driver();rect=d.rect(1)
+        d.guard(1,rect)
+        with self.assertRaises(DesktopUnavailable):d.guard(1,rect,7)
+        # New native Qt input children may own focus inside the selected root.
+        d.user.GetForegroundWindow=lambda:2;d.user.GetAncestor=lambda *_:1
+        d.guard(1,rect,7)
+        with self.assertRaises(DesktopDeferred):d.guard(1,rect,6)
+        d.user.IsIconic=lambda _:True
+        with self.assertRaises(DesktopUnavailable):d.guard(1,rect)
+
+    def test_chat_switch_never_leaves_an_unverified_draft(self):
+        d=self.driver();d.capture=lambda _:'image';d.title=lambda *_:False
+        d.verify_draft=lambda *_:False
+        with self.assertRaises(DesktopDeferred):d.select_chat(1,DEFAULT_LAYOUT,'other')
+
+    def test_send_uses_resolved_layout_and_foreground_guarded_implementation(self):
+        d=self.driver();d.find=lambda _:1
+        native=dict(DEFAULT_LAYOUT,editor=[.32,.78,.97,.91]);d.resolve_layout=lambda *_:native
+        config=dict(windowTitle='钉钉',layout=DEFAULT_LAYOUT)
+        with patch('desktop_windows.WindowsDesktop.send_reply',return_value='sent') as send:
+            self.assertEqual(d.send_reply(config,'222','test',None),'sent')
+            self.assertEqual(send.call_args.args[0]['layout'],native)
+            self.assertEqual(config['layout'],DEFAULT_LAYOUT)
 
 
 if __name__=='__main__': unittest.main()

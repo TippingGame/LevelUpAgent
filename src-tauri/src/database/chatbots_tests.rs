@@ -8,6 +8,7 @@ fn chatbots_desktop_config_routes_and_single_controller() {
         version: 1,
         window_title: "钉钉".into(),
         self_names: vec!["小明".into()],
+        input_mode: "background".into(),
         layout: DesktopLayout {
             title: [0.3, 0.04, 0.8, 0.1],
             messages: [0.3, 0.12, 0.98, 0.64],
@@ -16,6 +17,15 @@ fn chatbots_desktop_config_routes_and_single_controller() {
             send: [0.93, 0.94],
         },
     };
+    let mut legacy = serde_json::to_value(&config).unwrap();
+    legacy.as_object_mut().unwrap().remove("inputMode");
+    let restored: DesktopConfig = serde_json::from_value(legacy).unwrap();
+    assert_eq!(restored.input_mode, "background");
+    let mut compatible = restored;
+    compatible.input_mode = "foreground".into();
+    assert!(compatible.validate().is_ok());
+    compatible.input_mode = "unknown".into();
+    assert!(compatible.validate().is_err());
     let a = Account {
         id: String::new(),
         name: "Local".into(),
@@ -71,6 +81,7 @@ fn chatbots_desktop_preinput_deferral_keeps_reply_and_respects_pause() {
         version: 1,
         window_title: "钉钉".into(),
         self_names: vec!["我".into()],
+        input_mode: "background".into(),
         layout: DesktopLayout {
             title: [0.3, 0.04, 0.8, 0.1],
             messages: [0.3, 0.12, 0.98, 0.64],

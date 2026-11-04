@@ -71,6 +71,33 @@ class DesktopSessionTests(unittest.TestCase):
         self.observe([first])
         self.assertEqual(self.session.store.data['pending'], [])
 
+    def test_new_message_after_temporary_empty_ocr_is_not_swallowed(self):
+        first = Bubble('known message', 'incoming')
+        self.observe([first])
+        self.observe([])
+        self.observe([first, Bubble('new after loading', 'incoming')])
+        self.assertEqual([m['text'] for m in self.session.store.data['pending']], ['new after loading'])
+        self.observe([first, Bubble('new after loading', 'incoming')])
+        self.assertEqual(len(self.session.store.data['pending']), 1)
+
+    def test_scan_status_reports_empty_ocr_baseline_counts_and_group_trigger(self):
+        self.observe([])
+        state, detail = self.session.scan_status(self.route, [])
+        self.assertEqual(state, 'waiting')
+        self.assertIn('未识别到', detail)
+        self.assertIn('校准消息区', detail)
+        bubbles = [Bubble('old', 'incoming'), Bubble('reply', 'outgoing')]
+        group = dict(self.route, chatType='group')
+        state, detail = self.session.scan_status(group, bubbles)
+        self.assertEqual(state, 'waiting')
+        self.assertIn('历史消息不回复', detail)
+        self.observe(bubbles, group)
+        state, detail = self.session.scan_status(group, bubbles)
+        self.assertEqual(state, 'online')
+        self.assertIn('识别 2 条（收到 1 条）', detail)
+        self.assertIn('仅 @', detail)
+        self.assertNotIn('仅 @', self.session.scan_status(dict(group,mode='all'), bubbles)[1])
+
     def test_busy_before_input_defers_same_delivery_without_send_intent(self):
         self.driver.busy = True
         self.assertEqual(self.session.deliver(self.delivery()), 'deferred')

@@ -76,7 +76,7 @@ class BackgroundDesktop(WindowsDesktop):
         if self.title(image, layout, title):
             return image
         if not self.verify_draft(hwnd, layout, ''):
-            raise DesktopDeferred('当前钉钉聊天有草稿，等待人工处理')
+            raise DesktopDeferred('无法确认当前输入框为空；请检查草稿，若为空请暂停连接并重新校准输入区')
         rows = self.read(self.crop(image, layout['sidebar']))
         matches = [r for r in rows if r['confidence'] >= .92 and title_matches(r['text'], title)]
         if len(matches) != 1:
@@ -127,7 +127,7 @@ class BackgroundDesktop(WindowsDesktop):
         if any(ord(char) < 32 or ord(char) == 127 for char in text):
             raise DesktopUnavailable('回复包含不支持的控制字符')
         hwnd = self.find(config['windowTitle'])
-        layout = config['layout']
+        layout = self.resolve_layout(hwnd, config['layout'])
         self.select_chat(hwnd, layout, title)
         rect = self.rect(hwnd)
         self.guard(hwnd, rect)
@@ -152,3 +152,39 @@ class BackgroundDesktop(WindowsDesktop):
             if outgoing_added(before, self.messages(image, layout), text) and self.verify_draft(hwnd, layout, ''):
                 return 'sent'
         return 'delivery_unknown'
+
+
+class CompatibleDesktop(WindowsDesktop):
+    """Explicitly selected foreground input for newer native DingTalk clients."""
+
+    def guard(self, hwnd, rect, input_stamp=None):
+        if input_stamp is not None:
+            return super().guard(hwnd, rect, input_stamp)
+        # Reading a stable chat may run while covered. Only input needs focus
+        # and an unchanged global input stamp, enforced by the base driver.
+        if self.stopped() or not self.unlocked():
+            raise DesktopUnavailable('桌面已锁定或宿主已停止')
+        if not self.user.IsWindow(hwnd) or self.user.IsIconic(hwnd) or self.rect(hwnd) != rect:
+            raise DesktopUnavailable('钉钉窗口关闭、最小化或布局变化')
+
+    def select_chat(self, hwnd, layout, title):
+        image = self.capture(hwnd)
+        if self.title(image, layout, title):
+            return image
+        if not self.verify_draft(hwnd, layout, ''):
+            raise DesktopDeferred('当前聊天输入框未确认空白；请先处理草稿再切换聊天')
+        return super().select_chat(hwnd, layout, title)
+
+    def send_reply(self, config, title, text, before_dispatch):
+        hwnd = self.find(config['windowTitle'])
+        layout = self.resolve_layout(hwnd, config['layout'])
+        return super().send_reply(dict(config, layout=layout), title, text, before_dispatch)
+
+
+def desktop_driver(config):
+    mode = config.get('inputMode', 'background')
+    if mode == 'foreground':
+        return CompatibleDesktop()
+    if mode == 'background':
+        return BackgroundDesktop()
+    raise ValueError('Unsupported desktop input mode')

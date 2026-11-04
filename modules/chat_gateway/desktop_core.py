@@ -55,6 +55,10 @@ class MessageTracker:
         initialized = self.state.get('initialized', bool(old))
         additions = []
         history = self.state.setdefault('history', [])
+        # A blank/loading OCR frame must not erase the last comparable viewport.
+        # Otherwise the next real message loses overlap and is swallowed as history.
+        if not current and history:
+            return []
         # Re-visiting a known viewport after scrolling must not replay messages.
         revisited = bool(current) and any(current == history[i:i+len(current)] for i in range(max(0, len(history)-len(current)+1)))
         if old and current != old and not revisited:
@@ -106,6 +110,8 @@ DEFAULT_LAYOUT = {
 def validate_config(config):
     if config.get('version') != 1:
         raise ValueError('Unsupported desktop configuration')
+    if config.get('inputMode', 'background') not in ('background', 'foreground'):
+        raise ValueError('Unsupported desktop input mode')
     if not isinstance(config.get('windowTitle'), str) or not config['windowTitle'].strip():
         raise ValueError('Choose one DingTalk window')
     aliases = config.get('selfNames', [])

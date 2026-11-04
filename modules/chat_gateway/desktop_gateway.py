@@ -92,13 +92,25 @@ class DesktopSession:
     def scan(self, route):
         driver = self.driver
         hwnd = driver.find(self.config['windowTitle'])
-        image = driver.select_chat(hwnd, self.config['layout'], route['chatId'])
+        layout = driver.resolve_layout(hwnd, self.config['layout'])
+        image = driver.select_chat(hwnd, layout, route['chatId'])
         rect = driver.rect(hwnd)
-        bubbles = driver.messages(image, self.config['layout'])
+        bubbles = driver.messages(image, layout)
         driver.guard(hwnd, rect)
-        if not driver.title(driver.capture(hwnd), self.config['layout'], route['chatId']):
+        if not driver.title(driver.capture(hwnd), layout, route['chatId']):
             raise DesktopUnavailable('读取期间聊天标题变化，稍后重试')
         self.observe(route, bubbles)
+        return bubbles
+
+    def scan_status(self, route, bubbles):
+        title = route['chatId']
+        if not bubbles:
+            return ('waiting', f'未识别到可读文本消息：{title}；若聊天中已有文字，请暂停连接并重新校准消息区、核对识别预览')
+        if self.key(route) not in self.started:
+            return ('waiting', f'正在建立历史消息基线：{title}（识别 {len(bubbles)} 条；历史消息不回复）')
+        incoming = sum(b.direction == 'incoming' for b in bubbles)
+        trigger = '群聊仅 @ 我的显示名时触发' if route['chatType'] == 'group' and route.get('mode', 'mention') != 'all' else '仅处理基线之后的新消息'
+        return ('online', f'本地桌面监听中：{title}；识别 {len(bubbles)} 条（收到 {incoming} 条）；{trigger}')
 
     def deliver(self, delivery):
         self.delivery_detail = ''
@@ -143,10 +155,10 @@ def emit(value):
 
 
 def run(config, state_path):
-    from desktop_background import BackgroundDesktop
+    from desktop_background import desktop_driver
     if config.get('version') != 1 or config.get('type') != 'configure' or config['account']['platform'] != 'dingtalk_desktop':
         raise ValueError('Unsupported desktop protocol')
-    session = DesktopSession(config['account']['desktop'], Store(state_path), BackgroundDesktop())
+    session = DesktopSession(config['account']['desktop'], Store(state_path), desktop_driver(config['account']['desktop']))
     session.set_routes(config.get('routes', []))
     frames, closed = queue.Queue(maxsize=64), threading.Event()
     session.driver.stopped = closed.is_set
@@ -173,7 +185,10 @@ def run(config, state_path):
         if value != last_status:
             emit(dict(type='status', status=state, detail=detail[:300]))
             last_status = value
-    status('waiting', '后台接入已启动；等待绑定聊天，请在其他应用中正常使用键鼠')
+    if session.config.get('inputMode') == 'foreground':
+        status('waiting', '前台兼容模式已启动；发送前等待键鼠空闲 5 秒，并激活钉钉')
+    else:
+        status('waiting', '后台接入已启动；等待绑定聊天，请在其他应用中正常使用键鼠')
     while not closed.is_set():
         try:
             frame = frames.get(timeout=.1)
@@ -209,11 +224,8 @@ def run(config, state_path):
             route = session.routes[index % len(session.routes)]
             index += 1
             try:
-                session.scan(route)
-                if session.key(route) in session.started:
-                    status('online', '本地桌面监听中：' + route['chatId'])
-                else:
-                    status('waiting', '正在建立历史消息基线：' + route['chatId'])
+                bubbles = session.scan(route)
+                status(*session.scan_status(route, bubbles))
             except Exception as exc:
                 # These diagnostics contain local adapter errors, never credentials.
                 status('waiting', str(exc)[:200])

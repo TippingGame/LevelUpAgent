@@ -70,6 +70,9 @@ try {
     const selection = page.getByLabel('钉钉窗口',{exact:false});
     const result = page.getByTestId('desktop-window-result');
     const preview = page.getByRole('button',{name:'自动识别区域并预览（不发消息）',exact:true});
+    const inputMode = page.getByTestId('desktop-input-mode');
+    assert.equal(await inputMode.inputValue(),'background');
+    assert.equal(await inputMode.isDisabled(),true);
     await detect.click();
     await result.waitFor();
     assert.match(await result.innerText(),/已检测到 1 个钉钉窗口/);
@@ -115,6 +118,17 @@ try {
     assert.equal(await selection.isEnabled(),true);
     assert.equal(await preview.isEnabled(),true);
     assert.equal(await selection.inputValue(),'DingTalk');
+    assert.equal(await inputMode.isEnabled(),true);
+    await inputMode.selectOption('foreground');
+    assert.equal(await page.evaluate(()=>desktopTest.account.desktop.inputMode),'foreground');
+    assert.match(await page.getByTestId('desktop-execution-mode').innerText(),/发送时会激活钉钉.*鼠标或键盘/);
+    assert.match(await page.getByTestId('desktop-execution-mode').innerText(),/空闲 5 秒/);
+    await inputMode.hover(); await inputMode.focus();
+    await page.screenshot({path:resolve(output,`${colorScheme}-armor-${armor}-foreground-mode.png`),fullPage:true});
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+    await inputMode.selectOption('background');
+    assert.equal(await page.evaluate(()=>desktopTest.account.desktop.inputMode),'background');
+    assert.match(await page.getByTestId('desktop-execution-mode').innerText(),/后台窗口定向收发/);
     const calls = await page.evaluate(()=>desktopTest.calls);
     assert.ok(calls.every(c=>c.command==='chat_detect_python'||(c.command==='chat_desktop_probe'&&Object.keys(c.args.request).length===0)));
     // Also exercise switching appearance in the mounted component and reload.
@@ -128,7 +142,7 @@ try {
   await writeFile(resolve(output,'ui-report.json'),JSON.stringify({passed:true,appearanceCases:4,
     cases:['active connection with empty form','visible success and window dimensions','calibration remains locked',
       'minimized restore hint','failed rescan clears stale result','empty rescan','empty-result diagnostic','pause recovers account',
-      'offline detection repairs stale title','720px layout','appearance switches and reload'],
+      'offline detection repairs stale title','foreground mode requires explicit selection and explains focus','720px layout','appearance switches and reload'],
     nativeTauriBuild:false,realMessagesSent:0},null,2));
   console.log('DingTalk setup UI: all cases passed in light/dark with Armor off/on.');
 } finally {

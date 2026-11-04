@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { desktopProbe, type ChatAccount, type DesktopConfig, type DesktopPreview } from '../lib/chatbots';
 import { ChatRuntimeSetup } from './ChatRuntimeSetup';
 
-export const defaultDesktopConfig = (): DesktopConfig => ({ version: 1, windowTitle: '', selfNames: [], layout: { title: [0.33, 0.045, 0.81, 0.10], messages: [0.30, 0.12, 0.985, 0.64], editor: [0.31, 0.70, 0.97, 0.88], send: [0.93, 0.94], sidebar: [0.105, 0.15, 0.285, 0.97] } });
+export const defaultDesktopConfig = (): DesktopConfig => ({ version: 1, windowTitle: '', selfNames: [], inputMode: 'background', layout: { title: [0.33, 0.045, 0.81, 0.10], messages: [0.30, 0.12, 0.985, 0.64], editor: [0.31, 0.70, 0.97, 0.88], send: [0.93, 0.94], sidebar: [0.105, 0.15, 0.285, 0.97] } });
 type Region = keyof DesktopConfig['layout'];
 export function ChatDesktopSetup({ account, onChange, connectedAccount, onPause, ready, busy, action, t }: { account: ChatAccount; onChange: (account: ChatAccount) => void; connectedAccount?: ChatAccount; onPause: () => Promise<void>; ready: boolean; busy: boolean; action: (fn: () => Promise<unknown>, success?: string) => Promise<void>; t: (zh: string, en: string) => string }) {
   const config = account.desktop ?? defaultDesktopConfig();
@@ -17,7 +17,20 @@ export function ChatDesktopSetup({ account, onChange, connectedAccount, onPause,
   return <section className="chatbot-desktop" data-testid="desktop-setup">
     <h3>{t('钉钉桌面接管 · 实验版', 'DingTalk desktop control · Experimental')}</h3>
     <p>{t('使用此电脑已登录的钉钉账号；无需开发者、组织 API 权限或应用密钥。只处理选定聊天的新文本；群聊默认仅 @，也可单独设置全部文本。聊天应置顶且完整标题可见。', 'Uses the signed-in DingTalk account without developer credentials. Reads new text in selected chats. Groups default to mentions and can opt into all text. Pin selected chats and keep their full titles visible.')}</p>
-    <div className="chatbot-card" data-testid="desktop-execution-mode"><strong>{t('运行方式：后台窗口定向收发', 'Execution: background window messaging')}</strong><p>{t('切换聊天、输入及发送直接交给钉钉窗口，不移动鼠标、不占用键盘或抢前台。你可以在其他应用中正常操作；切回钉钉时暂停，避免与手动输入冲突。', 'Chats, text and send actions target DingTalk directly without moving the pointer, using global keys or stealing focus. Other apps remain usable. Automation pauses while you use DingTalk.')}</p><small>{t('钉钉可被其他窗口遮挡，但须保持窗口打开且不最小化、Windows 解锁。暂不支持托盘、锁屏或未知客户端结构；后台回复的换行会转为空格。', 'DingTalk may be covered by other windows but must remain open, restored and on an unlocked desktop. Tray-only, locked sessions and unknown client layouts are unsupported. Reply line breaks become spaces.')}</small></div>
+    <div className="chatbot-card" data-testid="desktop-execution-mode">
+      <label>{t('发送方式', 'Sending mode')}<select data-testid="desktop-input-mode" value={config.inputMode ?? 'background'} disabled={calibrationLocked} onChange={e => update({ ...config, inputMode: e.target.value as 'background' | 'foreground' })}>
+        <option value="background">{t('后台模式 · 不抢前台', 'Background · keeps other apps focused')}</option>
+        <option value="foreground">{t('前台兼容模式 · 新版钉钉', 'Foreground compatibility · newer DingTalk')}</option>
+      </select></label>
+      {config.inputMode === 'foreground' ? <>
+        <strong>{t('发送时会激活钉钉，并使用鼠标或键盘', 'Sending activates DingTalk and may use the pointer or keyboard')}</strong>
+        <p>{t('适用于能读取消息但后台输入无效的新版钉钉。发送前等待键鼠空闲 5 秒；检测到人工操作就停止，已有草稿不覆盖。请在测试聊天验证后再使用，发送期间不要同时操作钉钉。', 'For newer clients that can be read but reject background input. Waits for 5 seconds of idle input, stops on human activity and preserves existing drafts. Verify in a test chat first and avoid using DingTalk during sending.')}</p>
+      </> : <>
+        <strong>{t('运行方式：后台窗口定向收发', 'Execution: background window messaging')}</strong>
+        <p>{t('切换聊天、输入及发送直接交给钉钉窗口，不移动鼠标、不占用键盘或抢前台。你可以在其他应用中正常操作；切回钉钉时暂停，避免与手动输入冲突。新版客户端后台输入无效时，可暂停连接后选择前台兼容模式。', 'Chats, text and send actions target DingTalk without global input or taking focus. Other apps remain usable; automation pauses while you use DingTalk. If a newer client rejects background input, pause the connection and select foreground compatibility.')}</p>
+      </>}
+      <small>{t('钉钉须保持窗口打开且不最小化、Windows 解锁。首次观察只建立历史基线；发送结果不明确时不会自动重发。', 'Keep DingTalk open and restored, and Windows unlocked. Initial observations establish history; unconfirmed sends are never retried automatically.')}</small>
+    </div>
     <p>{t('首次观察只建立基线，不补回旧消息。OCR 可能漏字或误判；群成员身份无法可靠核验，图片、语音、附件和富文本暂不支持。启用前请核对识别预览；修改校准前先断开账号。', 'The first observation establishes a baseline without replying to history. OCR can miss or misread text; group speaker identities are unverified. Media and rich messages are unsupported. Review the preview before enabling; disconnect before calibration.')}</p>
     <p>{t('桌面发送成功仅表示本地出现对应发出气泡，不代表服务器或对方确认送达。请在钉钉检查离线、失败提示。', 'Desktop send success means a matching outgoing bubble appeared locally. It is not a server or recipient delivery acknowledgment; check DingTalk for offline or failed sends.')}</p>
     <ChatRuntimeSetup desktop ready={ready} busy={busy} action={action} t={t} />

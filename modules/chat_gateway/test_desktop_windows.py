@@ -8,6 +8,21 @@ from desktop_windows import WindowsDesktop, DesktopUnavailable, DesktopDeferred,
 
 
 class BubbleImageTests(unittest.TestCase):
+    def test_current_client_tail_geometry_keeps_messages_but_excludes_avatars(self):
+        from PIL import Image, ImageDraw
+        image=Image.new('RGB',(1105,599),'white');draw=ImageDraw.Draw(image)
+        draw.rounded_rectangle((79,56,238,106),radius=22,fill=(244,244,245))
+        draw.rounded_rectangle((79,337,146,387),radius=22,fill=(244,244,245))
+        draw.polygon([(70,338),(100,338),(90,358)],fill=(244,244,245))
+        draw.rounded_rectangle((944,412,1017,463),radius=22,fill=(204,223,255))
+        draw.polygon([(995,414),(1026,414),(1010,433)],fill=(204,223,255))
+        for x in (960,985):draw.rectangle((x,430,x+12,446),fill='black')
+        # Same pale colors in the actual avatar rails must still be excluded.
+        draw.rounded_rectangle((6,56,61,100),radius=10,fill=(244,244,245))
+        draw.rounded_rectangle((1041,411,1081,450),radius=10,fill=(224,237,255))
+        self.assertEqual([(x,side) for x,y,w,h,side in bubble_regions(image)],
+                         [(79,'incoming'),(70,'incoming'),(944,'outgoing')])
+
     def test_outgoing_ocr_fragments_keep_left_to_right_order(self):
         rows=[dict(text='prefix',confidence=.99,x=32,y=26,w=143,h=24),
               dict(text='middle',confidence=.99,x=166,y=25,w=165,h=23),
@@ -102,7 +117,7 @@ class BubbleImageTests(unittest.TestCase):
         from PIL import Image,ImageDraw
         image=Image.new('RGB',(200,80),(240,242,244));draw=ImageDraw.Draw(image)
         draw.line((10,5,10,29),fill='black',width=1)
-        driver=WindowsDesktop.__new__(WindowsDesktop);driver.capture=lambda _:image;driver.read=lambda _:[]
+        driver=WindowsDesktop.__new__(WindowsDesktop);driver.editor_image=lambda *_:image;driver.read=lambda _:[]
         self.assertTrue(driver.visual_draft(1,{'editor':[0,0,1,1]})['empty'])
         draw.rectangle((20,10,27,26),fill='black')
         self.assertEqual(driver.visual_draft(1,{'editor':[0,0,1,1]}),dict(empty=False,text=None))
@@ -110,7 +125,7 @@ class BubbleImageTests(unittest.TestCase):
     def test_visual_draft_retries_scaled_ocr_without_fuzzy_punctuation_matching(self):
         from PIL import Image,ImageDraw
         image=Image.new('RGB',(200,80),(240,242,244));ImageDraw.Draw(image).rectangle((20,10,100,28),fill='black')
-        driver=WindowsDesktop.__new__(WindowsDesktop);driver.capture=lambda _:image
+        driver=WindowsDesktop.__new__(WindowsDesktop);driver.editor_image=lambda *_:image
         calls=[]
         def read(im):
             calls.append(im.size)
@@ -122,7 +137,7 @@ class BubbleImageTests(unittest.TestCase):
     def test_exact_single_line_fallback_keeps_punctuation_required(self):
         from PIL import Image,ImageDraw
         image=Image.new('RGB',(200,80),(240,242,244));ImageDraw.Draw(image).rectangle((20,10,100,28),fill='black')
-        driver=WindowsDesktop.__new__(WindowsDesktop);driver.capture=lambda _:image
+        driver=WindowsDesktop.__new__(WindowsDesktop);driver.editor_image=lambda *_:image
         driver.read=lambda _:[dict(text='check',confidence=.99,x=1,y=1)]
         driver.read_single_line=lambda _:'check.'
         self.assertEqual(driver.visual_draft(1,{'editor':[0,0,1,1]},'check.')['text'],'check.')
@@ -245,6 +260,16 @@ class GuardedSendTests(unittest.TestCase):
     def test_no_visible_echo_is_unknown(self):
         self.driver.receipt=False
         self.assertEqual(self.send(),'delivery_unknown')
+    def test_existing_draft_defers_before_intent_and_keeps_reply_retryable(self):
+        self.driver.draft='manual draft'
+        with self.assertRaises(DesktopDeferred): self.send()
+        self.assertEqual(self.driver.draft,'manual draft')
+        self.assertEqual(self.driver.clicks,0)
+        self.assertEqual(self.intent,[])
+        self.driver.draft=''
+        self.assertEqual(self.send(),'sent')
+        self.assertEqual(self.driver.clicks,1)
+        self.assertEqual(self.intent,[True])
     def test_wrong_title_prevents_click(self):
         self.driver.wrong_title=True
         with self.assertRaises(DesktopUnavailable): self.send()
@@ -263,7 +288,7 @@ class GuardedSendTests(unittest.TestCase):
 class ForegroundTests(unittest.TestCase):
     def test_accessibility_focus_is_verified_before_proceeding(self):
         driver=SendDriver();state={'hwnd':2,'calls':0}
-        driver.user=SimpleNamespace(GetForegroundWindow=lambda:state['hwnd'],SetForegroundWindow=lambda _:False)
+        driver.user=SimpleNamespace(GetForegroundWindow=lambda:state['hwnd'],GetAncestor=lambda h,_:h,SetForegroundWindow=lambda _:False)
         def focus():state.update(hwnd=1,calls=state['calls']+1)
         auto=SimpleNamespace(UIAutomationInitializerInThread=nullcontext,ControlFromHandle=lambda _:SimpleNamespace(SetFocus=focus))
         with patch.dict(sys.modules,{'uiautomation':auto}),patch('desktop_windows.time.sleep',lambda _:None):
@@ -271,7 +296,7 @@ class ForegroundTests(unittest.TestCase):
         self.assertEqual(state['calls'],1)
 
     def test_refused_foreground_is_deferred_without_typing(self):
-        driver=SendDriver();driver.user=SimpleNamespace(GetForegroundWindow=lambda:2,SetForegroundWindow=lambda _:False)
+        driver=SendDriver();driver.user=SimpleNamespace(GetForegroundWindow=lambda:2,GetAncestor=lambda h,_:h,SetForegroundWindow=lambda _:False)
         auto=SimpleNamespace(UIAutomationInitializerInThread=nullcontext,ControlFromHandle=lambda _:SimpleNamespace(SetFocus=lambda:None))
         with patch.dict(sys.modules,{'uiautomation':auto}),patch('desktop_windows.time.sleep',lambda _:None):
             with self.assertRaises(DesktopDeferred):WindowsDesktop.foreground(driver,1)
@@ -279,7 +304,7 @@ class ForegroundTests(unittest.TestCase):
 
     def test_human_activity_blocks_foreground_request(self):
         driver=SendDriver();driver.idle=lambda:0
-        driver.user=SimpleNamespace(GetForegroundWindow=lambda:2,SetForegroundWindow=lambda _:self.fail('must not activate'))
+        driver.user=SimpleNamespace(GetForegroundWindow=lambda:2,GetAncestor=lambda h,_:h,SetForegroundWindow=lambda _:self.fail('must not activate'))
         with self.assertRaises(DesktopDeferred):WindowsDesktop.foreground(driver,1)
 
 
@@ -308,6 +333,34 @@ class FakeEditor:
 
 
 class EditorCapabilityTests(unittest.TestCase):
+    def test_only_known_light_placeholder_with_empty_uia_is_empty(self):
+        from PIL import Image, ImageDraw
+        driver=WindowsDesktop.__new__(WindowsDesktop)
+        state=dict(color=(139,141,143),value='',cls='im_chat::InputRichTextEdit',extra=False,top=3,caret=False,focus=True)
+        def frame(*_):
+            image=Image.new('RGB',(1047,128),'white');draw=ImageDraw.Draw(image)
+            for x in range(2,86,18):draw.rectangle((x,state['top'],x+7,state['top']+17),fill=state['color'])
+            if state['caret']:draw.line((1,2,1,24),fill='black')
+            if state['extra']:draw.rectangle((250,40,260,50),fill=(150,150,150))
+            return image
+        driver.editor_image=frame
+        driver.editor=lambda *_:SimpleNamespace(ClassName=state['cls'],HasKeyboardFocus=state['focus'])
+        driver.editor_text=lambda _:state['value']
+        driver.read=lambda _:[dict(text='请输入消息',confidence=.999,x=1,y=1)]
+        with patch.dict(sys.modules,{'uiautomation':SimpleNamespace(UIAutomationInitializerInThread=nullcontext)}):
+            self.assertTrue(driver.visual_draft(1,DEFAULT_LAYOUT)['empty'])
+            state['caret']=True
+            self.assertTrue(driver.visual_draft(1,DEFAULT_LAYOUT)['empty'])
+            state['focus']=False
+            self.assertFalse(driver.visual_draft(1,DEFAULT_LAYOUT)['empty'])
+            state['focus']=True;state['caret']=False
+            for key,value in [('color',(30,30,30)),('value','请输入消息'),('cls','unknown'),('extra',True),('top',50)]:
+                previous=state[key];state[key]=value
+                with self.subTest(key=key):self.assertFalse(driver.visual_draft(1,DEFAULT_LAYOUT)['empty'])
+                state[key]=previous
+            # Expected typed text is never discarded as a placeholder.
+            self.assertFalse(driver.visual_draft(1,DEFAULT_LAYOUT,'请输入消息')['empty'])
+
     def setUp(self):
         self.driver=SendDriver()
         self.control=FakeEditor()
@@ -377,8 +430,71 @@ class EditorCapabilityTests(unittest.TestCase):
         self.assertFalse(report['readable'])
         self.assertEqual(self.control.writes,[])
 
+    def test_draft_pixels_use_actual_editor_bounds_not_stale_calibration(self):
+        from PIL import Image, ImageDraw
+        driver = WindowsDesktop.__new__(WindowsDesktop)
+        image = Image.new('RGB', (1000,800), (240,242,244))
+        # The old box includes a white sidebar and toolbar, while the edit is empty.
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((310,560,475,704), fill='white')
+        draw.rectangle((490,560,510,575), fill='black')
+        driver.rect = lambda _: (50,70,1000,800)
+        control = SimpleNamespace(BoundingRectangle=SimpleNamespace(left=526,top=650,right=1040,bottom=810))
+        driver.editor = lambda *_: control
+        driver.capture = lambda _: image
+        driver.read = lambda _: []
+        self.assertEqual(driver.editor_image(1,DEFAULT_LAYOUT).size, (514,160))
+        self.assertTrue(driver.visual_draft(1,DEFAULT_LAYOUT)['empty'])
+        # A real but unreadable glyph remains protected even when UIA returns ''.
+        draw.rectangle((500,600,507,616), fill='black')
+        self.assertEqual(driver.visual_draft(1,DEFAULT_LAYOUT), dict(empty=False,text=None))
+
+    def test_editor_outside_window_or_resize_during_capture_stops_check(self):
+        from PIL import Image
+        driver = WindowsDesktop.__new__(WindowsDesktop)
+        driver.rect = lambda _: (0,0,1000,800)
+        bounds = SimpleNamespace(left=310,top=560,right=1200,bottom=704)
+        driver.editor = lambda *_: SimpleNamespace(BoundingRectangle=bounds)
+        driver.capture = lambda _: self.fail('must not capture invalid editor')
+        with self.assertRaisesRegex(DesktopUnavailable, '边界'):
+            driver.visual_draft(1,DEFAULT_LAYOUT)
+        bounds.right = 970
+        driver.capture = lambda _: Image.new('RGB',(1200,800))
+        with self.assertRaisesRegex(DesktopUnavailable, '尺寸变化'):
+            driver.visual_draft(1,DEFAULT_LAYOUT)
+
 
 class LayoutDetectionTests(unittest.TestCase):
+    def test_current_client_unnamed_native_controls_calibrate_without_input(self):
+        nodes=[self.node(cls='im_chat::ChatBubbleWidget',rect=(479,117,1584,714)),
+               self.node('EditControl',cls='im_chat::InputRichTextEdit',rect=(512,782,1559,910)),
+               self.node('ButtonControl','发送(S)',rect=(1459,920,1512,955)),
+               self.node('ListControl',cls='ConvListItemListView',rect=(178,192,474,993))]
+        root=self.node(rect=(0,0,1600,1000),children=nodes)
+        driver=SendDriver();driver.rect=lambda _:(0,0,1600,1000)
+        with patch.dict(sys.modules,{'uiautomation':SimpleNamespace(UIAutomationInitializerInThread=nullcontext,ControlFromHandle=lambda _:root)}):
+            layout=driver.detect_layout(1)
+            self.assertEqual(layout['editor'],[.32,.782,.974375,.91])
+            self.assertEqual(layout['send'],[1485.5/1600,.9375])
+            nodes.append(nodes[1])
+            with self.assertRaisesRegex(DesktopUnavailable,'唯一校准'):driver.detect_layout(1)
+
+    def test_default_regions_are_calibrated_and_manual_regions_are_preserved(self):
+        driver = WindowsDesktop.__new__(WindowsDesktop)
+        native = dict(DEFAULT_LAYOUT, editor=[.38,.72,.99,.93])
+        driver.detect_layout = lambda _: native
+        self.assertEqual(driver.resolve_layout(1,DEFAULT_LAYOUT), native)
+        manual = dict(DEFAULT_LAYOUT, title=[.4,.05,.8,.1])
+        driver.detect_layout = lambda _: self.fail('must preserve manual calibration')
+        self.assertIs(driver.resolve_layout(1,manual), manual)
+
+    def test_unknown_native_layout_cannot_automate_using_placeholder_regions(self):
+        driver = WindowsDesktop.__new__(WindowsDesktop)
+        def unavailable(_): raise DesktopUnavailable('unknown controls')
+        driver.detect_layout = unavailable
+        with self.assertRaisesRegex(DesktopUnavailable, '尚未校准'):
+            driver.resolve_layout(1,DEFAULT_LAYOUT)
+
     def node(self,kind='',name='',cls='',rect=(0,0,1280,800),children=()):
         left,top,right,bottom=rect
         return SimpleNamespace(ControlTypeName=kind,Name=name,ClassName=cls,IsOffscreen=False,

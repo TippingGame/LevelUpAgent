@@ -12,7 +12,7 @@ import os
 import time
 from pathlib import PureWindowsPath
 
-from desktop_core import Bubble, normalized, title_matches
+from desktop_core import Bubble, DEFAULT_LAYOUT, normalized, title_matches
 
 
 class DesktopUnavailable(RuntimeError):
@@ -108,7 +108,9 @@ def bubble_regions(image, *, include_actions=False):
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((max(3, round(3*scale)), 1), dtype='uint8'))
     _, _, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
     candidates = []
-    rail = max(30, min(80, width * .075))
+    # Current clients place the bubble tail about 70 px into a 1105 px viewport;
+    # the old 80 px rail discarded every incoming message on that layout.
+    rail = max(30, min(64, width * .055))
     for x, y, w, h, count in stats[1:]:
         x, y, w, h, count = map(int, (x, y, w, h, count))
         if w < 22 or h < 24 or count / (w*h) < .78 or h > height * .90:
@@ -133,7 +135,8 @@ def bubble_regions(image, *, include_actions=False):
         if max(background)-min(background) > 105:
             continue
         delta = np.max(np.abs(body.astype(np.int16)-background), axis=2)
-        if (delta < 9).mean() < .72:
+        # Short text bubbles include proportionally more rounded corners/tail.
+        if (delta < 9).mean() < .68:
             continue
         inset = max(5, min(12, w//8))
         interior = delta[8:-8, inset:-inset]
@@ -418,6 +421,17 @@ class WindowsDesktop:
             raise DesktopUnavailable('钉钉已最小化，请还原窗口')
         return windows[0]['handle']
 
+    def resolve_layout(self, hwnd, layout):
+        # The initial fractions are only a setup placeholder. Different sidebar
+        # widths/DPI settings can put that editor box over the conversation list.
+        # Require native calibration before using these defaults for automation.
+        if layout == DEFAULT_LAYOUT:
+            try:
+                return self.detect_layout(hwnd)
+            except DesktopUnavailable as exc:
+                raise DesktopUnavailable('尚未校准聊天区域；请暂停连接，点击「自动识别区域并预览」或手动校准') from exc
+        return layout
+
     def rect(self, hwnd):
         rect = wintypes.RECT()
         if not self.user.GetWindowRect(hwnd, ctypes.byref(rect)):
@@ -446,6 +460,10 @@ class WindowsDesktop:
     def idle(self):
         return ((self.kernel.GetTickCount() - self.last_input()) & 0xffffffff) / 1000
 
+    def is_foreground(self, hwnd):
+        foreground = self.user.GetForegroundWindow()
+        return foreground == hwnd or bool(foreground and self.user.GetAncestor(foreground, 2) == hwnd)
+
     def capture(self, hwnd):
         from PIL import Image, ImageGrab
         if not self.unlocked() or not self.user.IsWindow(hwnd) or self.user.IsIconic(hwnd):
@@ -459,7 +477,7 @@ class WindowsDesktop:
         old = self.gdi.SelectObject(memory, bitmap)
         try:
             if not self.user.PrintWindow(hwnd, memory, 2):
-                if self.user.GetForegroundWindow() != hwnd:
+                if not self.is_foreground(hwnd):
                     raise DesktopUnavailable('请将钉钉窗口置于前台')
                 return ImageGrab.grab(bbox=(x, y, x + width, y + height), all_screens=True)
             class Header(ctypes.Structure):
@@ -564,7 +582,7 @@ class WindowsDesktop:
         return result
 
     def detect_layout(self, hwnd):
-        """Read-only calibration for native DingTalk 9 controls; never guesses."""
+        """Read-only calibration for observed native DingTalk controls."""
         import uiautomation as auto
         x, y, width, height = self.rect(hwnd)
         found = {'messages': [], 'editor': [], 'send': [], 'sidebar': []}
@@ -580,9 +598,9 @@ class WindowsDesktop:
             if rect.width() > 0 and rect.height() > 0:
                 kind, name, cls = control.ControlTypeName, control.Name, control.ClassName
                 key = ('messages' if cls == 'im_chat::ChatBubbleWidget'
-                       else 'editor' if kind == 'EditControl' and name == '请输入消息'
-                       else 'send' if kind == 'ButtonControl' and name == '发送'
-                       else 'sidebar' if kind == 'ListControl' and name == 'filterboxconvlist' else None)
+                       else 'editor' if kind == 'EditControl' and (name == '请输入消息' or cls == 'im_chat::InputRichTextEdit')
+                       else 'send' if kind == 'ButtonControl' and name in ('发送', '发送(S)')
+                       else 'sidebar' if kind == 'ListControl' and (name == 'filterboxconvlist' or cls == 'ConvListItemListView') else None)
                 if key:
                     found[key].append([rect.left-x,rect.top-y,rect.right-x,rect.bottom-y])
             for child in control.GetChildren()[:150]:
@@ -608,10 +626,10 @@ class WindowsDesktop:
             raise DesktopUnavailable('桌面锁定或宿主已停止，未激活窗口')
         if self.idle() < 5 and self.last_input() != self.auto_input:
             raise DesktopDeferred('正在人工操作桌面，等待空闲')
-        if self.user.GetForegroundWindow() != hwnd:
+        if not self.is_foreground(hwnd):
             self.user.SetForegroundWindow(hwnd)
             time.sleep(.2)
-        if self.user.GetForegroundWindow() != hwnd:
+        if not self.is_foreground(hwnd):
             # Windows may refuse SetForegroundWindow for a background process.
             # One native accessibility focus request is allowed; never simulate
             # Alt keys, attach input threads, or assume the request succeeded.
@@ -626,11 +644,11 @@ class WindowsDesktop:
             if (self.stopped() or not self.unlocked() or self.rect(hwnd) != rect
                     or self.last_input() != stamp):
                 raise DesktopDeferred('窗口激活期间状态变化，等待空闲后重新检查')
-        if self.user.GetForegroundWindow() != hwnd:
+        if not self.is_foreground(hwnd):
             raise DesktopDeferred('系统未允许激活钉钉窗口；请将钉钉置于前台，原回复保留排队')
 
     def click(self, hwnd, x, y):
-        if self.stopped() or not self.unlocked() or self.user.GetForegroundWindow() != hwnd:
+        if self.stopped() or not self.unlocked() or not self.is_foreground(hwnd):
             raise DesktopUnavailable('目标窗口不在前台')
         px, py, width, height = self.rect(hwnd)
         target = wintypes.POINT(px + int(x * width), py + int(y * height))
@@ -642,7 +660,7 @@ class WindowsDesktop:
         if not self.user.SetCursorPos(target.x, target.y):
             raise DesktopUnavailable('系统拒绝定位鼠标，未点击')
         actual = wintypes.POINT()
-        if (self.stopped() or self.user.GetForegroundWindow() != hwnd or self.rect(hwnd) != (px, py, width, height)
+        if (self.stopped() or not self.is_foreground(hwnd) or self.rect(hwnd) != (px, py, width, height)
                 or not self.user.GetCursorPos(ctypes.byref(actual)) or (actual.x, actual.y) != (target.x, target.y)
                 or not point_is_target()):
             raise DesktopUnavailable('点击前窗口或鼠标位置已变化，未点击')
@@ -730,11 +748,27 @@ class WindowsDesktop:
         except Exception as exc:
             return dict(readable=False, draftEmpty=False, writable=False, detail=str(exc)[:200])
 
+    def editor_image(self, hwnd, layout):
+        """Capture the verified edit itself, excluding stale calibration margins."""
+        import uiautomation as auto
+        rect = self.rect(hwnd)
+        with auto.UIAutomationInitializerInThread():
+            bounds = self.editor(hwnd, layout).BoundingRectangle
+            left, top, right, bottom = (bounds.left-rect[0], bounds.top-rect[1],
+                                        bounds.right-rect[0], bounds.bottom-rect[1])
+        width, height = rect[2:]
+        if not (-2 <= left < right <= width+2 and -2 <= top < bottom <= height+2):
+            raise DesktopUnavailable('输入框边界超出钉钉窗口，请还原窗口并重新校准')
+        image = self.capture(hwnd)
+        if self.rect(hwnd) != rect or image.size != (width, height):
+            raise DesktopUnavailable('读取输入框期间窗口尺寸变化，请重新检查')
+        return image.crop((max(0, left), max(0, top), min(width, right), min(height, bottom)))
+
     def visual_draft(self, hwnd, layout, expected=None):
         import cv2
         import numpy as np
         from PIL import Image, ImageOps
-        region = self.crop(self.capture(hwnd), layout['editor'])
+        region = self.editor_image(hwnd, layout)
         pixels = np.asarray(region.convert('RGB'))
         background = np.median(pixels.reshape(-1, 3), axis=0)
         mask = (np.max(np.abs(pixels.astype(np.int16)-background), axis=2)>35).astype('uint8')
@@ -751,6 +785,30 @@ class WindowsDesktop:
             rows=self.read(image)
             return '\n'.join(r['text'] for r in sorted(rows,key=lambda r:(r['y'],r['x']))) if rows and all(r['confidence']>=.9 for r in rows) else None
         text=recognize(padded)
+        if not expected and normalized(text) == '请输入消息':
+            # The observed InputRichTextEdit renders its empty hint inside the
+            # edit rectangle. Only accept that exact, light-gray, top-left hint
+            # with an independently empty UIA value; dark typed text, images,
+            # extra marks and unknown providers remain nonempty.
+            import uiautomation as auto
+            hint_geometry = left <= 8 and top <= 8 and right <= 160 and bottom <= 40
+            if hint_geometry and min(background) >= 240:
+                with auto.UIAutomationInitializerInThread():
+                    control = self.editor(hwnd, layout)
+                    if control.ClassName == 'im_chat::InputRichTextEdit' and not normalized(self.editor_text(control)):
+                        ink_mask = mask.astype(bool)
+                        # The focused caret touches the gray hint's first glyph,
+                        # merging into its component. Remove only the observed
+                        # single dark caret at the empty edit's origin.
+                        dark = (pixels.min(axis=2) < 110).astype('uint8')
+                        _, _, dark_stats, _ = cv2.connectedComponentsWithStats(dark, 8)
+                        if control.HasKeyboardFocus and len(dark_stats) == 2:
+                            dx, dy, dw, dh, count = map(int, dark_stats[1])
+                            if dx <= 2 and dy <= 4 and dw <= 2 and 16 <= dh <= 40 and count >= dw*dh*.9:
+                                ink_mask &= ~dark.astype(bool)
+                        ink = pixels[ink_mask]
+                        if ink.size and int(ink.min()) >= 110 and float(ink.mean()) >= 140:
+                            return dict(empty=True, text='')
         if expected:
             import re
             compact=lambda s:re.sub(r'\s+','',normalized(s))
@@ -799,7 +857,7 @@ class WindowsDesktop:
         with auto.UIAutomationInitializerInThread():
             control = self.focus_editor(hwnd, layout)
             rect, stamp = self.rect(hwnd), self.last_input()
-            if self.user.GetForegroundWindow() != hwnd or not control.HasKeyboardFocus:
+            if not self.is_foreground(hwnd) or not control.HasKeyboardFocus:
                 raise DesktopUnavailable('输入焦点已变化')
             direct = False
             for name in ('GetValuePattern', 'GetLegacyIAccessiblePattern'):
@@ -825,7 +883,7 @@ class WindowsDesktop:
                     raise DesktopUnavailable('写入后草稿核对失败，未发送')
             if not direct:
                 # Never select/delete an unknown or concurrently edited draft.
-                if normalized(self.editor_text(control)) or not self.visual_draft(hwnd,layout)['empty'] or self.user.GetForegroundWindow() != hwnd:
+                if normalized(self.editor_text(control)) or not self.visual_draft(hwnd,layout)['empty'] or not self.is_foreground(hwnd):
                     raise DesktopUnavailable('草稿或焦点已变化，未发送')
                 # SendKeys parses {Enter}/{Ctrl} even with charMode=True. Send
                 # UTF-16 units literally; multiline fallback is refused.
@@ -855,7 +913,7 @@ class WindowsDesktop:
             raise DesktopUnavailable('宿主已停止，已停止发送')
         if not self.unlocked():
             raise DesktopUnavailable('桌面已锁定，已停止发送')
-        if self.user.GetForegroundWindow() != hwnd:
+        if not self.is_foreground(hwnd):
             raise DesktopUnavailable('钉钉失去前台焦点，已停止发送')
         if self.rect(hwnd) != rect:
             raise DesktopUnavailable('钉钉窗口位置或尺寸变化，已停止发送')
@@ -880,6 +938,8 @@ class WindowsDesktop:
         if not self.title(image, layout, title):
             raise DesktopUnavailable('写入前聊天标题核对失败，未发送')
         before = self.messages(image, layout)
+        if not self.verify_draft(hwnd, layout, ''):
+            raise DesktopDeferred('当前聊天输入框未确认空白；原回复保留排队，请先处理草稿')
         self.guard(hwnd, rect, stamp)
         before_dispatch()  # Durable intent before any typing/clicking.
         stamp = self.type_reply(hwnd, layout, text)

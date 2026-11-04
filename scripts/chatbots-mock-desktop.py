@@ -33,6 +33,7 @@ class ProtocolFixture:
     def control(self):
         return json.loads((directory/'control.json').read_text('utf-8'))
     def find(self, title): return 'fixture-only'
+    def resolve_layout(self, hwnd, layout): return layout
     def idle(self): return 60
     def last_input(self): return 1
     def rect(self, hwnd): return (0,0,1000,800)

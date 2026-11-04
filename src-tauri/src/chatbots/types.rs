@@ -35,7 +35,12 @@ pub struct DesktopConfig {
     pub version: u32,
     pub window_title: String,
     pub self_names: Vec<String>,
+    #[serde(default = "default_desktop_input_mode")]
+    pub input_mode: String,
     pub layout: DesktopLayout,
+}
+fn default_desktop_input_mode() -> String {
+    "background".into()
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DesktopLayout {
@@ -51,6 +56,7 @@ impl DesktopConfig {
             b.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)) && b[0] < b[2] && b[1] < b[3]
         };
         if self.version != 1
+            || !matches!(self.input_mode.as_str(), "background" | "foreground")
             || self.window_title.trim().is_empty()
             || self.window_title.len() > 500
             || self.self_names.is_empty()
