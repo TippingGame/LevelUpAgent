@@ -10,7 +10,7 @@ from ctypes import wintypes
 import io
 import os
 import time
-from pathlib import Path
+from pathlib import PureWindowsPath
 
 from desktop_core import Bubble, normalized, title_matches
 
@@ -21,6 +21,20 @@ class DesktopUnavailable(RuntimeError):
 
 class DesktopDeferred(DesktopUnavailable):
     """Temporary human interaction, eligible for retry only before input."""
+
+
+class WindowPlacement(ctypes.Structure):
+    _fields_ = [('length', wintypes.UINT), ('flags', wintypes.UINT),
+                ('showCmd', wintypes.UINT), ('ptMinPosition', wintypes.POINT),
+                ('ptMaxPosition', wintypes.POINT), ('rcNormalPosition', wintypes.RECT)]
+
+
+class ProcessEntry(ctypes.Structure):
+    _fields_ = [('dwSize', wintypes.DWORD), ('cntUsage', wintypes.DWORD),
+                ('th32ProcessID', wintypes.DWORD), ('th32DefaultHeapID', ctypes.c_size_t),
+                ('th32ModuleID', wintypes.DWORD), ('cntThreads', wintypes.DWORD),
+                ('th32ParentProcessID', wintypes.DWORD), ('pcPriClassBase', wintypes.LONG),
+                ('dwFlags', wintypes.DWORD), ('szExeFile', wintypes.WCHAR * 260)]
 
 
 def text_bubbles(image, lines):
@@ -265,6 +279,7 @@ class WindowsDesktop:
             (self.user, 'IsWindowVisible', [wintypes.HWND], wintypes.BOOL),
             (self.user, 'IsIconic', [wintypes.HWND], wintypes.BOOL),
             (self.user, 'GetWindowRect', [wintypes.HWND, ctypes.POINTER(wintypes.RECT)], wintypes.BOOL),
+            (self.user, 'GetWindowPlacement', [wintypes.HWND, ctypes.POINTER(WindowPlacement)], wintypes.BOOL),
             (self.user, 'GetWindowThreadProcessId', [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)], wintypes.DWORD),
             (self.user, 'GetWindowTextW', [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int], ctypes.c_int),
             (self.user, 'GetDC', [wintypes.HWND], wintypes.HDC),
@@ -284,6 +299,9 @@ class WindowsDesktop:
             (self.kernel, 'OpenProcess', [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD], wintypes.HANDLE),
             (self.kernel, 'CloseHandle', [wintypes.HANDLE], wintypes.BOOL),
             (self.kernel, 'QueryFullProcessImageNameW', [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)], wintypes.BOOL),
+            (self.kernel, 'CreateToolhelp32Snapshot', [wintypes.DWORD, wintypes.DWORD], wintypes.HANDLE),
+            (self.kernel, 'Process32FirstW', [wintypes.HANDLE, ctypes.POINTER(ProcessEntry)], wintypes.BOOL),
+            (self.kernel, 'Process32NextW', [wintypes.HANDLE, ctypes.POINTER(ProcessEntry)], wintypes.BOOL),
             (self.gdi, 'CreateCompatibleDC', [wintypes.HDC], wintypes.HDC),
             (self.gdi, 'CreateCompatibleBitmap', [wintypes.HDC, ctypes.c_int, ctypes.c_int], wintypes.HBITMAP),
             (self.gdi, 'SelectObject', [wintypes.HDC, wintypes.HANDLE], wintypes.HANDLE),
@@ -293,40 +311,104 @@ class WindowsDesktop:
             function = getattr(dll, name)
             function.argtypes, function.restype = args, result
 
-    def windows(self):
+    def process_names(self):
+        """Read executable names without opening each process (e.g. elevated clients)."""
+        snapshot = self.kernel.CreateToolhelp32Snapshot(0x00000002, 0)
+        if snapshot in (None, 0, ctypes.c_void_p(-1).value):
+            return {}
+        try:
+            entry = ProcessEntry()
+            entry.dwSize = ctypes.sizeof(entry)
+            names = {}
+            more = self.kernel.Process32FirstW(snapshot, ctypes.byref(entry))
+            while more:
+                names[entry.th32ProcessID] = entry.szExeFile.lower()
+                more = self.kernel.Process32NextW(snapshot, ctypes.byref(entry))
+            return names
+        finally:
+            self.kernel.CloseHandle(snapshot)
+
+    def windows(self, diagnostics=None):
         result = []
+        process_names = None
+        allowed = ('dingtalk.exe', 'dingding.exe', 'dingtalkapp.exe')
+
+        def report(code, detail):
+            if diagnostics is not None and not any(item['code'] == code for item in diagnostics):
+                diagnostics.append(dict(code=code, detail=detail))
+
         callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
         def visit(hwnd, _):
-            if not self.user.IsWindowVisible(hwnd):
+            nonlocal process_names
+            visible = bool(self.user.IsWindowVisible(hwnd))
+            if not visible and diagnostics is None:
                 return True
             pid = wintypes.DWORD()
-            self.user.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            process = self.kernel.OpenProcess(0x1000, False, pid.value)
-            if not process:
+            if not self.user.GetWindowThreadProcessId(hwnd, ctypes.byref(pid)) or not pid.value:
                 return True
-            try:
-                size = wintypes.DWORD(32768)
-                path = ctypes.create_unicode_buffer(size.value)
-                if not self.kernel.QueryFullProcessImageNameW(process, 0, path, ctypes.byref(size)):
+            title = ctypes.create_unicode_buffer(1024)
+            self.user.GetWindowTextW(hwnd, title, len(title))
+            executable = None
+            process = self.kernel.OpenProcess(0x1000, False, pid.value)
+            if process:
+                try:
+                    size = wintypes.DWORD(32768)
+                    path = ctypes.create_unicode_buffer(size.value)
+                    if self.kernel.QueryFullProcessImageNameW(process, 0, path, ctypes.byref(size)):
+                        executable = PureWindowsPath(path.value).name.lower()
+                finally:
+                    self.kernel.CloseHandle(process)
+            if executable is None:
+                # A failed path query used to silently exclude an open client.
+                # Match the OS-reported PID/executable; never trust a title alone.
+                if process_names is None:
+                    process_names = self.process_names()
+                executable = process_names.get(pid.value)
+                if executable is None and visible and title.value.strip().lower() in ('钉钉', 'dingtalk'):
+                    report('process_unverified', '发现标题为钉钉的窗口，但无法核验所属进程。请以同一 Windows 用户正常启动钉钉和本应用后重试。')
+            if executable not in allowed:
+                return True
+            if not visible:
+                if title.value.strip():
+                    report('hidden', '发现隐藏的钉钉窗口，请从任务栏或托盘打开主窗口后重新检测。')
+                return True
+            if not title.value.strip():
+                report('untitled', '发现无标题的钉钉窗口；请等待主界面加载完成后重新检测。')
+                return True  # DingTalk's large transparent shadow is not a chat window.
+            minimized = bool(self.user.IsIconic(hwnd))
+            if minimized:
+                # GetWindowRect reports the minimized icon (often 160x28),
+                # not the chat size. Keep it discoverable so find() and the
+                # setup UI can ask the user to restore it explicitly.
+                placement = WindowPlacement()
+                placement.length = ctypes.sizeof(placement)
+                if not self.user.GetWindowPlacement(hwnd, ctypes.byref(placement)):
+                    report('geometry_unavailable', '无法读取钉钉窗口位置，请还原主窗口后重新检测。')
                     return True
-                if Path(path.value).name.lower() not in ('dingtalk.exe', 'dingding.exe', 'dingtalkapp.exe'):
+                rect = placement.rcNormalPosition
+                width, height = rect.right - rect.left, rect.bottom - rect.top
+            else:
+                try:
+                    _, _, width, height = self.rect(hwnd)
+                except DesktopUnavailable:
+                    report('window_closed', '检测期间钉钉窗口已关闭，请打开主窗口后重新检测。')
                     return True
-                title = ctypes.create_unicode_buffer(1024)
-                self.user.GetWindowTextW(hwnd, title, len(title))
-                if not title.value.strip():
-                    return True  # DingTalk's large transparent shadow is not a chat window.
-                rect = self.rect(hwnd)
-                if rect[2] < 600 or rect[3] < 400:
-                    return True
-                result.append(dict(handle=int(hwnd), title=title.value, width=rect[2], height=rect[3], minimized=bool(self.user.IsIconic(hwnd))))
-            finally:
-                self.kernel.CloseHandle(process)
+            if width < 600 or height < 400:
+                report('too_small', '发现钉钉小窗口，未达到 600 × 400 的识别尺寸；请展开或放大聊天主窗口后重新检测。')
+                return True
+            result.append(dict(handle=int(hwnd), title=title.value, width=width, height=height, minimized=minimized))
             return True
         callback = callback_type(visit)
         self.user.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
         self.user.EnumWindows.restype = wintypes.BOOL
-        self.user.EnumWindows(callback, 0)
+        if not self.user.EnumWindows(callback, 0):
+            raise DesktopUnavailable('无法枚举桌面窗口，请确认 Windows 已解锁后重试')
         return result
+
+    def probe_windows(self):
+        diagnostics = []
+        windows = self.windows(diagnostics=diagnostics)
+        return dict(windows=windows, diagnostics=diagnostics if not windows else [])
 
     def find(self, title):
         windows = [w for w in self.windows() if w['title'] == title]

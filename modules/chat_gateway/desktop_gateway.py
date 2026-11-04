@@ -234,7 +234,7 @@ def main():
     if args.probe:
         request = json.loads(sys.stdin.buffer.readline(MAX_FRAME + 1))
         driver = WindowsDesktop()
-        result = dict(windows=driver.windows())
+        result = driver.probe_windows()
         if request.get('windowTitle'):
             result.update(driver.preview(request['windowTitle'], request.get('layout') or DEFAULT_LAYOUT, request.get('autoLayout') is True))
         PROTOCOL.write(json.dumps(result, ensure_ascii=False) + '\n')
