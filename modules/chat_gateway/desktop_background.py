@@ -6,7 +6,7 @@ Window messages are bounded and each reply requires visible draft/echo checks.
 import ctypes
 from ctypes import wintypes
 import time
-from desktop_core import normalized, outgoing_added, title_matches
+from desktop_core import normalized, outgoing_added
 from desktop_windows import WindowsDesktop, DesktopUnavailable, DesktopDeferred
 
 
@@ -75,12 +75,16 @@ class BackgroundDesktop(WindowsDesktop):
         image = self.capture(hwnd)
         if self.title(image, layout, title):
             return image
+        time.sleep(.15)
+        self.guard(hwnd, rect)
+        image = self.capture(hwnd)
+        if self.title(image, layout, title):
+            return image
         if not self.verify_draft(hwnd, layout, ''):
             raise DesktopDeferred('无法确认当前输入框为空；请检查草稿，若为空请暂停连接并重新校准输入区')
-        rows = self.read(self.crop(image, layout['sidebar']))
-        matches = [r for r in rows if r['confidence'] >= .92 and title_matches(r['text'], title)]
+        matches = self.sidebar_matches(image, layout, title)
         if len(matches) != 1:
-            raise DesktopUnavailable('列表中未找到唯一完整标题，请将绑定聊天置顶')
+            raise DesktopUnavailable('列表中未找到唯一完整标题；请核对绑定名称与聊天标题一致，并暂停连接后重新识别区域')
         row, box = matches[0], layout['sidebar']
         self.guard(hwnd, rect)
         self.click(hwnd, box[0] + (row['x'] + row['w']/2)/image.width, box[1] + (row['y'] + row['h']/2)/image.height)
@@ -88,7 +92,7 @@ class BackgroundDesktop(WindowsDesktop):
         self.guard(hwnd, rect)
         image = self.capture(hwnd)
         if not self.title(image, layout, title):
-            raise DesktopUnavailable('后台切换聊天后的标题核对失败')
+            raise DesktopUnavailable('后台切换聊天后的标题核对失败；新版钉钉请暂停连接，选择「前台兼容模式」并保存后重连')
         return image
 
     def type_reply(self, hwnd, layout, text):

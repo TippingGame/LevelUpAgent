@@ -548,6 +548,42 @@ class WindowsDesktop:
         rows = self.read(self.crop(image, layout['title']))
         return any(r['confidence'] >= .9 and title_matches(r['text'], expected) for r in rows)
 
+    def sidebar_matches(self, image, layout, expected):
+        """Match exact titles, independently checking DingTalk's orange @ badge."""
+        from PIL import Image, ImageOps
+        import numpy as np
+        region = self.crop(image, layout['sidebar'])
+        matches = []
+        for row in self.read(region):
+            if row['confidence'] < .92:
+                continue
+            if title_matches(row['text'], expected):
+                matches.append(row)
+                continue
+            # OCR merges the orange UI badge into the black conversation name.
+            # Do not strip arbitrary suffixes or accept prefix-only name matches.
+            value, title = normalized(row['text']), normalized(expected)
+            if not title or not value.startswith(title) or value[len(title):].strip() != '@好友':
+                continue
+            left, top = max(0, int(row['x'])-3), max(0, int(row['y'])-3)
+            right = min(region.width, int(row['x']+row['w'])+3)
+            bottom = min(region.height, int(row['y']+row['h'])+3)
+            pixels = np.asarray(region.crop((left, top, right, bottom)).convert('RGB')).astype('int16')
+            if not pixels.size:
+                continue
+            red, green, blue = (pixels[:, :, n] for n in range(3))
+            badge = (red > 200) & (red-blue > 35) & (red-green > 20)
+            if int(badge.sum()) < 5:
+                continue  # A literal dark name such as "111@好友" is a different chat.
+            background = np.median(pixels.reshape(-1, 3), axis=0).astype('uint8')
+            pixels[badge] = background
+            clean = Image.fromarray(pixels.astype('uint8'))
+            clean = ImageOps.expand(clean.resize((clean.width*3, clean.height*3)), 12, tuple(background))
+            checked = self.read(clean)
+            if len(checked) == 1 and checked[0]['confidence'] >= .97 and title_matches(checked[0]['text'], title):
+                matches.append(row)
+        return matches
+
     def messages(self, image, layout):
         from PIL import ImageOps
         region = self.crop(image, layout['messages'])
@@ -672,12 +708,17 @@ class WindowsDesktop:
         image = self.capture(hwnd)
         if self.title(image, layout, title):
             return image
+        # A transient stale/unfinished title frame must not trigger a click in
+        # an already selected chat. Re-read before looking in the sidebar.
+        time.sleep(.15)
+        image = self.capture(hwnd)
+        if self.title(image, layout, title):
+            return image
         if self.idle() < 5 and self.last_input() != self.auto_input:
             raise DesktopUnavailable('正在人工操作桌面，等待空闲')
-        rows = self.read(self.crop(image, layout['sidebar']))
-        matches = [r for r in rows if r['confidence'] >= .92 and title_matches(r['text'], title)]
+        matches = self.sidebar_matches(image, layout, title)
         if len(matches) != 1:
-            raise DesktopUnavailable('聊天列表中未找到唯一完整标题，请将绑定聊天置顶或打开该聊天')
+            raise DesktopUnavailable('列表中未找到唯一完整标题；请核对绑定名称、打开目标聊天，并暂停连接后重新识别区域')
         row, box = matches[0], layout['sidebar']
         self.foreground(hwnd)
         self.click(hwnd, box[0] + (row['x'] + row['w']/2)/image.width, box[1] + (row['y'] + row['h']/2)/image.height)

@@ -96,6 +96,25 @@ class BackgroundTests(unittest.TestCase):
         with self.assertRaises(DesktopDeferred):
             d.send_reply(dict(windowTitle='x',layout=DEFAULT_LAYOUT),'test','reply',lambda:self.fail('no intent'))
 
+    def test_transient_title_miss_does_not_switch_an_already_open_chat(self):
+        d=self.driver();frames=iter(['stale','current'])
+        d.capture=lambda _:next(frames);d.title=lambda image,*_:image=='current'
+        d.sidebar_matches=lambda *_:self.fail('must not search when current title recovers')
+        d.click=lambda *_:self.fail('must not click')
+        with patch('desktop_background.time.sleep',lambda _:None):
+            self.assertEqual(d.select_chat(1,DEFAULT_LAYOUT,'111'),'current')
+
+    def test_switch_still_requires_postclick_exact_title(self):
+        d=self.driver();d.capture=lambda _:'image';d.title=lambda *_:False;d.verify_draft=lambda *_:True
+        from PIL import Image
+        d.capture=lambda _:Image.new('RGB',(1000,800))
+        d.sidebar_matches=lambda *_:[dict(x=10,y=20,w=30,h=20)]
+        clicks=[];d.click=lambda *args:clicks.append(args)
+        with patch('desktop_background.time.sleep',lambda _:None):
+            with self.assertRaisesRegex(DesktopUnavailable,'前台兼容模式'):
+                d.select_chat(1,DEFAULT_LAYOUT,'111')
+        self.assertEqual(len(clicks),1)
+
     def test_scan_ignores_other_apps_input_and_rechecks_chat(self):
         for same_chat in (True,False):
             d=self.driver();d.find=lambda _:1;d.select_chat=lambda *_:'image'

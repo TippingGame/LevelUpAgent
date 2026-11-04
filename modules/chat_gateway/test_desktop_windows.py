@@ -464,6 +464,42 @@ class EditorCapabilityTests(unittest.TestCase):
             driver.visual_draft(1,DEFAULT_LAYOUT)
 
 
+class SidebarTitleTests(unittest.TestCase):
+    def match(self, text='111@好友', checked='111', colored=True, extra=()):
+        from PIL import Image, ImageDraw
+        image=Image.new('RGB',(300,100),(237,238,240))
+        ImageDraw.Draw(image).rectangle((30,12,70,24),fill=(255,140,0) if colored else (20,20,20))
+        row=dict(text=text,confidence=.999,x=10,y=10,w=80,h=20)
+        driver=WindowsDesktop.__new__(WindowsDesktop);calls=[]
+        def read(im):
+            calls.append(im)
+            return [row]+list(extra) if len(calls)==1 else [dict(text=checked,confidence=.999)]
+        driver.read=read
+        return driver.sidebar_matches(image,dict(sidebar=[0,0,1,1]),'111'),calls
+
+    def test_orange_badge_requires_an_independent_exact_name_read(self):
+        matches,calls=self.match()
+        self.assertEqual(len(matches),1);self.assertEqual(len(calls),2)
+        self.assertEqual(self.match(checked='1111')[0],[])
+        self.assertEqual(self.match(checked='11')[0],[])
+
+    def test_literal_suffix_or_other_name_never_matches_prefix(self):
+        self.assertEqual(self.match(colored=False)[0],[])
+        for text in ('1111@好友','111测试@好友','111@陌生人','111 (2)'):
+            with self.subTest(text=text):self.assertEqual(self.match(text=text)[0],[])
+
+    def test_exact_and_badged_duplicate_names_remain_ambiguous(self):
+        extra=dict(text='111',confidence=.999,x=10,y=60,w=30,h=20)
+        self.assertEqual(len(self.match(extra=[extra])[0]),2)
+
+    def test_transient_title_miss_does_not_click_sidebar(self):
+        driver=WindowsDesktop.__new__(WindowsDesktop);frames=iter(['stale','current'])
+        driver.capture=lambda _:next(frames);driver.title=lambda image,*_:image=='current'
+        driver.sidebar_matches=lambda *_:self.fail('must not search or click when already selected')
+        with patch('desktop_windows.time.sleep',lambda _:None):
+            self.assertEqual(driver.select_chat(1,DEFAULT_LAYOUT,'111'),'current')
+
+
 class LayoutDetectionTests(unittest.TestCase):
     def test_current_client_unnamed_native_controls_calibrate_without_input(self):
         nodes=[self.node(cls='im_chat::ChatBubbleWidget',rect=(479,117,1584,714)),
