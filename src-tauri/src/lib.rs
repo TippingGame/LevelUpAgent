@@ -11615,7 +11615,10 @@ fn validated_local_directory(path: &str) -> Result<PathBuf, String> {
     if !metadata.is_dir() {
         return Err("Path is not a folder".to_owned());
     }
-    Ok(directory)
+    // Packaged launchers can virtualize AppData writes into LocalCache. Explorer
+    // runs outside that namespace, so it needs the actual filesystem location.
+    std::fs::canonicalize(&directory)
+        .map_err(|error| format!("Could not resolve folder location: {error}"))
 }
 
 #[tauri::command]
@@ -13076,7 +13079,13 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         assert_eq!(
             validated_local_directory(root.to_str().unwrap()).unwrap(),
-            root
+            std::fs::canonicalize(&root).unwrap()
+        );
+        let nested = root.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        assert_eq!(
+            validated_local_directory(nested.join("..").to_str().unwrap()).unwrap(),
+            std::fs::canonicalize(&root).unwrap()
         );
 
         let file = root.join("not-a-folder.txt");

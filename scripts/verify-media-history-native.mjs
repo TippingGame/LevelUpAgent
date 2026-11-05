@@ -58,11 +58,18 @@ try {
     const dated = await invoke("list_media_assets", { kind, limit: 20, offset: 0, filter: { createdAfter: new Date(2026, 10, 4).getTime(), createdBefore: new Date(2026, 10, 6).getTime() } });
     assert.equal(dated.total, 2);
   }
-  await gallery.getByRole("button", { name: "打开目录", exact: true }).click();
-  await page.waitForFunction(() => ![...document.querySelectorAll("button")].find(button => button.textContent.includes("打开目录"))?.disabled);
+  // Opening Explorer is opt-in: routine regressions must not leave native windows
+  // or error dialogs on the user's desktop. Verify the resulting location manually.
+  if (process.argv.includes("--open-folder")) {
+    await gallery.getByRole("button", { name: "打开目录", exact: true }).click();
+    await page.waitForFunction(() => ![...document.querySelectorAll("button")].find(button => button.textContent.includes("打开目录"))?.disabled);
+  }
   await gallery.getByRole("button", { name: "清除筛选" }).click();
   await page.waitForFunction(() => document.querySelectorAll(".media-asset-card").length === 20);
   await page.screenshot({ path: resolve(output, "native.png") });
-  await writeFile(resolve(output, "native.json"), JSON.stringify({ status: "passed", identity, pid: child.pid, directory: join(process.env.APPDATA, identity, "media"), folderVerification: "IPC accepted; verify the actual Explorer location separately", cases: ["real SQLite all three media kinds", "20 per page and next page", "search old record", "literal wildcard search", "date bounds", "open media directory IPC"] }, null, 2));
-  console.log("PASS native SQLite history/filter/pagination/open-folder IPC; QA process left open for visual inspection", child.pid);
-} finally { await browser?.close(); }
+  await writeFile(resolve(output, "native.json"), JSON.stringify({ status: "passed", identity, pid: child.pid, directory: join(process.env.APPDATA, identity, "media"), folderVerification: process.argv.includes("--open-folder") ? "IPC accepted; verify the actual Explorer location separately" : "Not opened (opt-in only)", cases: ["real SQLite all three media kinds", "20 per page and next page", "search old record", "literal wildcard search", "date bounds"] }, null, 2));
+  console.log("PASS native SQLite history/filter/pagination", child.pid);
+} finally {
+  await browser?.close();
+  if (!process.argv.includes("--keep-open")) child.kill();
+}
