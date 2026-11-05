@@ -5273,6 +5273,7 @@ fn list_media_assets(
     kind: MediaKind,
     limit: Option<usize>,
     offset: Option<usize>,
+    filter: Option<models::MediaHistoryFilter>,
 ) -> Result<MediaAssetPage, String> {
     media::list_assets_page(
         &database,
@@ -5280,7 +5281,16 @@ fn list_media_assets(
         &kind,
         limit.unwrap_or(24),
         offset.unwrap_or(0),
+        &filter.unwrap_or_default(),
     )
+}
+
+#[tauri::command]
+fn open_media_directory(app: tauri::AppHandle) -> Result<(), String> {
+    let directory = media_storage(&app)?;
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("Could not create media directory: {error}"))?;
+    open_local_directory(directory.to_string_lossy().into_owned())
 }
 
 async fn refresh_media_asset_internal(
@@ -12141,6 +12151,7 @@ pub fn run() {
             get_media_catalog,
             generate_media,
             list_media_assets,
+            open_media_directory,
             refresh_media_asset,
             export_media_asset,
             delete_media_asset,

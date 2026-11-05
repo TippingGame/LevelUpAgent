@@ -6,6 +6,7 @@ import type { LocalAttachmentPath } from "./localAttachments";
 import type { WorkspaceFileSearch } from "./composerReferences";
 import { deduplicateMediaRefresh } from "./mediaPolling";
 import { runHarnessStream } from "./harnessStream";
+import { tr } from "./i18n";
 import type {
   AgentMessage,
   AgentMode,
@@ -53,6 +54,7 @@ import type {
   McpServerSnapshot,
   MediaAsset,
   MediaAssetPage,
+  MediaHistoryFilter,
   MediaBatchResult,
   MediaCatalog,
   MediaGenerationRequest,
@@ -575,9 +577,14 @@ export async function generateMedia(
   return invoke<MediaBatchResult>("generate_media", { request, threadId: threadId || null });
 }
 
-export async function listMediaAssets(kind: MediaKind, limit = 24, offset = 0): Promise<MediaAssetPage> {
-  if (!isDesktop()) return { assets: [], hasMore: false };
-  return invoke<MediaAssetPage>("list_media_assets", { kind, limit, offset });
+export async function listMediaAssets(kind: MediaKind, limit = 24, offset = 0, filter?: MediaHistoryFilter): Promise<MediaAssetPage> {
+  if (!isDesktop()) return { assets: [], hasMore: false, total: 0 };
+  return invoke<MediaAssetPage>("list_media_assets", { kind, limit, offset, filter });
+}
+
+export async function openMediaDirectory(): Promise<void> {
+  if (!isDesktop()) throw new Error(tr("请在桌面应用中打开创作目录", "Open the creations folder in the desktop app"));
+  await invoke("open_media_directory");
 }
 
 export const refreshMediaAsset = deduplicateMediaRefresh((assetId: string): Promise<MediaAsset> => {

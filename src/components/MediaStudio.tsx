@@ -23,6 +23,7 @@ import {
   Clock3,
   Copy,
   Download,
+  FolderOpen,
   Image,
   ImagePlus,
   LoaderCircle,
@@ -30,6 +31,7 @@ import {
   Move,
   Plus,
   RefreshCw,
+  Search,
   Settings2,
   Sparkles,
   Trash2,
@@ -52,6 +54,7 @@ import {
   previewAttachment,
   refreshMediaAsset,
   onMediaAssetUpdate,
+  openMediaDirectory,
   selectImageReferences,
   selectVideoReference,
 } from "../lib/bridge";
@@ -61,6 +64,7 @@ import { copyText } from "../lib/clipboard";
 import { IMAGE_DIMENSION_OPTIONS, IMAGE_RATIO_OPTIONS, VIDEO_SIZE_OPTIONS, imageModelCapabilities, mediaModelBaseId, mediaModelSupportsExplicitImageMask, selectStudioMediaModel, sortStudioMediaModels, videoModelCapabilities, videoOutputOptions } from "../lib/mediaCapabilities";
 import { createMediaReferenceUrl, imageEditInputs, moveMediaReference, orderedMediaReferenceUrls, type MediaReferenceUrl } from "../lib/mediaReferences";
 import { createMediaPoller } from "../lib/mediaPolling";
+import { mediaHistoryFilter, type MediaHistoryRange } from "../lib/mediaHistory";
 import type {
   ImageAttachment,
   MediaAsset,
@@ -83,8 +87,11 @@ interface PromptDraft {
 interface MediaHistoryLoadState {
   loaded: boolean;
   loading: boolean;
-  loadingMore: boolean;
   hasMore: boolean;
+  ids: string[];
+  total: number;
+  queryKey: string;
+  error: string | null;
 }
 
 type StudioMediaAsset = MediaAsset & {
@@ -113,7 +120,7 @@ interface PreviewTransform extends PreviewPoint {
 const MIN_PREVIEW_ZOOM = 0.05;
 const MAX_PREVIEW_ZOOM = 4;
 const PREVIEW_ZOOM_STEP = 1.2;
-const MEDIA_HISTORY_PAGE_SIZE = 24;
+const EMPTY_HISTORY: MediaHistoryLoadState = { loaded: false, loading: false, hasMore: false, ids: [], total: 0, queryKey: "", error: null };
 
 interface MediaStudioProps {
   active: boolean;
@@ -180,10 +187,22 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
   const [refreshing, setRefreshing] = useState(false);
   const [pastingReferences, setPastingReferences] = useState(false);
   const [previewAsset, setPreviewAsset] = useState<MediaAsset | null>(null);
+  const [historyKeyword, setHistoryKeyword] = useState("");
+  const [historyRange, setHistoryRange] = useState<MediaHistoryRange>("all");
+  const [historyStart, setHistoryStart] = useState("");
+  const [historyEnd, setHistoryEnd] = useState("");
+  const [historyPageSize, setHistoryPageSize] = useState(20);
+  const [historyPage, setHistoryPage] = useState({ kind, index: 0 });
+  const [historyRevision, setHistoryRevision] = useState(0);
+  const [openingHistoryDirectory, setOpeningHistoryDirectory] = useState(false);
+  const historyPageIndex = historyPage.kind === kind ? historyPage.index : 0;
+  const historyFilter = mediaHistoryFilter(historyKeyword, historyRange, historyStart, historyEnd);
+  const historyQueryKey = JSON.stringify([kind, historyFilter, historyPageSize, historyPageIndex]);
+  const historyFiltered = Boolean(historyKeyword.trim()) || historyRange !== "all";
   const [historyState, setHistoryState] = useState<Record<MediaKind, MediaHistoryLoadState>>({
-    image: { loaded: false, loading: false, loadingMore: false, hasMore: false },
-    video: { loaded: false, loading: false, loadingMore: false, hasMore: false },
-    audio: { loaded: false, loading: false, loadingMore: false, hasMore: false },
+    image: EMPTY_HISTORY,
+    video: EMPTY_HISTORY,
+    audio: EMPTY_HISTORY,
   });
   const catalogRequestRef = useRef(0);
   const catalogRevisionRef = useRef<number | null>(null);
@@ -230,12 +249,16 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
   const imageRatios = imageCapabilities.ratios;
   const imageEditReady = imageMode === "generate"
     || imageEditEntries.length > 0;
-  const visibleAssets = useMemo(() => assets.filter((asset) => asset.kind === kind), [assets, kind]);
+  const currentHistoryState = historyState[kind];
+  const historyLoading = (!currentHistoryState.loaded && !currentHistoryState.error) || currentHistoryState.queryKey !== historyQueryKey;
+  const visibleAssets = useMemo(() => {
+    const byId = new Map(assets.map((asset) => [asset.id, asset]));
+    return currentHistoryState.ids.flatMap((id) => byId.has(id) ? [byId.get(id)!] : []);
+  }, [assets, currentHistoryState.ids]);
   const visiblePendingAssets = useMemo(() => pendingAssets.filter((asset) => asset.kind === kind), [pendingAssets, kind]);
   const displayedAssets = useMemo<StudioMediaAsset[]>(() => [...visiblePendingAssets, ...visibleAssets], [visiblePendingAssets, visibleAssets]);
   const activeImageEditEntry = imageEditEntries.find((entry) => entry.id === imageEditSelectionId) ?? imageEditEntries[0];
   const activeImageEditNumber = imageEditEntries.findIndex((entry) => entry.id === activeImageEditEntry?.id) + 1;
-  const currentHistoryState = historyState[kind];
   const previewableAssets = useMemo(() => displayedAssets.filter(
     (asset) => asset.kind === "image" && asset.status === "completed" && Boolean(mediaAssetUrl(asset)),
   ), [displayedAssets]);
@@ -271,34 +294,42 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
     }
   };
 
-  const loadHistory = async (targetKind: MediaKind, reset = false) => {
+  const loadHistory = async (targetKind: MediaKind) => {
+    if (!historyFilter) return;
     const requestId = ++historyRequestRef.current[targetKind];
-    const offset = reset ? 0 : assets.filter((asset) => asset.kind === targetKind).length;
+    const offset = historyPageIndex * historyPageSize;
     setHistoryState((current) => ({
       ...current,
       [targetKind]: {
         ...current[targetKind],
-        loading: reset,
-        loadingMore: !reset,
+        loading: true,
+        error: null,
       },
     }));
     try {
-      const page = await listMediaAssets(targetKind, MEDIA_HISTORY_PAGE_SIZE, offset);
+      const page = await listMediaAssets(targetKind, historyPageSize, offset, historyFilter);
       if (requestId !== historyRequestRef.current[targetKind]) return;
-      setAssets((current) => mergeAssets(
-        reset ? current.filter((asset) => asset.kind !== targetKind) : current,
-        page.assets,
-      ));
+      // Deleting the last item on a page returns to the last remaining page.
+      if (historyPageSize > 0 && historyPageIndex > 0 && offset >= page.total) {
+        setHistoryPage({ kind: targetKind, index: Math.max(0, Math.ceil(page.total / historyPageSize) - 1) });
+        return;
+      }
+      setAssets((current) => mergeAssets(current, page.assets));
       setHistoryState((current) => ({
         ...current,
         [targetKind]: {
           ...current[targetKind],
           loaded: true,
           hasMore: page.hasMore,
+          ids: page.assets.map((asset) => asset.id),
+          total: page.total,
+          queryKey: historyQueryKey,
         },
       }));
     } catch (reason) {
-      if (requestId === historyRequestRef.current[targetKind]) setError(errorText(reason));
+      if (requestId === historyRequestRef.current[targetKind]) {
+        setHistoryState((current) => ({ ...current, [targetKind]: { ...current[targetKind], queryKey: historyQueryKey, error: errorText(reason) } }));
+      }
     } finally {
       if (requestId === historyRequestRef.current[targetKind]) {
         setHistoryState((current) => ({
@@ -306,7 +337,6 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
           [targetKind]: {
             ...current[targetKind],
             loading: false,
-            loadingMore: false,
           },
         }));
       }
@@ -319,9 +349,13 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
   }, [active, mediaCatalogRevision]);
 
   useEffect(() => {
-    if (!active || historyState[kind].loaded || historyState[kind].loading) return;
-    void loadHistory(kind, true);
-  }, [active, kind]);
+    if (!active || !historyFilter) return;
+    const timer = window.setTimeout(() => void loadHistory(kind), 250);
+    return () => {
+      window.clearTimeout(timer);
+      ++historyRequestRef.current[kind];
+    };
+  }, [active, historyQueryKey, historyRevision]);
 
   useEffect(() => {
     if (!transparentBackgroundSupported && background === "transparent") setBackground("auto");
@@ -379,6 +413,8 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
 
   useEffect(() => onMediaAssetUpdate((asset) => {
     setAssets((current) => mergeAssets(current, [asset]));
+    // Progress is rendered from the cache; only persisted changes reload the page.
+    if (!asset.downloadProgress) setHistoryRevision((current) => current + 1);
   }), []);
 
   useEffect(() => {
@@ -820,6 +856,7 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
           maskAttachmentId: task.editInput?.maskAttachmentId,
         });
         setAssets((current) => mergeAssets(current, result.assets));
+        setHistoryRevision((current) => current + 1);
         return result;
       } finally {
         setPendingAssets((current) => current.filter((asset) => asset.batchId !== pendingBatchId));
@@ -831,14 +868,34 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
 
   const refreshAll = async () => {
     setRefreshing(true);
-    await Promise.all([loadCatalog(false), loadHistory(kind, true)]);
+    await Promise.all([loadCatalog(false), loadHistory(kind)]);
     setRefreshing(false);
+  };
+
+  const resetHistoryPage = () => setHistoryPage({ kind, index: 0 });
+  const clearHistoryFilters = () => {
+    setHistoryKeyword("");
+    setHistoryRange("all");
+    setHistoryStart("");
+    setHistoryEnd("");
+    resetHistoryPage();
+  };
+  const openHistoryDirectory = async () => {
+    setOpeningHistoryDirectory(true);
+    try {
+      await openMediaDirectory();
+    } catch (reason) {
+      setError(errorText(reason));
+    } finally {
+      setOpeningHistoryDirectory(false);
+    }
   };
 
   const removeAsset = async (asset: MediaAsset) => {
     try {
       await deleteMediaAsset(asset.id);
       setAssets((current) => current.filter((item) => item.id !== asset.id));
+      setHistoryRevision((current) => current + 1);
     } catch (reason) {
       setError(errorText(reason));
     }
@@ -1114,22 +1171,49 @@ export function MediaStudio({ active, locale, mediaCatalogRevision, dropActive, 
         </section>
 
         <section className="media-gallery-panel">
-          <div className="media-gallery-heading">
+          <div className="media-gallery-heading media-history-heading">
             <div>
-              <strong>{tr("创作历史", "Creation history")}</strong><span title={currentHistoryState.hasMore ? tr("还有更多历史未读取", "More history is available") : undefined}>{visibleAssets.length}{currentHistoryState.hasMore ? "+" : ""}</span>
+              <strong>{tr("创作历史", "Creation history")}</strong><span aria-live="polite">{historyLoading ? "…" : currentHistoryState.total}</span>
               {visiblePendingAssets.length > 0 && <em><LoaderCircle className="spin" size={12} />{tr(`${visiblePendingAssets.length} 个生成中`, `${visiblePendingAssets.length} generating`)}</em>}
             </div>
-            <small>{tr("结果保存在本机应用数据目录", "Outputs are stored in local app data")}</small>
+            <form className="media-history-tools" onSubmit={(event) => event.preventDefault()}>
+              <label className="media-history-search">
+                <Search size={15} aria-hidden="true" />
+                <input type="search" aria-label={tr("搜索创作历史", "Search creation history")} placeholder={tr("搜索提示词、模型、文件名", "Search prompts, models, filenames")} value={historyKeyword} onChange={(event) => { setHistoryKeyword(event.target.value); resetHistoryPage(); }} />
+              </label>
+              <select aria-label={tr("创作时间范围", "Creation date range")} value={historyRange} onChange={(event) => { setHistoryRange(event.target.value as MediaHistoryRange); resetHistoryPage(); }}>
+                <option value="all">{tr("全部时间", "All time")}</option>
+                <option value="today">{tr("今天", "Today")}</option>
+                <option value="7">{tr("近 7 天", "Last 7 days")}</option>
+                <option value="30">{tr("近 30 天", "Last 30 days")}</option>
+                <option value="custom">{tr("自定义日期", "Custom dates")}</option>
+              </select>
+              <label className="media-history-page-size">{tr("每页", "Per page")}
+                <select aria-label={tr("每页历史数量", "History items per page")} value={historyPageSize} onChange={(event) => { setHistoryPageSize(Number(event.target.value)); resetHistoryPage(); }}>
+                  <option value={20}>20</option><option value={50}>50</option><option value={100}>100</option><option value={0}>{tr("全部", "All")}</option>
+                </select>
+              </label>
+              <button type="button" disabled={openingHistoryDirectory} onClick={() => void openHistoryDirectory()} title={tr("打开本地保存创作结果的目录", "Open the folder containing local creations")}>
+                {openingHistoryDirectory ? <LoaderCircle className="spin" size={15} /> : <FolderOpen size={15} />}{tr("打开目录", "Open folder")}
+              </button>
+              {historyFiltered && <button type="button" onClick={clearHistoryFilters}>{tr("清除筛选", "Clear filters")}</button>}
+            </form>
           </div>
-          {currentHistoryState.loading && !currentHistoryState.loaded ? <div className="media-empty"><LoaderCircle className="spin" size={24} /><span>{tr("正在读取首段历史", "Loading recent history")}</span></div>
-            : displayedAssets.length === 0 ? <div className="media-empty"><KindIcon kind={kind} /><strong>{tr("还没有作品", "No creations yet")}</strong><span>{tr("输入提示词后，结果会自动出现在这里", "Generated outputs will appear here automatically")}</span></div>
+          {historyRange === "custom" && <div className="media-history-dates">
+            <label>{tr("开始日期", "Start date")}<input type="date" aria-label={tr("开始日期", "Start date")} max={historyEnd || undefined} value={historyStart} onChange={(event) => { setHistoryStart(event.target.value); resetHistoryPage(); }} /></label>
+            <label>{tr("结束日期", "End date")}<input type="date" aria-label={tr("结束日期", "End date")} min={historyStart || undefined} value={historyEnd} onChange={(event) => { setHistoryEnd(event.target.value); resetHistoryPage(); }} /></label>
+            <small>{tr("包含开始和结束当天，可只选一端", "Includes both dates; either end may be left open")}</small>
+          </div>}
+          {!historyFilter ? <div className="media-empty" role="alert">{tr("开始日期不能晚于结束日期", "The start date must not be after the end date")}</div>
+            : historyLoading ? <div className="media-empty" role="status"><LoaderCircle className="spin" size={24} /><span>{tr("正在读取历史", "Loading history")}</span></div>
+            : currentHistoryState.error ? <div className="media-empty" role="alert"><CircleAlert size={24} /><span>{currentHistoryState.error}</span><button type="button" onClick={() => void loadHistory(kind)}>{tr("重试", "Retry")}</button></div>
+            : displayedAssets.length === 0 ? <div className="media-empty"><KindIcon kind={kind} /><strong>{historyFiltered ? tr("没有符合条件的历史记录", "No matching history") : tr("还没有作品", "No creations yet")}</strong><span>{historyFiltered ? tr("试试其他关键词或扩大时间范围", "Try another keyword or a wider date range") : tr("输入提示词后，结果会自动出现在这里", "Generated outputs will appear here automatically")}</span></div>
               : <>
                 <MediaHistoryGrid assets={displayedAssets} locale={locale} onAction={onAssetAction}/>
-                {currentHistoryState.hasMore && <div className="media-history-pagination">
-                  <button type="button" disabled={currentHistoryState.loadingMore} onClick={() => void loadHistory(kind)}>
-                    {currentHistoryState.loadingMore && <LoaderCircle className="spin" size={14} />}
-                    {currentHistoryState.loadingMore ? tr("正在读取下一段", "Loading next page") : tr(`继续读取 ${MEDIA_HISTORY_PAGE_SIZE} 条`, `Load ${MEDIA_HISTORY_PAGE_SIZE} more`)}
-                  </button>
+                {historyPageSize > 0 && currentHistoryState.total > 0 && <div className="media-history-pagination media-history-pages">
+                  <button type="button" disabled={historyPageIndex === 0} onClick={() => setHistoryPage({ kind, index: historyPageIndex - 1 })}><ArrowLeft size={14} />{tr("上一页", "Previous")}</button>
+                  <span aria-live="polite">{tr(`第 ${historyPageIndex + 1} / ${Math.max(1, Math.ceil(currentHistoryState.total / historyPageSize))} 页 · 共 ${currentHistoryState.total} 条`, `Page ${historyPageIndex + 1} / ${Math.max(1, Math.ceil(currentHistoryState.total / historyPageSize))} · ${currentHistoryState.total} items`)}</span>
+                  <button type="button" disabled={!currentHistoryState.hasMore} onClick={() => setHistoryPage({ kind, index: historyPageIndex + 1 })}>{tr("下一页", "Next")}<ArrowRight size={14} /></button>
                 </div>}
               </>}
         </section>

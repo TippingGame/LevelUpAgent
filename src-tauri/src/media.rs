@@ -348,16 +348,15 @@ pub fn list_assets_page(
     kind: &MediaKind,
     limit: usize,
     offset: usize,
+    filter: &crate::models::MediaHistoryFilter,
 ) -> Result<MediaAssetPage, String> {
-    let limit = limit.clamp(1, 100);
-    let mut assets = database.list_media_assets_page(kind, limit.saturating_add(1), offset)?;
-    let has_more = assets.len() > limit;
-    assets.truncate(limit);
-    let assets = assets
+    let mut page = database.list_media_assets_page(kind, limit, offset, filter)?;
+    page.assets = page
+        .assets
         .into_iter()
         .map(|asset| enrich_asset(storage, asset))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(MediaAssetPage { assets, has_more })
+    Ok(page)
 }
 
 pub fn get_asset(

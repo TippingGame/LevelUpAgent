@@ -815,6 +815,14 @@ export interface MediaAsset {
 export interface MediaAssetPage {
   assets: MediaAsset[];
   hasMore: boolean;
+  total: number;
+}
+
+export interface MediaHistoryFilter {
+  keyword?: string;
+  createdAfter?: number;
+  /** Exclusive upper bound, so a selected end date includes the whole day. */
+  createdBefore?: number;
 }
 
 export interface MediaBatchResult {

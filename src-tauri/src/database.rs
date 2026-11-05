@@ -1191,35 +1191,77 @@ impl Database {
         kind: &MediaKind,
         limit: usize,
         offset: usize,
-    ) -> Result<Vec<MediaAsset>, String> {
+        filter: &crate::models::MediaHistoryFilter,
+    ) -> Result<crate::models::MediaAssetPage, String> {
+        if matches!((filter.created_after, filter.created_before), (Some(start), Some(end)) if start >= end)
+        {
+            return Err("The start date must not be after the end date".to_owned());
+        }
         let connection = self
             .connection
             .lock()
             .map_err(|_| "Could not lock conversation database".to_owned())?;
+        let keyword = filter.keyword.as_deref().unwrap_or("").trim();
+        // Bound parameters and instr keep %, _ and quotes literal in searches.
+        let predicate = "kind = ?1
+            AND (?2 = '' OR instr(lower(prompt), lower(?2)) > 0
+                OR instr(lower(COALESCE(revised_prompt, '')), lower(?2)) > 0
+                OR instr(lower(model), lower(?2)) > 0
+                OR instr(lower(provider_name), lower(?2)) > 0
+                OR instr(lower(COALESCE(file_name, '')), lower(?2)) > 0)
+            AND (?3 IS NULL OR created_at >= ?3)
+            AND (?4 IS NULL OR created_at < ?4)";
+        // A zero limit explicitly means all matching history, without the old 500-row cap.
+        let limit = if limit == 0 {
+            -1
+        } else {
+            limit.min(100) as i64
+        };
+        let offset = i64::try_from(offset).unwrap_or(i64::MAX);
+        let total: i64 = connection
+            .query_row(
+                &format!("SELECT COUNT(*) FROM media_assets WHERE {predicate}"),
+                params![
+                    media_kind_value(kind),
+                    keyword,
+                    filter.created_after,
+                    filter.created_before
+                ],
+                |row| row.get(0),
+            )
+            .map_err(database_error)?;
         let mut statement = connection
             .prepare(
-                "SELECT id, batch_id, thread_id, provider_id, provider_name, kind, status,
+                &format!("SELECT id, batch_id, thread_id, provider_id, provider_name, kind, status,
                         prompt, model, mime_type, file_name, remote_id, revised_prompt, error,
                         progress, size, quality, output_format, voice, seconds, created_at, updated_at,
                         background, generation_count, video_output
                  FROM media_assets
-                 WHERE kind = ?1
+                 WHERE {predicate}
                  ORDER BY created_at DESC, id DESC
-                 LIMIT ?2 OFFSET ?3",
+                 LIMIT ?5 OFFSET ?6"),
             )
             .map_err(database_error)?;
-        statement
+        let assets = statement
             .query_map(
                 params![
                     media_kind_value(kind),
-                    limit.clamp(1, 500) as i64,
-                    i64::try_from(offset).unwrap_or(i64::MAX),
+                    keyword,
+                    filter.created_after,
+                    filter.created_before,
+                    limit,
+                    offset
                 ],
                 media_asset_from_row,
             )
             .map_err(database_error)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(database_error)
+            .map_err(database_error)?;
+        Ok(crate::models::MediaAssetPage {
+            has_more: offset.saturating_add(assets.len() as i64) < total,
+            assets,
+            total: total as usize,
+        })
     }
 
     pub fn get_media_asset(&self, id: &str) -> Result<Option<MediaAsset>, String> {
@@ -5337,25 +5379,106 @@ mod tests {
         }
 
         let first_page = database
-            .list_media_assets_page(&MediaKind::Video, 2, 0)
+            .list_media_assets_page(&MediaKind::Video, 2, 0, &Default::default())
             .unwrap();
         assert_eq!(
             first_page
+                .assets
                 .iter()
                 .map(|item| item.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["video-new", "video-middle"]
         );
         let second_page = database
-            .list_media_assets_page(&MediaKind::Video, 2, 2)
+            .list_media_assets_page(&MediaKind::Video, 2, 2, &Default::default())
             .unwrap();
         assert_eq!(
             second_page
+                .assets
                 .iter()
                 .map(|item| item.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["video-old"]
         );
+        assert_eq!(first_page.total, 3);
+        assert!(first_page.has_more);
+        assert!(!second_page.has_more);
+
+        use crate::models::MediaHistoryFilter;
+        let search = |keyword: &str, after, before| MediaHistoryFilter {
+            keyword: Some(keyword.to_owned()),
+            created_after: after,
+            created_before: before,
+        };
+        let filtered = database
+            .list_media_assets_page(
+                &MediaKind::Video,
+                20,
+                0,
+                &search("PROMPT", Some(100), Some(300)),
+            )
+            .unwrap();
+        assert_eq!(filtered.total, 2);
+        assert_eq!(filtered.assets[0].id, "video-middle");
+        assert_eq!(filtered.assets[1].id, "video-old");
+        assert_eq!(
+            database
+                .list_media_assets_page(&MediaKind::Video, 20, 0, &search("video-old", None, None))
+                .unwrap()
+                .total,
+            1
+        );
+        assert_eq!(
+            database
+                .list_media_assets_page(&MediaKind::Video, 20, 0, &search("absent", None, None))
+                .unwrap()
+                .total,
+            0
+        );
+        assert!(
+            database
+                .list_media_assets_page(&MediaKind::Video, 20, 0, &search("", Some(300), Some(100)))
+                .is_err()
+        );
+
+        let mut chinese = asset("chinese", MediaKind::Image, 500);
+        chinese.prompt = "橘猫 100%_ '风景'".to_owned();
+        chinese.revised_prompt = Some("修订后的猫".to_owned());
+        chinese.file_name = Some("kitten.png".to_owned());
+        database.save_media_asset(&chinese).unwrap();
+        for keyword in ["橘猫", "%_", "'风景'", "修订", "KITTEN.PNG"] {
+            let page = database
+                .list_media_assets_page(&MediaKind::Image, 20, 0, &search(keyword, None, None))
+                .unwrap();
+            assert_eq!(page.total, 1, "literal keyword {keyword}");
+            assert_eq!(page.assets[0].id, "chinese");
+        }
+        assert_eq!(
+            database
+                .list_media_assets_page(&MediaKind::Video, 20, 0, &search("%", None, None))
+                .unwrap()
+                .total,
+            0
+        );
+        for index in 0..505 {
+            database
+                .save_media_asset(&asset(&format!("audio-{index:03}"), MediaKind::Audio, 600))
+                .unwrap();
+        }
+        for limit in [20, 50, 100, 0] {
+            let page = database
+                .list_media_assets_page(&MediaKind::Audio, limit, 0, &Default::default())
+                .unwrap();
+            assert_eq!(page.total, 505);
+            assert_eq!(page.assets.len(), if limit == 0 { 505 } else { limit });
+            assert_eq!(page.has_more, limit != 0);
+            assert_eq!(page.assets[0].id, "audio-504");
+        }
+        let tail = database
+            .list_media_assets_page(&MediaKind::Audio, 20, 500, &Default::default())
+            .unwrap();
+        assert_eq!(tail.assets.len(), 5);
+        assert!(!tail.has_more);
     }
 
     #[test]

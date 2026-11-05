@@ -824,6 +824,15 @@ pub enum MediaVideoOutput {
 pub struct MediaAssetPage {
     pub assets: Vec<MediaAsset>,
     pub has_more: bool,
+    pub total: usize,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaHistoryFilter {
+    pub keyword: Option<String>,
+    pub created_after: Option<i64>,
+    pub created_before: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
