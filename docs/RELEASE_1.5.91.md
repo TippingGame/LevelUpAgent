@@ -21,3 +21,16 @@
 Windows 自动更新使用 Tauri updater 签名，不是 Authenticode。macOS 包为 ad-hoc 签名，未做 Apple 公证；Linux 包未做发行版签名。
 
 发布页：https://github.com/TippingGame/LevelUpAgent/releases/tag/v1.5.91
+
+## 正式发布记录
+
+- 2026-11-05 15:35:19（Asia/Shanghai）正式发布并设为 Latest，tag `v1.5.91` 指向 `a8834841581819ef9c568e820394f7d60b2cb0ff`。
+- CI `41986163225` 三平台检查和 Release `41986182097` 四平台构建均成功。
+- 公开 `releases/latest/download/latest.json` 返回 HTTP 200，版本为 1.5.91，Windows 下载 URL 与签名字段匹配。
+- 10 个发布资产完整下载并通过 GitHub SHA-256 校验；Windows EXE/MSI updater 签名、可信注释签名、更新 URL 和版本均通过验证。
+- Windows EXE/MSI 产品版本及解包后的主程序版本为 1.5.91；78 个内置资源与发布源码一致，文本只存在 Windows checkout 的换行差异。
+- 本地项目检查 311 项、Rust 592 项通过（5 项忽略），格式检查及 Clippy 通过；聊天网关 Python 122 项通过，3D 资源 21 项（3 项平台跳过）、音频 9 项（2 项平台跳过）通过。
+- Windows 实际目录解析修复已在同一隔离测试实例实测：资源管理器进入 Codex LocalCache 下的实际 media 目录，没有新增“位置不可用”提示。测试脚本默认不打开目录，并自动关闭测试进程。
+- 音频与 3D 的五份资源清单均匿名 HTTP 200，资源 Release 仍为 prerelease、不占 Latest。
+- 官方 Windows EXE 与 SHA256 清单同步到本机安装包目录；本轮未覆盖用户本机正式安装，未进行 macOS/Linux 实体机交互安装验收。
+- 本地验证证据：`artifacts/release-1.5.91/`。
