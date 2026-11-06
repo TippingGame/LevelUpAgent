@@ -135,7 +135,18 @@ fn save_route(c: &Connection, mut route: Route) -> Result<Route, String> {
             );
         }
         if !route.topic_id.is_empty() || route.chat_id.trim() != route.chat_id {
-            return Err("Desktop routes use an exact full title without topic IDs".into());
+            return Err(
+                "Desktop routes use a name contained in the title, without topic IDs".into(),
+            );
+        }
+        if route.chat_type == "group"
+            && route.mode == "mention"
+            && account
+                .desktop
+                .as_ref()
+                .is_some_and(|d| d.self_names.is_empty())
+        {
+            return Err("群聊仅 @ 模式需要先在桌面收发设置填写我的显示名 / Set your @ name before using group mentions".into());
         }
         if all::<Route>(c, "chat_routes")?.iter().any(|r| {
             r.id != route.id

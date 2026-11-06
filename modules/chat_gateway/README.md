@@ -44,7 +44,9 @@ runtime (`requirements-desktop.txt`, Windows Python 3.10-3.12). Configure includ
 and OCR preview. It never sends messages. `--state` is a host-selected local file
 for atomic inbound buffering and durable outbound intent.
 
-Read `docs/DINGTALK_DESKTOP_2026-10-20.md` for setup and limitations.
+Read `docs/DESKTOP_CALIBRATION.md` for the manual screenshot workflow, unread
+processing and custom desktop application profiles. The older
+`docs/DINGTALK_DESKTOP_2026-10-20.md` describes the legacy configuration.
 `python -m unittest discover -s modules/chat_gateway -p 'test_desktop*.py'`
 tests rules, image filtering and send guards. Synthetic tests and screenshot
 recognition do not prove real DingTalk UIA compatibility or live delivery.

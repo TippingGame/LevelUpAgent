@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "LevelUpAgent",
-  "version": "1.5.91",
+  "version": "1.5.92",
   "identifier": "com.levelup.agent",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -65,6 +65,7 @@
       "../modules/chat_gateway/desktop_windows.py": "modules/chat_gateway/desktop_windows.py",
       "../modules/chat_gateway/desktop_background.py": "modules/chat_gateway/desktop_background.py",
       "../modules/chat_gateway/desktop_core.py": "modules/chat_gateway/desktop_core.py",
+      "../modules/chat_gateway/desktop_calibration.py": "modules/chat_gateway/desktop_calibration.py",
       "../modules/chat_gateway/requirements-desktop.txt": "modules/chat_gateway/requirements-desktop.txt"
     },
     "icon": [

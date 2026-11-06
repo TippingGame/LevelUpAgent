@@ -14,8 +14,18 @@ def normalized(text):
 
 
 def title_matches(observed, expected):
-    # Never collapse distinct chat names (spaces or parenthesized numbers).
-    return bool(normalized(expected)) and normalized(observed) == normalized(expected)
+    # Names may be followed by departments, badges or member counts.
+    return bool(normalized(expected)) and normalized(expected).casefold() in normalized(observed).casefold()
+
+
+def matching_route(observed, routes):
+    """Resolve overlapping names deterministically; equal-length ambiguity stops."""
+    matches = [r for r in routes if title_matches(observed, r['chatId'])]
+    if not matches:
+        return None
+    longest = max(len(normalized(r['chatId'])) for r in matches)
+    matches = [r for r in matches if len(normalized(r['chatId'])) == longest]
+    return matches[0] if len(matches) == 1 and not matches[0].get('paused') else None
 
 
 def is_mention(text, names):
@@ -47,7 +57,7 @@ class MessageTracker:
     def __init__(self, state=None):
         self.state = state or {'previous': [], 'serial': 0, 'history': []}
 
-    def observe(self, bubbles, chat_id):
+    def observe(self, bubbles, chat_id, unread=False):
         # Persist fingerprints, not a second plaintext copy of chat history.
         current = [hashlib.sha256(json.dumps(b.signature, ensure_ascii=False).encode()).hexdigest() for b in bubbles]
         old = self.state.get('previous', [])
@@ -89,6 +99,12 @@ class MessageTracker:
                             additions = bubbles[anchored+1+seen:]
         elif initialized and not old and not history and current:
             additions = bubbles
+        # A badge is independent evidence of unread content when the viewport
+        # has never been seen or has lost its overlap. Only the latest incoming
+        # bubble at the live tail is eligible; never bulk-replay old history.
+        if unread and not additions and not revisited and current != old and bubbles and bubbles[-1].direction == 'incoming':
+            if current[-1] not in history:
+                additions = [bubbles[-1]]
         result = []
         for bubble in additions:
             if bubble.direction != 'incoming' or not normalized(bubble.text):
@@ -129,14 +145,14 @@ DEFAULT_LAYOUT = {
 
 
 def validate_config(config):
-    if config.get('version') != 1:
+    if config.get('version') not in (1, 2):
         raise ValueError('Unsupported desktop configuration')
     if config.get('inputMode', 'background') not in ('background', 'foreground'):
         raise ValueError('Unsupported desktop input mode')
     if not isinstance(config.get('windowTitle'), str) or not config['windowTitle'].strip():
-        raise ValueError('Choose one DingTalk window')
+        raise ValueError('Choose one application window')
     aliases = config.get('selfNames', [])
-    if not isinstance(aliases, list) or not 1 <= len(aliases) <= 10 or any(not isinstance(n, str) or not n.strip() or len(n) > 80 for n in aliases):
+    if not isinstance(aliases, list) or not (1 if config['version'] == 1 else 0) <= len(aliases) <= 10 or any(not isinstance(n, str) or not n.strip() or len(n) > 80 for n in aliases):
         raise ValueError('Enter your exact DingTalk @ display name')
     layout = config.get('layout', {})
     for region in ('title', 'messages', 'editor', 'sidebar'):
@@ -145,4 +161,24 @@ def validate_config(config):
     point = layout.get('send')
     if not isinstance(point, list) or len(point) != 2 or any(not isinstance(v, (int, float)) or isinstance(v, bool) or not 0 <= v <= 1 for v in point):
         raise ValueError('Calibrate the send button')
+    if config['version'] == 2:
+        application = config.get('application') or 'dingtalk'
+        if application not in ('dingtalk', 'custom'):
+            raise ValueError('Unsupported application profile')
+        if application == 'custom':
+            process = config.get('processName') or ''
+            if config.get('inputMode') != 'foreground' or not process.strip() or len(process) > 260 or '/' in process or '\\' in process:
+                raise ValueError('Choose a process and foreground mode for a custom app')
+        for region in ('notification', 'sendButton'):
+            if not valid_box(layout.get(region)):
+                raise ValueError('Calibrate the ' + region + ' region')
+        button = layout['sendButton']
+        if any(abs(point[i] - (button[i] + button[i+2])/2) > .000001 for i in range(2)):
+            raise ValueError('Send point must be the button center')
+        size = config.get('referenceSize')
+        if not isinstance(size, list) or len(size) != 2 or any(type(v) is not int or not 0 < v <= 16384 for v in size):
+            raise ValueError('Capture or upload a window screenshot before calibration')
+        placeholder = config.get('editorPlaceholder')
+        if placeholder is not None and (not isinstance(placeholder, str) or len(placeholder) > 500):
+            raise ValueError('Invalid editor placeholder')
     return config

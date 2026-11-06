@@ -1,7 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 export interface ChatBot { id: string; petId: string; name: string; profileId: string; persona: string; enabled: boolean; revision: number; dailyReplyLimit: number; cooldownSeconds: number }
-export interface DesktopConfig { version: number; windowTitle: string; selfNames: string[]; inputMode?: 'background' | 'foreground'; layout: { title: [number, number, number, number]; messages: [number, number, number, number]; editor: [number, number, number, number]; sidebar: [number, number, number, number]; send: [number, number] } }
-export interface DesktopPreview { diagnostics?: { code: string; detail: string }[]; layout?: DesktopConfig['layout']; editor?: { readable: boolean; draftEmpty: boolean; writable: boolean; detail: string }; windows: { handle: number; title: string; width: number; height: number; minimized: boolean }[]; image?: string; titleLines?: { text: string }[]; messages?: { text: string; direction: string }[] }
+export type DesktopBox = [number, number, number, number];
+export interface DesktopConfig { version: number; windowTitle: string; selfNames: string[]; inputMode?: 'background' | 'foreground'; application?: 'dingtalk' | 'custom'; processName?: string; windowHandle?: number; referenceSize?: [number, number]; editorPlaceholder?: string; layout: { title: DesktopBox; messages: DesktopBox; editor: DesktopBox; sidebar: DesktopBox; notification?: DesktopBox; sendButton?: DesktopBox; send: [number, number] } }
+export interface DesktopPreview { diagnostics?: { code: string; detail: string }[]; layout?: DesktopConfig['layout']; editor?: { readable: boolean; draftEmpty: boolean; writable: boolean; detail: string }; windows: { handle: number; title: string; processName?: string; width: number; height: number; minimized: boolean }[]; image?: string; width?: number; height?: number; unread?: { notification: boolean; rows: number }; titleLines?: { text: string }[]; messages?: { text: string; direction: string }[] }
 export interface ChatAccount { id: string; name: string; platform: 'feishu' | 'dingtalk' | 'dingtalk_desktop' | 'qq' | 'onebot'; appId: string; tenantId: string; endpoint: string; enabled: boolean; desktop?: DesktopConfig }
 export interface ChatRoute { id: string; botId: string; accountId: string; chatType: 'direct' | 'group' | 'guild'; scope?: 'exact' | 'all'; chatId: string; topicId: string; mode: 'mention' | 'all'; paused: boolean }
 export interface ChatKnowledge { id: string; botId: string; routeId: string; title: string; content: string }
@@ -21,5 +22,5 @@ export const resolveChatDelivery = (inboxId: string, sent: boolean) => invoke<vo
 export interface ChatPython { executable: string; version: string; bits: number }
 export const detectChatPython = (desktop = false) => invoke<ChatPython | null>('chat_detect_python', { desktop });
 export const installChatRuntime = (python?: string, desktop = false) => invoke<void>('chat_install_runtime', { python, desktop });
-export const desktopProbe = (request: { windowTitle?: string; autoLayout?: boolean; layout?: DesktopConfig['layout'] }) => invoke<DesktopPreview>('chat_desktop_probe', { request });
+export const desktopProbe = (request: { windowTitle?: string; application?: 'dingtalk' | 'custom'; processName?: string; windowHandle?: number; captureOnly?: boolean; config?: DesktopConfig; layout?: DesktopConfig['layout'] }) => invoke<DesktopPreview>('chat_desktop_probe', { request });
 export const reconnectChat = (accountId: string) => invoke<void>('chat_reconnect', { accountId });

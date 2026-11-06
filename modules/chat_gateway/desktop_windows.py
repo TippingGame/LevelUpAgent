@@ -259,7 +259,7 @@ def mention_action_text(rows, width, footer, padding=12):
 
 
 class WindowsDesktop:
-    def __init__(self):
+    def __init__(self, config=None):
         if os.name != 'nt':
             raise DesktopUnavailable('Windows only')
         self.user = ctypes.WinDLL('user32', use_last_error=True)
@@ -268,6 +268,7 @@ class WindowsDesktop:
         self._bind()
         self.ocr = None
         self.auto_input = None
+        self.config = config or {}
         self.stopped = lambda: False
         # Each process uses physical pixels throughout; never multiply guessed DPI.
         try:
@@ -334,7 +335,9 @@ class WindowsDesktop:
     def windows(self, diagnostics=None):
         result = []
         process_names = None
-        allowed = ('dingtalk.exe', 'dingding.exe', 'dingtalkapp.exe')
+        config = getattr(self, 'config', {})
+        custom = config.get('application') == 'custom'
+        allowed = ((config['processName'].lower(),) if config.get('processName') else None) if custom else ('dingtalk.exe', 'dingding.exe', 'dingtalkapp.exe')
 
         def report(code, detail):
             if diagnostics is not None and not any(item['code'] == code for item in diagnostics):
@@ -369,7 +372,7 @@ class WindowsDesktop:
                 executable = process_names.get(pid.value)
                 if executable is None and visible and title.value.strip().lower() in ('钉钉', 'dingtalk'):
                     report('process_unverified', '发现标题为钉钉的窗口，但无法核验所属进程。请以同一 Windows 用户正常启动钉钉和本应用后重试。')
-            if executable not in allowed:
+            if not executable or (allowed is not None and executable not in allowed):
                 return True
             if not visible:
                 if title.value.strip():
@@ -399,7 +402,10 @@ class WindowsDesktop:
             if width < 600 or height < 400:
                 report('too_small', '发现钉钉小窗口，未达到 600 × 400 的识别尺寸；请展开或放大聊天主窗口后重新检测。')
                 return True
-            result.append(dict(handle=int(hwnd), title=title.value, width=width, height=height, minimized=minimized))
+            item = dict(handle=int(hwnd), title=title.value, width=width, height=height, minimized=minimized)
+            if config:
+                item['processName'] = executable
+            result.append(item)
             return True
         callback = callback_type(visit)
         self.user.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
@@ -414,22 +420,24 @@ class WindowsDesktop:
         return dict(windows=windows, diagnostics=diagnostics if not windows else [])
 
     def find(self, title):
-        windows = [w for w in self.windows() if w['title'] == title]
+        config = getattr(self, 'config', {})
+        candidates = self.windows()
+        selected = [w for w in candidates if w['handle'] == config.get('windowHandle')]
+        windows = selected or [w for w in candidates if w['title'] == title]
         if len(windows) != 1:
-            raise DesktopUnavailable('未找到唯一钉钉窗口，请打开并重新选择窗口')
+            raise DesktopUnavailable('未找到唯一钉钉窗口或目标应用窗口，请打开并重新选择窗口')
         if windows[0]['minimized']:
             raise DesktopUnavailable('钉钉已最小化，请还原窗口')
         return windows[0]['handle']
 
     def resolve_layout(self, hwnd, layout):
-        # The initial fractions are only a setup placeholder. Different sidebar
-        # widths/DPI settings can put that editor box over the conversation list.
-        # Require native calibration before using these defaults for automation.
-        if layout == DEFAULT_LAYOUT:
-            try:
-                return self.detect_layout(hwnd)
-            except DesktopUnavailable as exc:
-                raise DesktopUnavailable('尚未校准聊天区域；请暂停连接，点击「自动识别区域并预览」或手动校准') from exc
+        # Runtime never guesses or replaces user-drawn regions.
+        config = getattr(self, 'config', {})
+        if config.get('version') == 1 and layout == DEFAULT_LAYOUT:
+            raise DesktopUnavailable('旧版默认区域尚未校准，请暂停连接后重新截图框选')
+        size = config.get('referenceSize')
+        if size and tuple(size) != tuple(self.rect(hwnd)[2:]):
+            raise DesktopUnavailable('窗口尺寸与校准截图不一致，请恢复原尺寸或暂停连接后重新截图框选')
         return layout
 
     def rect(self, hwnd):
@@ -546,43 +554,22 @@ class WindowsDesktop:
 
     def title(self, image, layout, expected):
         rows = self.read(self.crop(image, layout['title']))
-        return any(r['confidence'] >= .9 and title_matches(r['text'], expected) for r in rows)
+        eligible = [r['text'] for r in rows if r['confidence'] >= .80]
+        if getattr(self, 'config', {}).get('version') == 2:
+            matching_rows = self.sidebar_matches(image, layout, expected)
+            if any(abs(a['y']-b['y']) >= max(a['h'], b['h']) for a in matching_rows for b in matching_rows):
+                return False
+        routes = getattr(self, 'routes', [])
+        if routes:
+            from desktop_core import matching_route
+            match = matching_route('\n'.join(eligible), routes)
+            return bool(match and match['chatId'] == expected)
+        return any(title_matches(value, expected) for value in eligible)
 
     def sidebar_matches(self, image, layout, expected):
-        """Match exact titles, independently checking DingTalk's orange @ badge."""
-        from PIL import Image, ImageOps
-        import numpy as np
-        region = self.crop(image, layout['sidebar'])
-        matches = []
-        for row in self.read(region):
-            if row['confidence'] < .92:
-                continue
-            if title_matches(row['text'], expected):
-                matches.append(row)
-                continue
-            # OCR merges the orange UI badge into the black conversation name.
-            # Do not strip arbitrary suffixes or accept prefix-only name matches.
-            value, title = normalized(row['text']), normalized(expected)
-            if not title or not value.startswith(title) or value[len(title):].strip() != '@好友':
-                continue
-            left, top = max(0, int(row['x'])-3), max(0, int(row['y'])-3)
-            right = min(region.width, int(row['x']+row['w'])+3)
-            bottom = min(region.height, int(row['y']+row['h'])+3)
-            pixels = np.asarray(region.crop((left, top, right, bottom)).convert('RGB')).astype('int16')
-            if not pixels.size:
-                continue
-            red, green, blue = (pixels[:, :, n] for n in range(3))
-            badge = (red > 200) & (red-blue > 35) & (red-green > 20)
-            if int(badge.sum()) < 5:
-                continue  # A literal dark name such as "111@好友" is a different chat.
-            background = np.median(pixels.reshape(-1, 3), axis=0).astype('uint8')
-            pixels[badge] = background
-            clean = Image.fromarray(pixels.astype('uint8'))
-            clean = ImageOps.expand(clean.resize((clean.width*3, clean.height*3)), 12, tuple(background))
-            checked = self.read(clean)
-            if len(checked) == 1 and checked[0]['confidence'] >= .97 and title_matches(checked[0]['text'], title):
-                matches.append(row)
-        return matches
+        """Names may include arbitrary application status labels and suffixes."""
+        return [row for row in self.read(self.crop(image, layout['sidebar']))
+                if row['confidence'] >= .80 and title_matches(row['text'], expected)]
 
     def messages(self, image, layout):
         from PIL import ImageOps
@@ -718,7 +705,7 @@ class WindowsDesktop:
             raise DesktopUnavailable('正在人工操作桌面，等待空闲')
         matches = self.sidebar_matches(image, layout, title)
         if len(matches) != 1:
-            raise DesktopUnavailable('列表中未找到唯一完整标题；请核对绑定名称、打开目标聊天，并暂停连接后重新识别区域')
+            raise DesktopUnavailable('列表中未找到唯一包含该名称的会话；请使用更完整的名称，或调整会话栏框选')
         row, box = matches[0], layout['sidebar']
         self.foreground(hwnd)
         self.click(hwnd, box[0] + (row['x'] + row['w']/2)/image.width, box[1] + (row['y'] + row['h']/2)/image.height)
@@ -770,6 +757,9 @@ class WindowsDesktop:
     def inspect_editor(self, hwnd, layout):
         """Read-only capability report. Never exposes draft content or sets focus."""
         try:
+            if getattr(self, 'config', {}).get('version') == 2:
+                empty = self.visual_draft(hwnd, layout)['empty']
+                return dict(readable=True, draftEmpty=empty, writable=True, detail='按框选区域检查输入栏；' + ('当前草稿为空' if empty else '存在内容或提示文字未核验，暂不发送'))
             import uiautomation as auto
             with auto.UIAutomationInitializerInThread():
                 control = self.editor(hwnd, layout)
@@ -791,6 +781,9 @@ class WindowsDesktop:
 
     def editor_image(self, hwnd, layout):
         """Capture the verified edit itself, excluding stale calibration margins."""
+        if getattr(self, 'config', {}).get('version') == 2:
+            self.resolve_layout(hwnd, layout)
+            return self.crop(self.capture(hwnd), layout['editor'])
         import uiautomation as auto
         rect = self.rect(hwnd)
         with auto.UIAutomationInitializerInThread():
@@ -826,6 +819,20 @@ class WindowsDesktop:
             rows=self.read(image)
             return '\n'.join(r['text'] for r in sorted(rows,key=lambda r:(r['y'],r['x']))) if rows and all(r['confidence']>=.9 for r in rows) else None
         text=recognize(padded)
+        config = getattr(self, 'config', {})
+        if config.get('version') == 2 and not expected and config.get('editorPlaceholder') and normalized(text) == normalized(config['editorPlaceholder']):
+            # A configured hint is only empty with independent UIA evidence.
+            # Literal user text equal to the hint must never be overwritten.
+            try:
+                import uiautomation as auto
+                with auto.UIAutomationInitializerInThread():
+                    if not normalized(self.editor_text(self.editor(hwnd, layout))):
+                        ink = pixels[mask.astype(bool)]
+                        contrast = abs(ink.mean(axis=0) - background).max() if ink.size else 0
+                        if 35 < contrast < 155:
+                            return dict(empty=True, text='')
+            except DesktopUnavailable:
+                pass
         if not expected and normalized(text) == '请输入消息':
             # The observed InputRichTextEdit renders its empty hint inside the
             # edit rectangle. Only accept that exact, light-gray, top-left hint
@@ -894,6 +901,8 @@ class WindowsDesktop:
 
     def type_reply(self, hwnd, layout, text):
         import uiautomation as auto
+        if getattr(self, 'config', {}).get('version') == 2:
+            return self.type_calibrated(hwnd, layout, text)
         self.foreground(hwnd)
         with auto.UIAutomationInitializerInThread():
             control = self.focus_editor(hwnd, layout)
@@ -1001,7 +1010,66 @@ class WindowsDesktop:
                 return 'sent'
         return 'delivery_unknown'
 
+    def click_region(self, hwnd, layout, box, require_empty=True):
+        """User-calibrated navigation, under the same idle/draft guards as send."""
+        rect = self.rect(hwnd)
+        self.guard(hwnd, rect)
+        if require_empty and not self.verify_draft(hwnd, layout, ''):
+            raise DesktopDeferred('当前输入栏有草稿或无法确认空白，暂不切换会话')
+        if getattr(self, 'config', {}).get('inputMode', 'foreground') == 'foreground':
+            if self.idle() < 5 and self.last_input() != self.auto_input:
+                raise DesktopDeferred('正在人工操作桌面，等待空闲')
+            self.foreground(hwnd)
+        self.click(hwnd, (box[0]+box[2])/2, (box[1]+box[3])/2)
+        time.sleep(.3)
+        self.guard(hwnd, rect)
+        return self.capture(hwnd)
+
+    def type_calibrated(self, hwnd, layout, text):
+        """Coordinates and literal Unicode input; no named controls required."""
+        import uiautomation as auto
+        if any(ord(c) < 32 or ord(c) == 127 for c in text):
+            raise DesktopUnavailable('桌面文字输入不支持控制字符')
+        self.foreground(hwnd)
+        rect, stamp = self.rect(hwnd), self.last_input()
+        if not self.verify_draft(hwnd, layout, ''):
+            raise DesktopDeferred('输入框已有草稿，未覆盖')
+        self.guard(hwnd, rect, stamp)
+        box = layout['editor']
+        self.click(hwnd, (box[0]+box[2])/2, (box[1]+box[3])/2)
+        stamp = self.last_input()
+        def check_focus():
+            control = auto.GetFocusedControl()
+            bounds = control.BoundingRectangle
+            cx, cy = ((bounds.left+bounds.right)/2-rect[0])/rect[2], ((bounds.top+bounds.bottom)/2-rect[1])/rect[3]
+            if not (box[0] <= cx <= box[2] and box[1] <= cy <= box[3]):
+                raise DesktopUnavailable('输入焦点不在框选的输入栏内，未继续写入')
+        check_focus()
+        if not self.verify_draft(hwnd, layout, ''):
+            raise DesktopUnavailable('聚焦后输入区非空，未写入')
+        for char in text:
+            self.guard(hwnd, rect, stamp)
+            check_focus()
+            encoded = char.encode('utf-16-le')
+            for offset in range(0, len(encoded), 2):
+                unit = int.from_bytes(encoded[offset:offset+2], 'little')
+                for flag in (auto.KeyboardEventFlag.KeyDown, auto.KeyboardEventFlag.KeyUp):
+                    if auto.SendInput(auto.KeyboardInput(0, unit, auto.KeyboardEventFlag.KeyUnicode | flag)) != 1:
+                        raise DesktopUnavailable('系统拒绝文字输入，未发送')
+            stamp = self.last_input()
+        self.guard(hwnd, rect, stamp)
+        if not self.verify_draft(hwnd, layout, text):
+            raise DesktopUnavailable('写入后草稿核对失败，未发送')
+        return stamp
+
     def verify_draft(self, hwnd, layout, text):
+        if getattr(self, 'config', {}).get('version') == 2:
+            import re
+            visual = self.visual_draft(hwnd, layout, text)
+            if not text:
+                return visual['empty']
+            compact = lambda value: re.sub(r'\s+', '', normalized(value))
+            return visual['text'] is not None and compact(visual['text']) == compact(text)
         import uiautomation as auto
         with auto.UIAutomationInitializerInThread():
             value=self.editor_text(self.editor(hwnd, layout))
@@ -1012,14 +1080,19 @@ class WindowsDesktop:
             compact=lambda s:re.sub(r'\s+','',normalized(s))
             return visual['text'] is not None and compact(visual['text'])==compact(text) and (not value or compact(value)==compact(text))
 
-    def preview(self, title, layout, auto_layout=False):
+    def preview(self, title, layout, auto_layout=False, capture_only=False):
         import base64
         hwnd = self.find(title)
-        if auto_layout:
-            layout = self.detect_layout(hwnd)
+        if not capture_only:
+            layout = self.resolve_layout(hwnd, layout)
         image = self.capture(hwnd)
         stream = io.BytesIO()
         image.save(stream, format='PNG')
-        return dict(image='data:image/png;base64,' + base64.b64encode(stream.getvalue()).decode(), width=image.width, height=image.height, layout=layout,
+        shot = dict(image='data:image/png;base64,' + base64.b64encode(stream.getvalue()).decode(), width=image.width, height=image.height)
+        if capture_only:
+            return shot
+        from desktop_calibration import red_badges
+        return dict(**shot, layout=layout,
+                    unread=dict(notification=bool(red_badges(self.crop(image, layout['notification']))) if layout.get('notification') else False, rows=len(red_badges(self.crop(image, layout['sidebar'])))),
                     titleLines=self.read(self.crop(image, layout['title'])), messages=[b.__dict__ for b in self.messages(image, layout)],
                     editor=self.inspect_editor(hwnd, layout))

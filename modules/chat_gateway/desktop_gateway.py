@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 import uuid
-from desktop_core import MessageTracker, validate_config, is_mention, DEFAULT_LAYOUT
+from desktop_core import MessageTracker, validate_config, is_mention, DEFAULT_LAYOUT, matching_route
 from desktop_windows import DesktopDeferred, DesktopUnavailable
 
 MAX_FRAME = 65536
@@ -49,14 +49,28 @@ class DesktopSession:
         self.routes = []
         self.started = set()
         self.stable = {}
+        self.unread_pending = set(store.data.get('unread', [])) if config['version'] == 2 else set()
+        self.active_route = None
+        self.next_route = 0
+        self.last_navigation = 0
+        self.unread_attempts = {}
+        self.retry_after = {}
 
     def set_routes(self, routes):
         if any(r.get('scope', 'exact') != 'exact' for r in routes):
             raise ValueError('Desktop automation requires explicitly registered chat titles')
-        self.routes = [r for r in routes if r.get('chatType') in ('direct', 'group') and not r.get('paused') and r.get('chatId') and not r.get('topicId')]
+        self.route_rules = [r for r in routes if r.get('chatType') in ('direct', 'group') and r.get('chatId') and not r.get('topicId')]
+        self.routes = [r for r in self.route_rules if not r.get('paused')]
+        self.driver.routes = self.route_rules
         keys = {self.key(r) for r in self.routes}
         self.started.intersection_update(keys)
         self.stable = {k:v for k,v in self.stable.items() if k in keys}
+        self.unread_pending.intersection_update(keys)
+        if self.active_route and self.key(self.active_route) not in keys:
+            self.active_route = None
+        if not self.active_route:
+            self.active_route = next((r for r in self.routes if self.key(r) in self.unread_pending), None)
+        self.store.data['unread'] = sorted(self.unread_pending)
         self.store.data['pending'] = [m for m in self.store.data['pending'] if any(self.key(r) == self.key(m) and r.get('id') == m.get('_routeId') and r.get('botId') == m.get('_botId') for r in self.routes)]
         self.store.save()
 
@@ -64,8 +78,10 @@ class DesktopSession:
     def key(route):
         return route['chatType'] + ':' + route['chatId']
 
-    def observe(self, route, bubbles):
+    def observe(self, route, bubbles, unread=False):
         key = self.key(route)
+        if unread:
+            self.unread_pending.add(key)
         signatures = [b.signature for b in bubbles]
         # Require two identical observations; do not ingest a partially rendered bubble.
         stable = self.stable.get(key) == signatures
@@ -74,11 +90,14 @@ class DesktopSession:
             return
         state = copy.deepcopy(self.store.data['chats'].get(key))
         tracker = MessageTracker(state)
-        if key not in self.started:
+        if key not in self.started and self.config['version'] == 1:
             tracker.state['previous'] = []
             tracker.state['initialized'] = False
-            self.started.add(key)
-        events = tracker.observe(bubbles, key)
+        self.started.add(key)
+        events = tracker.observe(bubbles, key, unread=key in self.unread_pending)
+        if bubbles:
+            self.unread_pending.discard(key)
+        self.store.data['unread'] = sorted(self.unread_pending)
         for message_id, bubble in events:
             mention = is_mention(bubble.text, self.config['selfNames'])
             if route['chatType'] == 'group' and route.get('mode', 'mention') != 'all' and not mention:
@@ -88,6 +107,75 @@ class DesktopSession:
             self.store.data['pending'].append(dict(messageId=message_id, chatType=route['chatType'], chatId=route['chatId'], topicId='', senderId=sender, text=bubble.text.encode('utf-8')[:16000].decode('utf-8', errors='ignore'), mentioned=mention, senderBot=False, _routeId=route.get('id'), _botId=route.get('botId')))
         self.store.data['chats'][key] = tracker.state
         self.store.save()
+
+    def poll_unread(self):
+        """Only enter unread registered conversations; observe the open chat too.
+
+        Retain the unread token across the click that clears the badge and the
+        two stable OCR frames. Unknown names never become routes implicitly.
+        """
+        from desktop_calibration import red_badges, conversation_candidates
+        driver = self.driver
+        hwnd = driver.find(self.config['windowTitle'])
+        layout = driver.resolve_layout(hwnd, self.config['layout'])
+        rect = driver.rect(hwnd)
+        driver.guard(hwnd, rect)
+        image = driver.capture(hwnd)
+        sidebar = driver.crop(image, layout['sidebar'])
+        lines = driver.read(sidebar)
+        candidates = conversation_candidates(lines, red_badges(sidebar), self.route_rules)
+        candidates = [item for item in candidates if time.monotonic() >= self.retry_after.get(self.key(item[0]), 0)]
+        notification = bool(red_badges(driver.crop(image, layout['notification'])))
+        if notification and not candidates and time.monotonic() - self.last_navigation > 10:
+            # The unread entry can reveal the conversation list from another tab.
+            self.last_navigation = time.monotonic()
+            image = driver.click_region(hwnd, layout, layout['notification'], require_empty=False)
+            sidebar = driver.crop(image, layout['sidebar'])
+            candidates = conversation_candidates(driver.read(sidebar), red_badges(sidebar), self.route_rules)
+            candidates = [item for item in candidates if time.monotonic() >= self.retry_after.get(self.key(item[0]), 0)]
+        route = self.active_route
+        if route and self.key(route) in self.unread_pending:
+            # Finish reading this chat before consuming another badge.
+            pass
+        elif candidates:
+            route, row = candidates[self.next_route % len(candidates)]
+            self.next_route += 1
+            if not driver.title(image, layout, route['chatId']):
+                area = layout['sidebar']
+                box = [area[0]+row['x']/image.width, area[1]+row['y']/image.height,
+                       area[0]+(row['x']+row['w'])/image.width, area[1]+(row['y']+row['h'])/image.height]
+                image = driver.click_region(hwnd, layout, box)
+            if not driver.title(image, layout, route['chatId']):
+                raise DesktopUnavailable('未读会话切换后的标题未命中名称，请核对框选区域')
+            self.unread_pending.add(self.key(route))
+            self.active_route = route
+            self.store.data['unread'] = sorted(self.unread_pending)
+            self.store.save()
+        else:
+            titles = driver.read(driver.crop(image, layout['title']))
+            routes = [matching_route(r['text'], self.route_rules) for r in titles if r['confidence'] >= .8]
+            routes = [r for r in routes if r and driver.title(image, layout, r['chatId'])]
+            route = routes[0] if routes else None
+            self.active_route = route
+        if not route:
+            return ('online', '正在观察消息红点；没有可唯一匹配的已绑定未读会话')
+        key = self.key(route)
+        if key in self.unread_pending:
+            self.unread_attempts[key] = self.unread_attempts.get(key, 0) + 1
+        try:
+            bubbles = self.scan(route)
+        finally:
+            if key not in self.unread_pending:
+                self.unread_attempts.pop(key, None)
+            elif self.unread_attempts.get(key, 0) >= 4:
+                # One unread image/media-only chat must not starve other chats.
+                self.unread_pending.discard(key)
+                self.store.data['unread'] = sorted(self.unread_pending)
+                self.store.save()
+                self.unread_attempts.pop(key, None)
+                self.retry_after[key] = time.monotonic() + 15
+                self.active_route = None
+        return self.scan_status(route, bubbles)
 
     def scan(self, route):
         driver = self.driver
@@ -224,8 +312,11 @@ def run(config, state_path):
             route = session.routes[index % len(session.routes)]
             index += 1
             try:
-                bubbles = session.scan(route)
-                status(*session.scan_status(route, bubbles))
+                if session.config['version'] == 2:
+                    status(*session.poll_unread())
+                else:
+                    bubbles = session.scan(route)
+                    status(*session.scan_status(route, bubbles))
             except Exception as exc:
                 # These diagnostics contain local adapter errors, never credentials.
                 status('waiting', str(exc)[:200])
@@ -245,10 +336,13 @@ def main():
     from desktop_windows import WindowsDesktop
     if args.probe:
         request = json.loads(sys.stdin.buffer.readline(MAX_FRAME + 1))
-        driver = WindowsDesktop()
+        config = request.get('config') or request
+        if request.get('config'):
+            validate_config(config)
+        driver = WindowsDesktop(config)
         result = driver.probe_windows()
         if request.get('windowTitle'):
-            result.update(driver.preview(request['windowTitle'], request.get('layout') or DEFAULT_LAYOUT, request.get('autoLayout') is True))
+            result.update(driver.preview(request['windowTitle'], request.get('layout') or DEFAULT_LAYOUT, capture_only=request.get('captureOnly') is True))
         PROTOCOL.write(json.dumps(result, ensure_ascii=False) + '\n')
         return
     if not args.state:

@@ -477,16 +477,16 @@ class SidebarTitleTests(unittest.TestCase):
         driver.read=read
         return driver.sidebar_matches(image,dict(sidebar=[0,0,1,1]),'111'),calls
 
-    def test_orange_badge_requires_an_independent_exact_name_read(self):
+    def test_status_badges_need_no_label_specific_cleanup(self):
         matches,calls=self.match()
-        self.assertEqual(len(matches),1);self.assertEqual(len(calls),2)
-        self.assertEqual(self.match(checked='1111')[0],[])
-        self.assertEqual(self.match(checked='11')[0],[])
+        self.assertEqual(len(matches),1)
+        self.assertEqual(len(calls),1)
 
-    def test_literal_suffix_or_other_name_never_matches_prefix(self):
-        self.assertEqual(self.match(colored=False)[0],[])
+    def test_title_contains_registered_name_regardless_of_suffix(self):
+        self.assertEqual(len(self.match(colored=False)[0]),1)
         for text in ('1111@好友','111测试@好友','111@陌生人','111 (2)'):
-            with self.subTest(text=text):self.assertEqual(self.match(text=text)[0],[])
+            with self.subTest(text=text):self.assertEqual(len(self.match(text=text)[0]),1)
+        self.assertEqual(self.match(text='another person')[0],[])
 
     def test_exact_and_badged_duplicate_names_remain_ambiguous(self):
         extra=dict(text='111',confidence=.999,x=10,y=60,w=30,h=20)
@@ -515,19 +515,24 @@ class LayoutDetectionTests(unittest.TestCase):
             nodes.append(nodes[1])
             with self.assertRaisesRegex(DesktopUnavailable,'唯一校准'):driver.detect_layout(1)
 
-    def test_default_regions_are_calibrated_and_manual_regions_are_preserved(self):
+    def test_runtime_preserves_saved_regions_without_guessing(self):
         driver = WindowsDesktop.__new__(WindowsDesktop)
         native = dict(DEFAULT_LAYOUT, editor=[.38,.72,.99,.93])
         driver.detect_layout = lambda _: native
-        self.assertEqual(driver.resolve_layout(1,DEFAULT_LAYOUT), native)
+        self.assertEqual(driver.resolve_layout(1,DEFAULT_LAYOUT), DEFAULT_LAYOUT)
         manual = dict(DEFAULT_LAYOUT, title=[.4,.05,.8,.1])
         driver.detect_layout = lambda _: self.fail('must preserve manual calibration')
         self.assertIs(driver.resolve_layout(1,manual), manual)
 
-    def test_unknown_native_layout_cannot_automate_using_placeholder_regions(self):
+    def test_window_resize_requires_recalibration_but_moving_does_not(self):
         driver = WindowsDesktop.__new__(WindowsDesktop)
-        def unavailable(_): raise DesktopUnavailable('unknown controls')
-        driver.detect_layout = unavailable
+        driver.config = dict(version=2,referenceSize=[1000,800])
+        driver.rect = lambda _: (500,200,1000,800)
+        self.assertIs(driver.resolve_layout(1,DEFAULT_LAYOUT),DEFAULT_LAYOUT)
+        driver.rect = lambda _: (500,200,1200,800)
+        with self.assertRaisesRegex(DesktopUnavailable, '尺寸'):
+            driver.resolve_layout(1,DEFAULT_LAYOUT)
+        driver.config = dict(version=1)
         with self.assertRaisesRegex(DesktopUnavailable, '尚未校准'):
             driver.resolve_layout(1,DEFAULT_LAYOUT)
 

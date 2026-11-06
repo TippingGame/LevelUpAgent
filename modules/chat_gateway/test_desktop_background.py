@@ -154,10 +154,12 @@ class CompatibleModeTests(unittest.TestCase):
         return d
 
     def test_legacy_accounts_remain_background_and_foreground_requires_selection(self):
-        with patch('desktop_background.BackgroundDesktop',return_value='background'),patch('desktop_background.CompatibleDesktop',return_value='foreground'):
-            self.assertEqual(desktop_driver({}),'background')
-            self.assertEqual(desktop_driver({'inputMode':'background'}),'background')
-            self.assertEqual(desktop_driver({'inputMode':'foreground'}),'foreground')
+        background, foreground = SimpleNamespace(), SimpleNamespace()
+        with patch('desktop_background.BackgroundDesktop',return_value=background),patch('desktop_background.CompatibleDesktop',return_value=foreground):
+            self.assertIs(desktop_driver({}),background)
+            self.assertIs(desktop_driver({'inputMode':'background'}),background)
+            self.assertIs(desktop_driver({'inputMode':'foreground'}),foreground)
+            self.assertEqual(foreground.config['inputMode'], 'foreground')
             with self.assertRaises(ValueError):desktop_driver({'inputMode':'unknown'})
 
     def test_reads_do_not_need_focus_but_input_requires_same_window_and_input_stamp(self):

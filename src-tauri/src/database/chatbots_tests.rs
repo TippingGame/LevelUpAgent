@@ -9,12 +9,19 @@ fn chatbots_desktop_config_routes_and_single_controller() {
         window_title: "钉钉".into(),
         self_names: vec!["小明".into()],
         input_mode: "background".into(),
+        application: None,
+        process_name: None,
+        window_handle: None,
+        reference_size: None,
+        editor_placeholder: None,
         layout: DesktopLayout {
             title: [0.3, 0.04, 0.8, 0.1],
             messages: [0.3, 0.12, 0.98, 0.64],
             editor: [0.3, 0.7, 0.98, 0.9],
             sidebar: [0.1, 0.15, 0.28, 0.9],
             send: [0.93, 0.94],
+            notification: None,
+            send_button: None,
         },
     };
     let mut legacy = serde_json::to_value(&config).unwrap();
@@ -70,6 +77,50 @@ fn chatbots_desktop_config_routes_and_single_controller() {
 }
 
 #[test]
+fn chatbots_desktop_manual_calibration_roundtrip_and_validation() {
+    let value = serde_json::json!({
+        "version":2,"windowTitle":"Example","application":"custom","processName":"example.exe",
+        "windowHandle":123,"referenceSize":[1000,800],"selfNames":[],"inputMode":"foreground","editorPlaceholder":"Type a message",
+        "layout":{"title":[0.35,0.0,1.0,0.1],"messages":[0.35,0.1,1.0,0.7],
+        "editor":[0.35,0.7,1.0,0.9],"sidebar":[0.1,0.1,0.35,0.85],
+        "notification":[0.0,0.0,0.1,0.1],"sendButton":[0.9,0.9,1.0,1.0],"send":[0.95,0.95]}
+    });
+    let config: DesktopConfig = serde_json::from_value(value.clone()).unwrap();
+    assert!(config.validate().is_ok());
+    assert_eq!(serde_json::to_value(&config).unwrap(), value);
+    for key in [
+        "notification",
+        "sendButton",
+        "messages",
+        "editor",
+        "title",
+        "sidebar",
+    ] {
+        let mut invalid = value.clone();
+        invalid["layout"][key] = serde_json::json!([0, 0, 0, 0]);
+        assert!(
+            serde_json::from_value::<DesktopConfig>(invalid)
+                .unwrap()
+                .validate()
+                .is_err(),
+            "{key}"
+        );
+    }
+    let mut invalid = config.clone();
+    invalid.reference_size = None;
+    assert!(invalid.validate().is_err());
+    let mut invalid = config.clone();
+    invalid.input_mode = "background".into();
+    assert!(invalid.validate().is_err());
+    let mut invalid = config.clone();
+    invalid.process_name = Some("../example.exe".into());
+    assert!(invalid.validate().is_err());
+    let mut invalid = config;
+    invalid.layout.send = [0.2, 0.3];
+    assert!(invalid.validate().is_err());
+}
+
+#[test]
 fn chatbots_desktop_preinput_deferral_keeps_reply_and_respects_pause() {
     let db = db();
     let b = bot(&db, "desktop-defer");
@@ -82,12 +133,19 @@ fn chatbots_desktop_preinput_deferral_keeps_reply_and_respects_pause() {
         window_title: "钉钉".into(),
         self_names: vec!["我".into()],
         input_mode: "background".into(),
+        application: None,
+        process_name: None,
+        window_handle: None,
+        reference_size: None,
+        editor_placeholder: None,
         layout: DesktopLayout {
             title: [0.3, 0.04, 0.8, 0.1],
             messages: [0.3, 0.12, 0.98, 0.64],
             editor: [0.3, 0.7, 0.98, 0.9],
             sidebar: [0.1, 0.15, 0.28, 0.9],
             send: [0.93, 0.94],
+            notification: None,
+            send_button: None,
         },
     });
     let a = db.chat_save_account(a).unwrap();

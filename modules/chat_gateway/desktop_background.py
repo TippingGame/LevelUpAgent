@@ -84,7 +84,7 @@ class BackgroundDesktop(WindowsDesktop):
             raise DesktopDeferred('无法确认当前输入框为空；请检查草稿，若为空请暂停连接并重新校准输入区')
         matches = self.sidebar_matches(image, layout, title)
         if len(matches) != 1:
-            raise DesktopUnavailable('列表中未找到唯一完整标题；请核对绑定名称与聊天标题一致，并暂停连接后重新识别区域')
+            raise DesktopUnavailable('列表中未找到唯一包含该名称的会话；请使用更完整的名称，或调整会话栏框选')
         row, box = matches[0], layout['sidebar']
         self.guard(hwnd, rect)
         self.click(hwnd, box[0] + (row['x'] + row['w']/2)/image.width, box[1] + (row['y'] + row['h']/2)/image.height)
@@ -182,13 +182,18 @@ class CompatibleDesktop(WindowsDesktop):
     def send_reply(self, config, title, text, before_dispatch):
         hwnd = self.find(config['windowTitle'])
         layout = self.resolve_layout(hwnd, config['layout'])
+        if config.get('version') == 2:
+            text = ' '.join(text.splitlines()).replace(chr(9), '    ')
         return super().send_reply(dict(config, layout=layout), title, text, before_dispatch)
 
 
 def desktop_driver(config):
     mode = config.get('inputMode', 'background')
     if mode == 'foreground':
-        return CompatibleDesktop()
-    if mode == 'background':
-        return BackgroundDesktop()
-    raise ValueError('Unsupported desktop input mode')
+        driver = CompatibleDesktop()
+    elif mode == 'background':
+        driver = BackgroundDesktop()
+    else:
+        raise ValueError('Unsupported desktop input mode')
+    driver.config = config
+    return driver

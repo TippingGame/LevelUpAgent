@@ -146,6 +146,21 @@ class WindowDetectionTests(unittest.TestCase):
         self.assertEqual([w['handle'] for w in result['windows']], [3])
         self.assertEqual(result['diagnostics'], [])
 
+    def test_custom_apps_are_enumerated_then_bound_to_process_and_window(self):
+        driver, _ = self.driver({1: dict(exe='Example.exe', title='Chat A'), 2: dict(exe='browser.exe', title='Chat A')})
+        driver.config = dict(application='custom')
+        self.assertEqual(len(driver.windows()), 2)
+        driver.config = dict(application='custom', processName='example.exe', windowHandle=1)
+        self.assertEqual(driver.find('Title changed while chatting'), 1)
+        self.assertEqual(driver.windows()[0]['processName'], 'example.exe')
+        driver.config['windowHandle'] = 2
+        with self.assertRaises(DesktopUnavailable): driver.find('Missing title')
+
+    def test_selected_handle_disambiguates_same_title_without_guessing(self):
+        driver, _ = self.driver({1: {}, 2: {}})
+        driver.config = dict(application='dingtalk', windowHandle=2)
+        self.assertEqual(driver.find('钉钉'), 2)
+
 
 @unittest.skipUnless(os.name == 'nt', 'Windows process snapshot integration')
 class NativeProcessSnapshotTests(unittest.TestCase):

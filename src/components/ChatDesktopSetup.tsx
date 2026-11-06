@@ -1,64 +1,93 @@
-import { useState } from 'react';
-import { desktopProbe, type ChatAccount, type DesktopConfig, type DesktopPreview } from '../lib/chatbots';
+import { useRef, useState, type PointerEvent } from 'react';
+import { desktopProbe, type ChatAccount, type DesktopBox, type DesktopConfig, type DesktopPreview } from '../lib/chatbots';
+import { calibrationComplete, calibrationRegions, defaultDesktopConfig, setCalibrationBox, validDesktopBox, type CalibrationRegion } from '../lib/desktopCalibration';
 import { ChatRuntimeSetup } from './ChatRuntimeSetup';
 
-export const defaultDesktopConfig = (): DesktopConfig => ({ version: 1, windowTitle: '', selfNames: [], inputMode: 'background', layout: { title: [0.33, 0.045, 0.81, 0.10], messages: [0.30, 0.12, 0.985, 0.64], editor: [0.31, 0.70, 0.97, 0.88], send: [0.93, 0.94], sidebar: [0.105, 0.15, 0.285, 0.97] } });
-type Region = keyof DesktopConfig['layout'];
+export { defaultDesktopConfig } from '../lib/desktopCalibration';
+type Shot = { image: string; width: number; height: number };
+const loadImage = (src: string) => new Promise<HTMLImageElement>((resolve, reject) => { const img = new Image(); img.onload = () => resolve(img); img.onerror = () => reject(new Error('无法读取图片 / Cannot read image')); img.src = src; });
+
 export function ChatDesktopSetup({ account, onChange, connectedAccount, onPause, ready, busy, action, t }: { account: ChatAccount; onChange: (account: ChatAccount) => void; connectedAccount?: ChatAccount; onPause: () => Promise<void>; ready: boolean; busy: boolean; action: (fn: () => Promise<unknown>, success?: string) => Promise<void>; t: (zh: string, en: string) => string }) {
   const config = account.desktop ?? defaultDesktopConfig();
   const [names, setNames] = useState(config.selfNames.join(', '));
+  const [windows, setWindows] = useState<DesktopPreview['windows']>([]);
+  const [diagnostics, setDiagnostics] = useState<DesktopPreview['diagnostics']>([]);
+  const [shot, setShot] = useState<Shot | null>(null);
   const [preview, setPreview] = useState<DesktopPreview | null>(null);
-  const [region, setRegion] = useState<Region>('title');
-  const [first, setFirst] = useState<number[] | null>(null);
-  // The checkbox is an unsaved preference, not the running controller state.
-  const calibrationLocked = busy || !!connectedAccount;
-  const update = (next: DesktopConfig) => onChange({ ...account, desktop: next });
-  const labels: Record<Region, string> = { title: t('聊天标题', 'Chat title'), messages: t('消息区', 'Messages'), editor: t('输入区', 'Editor'), sidebar: t('聊天列表', 'Chat list'), send: t('发送按钮', 'Send button') };
+  const [region, setRegion] = useState<CalibrationRegion>('notification');
+  const [cropMode, setCropMode] = useState(false);
+  const [draft, setDraft] = useState<DesktopBox | null>(null);
+  const [zoom, setZoom] = useState(1);
+  const start = useRef<[number, number] | null>(null);
+  const locked = busy || !!connectedAccount;
+  const complete = calibrationComplete(config);
+  const labels: Record<CalibrationRegion, string> = { notification: t('消息栏 / 红点入口', 'Messages / unread entry'), sidebar: t('会话栏 / 聊天列表', 'Conversation list'), title: t('标题栏', 'Chat title'), messages: t('聊天正文', 'Message history'), editor: t('输入栏', 'Message editor'), sendButton: t('发送按钮', 'Send button') };
+  const hints: Record<CalibrationRegion, string> = { notification: t('只框「消息」入口及其红点，避开 DING 等其他入口。没有独立入口时，可框会话列表的未读标记所在列。', 'Include the Messages entry and its badge. Without a separate entry, select the unread badge column in the chat list.'), sidebar: t('框住会话名称和未读红点所在的整个列表，不含搜索框。', 'Include conversation names and unread badges; exclude search.'), title: t('框住当前聊天名称；附带部门、群人数或状态也可以。', 'Include the chat name. Department, member counts and status suffixes are allowed.'), messages: t('框住聊天正文与左右气泡，排除标题、工具栏和输入栏。', 'Include bubbles on both sides; exclude title, toolbar and editor.'), editor: t('只框可输入文字的区域，排除表情、附件等工具按钮。校准时请清空草稿。', 'Include only editable text, excluding toolbar buttons. Clear the draft before calibration.'), sendButton: t('框住发送按钮；发送时点击框的中心。', 'Select the Send button; its center will be clicked.') };
+  const update = (next: DesktopConfig) => { setPreview(null); onChange({ ...account, desktop: next }); };
+  const request = { application: config.application ?? 'dingtalk', processName: config.processName, windowHandle: config.windowHandle, windowTitle: config.windowTitle };
+  const acceptShot = (next: Shot, reset: boolean) => {
+    setShot(next); setPreview(null); setDraft(null); start.current = null;
+    update({ ...config, version: 2, referenceSize: [next.width, next.height], layout: reset ? defaultDesktopConfig().layout : config.layout });
+    if (reset) setRegion('notification');
+  };
+  const capture = () => action(async () => {
+    const result = await desktopProbe({ ...request, captureOnly: true });
+    if (!result.image || !result.width || !result.height) throw new Error(t('窗口截图失败，请还原窗口后重试。', 'Capture failed. Restore the window and retry.'));
+    setWindows(result.windows); setCropMode(false);
+    acceptShot({ image: result.image, width: result.width, height: result.height }, config.referenceSize?.[0] !== result.width || config.referenceSize?.[1] !== result.height);
+  });
+  const position = (e: PointerEvent<HTMLDivElement>): [number, number] => { const bounds = e.currentTarget.getBoundingClientRect(); return [Math.max(0, Math.min(1, (e.clientX - bounds.left) / bounds.width)), Math.max(0, Math.min(1, (e.clientY - bounds.top) / bounds.height))]; };
+  const rectangle = (a: [number, number], b: [number, number]): DesktopBox => [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[0], b[0]), Math.max(a[1], b[1])];
+  const finish = (e: PointerEvent<HTMLDivElement>) => {
+    if (!start.current || locked || !shot) return;
+    const box = rectangle(start.current, position(e)); start.current = null; setDraft(null);
+    if (box[2] - box[0] < .003 || box[3] - box[1] < .003) return;
+    if (cropMode) {
+      void action(async () => { const img = await loadImage(shot.image); const canvas = document.createElement('canvas'); const x = Math.round(box[0] * img.width), y = Math.round(box[1] * img.height); canvas.width = Math.round(box[2] * img.width) - x; canvas.height = Math.round(box[3] * img.height) - y; canvas.getContext('2d')!.drawImage(img, x, y, canvas.width, canvas.height, 0, 0, canvas.width, canvas.height); acceptShot({ image: canvas.toDataURL('image/png'), width: canvas.width, height: canvas.height }, true); setCropMode(false); });
+    } else {
+      update(setCalibrationBox(config, region, box));
+      setRegion(calibrationRegions.find(key => key !== region && !validDesktopBox(config.layout[key])) ?? region);
+    }
+  };
+  const boxStyle = (box: DesktopBox) => ({ left: `${box[0] * 100}%`, top: `${box[1] * 100}%`, width: `${(box[2] - box[0]) * 100}%`, height: `${(box[3] - box[1]) * 100}%` });
   return <section className="chatbot-desktop" data-testid="desktop-setup">
-    <h3>{t('钉钉桌面接管 · 实验版', 'DingTalk desktop control · Experimental')}</h3>
-    <p>{t('使用此电脑已登录的钉钉账号；无需开发者、组织 API 权限或应用密钥。只处理选定聊天的新文本；群聊默认仅 @，也可单独设置全部文本。聊天应置顶且完整标题可见。', 'Uses the signed-in DingTalk account without developer credentials. Reads new text in selected chats. Groups default to mentions and can opt into all text. Pin selected chats and keep their full titles visible.')}</p>
-    <div className="chatbot-card" data-testid="desktop-execution-mode">
-      <label>{t('发送方式', 'Sending mode')}<select data-testid="desktop-input-mode" value={config.inputMode ?? 'background'} disabled={calibrationLocked} onChange={e => update({ ...config, inputMode: e.target.value as 'background' | 'foreground' })}>
-        <option value="background">{t('后台模式 · 不抢前台', 'Background · keeps other apps focused')}</option>
-        <option value="foreground">{t('前台兼容模式 · 新版钉钉', 'Foreground compatibility · newer DingTalk')}</option>
-      </select></label>
-      {config.inputMode === 'foreground' ? <>
-        <strong>{t('发送时会激活钉钉，并使用鼠标或键盘', 'Sending activates DingTalk and may use the pointer or keyboard')}</strong>
-        <p>{t('适用于能读取消息但后台输入无效的新版钉钉。发送前等待键鼠空闲 5 秒；检测到人工操作就停止，已有草稿不覆盖。请在测试聊天验证后再使用，发送期间不要同时操作钉钉。', 'For newer clients that can be read but reject background input. Waits for 5 seconds of idle input, stops on human activity and preserves existing drafts. Verify in a test chat first and avoid using DingTalk during sending.')}</p>
-      </> : <>
-        <strong>{t('运行方式：后台窗口定向收发', 'Execution: background window messaging')}</strong>
-        <p>{t('切换聊天、输入及发送直接交给钉钉窗口，不移动鼠标、不占用键盘或抢前台。你可以在其他应用中正常操作；切回钉钉时暂停，避免与手动输入冲突。新版客户端后台输入无效时，可暂停连接后选择前台兼容模式。', 'Chats, text and send actions target DingTalk without global input or taking focus. Other apps remain usable; automation pauses while you use DingTalk. If a newer client rejects background input, pause the connection and select foreground compatibility.')}</p>
-      </>}
-      <small>{t('钉钉须保持窗口打开且不最小化、Windows 解锁。首次观察只建立历史基线；发送结果不明确时不会自动重发。', 'Keep DingTalk open and restored, and Windows unlocked. Initial observations establish history; unconfirmed sends are never retried automatically.')}</small>
-    </div>
-    <p>{t('首次观察只建立基线，不补回旧消息。OCR 可能漏字或误判；群成员身份无法可靠核验，图片、语音、附件和富文本暂不支持。启用前请核对识别预览；修改校准前先断开账号。', 'The first observation establishes a baseline without replying to history. OCR can miss or misread text; group speaker identities are unverified. Media and rich messages are unsupported. Review the preview before enabling; disconnect before calibration.')}</p>
-    <p>{t('桌面发送成功仅表示本地出现对应发出气泡，不代表服务器或对方确认送达。请在钉钉检查离线、失败提示。', 'Desktop send success means a matching outgoing bubble appeared locally. It is not a server or recipient delivery acknowledgment; check DingTalk for offline or failed sends.')}</p>
+    <h3>{t('桌面应用 · 截图框选接入', 'Desktop apps · screenshot calibration')}</h3>
+    <p>{t('选择窗口 → 截图或上传 → 手动框选 → 核对预览。按你的界面布局识别，不依赖固定坐标或控件标签。', 'Choose a window → capture or upload → draw regions → check the preview. Calibrate your own layout without fixed coordinates or control labels.')}</p>
+    {connectedAccount && <div className="chatbot-card" data-testid="desktop-setup-pause"><p>{t('连接运行中；暂停后可以更换截图和区域。', 'Pause the active connection to change screenshots or regions.')}</p><button type="button" disabled={busy} onClick={() => void action(onPause, t('已暂停，可以重新框选。', 'Paused. Calibration is unlocked.'))}>{t('暂停连接并校准', 'Pause connection and calibrate')}</button></div>}
+    {config.version === 1 && <p className="chatbot-notice">{t('这是旧版校准。请重新截图并框选消息红点入口和发送按钮，升级为未读驱动流程。', 'Legacy calibration: capture again and draw the unread entry and Send button to upgrade.')}</p>}
+    <h4>{t('1 · 选择应用与截图', '1 · Choose app and screenshot')}</h4>
+    <label>{t('桌面应用', 'Desktop application')}<select aria-label={t('桌面应用', 'Desktop application')} value={config.application ?? 'dingtalk'} disabled={locked} onChange={e => { setShot(null); setWindows([]); setNames(''); update({ ...defaultDesktopConfig(), application: e.target.value as 'dingtalk' | 'custom', editorPlaceholder: e.target.value === 'custom' ? '' : '请输入消息' }); }}><option value="dingtalk">{t('钉钉桌面版（默认）', 'DingTalk desktop (default)')}</option><option value="custom">{t('其他桌面应用', 'Other desktop application')}</option></select></label>
     <ChatRuntimeSetup desktop ready={ready} busy={busy} action={action} t={t} />
-    {connectedAccount && <div className="chatbot-card" data-testid="desktop-setup-pause"><p>{t('桌面连接已启用（包含等待和重连状态）。仍可检测窗口；修改区域或读取预览前，请暂停连接。暂停不会退出钉钉。', 'The desktop connection is enabled, including waiting or reconnecting. Window detection remains available. Pause before changing regions or previewing; DingTalk stays signed in.')}</p><button type="button" disabled={busy} onClick={() => void action(onPause, t('连接已暂停，可以校准。完成后勾选「保存后连接」并保存账号。', 'Connection paused for calibration. When finished, check Connect and start with app and save the account.'))}>{t('暂停连接并校准', 'Pause connection and calibrate')}</button></div>}
-    <label>{t('我的 @ 显示名（多个名称用逗号分隔）', 'My exact @ names (comma separated)')}<input required value={names} onChange={e => { setNames(e.target.value); update({ ...config, selfNames: e.target.value.split(/[,，]/).map(n => n.trim()).filter(Boolean) }); }} /></label>
-    <button type="button" disabled={!ready || busy} onClick={() => void action(async () => { setPreview(null); setFirst(null); const result = await desktopProbe({}); setPreview(result); if (!connectedAccount && result.windows.length === 1 && !result.windows.some(w => w.title === config.windowTitle)) update({ ...config, windowTitle: result.windows[0].title }); })}>{t('检测钉钉窗口', 'Detect DingTalk windows')}</button>
-    {preview && <div className="chatbot-card" role="status" aria-live="polite" data-testid="desktop-window-result">
-      {preview.windows.length ? <>
-        <strong>{t(`已检测到 ${preview.windows.length} 个钉钉窗口`, `Found ${preview.windows.length} DingTalk window(s)`)}</strong>
-        {preview.windows.map(w => <p key={w.handle}>{w.title} · {w.width} × {w.height}{w.minimized ? t('（已最小化，请还原钉钉窗口后重新检测）', ' (minimized; restore DingTalk and detect again)') : ''}</p>)}
-        {connectedAccount && <p>{t('检测成功。已有桌面连接正在运行，窗口选择与预览暂时锁定；点击上方「暂停连接并校准」后即可继续。', 'Detection succeeded. An existing desktop connection is running, so selection and preview are locked. Click Pause connection and calibrate above to continue.')}</p>}
-      </> : <>
-        <p>{t('未检测到可用的钉钉窗口。请从任务栏或托盘打开钉钉主窗口并登录，再点击检测。', 'No usable DingTalk window found. Open the main DingTalk window from the taskbar or tray, sign in, and detect again.')}</p>
-        {preview.diagnostics?.map(item => <p key={item.code}>{item.detail}</p>)}
+    <div className="chatbot-actions"><button type="button" disabled={!ready || busy} onClick={() => void action(async () => { setWindows([]); setDiagnostics([]); const result = await desktopProbe({ application: config.application ?? 'dingtalk' }); setWindows(result.windows); setDiagnostics(result.diagnostics); if (!connectedAccount && result.windows.length === 1) { const w = result.windows[0]; update({ ...config, windowTitle: w.title, windowHandle: w.handle, processName: w.processName }); } })}>{t('检测应用窗口', 'Detect app windows')}</button><span>{t(`检测到 ${windows.length} 个窗口`, `${windows.length} windows found`)}</span></div>
+    <div data-testid="desktop-window-result" role="status">{diagnostics?.map(d => <p key={d.code}>{d.detail}</p>)}</div>
+    <label>{t('目标窗口', 'Target window')}<select aria-label={t('目标窗口', 'Target window')} required value={config.windowHandle ? String(config.windowHandle) : config.windowTitle} disabled={locked} onChange={e => { const w = windows.find(item => String(item.handle) === e.target.value); if (!w) return; setShot(null); update({ ...config, windowTitle: w.title, windowHandle: w.handle, processName: w.processName, referenceSize: undefined, layout: defaultDesktopConfig().layout }); }}><option value="">{t('检测后选择要接管的窗口', 'Detect and choose the target window')}</option>{config.windowTitle && !windows.some(w => w.handle === config.windowHandle) && <option value={config.windowHandle ? String(config.windowHandle) : config.windowTitle}>{config.windowTitle}</option>}{windows.map(w => <option key={w.handle} value={String(w.handle)}>{w.title} · {w.processName} · {w.width} × {w.height}{w.minimized ? t('（请先还原）', ' (restore first)') : ''}</option>)}</select></label>
+    <div className="chatbot-actions"><button type="button" disabled={!ready || !config.windowTitle || locked} onClick={() => void capture()}>{t('自动截图', 'Capture window')}</button><label className="chatbot-upload">{t('或上传界面截图', 'Or upload screenshot')}<input type="file" accept="image/png,image/jpeg,image/webp" disabled={locked} onChange={e => { const file = e.target.files?.[0]; e.target.value = ''; if (!file) return; void action(async () => { if (file.size > 20 * 1024 * 1024) throw new Error(t('截图不能超过 20 MB。', 'Maximum image size is 20 MB.')); const url = URL.createObjectURL(file); try { const img = await loadImage(url); if (img.width * img.height > 32_000_000) throw new Error(t('截图分辨率过大。', 'Image resolution is too large.')); const canvas = document.createElement('canvas'); canvas.width = img.width; canvas.height = img.height; canvas.getContext('2d')!.drawImage(img, 0, 0); acceptShot({ image: canvas.toDataURL('image/png'), width: img.width, height: img.height }, true); setCropMode(true); } finally { URL.revokeObjectURL(url); } }); }} /></label></div>
+    <h4>{t('2 · 拖动框选你的界面', '2 · Draw regions on your layout')}</h4>
+    {!shot && <p className="chatbot-calibration-empty">{t('先获取截图，再依次框选。所有区域由你指定。', 'Capture or upload a screenshot, then draw each region.')}</p>}
+    {shot && <>
+      {cropMode ? <div className="chatbot-card"><strong>{t('先框出完整应用窗口（包含窗口边缘）', 'First crop the complete application window')}</strong><p>{t('如果上传的是整屏截图，拖框去掉桌面和其他窗口；之后再框选内部区域。', 'Crop away the desktop and other windows before selecting internal regions.')}</p><button type="button" disabled={locked} onClick={() => setCropMode(false)}>{t('这张图就是完整应用窗口', 'This image is already the full window')}</button></div> : <>
+        <div className="chatbot-region-tabs">{calibrationRegions.map((key, i) => <button type="button" key={key} disabled={locked} aria-pressed={region === key} onClick={() => setRegion(key)}>{validDesktopBox(config.layout[key]) ? '✓' : i + 1} · {labels[key]}</button>)}</div>
+        <p aria-live="polite"><strong>{labels[region]}</strong> · {hints[region]}</p>
       </>}
-    </div>}
-    <label>{t('钉钉窗口', 'DingTalk window')}<select required value={config.windowTitle} disabled={calibrationLocked} onChange={e => { update({ ...config, windowTitle: e.target.value }); setPreview(current => current ? { windows: current.windows } : null); setFirst(null); }}><option value="">{connectedAccount ? t('连接运行中；暂停后选择窗口', 'Connection active; pause to select a window') : t('先检测并选择窗口', 'Detect and select a window')}</option>{config.windowTitle && !preview?.windows.some(w => w.title === config.windowTitle) && <option value={config.windowTitle}>{config.windowTitle}</option>}{preview?.windows.map(w => <option key={w.handle} value={w.title}>{w.title} · {w.width} × {w.height}{w.minimized ? t('（已最小化）', ' (minimized)') : ''}</option>)}</select></label>
-    <button type="button" disabled={!ready || !config.windowTitle || calibrationLocked} onClick={() => void action(async () => { const result = await desktopProbe({ windowTitle: config.windowTitle, autoLayout: true }); if (!result.layout) throw new Error(t('未返回校准区域，请手动校准。', 'No calibrated regions returned. Calibrate manually.')); update({ ...config, layout: result.layout }); setFirst(null); setPreview(result); })}>{t('自动识别区域并预览（不发消息）', 'Detect regions and preview (no sending)')}</button>
-    <button type="button" disabled={!ready || !config.windowTitle || calibrationLocked} onClick={() => void action(async () => { setFirst(null); setPreview(await desktopProbe({ windowTitle: config.windowTitle, layout: config.layout })); })}>{t('截图并读取预览（不发消息）', 'Capture and read preview (no sending)')}</button>
-    {preview?.image && <><label>{t('校准区域', 'Calibration region')}<select value={region} onChange={e => { setRegion(e.target.value as Region); setFirst(null); }}>{Object.entries(labels).map(([key, text]) => <option key={key} value={key}>{text}</option>)}</select></label><p>{region === 'send' ? t('在截图上点击一次发送按钮中心。', 'Click the send button center once.') : first ? t('再点击区域右下角。', 'Now click the bottom-right corner.') : t('依次点击区域左上角和右下角。消息区只框正文列表，不含标题、输入框或通知浮层。', 'Click top-left, then bottom-right. The message region must exclude the header, editor and overlays.')}</p>
-      <button className="chatbot-calibration" type="button" disabled={calibrationLocked} aria-label={t('点击截图校准', 'Click screenshot to calibrate')} onClick={e => { const bounds = e.currentTarget.getBoundingClientRect(); const point = [Math.max(0, Math.min(1, (e.clientX - bounds.left) / bounds.width)), Math.max(0, Math.min(1, (e.clientY - bounds.top) / bounds.height))]; if (region === 'send') { update({ ...config, layout: { ...config.layout, send: point as [number, number] } }); } else if (!first) { setFirst(point); } else { const box = [Math.min(first[0], point[0]), Math.min(first[1], point[1]), Math.max(first[0], point[0]), Math.max(first[1], point[1])] as [number, number, number, number]; if (box[2] - box[0] > .01 && box[3] - box[1] > .01) update({ ...config, layout: { ...config.layout, [region]: box } }); setFirst(null); } }}>
-        <img src={preview.image} alt={t('钉钉窗口校准截图', 'DingTalk calibration screenshot')} draggable={false} />
-        {region !== 'send' && <span className="chatbot-calibration-box" style={{ left: `${config.layout[region][0] * 100}%`, top: `${config.layout[region][1] * 100}%`, width: `${(config.layout[region][2] - config.layout[region][0]) * 100}%`, height: `${(config.layout[region][3] - config.layout[region][1]) * 100}%` }} />}
-        {region === 'send' && <span className="chatbot-calibration-point" style={{ left: `${config.layout.send[0] * 100}%`, top: `${config.layout.send[1] * 100}%` }}>+</span>}
-      </button>
-      {preview.editor && <div className="chatbot-card" data-testid="desktop-editor-diagnostic"><strong>{t('输入框只读检查', 'Read-only editor check')}</strong><p className={!preview.editor.readable ? 'chatbot-error' : undefined}>{preview.editor.detail}</p><small>{t('不会聚焦、输入或发送。校准后请重新读取预览；此检查不代表真实收发已通过。', 'Does not focus, type or send. Refresh the preview after calibration; this check does not verify live messaging.')}</small></div>}
-      <p>{t('识别到的标题', 'Recognized titles')}: {preview.titleLines?.map(l => l.text).join(' · ')}</p><details><summary>{t('消息识别结果（核对方向及内容）', 'Message recognition (check direction and text)')}</summary>{preview.messages?.map((m, i) => <p className="chatbot-message" key={i}><strong>{m.direction === 'incoming' ? t('收到', 'Incoming') : t('发出', 'Outgoing')}</strong>: {m.text}</p>)}</details>
+      <div className="chatbot-actions"><label>{t('截图缩放', 'Screenshot zoom')}<select aria-label={t('截图缩放', 'Screenshot zoom')} value={zoom} onChange={e => setZoom(Number(e.target.value))}><option value={1}>100%</option><option value={1.5}>150%</option><option value={2}>200%</option></select></label><button type="button" disabled={locked} onClick={() => { setCropMode(true); setDraft(null); }}>{t('裁剪到应用窗口', 'Crop to app window')}</button>{!cropMode && <button type="button" disabled={locked} onClick={() => update(setCalibrationBox(config, region, [0, 0, 0, 0]))}>{t('清除当前框', 'Clear selected region')}</button>}</div>
+      <div className="chatbot-calibration-scroll"><div className="chatbot-calibration" style={{ width: `${zoom * 100}%` }} role="img" aria-label={t('拖动截图框选区域', 'Drag to select screenshot regions')} onPointerDown={e => { if (locked || e.button !== 0) return; e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); start.current = position(e); setDraft(rectangle(start.current, start.current)); }} onPointerMove={e => { if (start.current) setDraft(rectangle(start.current, position(e))); }} onPointerUp={finish} onPointerCancel={() => { start.current = null; setDraft(null); }}>
+        <img src={shot.image} alt={t('应用窗口校准截图', 'Application calibration screenshot')} draggable={false} />
+        {!cropMode && calibrationRegions.map(key => { const box = config.layout[key]; return validDesktopBox(box) && <span key={key} className={`chatbot-calibration-box${region === key ? ' is-selected' : ''}`} style={boxStyle(box)}><span>{labels[key]}</span></span>; })}
+        {draft && <span className="chatbot-calibration-box is-drawing" style={boxStyle(draft)} />}
+      </div></div>
     </>}
-    <details><summary>{t('精确校准坐标（相对窗口 0–1）', 'Exact coordinates (window fractions 0–1)')}</summary>{(Object.keys(labels) as Region[]).map(key => <fieldset className="chatbot-coordinate-fields" key={key}><legend>{labels[key]}</legend>{config.layout[key].map((v, i) => <label key={i}>{key === 'send' ? ['X', 'Y'][i] : ['X1', 'Y1', 'X2', 'Y2'][i]}<input type="number" step="0.001" min={0} max={1} value={v} disabled={calibrationLocked} onChange={e => { const values = [...config.layout[key]]; values[i] = Number(e.target.value); update({ ...config, layout: { ...config.layout, [key]: values } }); }} /></label>)}</fieldset>)}</details>
+    <p role="status">{t(`已框选 ${calibrationRegions.filter(k => validDesktopBox(config.layout[k])).length} / 6 个区域`, `${calibrationRegions.filter(k => validDesktopBox(config.layout[k])).length} / 6 regions calibrated`)}{config.referenceSize && ` · ${config.referenceSize[0]} × ${config.referenceSize[1]}`}</p>
+    <h4>{t('3 · 核对识别并保存', '3 · Review recognition and save')}</h4>
+    <p>{t('发现红点后检查对应会话，只回复已绑定的名称。标题包含名称即命中，例如「张楠楠（设计部）」可匹配「张楠楠」。多个名称重叠时优先较长名称；无法区分的同名会话暂停处理。', 'Unread badges trigger checks of registered chats. A title containing the name matches; longer names take precedence. Ambiguous conversations are skipped.')}</p>
+    <button type="button" disabled={!ready || !config.windowTitle || !complete || cropMode || locked} onClick={() => void action(async () => { setPreview(await desktopProbe({ ...request, config, layout: config.layout })); })}>{t('检查实时识别（不发送）', 'Check live recognition (no sending)')}</button>
+    {preview && <div className="chatbot-card" data-testid="desktop-recognition-result"><strong>{t('实时窗口识别结果', 'Live window recognition')}</strong><p>{t('标题', 'Title')}: {preview.titleLines?.map(l => l.text).join(' · ') || t('未读到，请调整标题栏', 'No title; adjust the title region')}</p><p>{t('消息入口红点', 'Unread entry badge')}: {preview.unread?.notification ? t('有', 'Yes') : t('无', 'No')} · {t('会话红点', 'Conversation badges')}: {preview.unread?.rows ?? 0}</p>{preview.editor && <p className={preview.editor.readable ? undefined : 'chatbot-error'}>{preview.editor.detail}</p>}<details open><summary>{t('聊天正文（核对收到 / 发出方向）', 'Message history (check incoming / outgoing)')}</summary>{preview.messages?.length ? preview.messages.map((m, i) => <p className="chatbot-message" key={i}><strong>{m.direction === 'incoming' ? t('收到', 'Incoming') : t('发出', 'Outgoing')}</strong>: {m.text}</p>) : <p>{t('未识别到文字气泡，请调整正文区域。', 'No text bubbles recognized; adjust the history region.')}</p>}</details></div>}
+    <details><summary>{t('收发设置与精确坐标', 'Input settings and exact coordinates')}</summary>
+      <label>{t('我的 @ 显示名（群聊仅 @ 模式需要，逗号分隔）', 'My @ names (needed for group mentions, comma separated)')}<input value={names} disabled={locked} onChange={e => { setNames(e.target.value); update({ ...config, selfNames: e.target.value.split(/[,，]/).map(n => n.trim()).filter(Boolean) }); }} /></label>
+      <label>{t('空输入栏的提示文字', 'Empty editor placeholder')}<input value={config.editorPlaceholder ?? '请输入消息'} disabled={locked} onChange={e => update({ ...config, editorPlaceholder: e.target.value })} /></label>
+      <label>{t('发送方式', 'Sending mode')}<select data-testid="desktop-input-mode" value={config.inputMode ?? 'background'} disabled={locked} onChange={e => update({ ...config, inputMode: e.target.value as 'background' | 'foreground' })}><option value="foreground">{t('前台兼容模式（默认）', 'Foreground compatibility (default)')}</option>{config.application !== 'custom' && <option value="background">{t('钉钉后台模式（部分旧版适用）', 'DingTalk background (supported older clients)')}</option>}</select></label>
+      <p>{config.inputMode === 'background' ? t('后台模式不抢焦点；切回目标应用时暂停。', 'Background mode preserves focus and pauses while you use the target app.') : t('切换会话和发送时激活目标窗口，等待键鼠空闲 5 秒；人工输入或已有草稿时暂停。', 'Switching chats and sending activates the target after 5 seconds of idle input. Human input or existing drafts pause automation.')}</p>
+      {calibrationRegions.map(key => <fieldset className="chatbot-coordinate-fields" key={key}><legend>{labels[key]}</legend>{(config.layout[key] ?? [0, 0, 0, 0]).map((v, i) => <label key={i}>{['X1', 'Y1', 'X2', 'Y2'][i]}<input type="number" step="0.001" min={0} max={1} value={v} disabled={locked} onChange={e => { const box = [...(config.layout[key] ?? [0, 0, 0, 0])] as DesktopBox; box[i] = Number(e.target.value); update(setCalibrationBox(config, key, box)); }} /></label>)}</fieldset>)}
+    </details>
+    <small>{t('保持窗口打开、未最小化和 Windows 解锁。窗口移动无需重新框选；调整窗口尺寸或内部布局后重新校准。未读首次出现只处理最新一条可读收到消息，已有历史不会批量补回。支持文字气泡；图片、语音和附件不自动理解。', 'Keep the window open, restored and Windows unlocked. Moving it preserves calibration; resize or layout changes require recalibration. A first unread chat processes only its latest readable incoming message. Text bubbles are supported; media is excluded.')}</small>
   </section>;
 }

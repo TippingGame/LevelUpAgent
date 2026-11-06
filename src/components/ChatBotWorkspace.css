@@ -46,7 +46,15 @@
 .chatbot-desktop { display:grid; gap:12px; min-width:0; }
 .chatbot-workspace .chatbot-calibration { position:relative; padding:0; border:0; width:100%; cursor:crosshair; overflow:hidden; }
 .chatbot-calibration img { display:block; width:100%; height:auto; }
-.chatbot-calibration-box { position:absolute; border:2px solid var(--danger-text); box-sizing:border-box; pointer-events:none; }
+.chatbot-calibration-scroll { max-width:100%; overflow:auto; border:1px solid var(--line); border-radius:10px; }
+.chatbot-calibration { touch-action:none; user-select:none; }
+.chatbot-calibration-box { position:absolute; border:2px dashed var(--danger-text); box-sizing:border-box; pointer-events:none; }
+.chatbot-calibration-box.is-selected,.chatbot-calibration-box.is-drawing { border-style:solid; border-width:3px; }
+.chatbot-calibration-box>span { position:absolute; left:0; top:0; max-width:100%; padding:2px 5px; color:var(--text); background:var(--surface); font-size:11px; white-space:nowrap; overflow:hidden; }
+.chatbot-region-tabs { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
+.chatbot-calibration-empty { padding:28px 16px; text-align:center; border:1px dashed var(--line); border-radius:10px; color:var(--muted); }
+.chatbot-desktop h4 { margin:10px 0 0; padding-top:14px; border-top:1px solid var(--line); }
+.chatbot-upload { flex:1; min-width:180px; }
 .chatbot-calibration-point { position:absolute; transform:translate(-50%,-50%); color:var(--danger-text); background:var(--surface); font-size:22px; pointer-events:none; }
 .chatbot-coordinate-fields { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; border:1px solid var(--line); min-width:0; margin:10px 0; }
 @media(max-width:900px) { .chatbot-layout { grid-template-columns:140px minmax(0,1fr); } .chatbot-main { padding:14px; } .chatbot-header { padding:12px 46px 12px 12px; gap:10px; } .chatbot-header small { font-size:11px; } .chatbot-fields { grid-template-columns:1fr; } .chatbot-roster button { flex-direction:column; align-items:flex-start; } .chatbot-roster small { font-size:11px; overflow-wrap:normal; } }

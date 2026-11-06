@@ -434,10 +434,11 @@ fn desktop_routes(app: &tauri::AppHandle, account: &str) -> Result<Vec<Route>, S
     Ok(dashboard
         .routes
         .into_iter()
-        .filter(|r| {
-            r.account_id == account
-                && !r.paused
-                && dashboard.bots.iter().any(|b| b.id == r.bot_id && b.enabled)
+        .filter(|r| r.account_id == account)
+        .map(|mut r| {
+            // Paused longer names must still exclude a shorter contains rule.
+            r.paused |= !dashboard.bots.iter().any(|b| b.id == r.bot_id && b.enabled);
+            r
         })
         .collect())
 }

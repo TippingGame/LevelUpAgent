@@ -40,11 +40,11 @@ class DesktopRulesTests(unittest.TestCase):
         resumed = MessageTracker(tracker.state.copy())
         self.assertEqual(resumed.observe([a], 'a'), [])
 
-    def test_sender_ambiguity_does_not_cross_chat(self):
+    def test_titles_match_contained_names_and_suffixes(self):
         self.assertTrue(title_matches(' 测试群 ', '测试群'))
-        self.assertFalse(title_matches('测试群 (20)', '测试群'))
+        self.assertTrue(title_matches('测试群 (20)', '测试群'))
         self.assertFalse(title_matches('A B', 'AB'))
-        self.assertFalse(title_matches('测试群二', '测试群'))
+        self.assertTrue(title_matches('测试群二', '测试群'))
         self.assertFalse(title_matches('', '测试群'))
         self.assertFalse(title_matches('同名', ''))
 
