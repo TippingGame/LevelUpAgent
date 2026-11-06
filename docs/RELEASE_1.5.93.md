@@ -25,3 +25,18 @@
 Windows 自动更新使用 Tauri updater 签名，不是 Authenticode。macOS 包为 ad-hoc 签名，未做 Apple 公证；Linux 包未做发行版签名。
 
 发布页：https://github.com/TippingGame/LevelUpAgent/releases/tag/v1.5.93
+
+## 正式发布记录
+
+- 2026-11-06 14:50:00（Asia/Shanghai）正式发布并设为 Latest，tag `v1.5.93` 指向 `70efed2a3611d473c21164fd3654c1565435ef4d`。
+- CI `42174165688` 三平台检查及 Release `42174205650` 四平台构建全部成功。
+- 10 个发布资产完整下载并通过 GitHub SHA-256 校验；Windows EXE/MSI updater 签名、可信注释签名、清单下载 URL 和版本均通过验证。
+- 公开 `releases/latest/download/latest.json` 匿名返回 HTTP 200，版本为 1.5.93，内容与已验证清单一致；全部 10 个资产地址匿名 HEAD 返回 HTTP 200。
+- Windows EXE/MSI 产品版本及解包后主程序版本均为 1.5.93；79 个内置资源与发布源码一致，文本仅有 Windows checkout 换行差异。主程序中嵌入的 updater 公钥和更新地址已核验。
+- 两种 macOS 架构均通过 runner 中的应用签名、DMG 内签名及模拟复制安装签名检查。
+- 音频与 3D 五份资源清单均匿名 HTTP 200，资源 Release 继续保持 prerelease、不占 Latest。
+- 官方 Windows EXE、版本 SHA256 文件、总 SHA256 清单及更新后的桌面校准说明已同步到本机安装包目录，保留旧版本。
+- 本轮未覆盖本机正式安装，未进行生产环境应用内更新或 macOS/Linux 实体机交互安装；后台发送仍未向真实联系人实测，功能验证范围见上文。
+- 本地验证证据：`artifacts/release-1.5.93/`。
+
+Windows EXE SHA-256：`028f734b36a78f0d13309324f12ad960f887da675b1e1d8ff2ee2fa78a768bd3`。
