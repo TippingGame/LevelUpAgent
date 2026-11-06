@@ -14,10 +14,25 @@
 
 本次功能验证包括 127 项桌面 Python 回归、21 项 Rust 聊天模块测试，以及浅色／深色、Armor 开关四种外观下的 720px 截图框选、上传裁剪和缩放。独立 Tauri 实例完成默认选项、非法校准拒绝、配置保存、编辑及关闭重启验证，未向真实联系人发送测试消息。
 
-发布前完整项目检查 311 项、Rust 全量测试 593 项通过（5 项忽略），格式检查、全目标 Clippy 零警告和生产前端构建通过。聊天网关 Python 137 项通过；3D 资源 21 项（3 项平台跳过）、音频 9 项（2 项环境跳过）通过。发布结果及资产校验记录将在完成后补充。
+发布前完整项目检查 311 项、Rust 全量测试 593 项通过（5 项忽略），格式检查、全目标 Clippy 零警告和生产前端构建通过。聊天网关 Python 137 项通过；3D 资源 21 项（3 项平台跳过）、音频 9 项（2 项环境跳过）通过。
 
 ## 平台签名
 
 Windows 自动更新使用 Tauri updater 签名，不是 Authenticode。macOS 包为 ad-hoc 签名，未做 Apple 公证；Linux 包未做发行版签名。
 
 发布页：https://github.com/TippingGame/LevelUpAgent/releases/tag/v1.5.92
+
+## 正式发布记录
+
+- 2026-11-06 12:03:18（Asia/Shanghai）正式发布并设为 Latest，tag `v1.5.92` 指向 `3081c20bebde130dc936cd153ee0105ce17322a9`。
+- CI `42157053185` 三平台检查和 Release `42157068182` 四平台构建均成功。Linux runner 的依赖安装耗时较长，最终正常完成，无需重跑。
+- 10 个发布资产完整下载并通过 GitHub SHA-256 校验；Windows EXE/MSI updater 签名、可信注释签名、更新 URL 和版本均通过验证。
+- 公开 `releases/latest/download/latest.json` 匿名返回 HTTP 200，版本为 1.5.92，内容与已核验清单一致；全部 10 个公开资产地址匿名 HEAD 返回 HTTP 200。
+- Windows EXE/MSI 产品版本及解包后主程序版本均为 1.5.92；79 个内置资源与发布源码一致，文本仅存在 Windows checkout 换行差异，新增 `desktop_calibration.py` 已包含。主程序中嵌入的 updater 公钥和更新地址与仓库配置一致。
+- 两种 macOS 架构均通过 runner 中的应用签名、DMG 内签名及模拟复制安装签名检查。
+- 音频与 3D 五份资源清单均匿名 HTTP 200，资源 Release 保持 prerelease、不占 Latest。
+- 官方 Windows EXE、版本 SHA256 文件、总 SHA256 清单和截图校准使用说明已同步到本机安装包目录，保留旧版本。
+- 本轮未覆盖用户本机正式安装，未做生产环境应用内更新或 macOS/Linux 实体机交互安装；自动回复功能验证未向真实联系人发送消息。
+- 本地验证证据：`artifacts/release-1.5.92/`。
+
+Windows EXE SHA-256：`fce5dbdcf3494832ddb169436cd7ca2f1482ae2a55b7620ded246e44d6470f1c`。
