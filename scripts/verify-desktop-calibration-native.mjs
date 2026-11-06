@@ -41,11 +41,15 @@ try {
   await page.getByRole('button', { name: '自动机器人', exact: true }).click();
   await page.getByRole('button', { name: '平台账号', exact: true }).click();
   assert.equal(await page.getByLabel('平台', { exact: true }).inputValue(), 'dingtalk_desktop');
-  assert.equal(await page.getByLabel('桌面应用', { exact: true }).inputValue(), 'dingtalk');
-  assert.equal(await page.getByRole('button', { name: '保存账号', exact: true }).isDisabled(), true);
+  const initialDesktop=(await invoke('chat_dashboard')).accounts.find(a=>a.platform==='dingtalk_desktop');
+  assert.equal(await page.getByLabel('桌面应用', { exact: true }).inputValue(), initialDesktop?.desktop?.application ?? 'dingtalk');
+  // A previous disconnected controller is automatically reopened on later runs.
+  if (!(await invoke('chat_dashboard')).accounts.some(a=>a.platform==='dingtalk_desktop')) assert.equal(await page.getByRole('button', { name: '保存账号', exact: true }).isDisabled(), true);
   await page.screenshot({ path: resolve(output, 'native-default.png') });
   const desktop = { version: 2, windowTitle: 'Synthetic app', application: 'custom', processName: 'example.exe', windowHandle: 123, referenceSize: [1000, 800], selfNames: [], inputMode: 'foreground', editorPlaceholder: '',
     layout: { notification: [0, 0, .1, .1], sidebar: [.1, .1, .35, .85], title: [.35, 0, 1, .1], messages: [.35, .1, 1, .7], editor: [.35, .7, 1, .9], sendButton: [.9, .9, 1, 1], send: [.95, .95] } };
+  desktop.calibrationImage = await page.evaluate(() => { const c=document.createElement('canvas');c.width=1000;c.height=800;const ctx=c.getContext('2d');ctx.fillStyle='#ddeeff';ctx.fillRect(0,0,1000,800);return c.toDataURL('image/png'); });
+  desktop.layout.notification[2]=0.09488272921108742;
   const data = await invoke('chat_dashboard');
   const previous = data.accounts.find(a => a.appId === 'calibration-fixture');
   const account = { id: previous?.id ?? '', name: 'Calibration fixture', platform: 'dingtalk_desktop', appId: 'calibration-fixture', tenantId: '', endpoint: '', enabled: false, desktop };
@@ -56,6 +60,8 @@ try {
   await page.locator('article.chatbot-card').filter({ hasText: 'Calibration fixture' }).getByRole('button', { name: '编辑', exact: true }).click();
   assert.equal(await page.getByLabel('桌面应用', { exact: true }).inputValue(), 'custom');
   assert.match(await page.getByTestId('desktop-setup').innerText(), /已框选 6 \/ 6/);
+  assert.equal(await page.locator('.chatbot-calibration-box').count(),6);
+  assert.equal(await page.locator('.chatbot-calibration img').getAttribute('src'),desktop.calibrationImage);
   await page.getByText('收发设置与精确坐标', { exact: true }).click();
   const aliases = page.getByLabel('我的 @ 显示名', { exact: false });
   await aliases.fill('测试甲, 测试乙');
@@ -67,7 +73,17 @@ try {
   const restored = (await invoke('chat_dashboard')).accounts.find(a => a.id === saved.id);
   assert.deepEqual(restored.desktop, { ...desktop, selfNames: ['测试甲', '测试乙'] });
   assert.equal(restored.enabled, false);
+  await invoke('open_pet_workspace', {petId:'yui', view:'life'});
+  await page.getByRole('button',{name:'自动机器人',exact:true}).click();
+  await page.getByRole('button',{name:'平台账号',exact:true}).click();
+  await page.locator('.chatbot-calibration img').waitFor();
+  assert.equal(await page.locator('.chatbot-calibration-box').count(),6);
+  assert.equal(await page.locator('.chatbot-calibration img').getAttribute('src'),desktop.calibrationImage);
+  await page.getByRole('button',{name:'保存账号',exact:true}).click();
+  await page.getByText('账号已保存。',{exact:true}).waitFor();
+  assert.equal((await invoke('chat_dashboard')).accounts.filter(a=>a.platform==='dingtalk_desktop').length,1);
+  await page.screenshot({path:resolve(output,'native-restored.png')});
   assert.deepEqual(errors, []);
-  await writeFile(resolve(output, 'native-report.json'), JSON.stringify({ passed: true, identifier, realMessagesSent: 0, cases: ['default desktop platform', 'incomplete save disabled', 'v2 Rust persistence', 'invalid region refused', 'custom account edit', 'comma separated mentions', 'close and restart persistence'] }, null, 2));
+  await writeFile(resolve(output, 'native-report.json'), JSON.stringify({ passed: true, identifier, realMessagesSent: 0, cases: ['default desktop platform', 'incomplete save disabled', 'v2 Rust persistence', 'invalid region refused', 'custom account edit', 'comma separated mentions', 'close and restart screenshot/region persistence', 'disconnected controller reused without duplicate', 'fractional coordinates submit'] }, null, 2));
   console.log('Native calibration save, validation and restart passed.');
 } finally { await close(); }

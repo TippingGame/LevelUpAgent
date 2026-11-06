@@ -254,7 +254,7 @@ impl Database {
                 .any(|a| a.id != account.id && a.platform == "dingtalk_desktop")
         {
             return Err(
-                "Only one DingTalk desktop controller is allowed; bind multiple chats to it".into(),
+                "已有桌面连接，请编辑现有账号；多个联系人请在「聊天路由」中绑定 / Edit the existing desktop account and add contacts under Routes".into(),
             );
         }
         if let Some(old) = one::<Account>(&c, "chat_accounts", &account.id)?

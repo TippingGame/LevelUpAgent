@@ -45,6 +45,9 @@ pub struct DesktopConfig {
     pub window_handle: Option<u64>,
     #[serde(default)]
     pub reference_size: Option<[u32; 2]>,
+    /// Local calibration reference only; never included in gateway frames.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calibration_image: Option<String>,
     #[serde(default)]
     pub editor_placeholder: Option<String>,
     pub layout: DesktopLayout,
@@ -69,7 +72,32 @@ pub struct DesktopLayout {
     pub send_button: Option<[f64; 4]>,
 }
 impl DesktopConfig {
+    pub fn for_runtime(&self) -> Self {
+        let mut config = self.clone();
+        config.calibration_image = None;
+        config
+    }
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(image) = &self.calibration_image {
+            use base64::Engine;
+            let invalid = "校准截图无效或过大，请重新截图 / Invalid or oversized calibration image";
+            if image.len() > 16 * 1024 * 1024 {
+                return Err(invalid.into());
+            }
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(
+                    image
+                        .strip_prefix("data:image/png;base64,")
+                        .ok_or(invalid)?,
+                )
+                .map_err(|_| invalid)?;
+            let dimensions = imagesize::blob_size(&bytes).map_err(|_| invalid)?;
+            if self.reference_size != Some([dimensions.width as u32, dimensions.height as u32])
+                || dimensions.width as u64 * dimensions.height as u64 > 32_000_000
+            {
+                return Err(invalid.into());
+            }
+        }
         let valid_box = |b: &[f64; 4]| {
             b.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)) && b[0] < b[2] && b[1] < b[3]
         };

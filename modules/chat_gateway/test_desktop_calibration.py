@@ -57,11 +57,11 @@ class CalibrationRulesTests(unittest.TestCase):
         self.assertEqual(len(red_badges(image)), 2)
 
     def test_name_contains_prefers_longer_rule_and_rejects_ties(self):
-        short = dict(chatId='张楠'); long = dict(chatId='张楠楠')
-        self.assertEqual(matching_route('张楠楠（设计部） 在线', [short, long]), long)
+        short = dict(chatId='测试'); long = dict(chatId='测试联系人')
+        self.assertEqual(matching_route('测试联系人（设计部） 在线', [short, long]), long)
         self.assertIsNone(matching_route('Alice Bob', [dict(chatId='Alice'), dict(chatId='Alice')]))
         self.assertIsNone(matching_route('Other', [short]))
-        self.assertIsNone(matching_route('张楠楠（设计部）', [short, dict(long, paused=True)]))
+        self.assertIsNone(matching_route('测试联系人（设计部）', [short, dict(long, paused=True)]))
 
     def test_badge_is_associated_with_title_not_next_preview_line(self):
         routes = [dict(chatId='Alice'), dict(chatId='Bob')]

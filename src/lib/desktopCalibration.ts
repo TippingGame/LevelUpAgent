@@ -3,8 +3,8 @@ import type { DesktopBox, DesktopConfig } from './chatbots';
 export const calibrationRegions = ['notification', 'sidebar', 'title', 'messages', 'editor', 'sendButton'] as const;
 export type CalibrationRegion = typeof calibrationRegions[number];
 export const validDesktopBox = (box?: DesktopBox): box is DesktopBox => !!box && box.every(v => Number.isFinite(v) && v >= 0 && v <= 1) && box[2] > box[0] && box[3] > box[1];
-export const defaultDesktopConfig = (): DesktopConfig => ({
-  version: 2, windowTitle: '', selfNames: [], application: 'dingtalk', inputMode: 'foreground', editorPlaceholder: '请输入消息',
+export const defaultDesktopConfig = (application: 'dingtalk' | 'custom' = 'dingtalk'): DesktopConfig => ({
+  version: 2, windowTitle: '', selfNames: [], application, inputMode: application === 'dingtalk' ? 'background' : 'foreground', editorPlaceholder: '请输入消息',
   layout: { title: [0, 0, 0, 0], messages: [0, 0, 0, 0], editor: [0, 0, 0, 0], sidebar: [0, 0, 0, 0], send: [0, 0] },
 });
 export function setCalibrationBox(config: DesktopConfig, region: CalibrationRegion, box: DesktopBox): DesktopConfig {

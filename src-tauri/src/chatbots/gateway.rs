@@ -362,9 +362,11 @@ async fn serve(
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     let mut input = child.stdin.take().ok_or("No gateway input")?;
     let mut output = BufReader::new(child.stdout.take().ok_or("No gateway output")?);
+    let mut runtime_account = account.clone();
+    runtime_account.desktop = account.desktop.as_ref().map(|config| config.for_runtime());
     write(
         &mut input,
-        json!({"type":"configure","version":1,"account":account,"secret":secret,"routes":desktop_routes(app, &account.id)?}),
+        json!({"type":"configure","version":1,"account":runtime_account,"secret":secret,"routes":desktop_routes(app, &account.id)?}),
     )
     .await?;
     let (frames, mut incoming) = tokio::sync::mpsc::channel(64);
@@ -456,7 +458,7 @@ pub async fn refresh_desktops(app: &tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn desktop_probe(app: &tauri::AppHandle, request: Value) -> Result<Value, String> {
+pub async fn desktop_probe(app: &tauri::AppHandle, mut request: Value) -> Result<Value, String> {
     if !cfg!(windows) || !ready_for(app, true) {
         return Err("Install the Windows desktop runtime first".into());
     }
@@ -487,6 +489,9 @@ pub async fn desktop_probe(app: &tauri::AppHandle, request: Value) -> Result<Val
     crate::process::hide_console_window(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     let mut input = child.stdin.take().ok_or("No probe stdin")?;
+    if let Some(config) = request.get_mut("config").and_then(Value::as_object_mut) {
+        config.remove("calibrationImage");
+    }
     write(&mut input, request).await?;
     drop(input);
     let output = tokio::time::timeout(Duration::from_secs(90), child.wait_with_output())

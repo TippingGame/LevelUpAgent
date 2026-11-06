@@ -13,6 +13,7 @@ fn chatbots_desktop_config_routes_and_single_controller() {
         process_name: None,
         window_handle: None,
         reference_size: None,
+        calibration_image: None,
         editor_placeholder: None,
         layout: DesktopLayout {
             title: [0.3, 0.04, 0.8, 0.1],
@@ -88,6 +89,49 @@ fn chatbots_desktop_manual_calibration_roundtrip_and_validation() {
     let config: DesktopConfig = serde_json::from_value(value.clone()).unwrap();
     assert!(config.validate().is_ok());
     assert_eq!(serde_json::to_value(&config).unwrap(), value);
+    let mut pictured = config.clone();
+    pictured.reference_size = Some([1, 1]);
+    pictured.calibration_image = Some("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jC0cAAAAASUVORK5CYII=".into());
+    assert!(pictured.validate().is_ok());
+    let db = db();
+    let saved = db
+        .chat_save_account(Account {
+            id: String::new(),
+            name: "Calibration".into(),
+            platform: "dingtalk_desktop".into(),
+            app_id: "local".into(),
+            tenant_id: String::new(),
+            endpoint: String::new(),
+            enabled: false,
+            desktop: Some(pictured.clone()),
+        })
+        .unwrap();
+    assert_eq!(
+        db.chat_accounts().unwrap()[0]
+            .desktop
+            .as_ref()
+            .unwrap()
+            .calibration_image,
+        pictured.calibration_image
+    );
+    assert!(pictured.for_runtime().calibration_image.is_none());
+    assert_eq!(
+        pictured.for_runtime().layout.notification,
+        pictured.layout.notification
+    );
+    let updated = db.chat_save_account(saved).unwrap();
+    assert_eq!(db.chat_accounts().unwrap().len(), 1);
+    assert!(updated.desktop.unwrap().calibration_image.is_some());
+    pictured.reference_size = Some([1000, 800]);
+    assert!(
+        pictured.validate().is_err(),
+        "Snapshot dimensions must match calibration"
+    );
+    pictured.calibration_image = Some("https://example.com/private.png".into());
+    assert!(
+        pictured.validate().is_err(),
+        "Only inline local PNG references are accepted"
+    );
     for key in [
         "notification",
         "sendButton",
@@ -137,6 +181,7 @@ fn chatbots_desktop_preinput_deferral_keeps_reply_and_respects_pause() {
         process_name: None,
         window_handle: None,
         reference_size: None,
+        calibration_image: None,
         editor_placeholder: None,
         layout: DesktopLayout {
             title: [0.3, 0.04, 0.8, 0.1],

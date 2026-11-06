@@ -17,6 +17,7 @@ class BackgroundDesktop(WindowsDesktop):
             ('FindWindowExW', [wintypes.HWND, wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR], wintypes.HWND),
             ('IsChild', [wintypes.HWND, wintypes.HWND], wintypes.BOOL),
             ('ScreenToClient', [wintypes.HWND, ctypes.POINTER(wintypes.POINT)], wintypes.BOOL),
+            ('ChildWindowFromPointEx', [wintypes.HWND, wintypes.POINT, wintypes.UINT], wintypes.HWND),
             ('SendMessageTimeoutW', [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM, wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t)], wintypes.LPARAM),
         ]:
             function = getattr(self.user, name)
@@ -48,18 +49,52 @@ class BackgroundDesktop(WindowsDesktop):
 
     def message(self, hwnd, target, rect, code, wparam, lparam):
         self.guard(hwnd, rect)
-        if self.native_target(hwnd) != target:
+        # Text is restricted to DingTalk's chat renderer. Pointer navigation may
+        # target its outer message rail, which is outside DingChatWnd.
+        if code == 0x0102 and self.native_target(hwnd) != target:
             raise DesktopUnavailable('后台聊天窗口已变化')
+        if code != 0x0102:
+            self.verify_pointer_target(hwnd, target)
         result = ctypes.c_size_t()
         # ABORTIFHUNG | ERRORONEXIT; timeout means uncertain mutation, no retry.
         if not self.user.SendMessageTimeoutW(target, code, wparam, lparam, 0x22, 1500, ctypes.byref(result)):
             raise DesktopUnavailable('后台窗口消息超时或被拒绝，停止且不自动重试')
 
+    def verify_pointer_target(self, hwnd, target):
+        root_pid, target_pid = wintypes.DWORD(), wintypes.DWORD()
+        self.user.GetWindowThreadProcessId(hwnd, ctypes.byref(root_pid))
+        self.user.GetWindowThreadProcessId(target, ctypes.byref(target_pid))
+        if (not root_pid.value or root_pid.value != target_pid.value
+                or not (target == hwnd or self.user.IsChild(hwnd, target))
+                or not self.user.IsWindowVisible(target)):
+            raise DesktopUnavailable('后台点击窗口身份核对失败')
+
+    def pointer_target(self, hwnd, point):
+        target = self.native_target(hwnd)
+        tx, ty, tw, th = self.rect(target)
+        if tx <= point.x < tx + tw and ty <= point.y < ty + th:
+            return target
+        # Walk child windows without consulting the foreground or occluding apps.
+        target = hwnd
+        for _ in range(20):
+            local = wintypes.POINT(point.x, point.y)
+            if not self.user.ScreenToClient(target, ctypes.byref(local)):
+                raise DesktopUnavailable('后台坐标转换失败')
+            child = self.user.ChildWindowFromPointEx(target, local, 7)
+            if not child or child == target:
+                self.verify_pointer_target(hwnd, target)
+                return target
+            self.verify_pointer_target(hwnd, child)
+            target = child
+        raise DesktopUnavailable('后台点击窗口层级异常')
+
     def click(self, hwnd, x, y):
         rect = self.rect(hwnd)
         self.guard(hwnd, rect)
-        target = self.native_target(hwnd)
         point = wintypes.POINT(rect[0] + int(x * rect[2]), rect[1] + int(y * rect[3]))
+        if not (rect[0] <= point.x < rect[0]+rect[2] and rect[1] <= point.y < rect[1]+rect[3]):
+            raise DesktopUnavailable('校准点击位置不在应用窗口中')
+        target = self.pointer_target(hwnd, point)
         tx, ty, tw, th = self.rect(target)
         if not (tx <= point.x < tx + tw and ty <= point.y < ty + th):
             raise DesktopUnavailable('校准点击位置不在后台聊天窗口中')
@@ -103,13 +138,17 @@ class BackgroundDesktop(WindowsDesktop):
             raise DesktopUnavailable('后台文字输入不支持控制字符，请使用单段回复')
         if not self.verify_draft(hwnd, layout, ''):
             raise DesktopDeferred('输入框已有草稿，未覆盖')
-        with auto.UIAutomationInitializerInThread():
-            control = self.editor(hwnd, layout)
-            if normalized(self.editor_text(control)):
-                raise DesktopUnavailable('输入框已有草稿，未覆盖')
-            bounds = control.BoundingRectangle
-            x = ((bounds.left + bounds.right)/2 - rect[0])/rect[2]
-            y = ((bounds.top + bounds.bottom)/2 - rect[1])/rect[3]
+        if getattr(self, 'config', {}).get('version') == 2:
+            box = layout['editor']
+            x, y = (box[0]+box[2])/2, (box[1]+box[3])/2
+        else:
+            with auto.UIAutomationInitializerInThread():
+                control = self.editor(hwnd, layout)
+                if normalized(self.editor_text(control)):
+                    raise DesktopUnavailable('输入框已有草稿，未覆盖')
+                bounds = control.BoundingRectangle
+                x = ((bounds.left + bounds.right)/2 - rect[0])/rect[2]
+                y = ((bounds.top + bounds.bottom)/2 - rect[1])/rect[3]
         # Local mouse messages focus the internal edit without changing global focus.
         self.click(hwnd, x, y)
         if not self.verify_draft(hwnd, layout, ''):

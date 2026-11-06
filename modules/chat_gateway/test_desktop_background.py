@@ -66,6 +66,36 @@ class BackgroundTests(unittest.TestCase):
             for character in (chr(10),chr(13),chr(9),chr(0),chr(127)):
                 with self.assertRaises(DesktopUnavailable):d.type_reply(1,DEFAULT_LAYOUT,'text'+character)
 
+    def test_manual_background_editor_does_not_require_uia_labels(self):
+        d=self.driver();d.config={'version':2};units=[];clicks=[]
+        d.native_target=lambda _:2
+        d.editor=lambda *_:self.fail('manual calibration must not search UIA labels')
+        d.verify_draft=lambda h,l,t: not t or ''.join(chr(u) for u in units)==t
+        d.click=lambda *args:clicks.append(args)
+        d.message=lambda h,target,rect,code,unit,param:units.append(unit)
+        with patch.dict(sys.modules,{'uiautomation':SimpleNamespace()}):
+            d.type_reply(1,dict(DEFAULT_LAYOUT,editor=[.4,.6,.8,.9]),'测试草稿')
+        self.assertEqual(len(clicks),1)
+        self.assertAlmostEqual(clicks[0][1],.6)
+        self.assertAlmostEqual(clicks[0][2],.75)
+
+    def test_message_rail_outside_chat_uses_own_child_without_global_hit_test(self):
+        d=self.driver();d.native_target=lambda _:2
+        d.rect=lambda h: (200,50,800,750) if h==2 else (0,0,1000,800)
+        d.user.ScreenToClient=lambda *_:True
+        d.user.ChildWindowFromPointEx=lambda h,p,f:3
+        checked=[];d.verify_pointer_target=lambda h,t:checked.append(t)
+        self.assertEqual(d.pointer_target(1,ctypes.wintypes.POINT(30,90)),3)
+        self.assertTrue(checked)
+        self.assertEqual(d.pointer_target(1,ctypes.wintypes.POINT(300,600)),2)
+
+    def test_pointer_messages_recheck_window_identity(self):
+        d=self.driver();calls=[]
+        d.verify_pointer_target=lambda h,t: (_ for _ in ()).throw(DesktopUnavailable('wrong process'))
+        d.user.SendMessageTimeoutW=lambda *args:calls.append(args) or 1
+        with self.assertRaises(DesktopUnavailable):d.message(1,3,d.rect(1),0x201,1,0)
+        self.assertEqual(calls,[])
+
     def test_bounded_message_failure_does_not_retry(self):
         d=self.driver();d.native_target=lambda _:2;calls=[]
         d.user.SendMessageTimeoutW=lambda *args:calls.append(args) or 0

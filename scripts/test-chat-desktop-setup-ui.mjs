@@ -34,11 +34,11 @@ window.__TAURI_INTERNALS__={invoke:async(command,args)=>{
   throw new Error('Unexpected IPC: '+command);
 }};
 function Fixture(){
-  const [account,setAccount]=useState({id:'',platform:'dingtalk_desktop',enabled:false,desktop:defaultDesktopConfig()});
+  const [account,setAccount]=useState(()=>JSON.parse(localStorage.getItem('calibration-saved')||'null')||{id:'',platform:'dingtalk_desktop',enabled:false,desktop:defaultDesktopConfig()});
   const [connected,setConnected]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState('');
   desktopTest.account=account;desktopTest.setConnected=setConnected;
   const action=async fn=>{setBusy(true);setError('');try{await fn();}catch(e){setError(String(e));}finally{setBusy(false);}};
-  return <div className={'app-shell'+(new URLSearchParams(location.search).has('armor')?' armor-mode':'')} style={{display:'block',height:'auto',minHeight:'100vh'}}><main className="chatbot-workspace" style={{maxWidth:1000,margin:'auto',padding:20}}>{error&&<p role="alert">{error}</p>}<ChatDesktopSetup account={account} onChange={setAccount} connectedAccount={connected?account:undefined} onPause={async()=>setConnected(false)} ready busy={busy} action={action} t={(zh,en)=>zh}/></main></div>;
+  return <div className={'app-shell'+(new URLSearchParams(location.search).has('armor')?' armor-mode':'')} style={{display:'block',height:'auto',minHeight:'100vh'}}><main className="chatbot-workspace" style={{maxWidth:1000,margin:'auto',padding:20}}>{error&&<p role="alert">{error}</p>}<form onSubmit={e=>{e.preventDefault();const saved={...account,id:'saved-desktop'};localStorage.setItem('calibration-saved',JSON.stringify(saved));setAccount(saved);desktopTest.saved=true;}}><ChatDesktopSetup key={account.id||'new'} account={account} onChange={setAccount} connectedAccount={connected?account:undefined} onPause={async()=>setConnected(false)} ready busy={busy} action={action} t={(zh,en)=>zh}/><button type="submit">保存测试账号</button></form></main></div>;
 }
 createRoot(document.getElementById('root')).render(<Fixture/>);
 `;
@@ -78,9 +78,21 @@ try {
     for (const box of Object.values(regions)) await draw(box);
     assert.equal(await preview.isEnabled(), true);
     const config = await page.evaluate(() => desktopTest.account.desktop);
-    assert.equal(config.version, 2); assert.equal(config.inputMode, 'foreground');
+    assert.equal(config.version, 2); assert.equal(config.inputMode, 'background');
     for (const [key, box] of Object.entries(regions)) for (let i = 0; i < 4; i++) assert.ok(Math.abs(config.layout[key][i] - box[i]) < .005, key);
     assert.ok(Math.abs(config.layout.send[0] - .95) < .005);
+    await page.getByText('收发设置与精确坐标', {exact:true}).click();
+    await page.locator('fieldset input[type=number]').nth(2).fill('0.09488272921108742');
+    assert.equal(await page.locator('form').evaluate(form=>form.checkValidity()), true, 'Fractional pointer coordinates must not block form submission');
+    await page.getByRole('button',{name:'保存测试账号'}).click();
+    await page.waitForFunction(()=>desktopTest.saved===true);
+    assert.equal(await page.locator('.chatbot-calibration-box').count(),6,'Saving and remounting preserves all overlays');
+    const savedConfig=await page.evaluate(()=>desktopTest.account.desktop);
+    await page.reload();
+    await image.waitFor();
+    assert.deepEqual(await page.evaluate(()=>desktopTest.account.desktop),savedConfig);
+    assert.equal(await page.locator('.chatbot-calibration-box').count(),6);
+    assert.equal(await page.locator('.chatbot-calibration img').getAttribute('src'),savedConfig.calibrationImage);
     await preview.click();
     await page.getByTestId('desktop-recognition-result').waitFor();
     assert.match(await page.getByTestId('desktop-recognition-result').innerText(), /Alice · Design team/);
@@ -116,6 +128,7 @@ try {
     await page.getByLabel('桌面应用', { exact: true }).selectOption('custom');
     await detect.click();
     assert.equal(await page.evaluate(() => desktopTest.calls.at(-1).args.request.application), 'custom');
+    assert.equal(await page.evaluate(()=>desktopTest.account.desktop.inputMode),'foreground');
     await page.emulateMedia({ colorScheme: colorScheme === 'light' ? 'dark' : 'light' });
     await page.emulateMedia({ colorScheme });
     await page.reload();
@@ -124,6 +137,6 @@ try {
   }
   assert.deepEqual(errors, []);
   await writeFile(resolve(output, 'ui-report.json'), JSON.stringify({ passed: true, appearanceCases: 4, viewport: 720,
-    cases: ['default DingTalk', 'capture without OCR', 'six pointer regions', 'button center', 'live preview invalidation', 'zoom coordinates', 'upload and crop', 'active lock and pause', 'custom applications', 'appearance switch/reload'], realMessagesSent: 0 }, null, 2));
+    cases: ['default background DingTalk', 'fractional form submit', 'save/remount/reload screenshot and six regions', 'capture without OCR', 'six pointer regions', 'button center', 'live preview invalidation', 'zoom coordinates', 'upload and crop', 'active lock and pause', 'custom applications', 'appearance switch/reload'], realMessagesSent: 0 }, null, 2));
   console.log('Desktop calibration UI passed in light/dark with Armor off/on.');
 } finally { await browser?.close(); await server.close(); }
