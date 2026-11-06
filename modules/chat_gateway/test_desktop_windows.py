@@ -8,6 +8,13 @@ from desktop_windows import WindowsDesktop, DesktopUnavailable, DesktopDeferred,
 
 
 class BubbleImageTests(unittest.TestCase):
+    def test_calibrated_tail_on_rounded_avatar_rail_is_not_discarded(self):
+        from PIL import Image, ImageDraw
+        image=Image.new('RGB',(1080,604),'white');draw=ImageDraw.Draw(image)
+        draw.rounded_rectangle((68,524,243,574),radius=22,fill=(244,244,245))
+        draw.polygon([(59,536),(80,536),(80,550)],fill=(244,244,245))
+        self.assertEqual([side for x,y,w,h,side in bubble_regions(image)],['incoming'])
+
     def test_current_client_tail_geometry_keeps_messages_but_excludes_avatars(self):
         from PIL import Image, ImageDraw
         image=Image.new('RGB',(1105,599),'white');draw=ImageDraw.Draw(image)

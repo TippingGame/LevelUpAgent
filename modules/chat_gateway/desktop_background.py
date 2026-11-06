@@ -38,23 +38,33 @@ class BackgroundDesktop(WindowsDesktop):
             raise DesktopUnavailable('后台聊天窗口身份核对失败')
         return target
 
-    def guard(self, hwnd, rect, input_stamp=None):
+    def observe_guard(self, hwnd, rect):
         if self.stopped() or not self.unlocked():
             raise DesktopUnavailable('桌面已锁定或宿主已停止')
         if not self.user.IsWindow(hwnd) or self.user.IsIconic(hwnd) or self.rect(hwnd) != rect:
             raise DesktopUnavailable('钉钉窗口关闭、最小化或布局变化')
+
+    def guard(self, hwnd, rect, input_stamp=None):
+        self.observe_guard(hwnd, rect)
         foreground = self.user.GetForegroundWindow()
-        if foreground == hwnd or (foreground and self.user.GetAncestor(foreground, 2) == hwnd):
-            raise DesktopDeferred('正在使用钉钉，等待切换到其他应用；不影响其他应用的键鼠操作')
+        if (foreground == hwnd or (foreground and self.user.GetAncestor(foreground, 2) == hwnd)) and self.idle() < 5:
+            raise DesktopDeferred('钉钉后台模式：最近 5 秒正在操作钉钉，暂缓点击和发送；切换到其他应用可继续')
 
     def message(self, hwnd, target, rect, code, wparam, lparam):
         self.guard(hwnd, rect)
         # Text is restricted to DingTalk's chat renderer. Pointer navigation may
         # target its outer message rail, which is outside DingChatWnd.
-        if code == 0x0102 and self.native_target(hwnd) != target:
-            raise DesktopUnavailable('后台聊天窗口已变化')
-        if code != 0x0102:
-            self.verify_pointer_target(hwnd, target)
+        if code == 0x0102:
+            native = self.native_target(hwnd)
+            if target != native and not self.user.IsChild(native, target):
+                raise DesktopUnavailable('后台文字目标不属于聊天窗口')
+            if getattr(self, 'config', {}).get('version') == 2:
+                area = self.config['layout']['editor']
+                point = wintypes.POINT(rect[0] + int((area[0]+area[2])/2*rect[2]),
+                                      rect[1] + int((area[1]+area[3])/2*rect[3]))
+                if self.pointer_target(hwnd, point) != target:
+                    raise DesktopUnavailable('后台输入栏窗口已变化，停止写入')
+        self.verify_pointer_target(hwnd, target)
         result = ctypes.c_size_t()
         # ABORTIFHUNG | ERRORONEXIT; timeout means uncertain mutation, no retry.
         if not self.user.SendMessageTimeoutW(target, code, wparam, lparam, 0x22, 1500, ctypes.byref(result)):
@@ -72,10 +82,11 @@ class BackgroundDesktop(WindowsDesktop):
     def pointer_target(self, hwnd, point):
         target = self.native_target(hwnd)
         tx, ty, tw, th = self.rect(target)
-        if tx <= point.x < tx + tw and ty <= point.y < ty + th:
-            return target
-        # Walk child windows without consulting the foreground or occluding apps.
-        target = hwnd
+        if not (tx <= point.x < tx + tw and ty <= point.y < ty + th):
+            target = hwnd
+        # Modern clients have native list/editor children under DingChatWnd.
+        # Address the actual child at the calibrated point instead of stopping
+        # at its outer container. This never uses global cursor hit-testing.
         for _ in range(20):
             local = wintypes.POINT(point.x, point.y)
             if not self.user.ScreenToClient(target, ctypes.byref(local)):
@@ -106,15 +117,16 @@ class BackgroundDesktop(WindowsDesktop):
 
     def select_chat(self, hwnd, layout, title):
         rect = self.rect(hwnd)
-        self.guard(hwnd, rect)
+        self.observe_guard(hwnd, rect)
         image = self.capture(hwnd)
         if self.title(image, layout, title):
             return image
         time.sleep(.15)
-        self.guard(hwnd, rect)
+        self.observe_guard(hwnd, rect)
         image = self.capture(hwnd)
         if self.title(image, layout, title):
             return image
+        self.guard(hwnd, rect)
         if not self.verify_draft(hwnd, layout, ''):
             raise DesktopDeferred('无法确认当前输入框为空；请检查草稿，若为空请暂停连接并重新校准输入区')
         matches = self.sidebar_matches(image, layout, title)
@@ -149,11 +161,18 @@ class BackgroundDesktop(WindowsDesktop):
                 bounds = control.BoundingRectangle
                 x = ((bounds.left + bounds.right)/2 - rect[0])/rect[2]
                 y = ((bounds.top + bounds.bottom)/2 - rect[1])/rect[3]
-        # Local mouse messages focus the internal edit without changing global focus.
+        # Use local window messages; the client may activate itself in response.
         self.click(hwnd, x, y)
         if not self.verify_draft(hwnd, layout, ''):
             raise DesktopUnavailable('写入前出现草稿，未覆盖')
-        target = self.native_target(hwnd)
+        # Newer clients host the editor in a native child of DingChatWnd.
+        # Sending WM_CHAR to the container succeeds at Win32 level but the
+        # editor receives nothing. Resolve the same calibrated input point.
+        point = wintypes.POINT(rect[0] + int(x * rect[2]), rect[1] + int(y * rect[3]))
+        target = self.pointer_target(hwnd, point)
+        native = self.native_target(hwnd)
+        if target != native and not self.user.IsChild(native, target):
+            raise DesktopUnavailable('输入栏未定位到聊天子窗口，未写入')
         units = text.encode('utf-16-le')
         for offset in range(0, len(units), 2):
             self.message(hwnd, target, rect, 0x0102, int.from_bytes(units[offset:offset+2], 'little'), 1)

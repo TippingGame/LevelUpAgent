@@ -28,7 +28,7 @@ window.__TAURI_INTERNALS__={invoke:async(command,args)=>{
   if(command==='chat_desktop_probe') {
     if(desktopTest.fail) throw new Error('Synthetic failure');
     const result={windows:desktopTest.windows,diagnostics:[]};
-    if(args.request.windowTitle) return {...result,image:desktopTest.image,width:1000,height:800,titleLines:[{text:'Alice · Design team'}],messages:[{text:'A readable incoming message',direction:'incoming'}],unread:{notification:true,rows:1},editor:{readable:true,draftEmpty:true,detail:'当前草稿为空'}};
+    if(args.request.windowTitle) return {...result,image:desktopTest.image,width:1000,height:800,titleLines:[{text:'Alice · Design team'}],sidebarLines:[{text:'Alice · Design team'},{text:'Bob'}],navigation:{box:args.request.layout?.notification??null,unread:true,detail:'已定位单个消息入口；忽略 DING、审批等其他入口红点'},messages:[{text:'A readable incoming message',direction:'incoming'}],unread:{notification:true,rows:1},editor:{readable:true,draftEmpty:true,detail:'当前草稿为空'}};
     return result;
   }
   throw new Error('Unexpected IPC: '+command);
@@ -61,6 +61,11 @@ try {
     const capture = page.getByRole('button', { name: '自动截图', exact: true });
     const preview = page.getByRole('button', { name: '检查实时识别（不发送）', exact: true });
     assert.equal(await page.getByLabel('桌面应用', { exact: true }).inputValue(), 'dingtalk');
+    assert.equal(await page.getByTestId('desktop-input-mode').isVisible(), true, 'Mode must be visible without expanding settings');
+    assert.equal(await page.getByTestId('desktop-input-mode').inputValue(), 'background');
+    await page.getByTestId('desktop-input-mode').selectOption('foreground');
+    assert.match(await page.getByTestId('desktop-setup').innerText(), /当前是前台兼容模式/);
+    await page.getByTestId('desktop-input-mode').selectOption('background');
     assert.equal(await preview.isDisabled(), true);
     await detect.click(); await capture.click();
     const image = page.getByRole('img', { name: '拖动截图框选区域', exact: true });
@@ -96,6 +101,15 @@ try {
     await preview.click();
     await page.getByTestId('desktop-recognition-result').waitFor();
     assert.match(await page.getByTestId('desktop-recognition-result').innerText(), /Alice · Design team/);
+    assert.match(await page.getByTestId('desktop-recognition-result').innerText(), /忽略 DING/);
+    assert.match(await page.getByTestId('desktop-recognition-result').innerText(), /Bob/);
+    await page.getByRole('button', { name: /✓ · 消息栏/ }).click();
+    await draw([.01,.01,.09,.8]);
+    await page.getByTestId('desktop-entry-warning').waitFor();
+    await page.getByTestId('desktop-entry-warning').scrollIntoViewIfNeeded();
+    await page.screenshot({ path: resolve(output, colorScheme+'-armor-'+armor+'-entry-warning.png'), fullPage:true });
+    await draw([.01,.01,.09,.1]);
+    assert.equal(await page.getByTestId('desktop-entry-warning').count(),0);
     await page.getByRole('button', { name: /✓ · 标题栏/ }).click();
     await draw([.36, .005, .95, .09]);
     assert.equal(await page.getByTestId('desktop-recognition-result').count(), 0, 'Changed regions invalidate OCR');

@@ -110,7 +110,7 @@ def bubble_regions(image, *, include_actions=False):
     candidates = []
     # Current clients place the bubble tail about 70 px into a 1105 px viewport;
     # the old 80 px rail discarded every incoming message on that layout.
-    rail = max(30, min(64, width * .055))
+    rail = round(max(30, min(64, width * .055)))
     for x, y, w, h, count in stats[1:]:
         x, y, w, h, count = map(int, (x, y, w, h, count))
         if w < 22 or h < 24 or count / (w*h) < .78 or h > height * .90:
@@ -568,7 +568,8 @@ class WindowsDesktop:
 
     def sidebar_matches(self, image, layout, expected):
         """Names may include arbitrary application status labels and suffixes."""
-        return [row for row in self.read(self.crop(image, layout['sidebar']))
+        from desktop_calibration import conversation_title_rows
+        return [row for row in conversation_title_rows(self.read(self.crop(image, layout['sidebar'])), [dict(chatId=expected)])
                 if row['confidence'] >= .80 and title_matches(row['text'], expected)]
 
     def messages(self, image, layout):
@@ -648,7 +649,7 @@ class WindowsDesktop:
         if self.stopped() or not self.unlocked():
             raise DesktopUnavailable('桌面锁定或宿主已停止，未激活窗口')
         if self.idle() < 5 and self.last_input() != self.auto_input:
-            raise DesktopDeferred('正在人工操作桌面，等待空闲')
+            raise DesktopDeferred('前台兼容模式：等待键鼠空闲 5 秒后点击或发送；钉钉可在执行方式中改为后台模式')
         if not self.is_foreground(hwnd):
             self.user.SetForegroundWindow(hwnd)
             time.sleep(.2)
@@ -702,7 +703,7 @@ class WindowsDesktop:
         if self.title(image, layout, title):
             return image
         if self.idle() < 5 and self.last_input() != self.auto_input:
-            raise DesktopUnavailable('正在人工操作桌面，等待空闲')
+            raise DesktopDeferred('前台兼容模式：等待键鼠空闲 5 秒后切换会话；钉钉可在执行方式中改为后台模式')
         matches = self.sidebar_matches(image, layout, title)
         if len(matches) != 1:
             raise DesktopUnavailable('列表中未找到唯一包含该名称的会话；请使用更完整的名称，或调整会话栏框选')
@@ -976,7 +977,7 @@ class WindowsDesktop:
         if not text.strip() or len(text) > 4000:
             raise DesktopUnavailable('桌面回复限 1–4000 字符')
         if self.idle() < 5 and self.last_input() != self.auto_input:
-            raise DesktopDeferred('正在人工操作桌面，等待空闲')
+            raise DesktopDeferred('前台兼容模式：等待键鼠空闲 5 秒后发送；钉钉可在执行方式中改为后台模式')
         hwnd = self.find(config['windowTitle'])
         layout = config['layout']
         self.foreground(hwnd)
@@ -1010,7 +1011,7 @@ class WindowsDesktop:
                 return 'sent'
         return 'delivery_unknown'
 
-    def click_region(self, hwnd, layout, box, require_empty=True):
+    def click_region(self, hwnd, layout, box, require_empty=True, before_click=None):
         """User-calibrated navigation, under the same idle/draft guards as send."""
         rect = self.rect(hwnd)
         self.guard(hwnd, rect)
@@ -1018,8 +1019,10 @@ class WindowsDesktop:
             raise DesktopDeferred('当前输入栏有草稿或无法确认空白，暂不切换会话')
         if getattr(self, 'config', {}).get('inputMode', 'foreground') == 'foreground':
             if self.idle() < 5 and self.last_input() != self.auto_input:
-                raise DesktopDeferred('正在人工操作桌面，等待空闲')
+                raise DesktopDeferred('前台兼容模式：等待键鼠空闲 5 秒后点击；钉钉可在执行方式中改为后台模式')
             self.foreground(hwnd)
+        if before_click:
+            before_click()
         self.click(hwnd, (box[0]+box[2])/2, (box[1]+box[3])/2)
         time.sleep(.3)
         self.guard(hwnd, rect)
@@ -1091,8 +1094,10 @@ class WindowsDesktop:
         shot = dict(image='data:image/png;base64,' + base64.b64encode(stream.getvalue()).decode(), width=image.width, height=image.height)
         if capture_only:
             return shot
-        from desktop_calibration import red_badges
+        from desktop_calibration import red_badges, notification_entry, conversation_title_rows
+        entry = notification_entry(image, layout, self.read, self.config.get('application', 'dingtalk')) if layout.get('notification') else None
         return dict(**shot, layout=layout,
-                    unread=dict(notification=bool(red_badges(self.crop(image, layout['notification']))) if layout.get('notification') else False, rows=len(red_badges(self.crop(image, layout['sidebar'])))),
+                    unread=dict(notification=entry['unread'] if entry else False, rows=len(red_badges(self.crop(image, layout['sidebar'])))),
+                    navigation=entry, sidebarLines=conversation_title_rows(self.read(self.crop(image, layout['sidebar']))),
                     titleLines=self.read(self.crop(image, layout['title'])), messages=[b.__dict__ for b in self.messages(image, layout)],
                     editor=self.inspect_editor(hwnd, layout))

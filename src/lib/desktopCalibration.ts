@@ -13,3 +13,11 @@ export function setCalibrationBox(config: DesktopConfig, region: CalibrationRegi
 export function calibrationComplete(config: DesktopConfig) {
   return config.version === 2 && calibrationRegions.every(key => validDesktopBox(config.layout[key])) && !!config.referenceSize?.every(v => Number.isFinite(v) && v > 0);
 }
+
+export function broadNotificationRegion(config: DesktopConfig) {
+  const box = config.layout.notification;
+  if (!validDesktopBox(box) || !config.referenceSize) return false;
+  const [width, height] = config.referenceSize;
+  return (box[3] - box[1]) * height > Math.max(48, height * .16)
+    || (box[2] - box[0]) * width > Math.max(200, width * .3);
+}

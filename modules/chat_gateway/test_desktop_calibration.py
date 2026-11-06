@@ -7,10 +7,10 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 from PIL import Image, ImageDraw
-from desktop_calibration import red_badges, conversation_candidates
+from desktop_calibration import red_badges, conversation_candidates, conversation_title_rows, notification_entry
 from desktop_core import Bubble, MessageTracker, matching_route, validate_config
 from desktop_gateway import DesktopSession, Store
-from desktop_windows import WindowsDesktop, DesktopUnavailable
+from desktop_windows import WindowsDesktop, DesktopUnavailable, DesktopDeferred
 
 
 def config():
@@ -70,6 +70,55 @@ class CalibrationRulesTests(unittest.TestCase):
         self.assertEqual(conversation_candidates([row('Alice'), row('Alice', 110)], [badge], routes), [])
         self.assertEqual(conversation_candidates([row('Unknown')], [badge], routes), [])
 
+    def test_preview_mention_does_not_hide_another_unique_heading(self):
+        lines = [row('Alice', 20), row('Hello', 48), row('Bob', 110), row('Alice said hello', 138)]
+        routes = [dict(chatId='Alice'), dict(chatId='Bob')]
+        badge = dict(x=30, y=10, w=16, h=16)
+        self.assertEqual(conversation_candidates(lines, [badge], routes), [(routes[0], lines[0])])
+        # Never collapse two genuine close, same-name headings.
+        self.assertEqual(conversation_candidates([row('Alice', 20), row('Alice', 48)], [badge], routes), [])
+        # A registered heading below another person's heading is not a preview.
+        self.assertEqual(conversation_candidates([row('Alice', 20), row('Bob', 110), row('Alice', 138)], [badge], routes), [])
+
+    def test_whole_navigation_rail_never_clicks_oa_or_ding_badge(self):
+        image = Image.new('RGB', (1000, 800), 'white')
+        layout = dict(config()['layout'], notification=[0, 0, .1, .8])
+        ImageDraw.Draw(image).ellipse((72, 110, 86, 124), fill=(255, 60, 30))
+        lines = [row('Messages', 30), row('DING', 110), row('OA Approval', 300)]
+        entry = notification_entry(image, layout, lambda _: lines, 'dingtalk')
+        self.assertFalse(entry['unread'])
+        self.assertLess(entry['box'][3], .1)
+        unresolved = notification_entry(image, layout, lambda _: lines[1:], 'dingtalk')
+        self.assertIsNone(unresolved['box'])
+        self.assertFalse(unresolved['unread'])
+        self.assertIn('范围过大', unresolved['detail'])
+
+    def test_resolved_messages_and_generic_compact_entry(self):
+        image = Image.new('RGB', (1000, 800), 'white')
+        ImageDraw.Draw(image).ellipse((72, 32, 86, 46), fill=(255, 60, 30))
+        layout = dict(config()['layout'], notification=[0, 0, .1, .8])
+        entry = notification_entry(image, layout, lambda _: [row('Messages', 30), row('DING', 110)], 'dingtalk')
+        self.assertTrue(entry['unread'])
+        self.assertLess(entry['box'][3], .1)
+        compact = notification_entry(image, config()['layout'], lambda _: [], 'custom')
+        self.assertTrue(compact['unread'])
+        self.assertEqual(compact['box'], config()['layout']['notification'])
+
+    def test_badge_column_inside_sidebar_is_observed_not_clicked(self):
+        layout = dict(config()['layout'], notification=[.1, .1, .15, .8])
+        entry = notification_entry(Image.new('RGB', (1000, 800), 'white'), layout, lambda _: [], 'custom')
+        self.assertIsNone(entry['box'])
+
+    def test_title_ignores_preview_mentions_but_keeps_real_duplicate_guard(self):
+        driver = WindowsDesktop.__new__(WindowsDesktop)
+        driver.config = config(); driver.routes = [dict(chatId='Alice')]
+        image = Image.new('RGB', (1000, 800), 'white')
+        sidebar = [row('Alice', 20), row('Hello', 48), row('Bob', 110), row('Alice said hello', 138)]
+        driver.read = lambda crop: sidebar if crop.width == 250 else [row('Alice · team')]
+        self.assertTrue(driver.title(image, config()['layout'], 'Alice'))
+        sidebar[2] = row('Alice', 110)
+        self.assertFalse(driver.title(image, config()['layout'], 'Alice'))
+
     def test_unread_first_view_latest_only_then_restart_deduplicates(self):
         tracker = MessageTracker()
         old, latest = Bubble('old', 'incoming'), Bubble('latest', 'incoming')
@@ -78,6 +127,18 @@ class CalibrationRulesTests(unittest.TestCase):
         resumed = MessageTracker(copy.deepcopy(tracker.state))
         self.assertEqual(resumed.observe([old, latest], 'alice', unread=True), [])
         self.assertEqual(resumed.observe([Bubble('reply', 'outgoing')], 'alice', unread=True), [])
+
+    def test_badge_over_dark_avatar_and_smaller_numeric_preview(self):
+        image = Image.new('RGB', (300, 180), 'white'); draw = ImageDraw.Draw(image)
+        draw.rectangle((20, 30, 70, 85), fill=(35, 30, 25))
+        draw.ellipse((55, 20, 75, 40), fill=(255, 65, 30))
+        draw.text((61, 22), '1', fill='white')
+        badges = red_badges(image)
+        self.assertEqual(len(badges), 1)
+        title = dict(row('222 · team', 26), x=80, h=21)
+        preview = dict(row('2222222222 hello', 56), x=80, h=15)
+        route = dict(chatId='222')
+        self.assertEqual(conversation_candidates([title, preview], badges, [route]), [(route, title)])
 
     def test_unread_after_lost_overlap_does_not_bulk_replay(self):
         tracker = MessageTracker(); tracker.observe([Bubble('a', 'incoming')], 'x')
@@ -103,7 +164,8 @@ class UnreadDriver:
     def title(self, image, layout, name):
         match = matching_route(self.current, self.routes)
         return bool(match and match['chatId'] == name)
-    def click_region(self, hwnd, layout, box, **_):
+    def click_region(self, hwnd, layout, box, before_click=None, **_):
+        if before_click: before_click()
         self.clicks.append(box); self.current = 'Alice · department'; self.unread = False
         return self.capture(hwnd)
     def select_chat(self, hwnd, layout, name):
@@ -113,6 +175,157 @@ class UnreadDriver:
 
 
 class UnreadSessionTests(unittest.TestCase):
+    def session(self, directory, driver, cfg=None):
+        session = DesktopSession(cfg or config(), Store(Path(directory)/'state.json'), driver)
+        session.set_routes([dict(chatId='Alice', chatType='direct')])
+        return session
+
+    def test_broad_nav_badge_does_not_click_menu_center(self):
+        with tempfile.TemporaryDirectory() as directory:
+            driver = UnreadDriver(); driver.unread = False
+            cfg = config(); cfg['layout']['notification'] = [0, 0, .09, .8]
+            image = driver.capture(1)
+            ImageDraw.Draw(image).ellipse((60, 110, 76, 126), fill=(255, 60, 30))
+            driver.capture = lambda _: image
+            session = self.session(directory, driver, cfg)
+            status = session.poll_unread(); session.poll_unread()
+            self.assertEqual(driver.clicks, [])
+            self.assertIn('范围过大', status[1])
+
+    def test_current_bound_chat_is_read_even_when_nav_region_is_invalid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            driver = UnreadDriver(); driver.unread = False; driver.current = 'Alice'
+            cfg = config(); cfg['layout']['notification'] = [0, 0, .09, .8]
+            session = self.session(directory, driver, cfg)
+            session.poll_unread(); session.poll_unread()
+            driver.bubbles.append(Bubble('new live message', 'incoming'))
+            session.poll_unread(); session.poll_unread()
+            self.assertEqual(driver.clicks, [])
+            self.assertEqual([m['text'] for m in session.store.data['pending']], ['new live message'])
+
+    def test_outgoing_only_loading_frames_keep_unread_for_incoming_tail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            driver=UnreadDriver();driver.bubbles=[Bubble('earlier outgoing','outgoing')]
+            session=self.session(directory,driver)
+            session.poll_unread();session.poll_unread()
+            self.assertIn('direct:Alice',session.unread_pending)
+            driver.bubbles.append(Bubble('new incoming','incoming'))
+            session.poll_unread();session.poll_unread()
+            self.assertEqual([m['text'] for m in session.store.data['pending']],['new incoming'])
+
+    def test_failed_entry_click_is_not_repeated_and_reports_reason(self):
+        with tempfile.TemporaryDirectory() as directory:
+            driver = UnreadDriver(); driver.unread = False
+            image = driver.capture(1)
+            ImageDraw.Draw(image).ellipse((60, 30, 76, 46), fill=(255, 60, 30))
+            driver.capture = lambda _: image
+            driver.read = lambda _: [row('Unknown')]
+            def click(h,l,b,before_click=None,**kw):
+                if before_click: before_click()
+                driver.clicks.append(b)
+                return image
+            driver.click_region = click
+            session = self.session(directory, driver)
+            with patch('desktop_gateway.time.monotonic', side_effect=[100,100,100,200,200,200,300,300,300]):
+                session.poll_unread(); status = session.poll_unread(); session.poll_unread()
+            self.assertEqual(len(driver.clicks), 1)
+            self.assertIn('停止重复点击', status[1])
+
+    def test_visible_registered_list_never_triggers_entry_click(self):
+        with tempfile.TemporaryDirectory() as directory:
+            driver = UnreadDriver(); driver.unread = False
+            image = driver.capture(1)
+            ImageDraw.Draw(image).ellipse((60, 30, 76, 46), fill=(255, 60, 30))
+            driver.capture = lambda _: image
+            session = self.session(directory, driver)
+            status = session.poll_unread()
+            self.assertEqual(driver.clicks, [])
+            self.assertIn('未检测到未读红点', status[1])
+
+    def entry_driver(self):
+        driver = UnreadDriver(); driver.unread = False
+        image = driver.capture(1)
+        ImageDraw.Draw(image).ellipse((60, 30, 76, 46), fill=(255, 60, 30))
+        driver.capture = lambda _: image
+        driver.read = lambda _: [row('Unknown')]
+        return driver, image
+
+    def test_entry_then_conversation_click_reads_latest_unread_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            driver, entry_image = self.entry_driver()
+            driver.phase = 'menu'
+            sidebar_image = Image.new('RGB', (1000, 800), 'white')
+            ImageDraw.Draw(sidebar_image).ellipse((130, 90, 146, 106), fill=(255, 60, 30))
+            clean = Image.new('RGB', (1000, 800), 'white')
+            driver.capture = lambda _: entry_image if driver.phase == 'menu' else sidebar_image if driver.phase == 'list' else clean
+            def read(crop):
+                if crop.width == 250: return [row('Unknown' if driver.phase == 'menu' else 'Alice · team')]
+                return [row(driver.current)]
+            driver.read = read
+            def click(h,l,b,before_click=None,**kw):
+                if before_click: before_click()
+                driver.clicks.append(b)
+                if driver.phase == 'menu': driver.phase = 'list'
+                else: driver.phase = 'chat'; driver.current = 'Alice · team'
+                return driver.capture(h)
+            driver.click_region = click
+            session = self.session(directory, driver)
+            session.poll_unread(); session.poll_unread(); session.poll_unread()
+            self.assertEqual(len(driver.clicks), 2)
+            self.assertEqual(driver.clicks[0], config()['layout']['notification'])
+            self.assertGreater(driver.clicks[1][0], .1)
+            self.assertEqual([m['text'] for m in session.store.data['pending']], ['question'])
+
+    def test_entry_timeout_and_flickering_badge_do_not_repeat_navigation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            driver, image = self.entry_driver()
+            def click(h,l,b,before_click=None,**kw):
+                if before_click: before_click()
+                driver.clicks.append(b)
+                raise DesktopUnavailable('simulated post-click capture failure')
+            driver.click_region = click
+            session = self.session(directory, driver)
+            with self.assertRaises(DesktopUnavailable): session.poll_unread()
+            driver.capture = lambda _: Image.new('RGB', (1000, 800), 'white')
+            self.assertIn('停止重复点击', session.poll_unread()[1])
+            driver.capture = lambda _: image
+            self.assertIn('停止重复点击', session.poll_unread()[1])
+            self.assertEqual(len(driver.clicks), 1)
+
+    def test_human_idle_deferral_does_not_consume_entry_attempt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            driver, image = self.entry_driver()
+            driver.click_region = lambda *a,**kw: (_ for _ in ()).throw(DesktopDeferred('busy'))
+            session = self.session(directory, driver)
+            with self.assertRaises(DesktopDeferred): session.poll_unread()
+            self.assertIsNone(session.navigation_attempted)
+            def click(h,l,b,before_click=None,**kw):
+                if before_click: before_click()
+                driver.clicks.append(b)
+                return image
+            driver.click_region = click
+            session.poll_unread()
+            self.assertEqual(len(driver.clicks), 1)
+
+    def test_failed_conversation_click_cools_down_without_consuming_unread(self):
+        with tempfile.TemporaryDirectory() as directory:
+            driver = UnreadDriver()
+            def click(h,l,b,before_click=None,**kw):
+                if before_click: before_click()
+                driver.clicks.append(b)
+                return driver.capture(h)
+            driver.click_region = click
+            session = self.session(directory, driver)
+            with patch('desktop_gateway.time.monotonic', return_value=100):
+                with self.assertRaisesRegex(DesktopUnavailable, '冷却 15 秒'): session.poll_unread()
+                session.poll_unread()
+            self.assertEqual(len(driver.clicks), 1)
+            self.assertTrue(driver.unread)
+            self.assertEqual(session.store.data['pending'], [])
+            with patch('desktop_gateway.time.monotonic', return_value=116):
+                with self.assertRaises(DesktopUnavailable): session.poll_unread()
+            self.assertEqual(len(driver.clicks), 2)
+
     def test_restart_after_badge_consumed_preserves_pending_read(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)/'state.json'; driver = UnreadDriver()
@@ -165,6 +378,24 @@ class UnreadSessionTests(unittest.TestCase):
 
 
 class CalibratedInputTests(unittest.TestCase):
+    def test_navigation_intent_is_after_guard_and_before_uncertain_click(self):
+        driver = WindowsDesktop.__new__(WindowsDesktop)
+        driver.config = dict(config(), inputMode='background')
+        driver.rect = lambda _: (0,0,1000,800)
+        driver.guard = lambda *_: (_ for _ in ()).throw(DesktopDeferred('busy'))
+        intent = []
+        with self.assertRaises(DesktopDeferred):
+            driver.click_region(1, config()['layout'], [.01,.01,.1,.1], require_empty=False, before_click=lambda: intent.append(True))
+        self.assertEqual(intent, [])
+        driver.guard = lambda *_: None
+        def click(*_):
+            self.assertEqual(intent, [True])
+            raise DesktopUnavailable('uncertain pointer result')
+        driver.click = click
+        with self.assertRaises(DesktopUnavailable):
+            driver.click_region(1, config()['layout'], [.01,.01,.1,.1], require_empty=False, before_click=lambda: intent.append(True))
+        self.assertEqual(intent, [True])
+
     def driver(self, *, draft='', wrong_focus=False, lose_focus=False):
         driver = WindowsDesktop.__new__(WindowsDesktop)
         driver.config = config(); driver.foreground = lambda _: None

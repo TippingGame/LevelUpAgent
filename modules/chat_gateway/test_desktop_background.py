@@ -18,7 +18,8 @@ class BackgroundTests(unittest.TestCase):
         d.rect = lambda _: (0,0,1000,800)
         d.resolve_layout = lambda hwnd, layout: layout
         d.user = SimpleNamespace(IsWindow=lambda _:True, IsIconic=lambda _:False,
-            GetForegroundWindow=lambda:99, GetAncestor=lambda *_:99)
+            GetForegroundWindow=lambda:99, GetAncestor=lambda *_:99, IsChild=lambda *_:True)
+        d.pointer_target=lambda *_:2
         d.last_input = lambda: self.fail('must not consult global input')
         d.idle = lambda: self.fail('must not wait for global idle')
         return d
@@ -30,7 +31,18 @@ class BackgroundTests(unittest.TestCase):
 
     def test_human_in_dingtalk_defers_without_stealing_focus(self):
         d=self.driver();d.user.GetAncestor=lambda *_:1
+        d.idle=lambda:1
         with self.assertRaises(DesktopDeferred): d.guard(1,d.rect(1))
+
+    def test_idle_foreground_dingtalk_can_continue_background_input(self):
+        d=self.driver();d.user.GetAncestor=lambda *_:1;d.idle=lambda:5
+        d.guard(1,d.rect(1))
+
+    def test_reading_current_chat_does_not_wait_for_human_idle(self):
+        d=self.driver();d.user.GetAncestor=lambda *_:1
+        d.capture=lambda _:'current';d.title=lambda *_:True
+        d.observe_guard(1,d.rect(1))
+        self.assertEqual(d.select_chat(1,DEFAULT_LAYOUT,'Alice'),'current')
 
     def test_lock_shutdown_minimize_and_geometry_fail_closed(self):
         for change in (lambda d:setattr(d,'unlocked',lambda:False),
@@ -81,13 +93,23 @@ class BackgroundTests(unittest.TestCase):
 
     def test_message_rail_outside_chat_uses_own_child_without_global_hit_test(self):
         d=self.driver();d.native_target=lambda _:2
+        d.pointer_target=lambda h,p:BackgroundDesktop.pointer_target(d,h,p)
         d.rect=lambda h: (200,50,800,750) if h==2 else (0,0,1000,800)
         d.user.ScreenToClient=lambda *_:True
-        d.user.ChildWindowFromPointEx=lambda h,p,f:3
+        d.user.ChildWindowFromPointEx=lambda h,p,f:3 if h in (1,3) else h
         checked=[];d.verify_pointer_target=lambda h,t:checked.append(t)
         self.assertEqual(d.pointer_target(1,ctypes.wintypes.POINT(30,90)),3)
         self.assertTrue(checked)
         self.assertEqual(d.pointer_target(1,ctypes.wintypes.POINT(300,600)),2)
+
+    def test_chat_container_resolves_its_native_list_child(self):
+        d=self.driver();d.native_target=lambda _:2
+        d.pointer_target=lambda h,p:BackgroundDesktop.pointer_target(d,h,p)
+        d.user.ScreenToClient=lambda *_:True
+        d.user.ChildWindowFromPointEx=lambda h,p,f:4
+        checked=[];d.verify_pointer_target=lambda h,t:checked.append(t)
+        self.assertEqual(d.pointer_target(1,ctypes.wintypes.POINT(300,300)),4)
+        self.assertEqual(checked,[4,4])
 
     def test_pointer_messages_recheck_window_identity(self):
         d=self.driver();calls=[]
@@ -96,8 +118,35 @@ class BackgroundTests(unittest.TestCase):
         with self.assertRaises(DesktopUnavailable):d.message(1,3,d.rect(1),0x201,1,0)
         self.assertEqual(calls,[])
 
+    def test_text_uses_calibrated_child_and_rejects_changed_target(self):
+        d=self.driver();d.native_target=lambda _:2;calls=[]
+        d.config={'version':2,'layout':DEFAULT_LAYOUT}
+        d.pointer_target=lambda *_:4
+        d.verify_pointer_target=lambda *_:None
+        d.user.SendMessageTimeoutW=lambda *args:calls.append(args) or 1
+        d.message(1,4,d.rect(1),0x102,65,1)
+        self.assertEqual(calls[0][0],4)
+        d.pointer_target=lambda *_:5
+        with self.assertRaisesRegex(DesktopUnavailable,'输入栏窗口已变化'):
+            d.message(1,4,d.rect(1),0x102,66,1)
+        self.assertEqual(len(calls),1)
+        d.user.IsChild=lambda *_:False
+        with self.assertRaisesRegex(DesktopUnavailable,'不属于聊天窗口'):
+            d.message(1,6,d.rect(1),0x102,66,1)
+        self.assertEqual(len(calls),1)
+
+    def test_typing_addresses_editor_child_instead_of_outer_container(self):
+        d=self.driver();d.config={'version':2};d.native_target=lambda _:2
+        d.pointer_target=lambda *_:4
+        d.verify_draft=lambda *_:True;d.click=lambda *_:None;targets=[]
+        d.message=lambda h,target,*args:targets.append(target)
+        with patch.dict(sys.modules,{'uiautomation':SimpleNamespace()}):
+            d.type_reply(1,DEFAULT_LAYOUT,'test')
+        self.assertEqual(targets,[4,4,4,4])
+
     def test_bounded_message_failure_does_not_retry(self):
         d=self.driver();d.native_target=lambda _:2;calls=[]
+        d.verify_pointer_target=lambda *_:None
         d.user.SendMessageTimeoutW=lambda *args:calls.append(args) or 0
         with self.assertRaises(DesktopUnavailable):d.message(1,2,d.rect(1),0x102,65,1)
         self.assertEqual(len(calls),1)

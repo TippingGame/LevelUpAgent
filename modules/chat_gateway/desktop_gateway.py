@@ -53,6 +53,7 @@ class DesktopSession:
         self.active_route = None
         self.next_route = 0
         self.last_navigation = 0
+        self.navigation_attempted = None
         self.unread_attempts = {}
         self.retry_after = {}
 
@@ -95,7 +96,7 @@ class DesktopSession:
             tracker.state['initialized'] = False
         self.started.add(key)
         events = tracker.observe(bubbles, key, unread=key in self.unread_pending)
-        if bubbles:
+        if bubbles and bubbles[-1].direction == 'incoming':
             self.unread_pending.discard(key)
         self.store.data['unread'] = sorted(self.unread_pending)
         for message_id, bubble in events:
@@ -114,24 +115,47 @@ class DesktopSession:
         Retain the unread token across the click that clears the badge and the
         two stable OCR frames. Unknown names never become routes implicitly.
         """
-        from desktop_calibration import red_badges, conversation_candidates
+        from desktop_calibration import red_badges, conversation_candidates, conversation_title_rows, notification_entry
         driver = self.driver
         hwnd = driver.find(self.config['windowTitle'])
         layout = driver.resolve_layout(hwnd, self.config['layout'])
         rect = driver.rect(hwnd)
-        driver.guard(hwnd, rect)
+        getattr(driver, 'observe_guard', driver.guard)(hwnd, rect)
         image = driver.capture(hwnd)
         sidebar = driver.crop(image, layout['sidebar'])
         lines = driver.read(sidebar)
-        candidates = conversation_candidates(lines, red_badges(sidebar), self.route_rules)
+        badges = red_badges(sidebar)
+        candidates = conversation_candidates(lines, badges, self.route_rules)
         candidates = [item for item in candidates if time.monotonic() >= self.retry_after.get(self.key(item[0]), 0)]
-        notification = bool(red_badges(driver.crop(image, layout['notification'])))
-        if notification and not candidates and time.monotonic() - self.last_navigation > 10:
-            # The unread entry can reveal the conversation list from another tab.
-            self.last_navigation = time.monotonic()
-            image = driver.click_region(hwnd, layout, layout['notification'], require_empty=False)
+        entry = notification_entry(image, layout, driver.read, self.config.get('application', 'dingtalk'))
+        visible_routes = [matching_route(r['text'], self.route_rules) for r in conversation_title_rows(lines, self.route_rules)]
+        titles = driver.read(driver.crop(image, layout['title']))
+        current = matching_route('\n'.join(r['text'] for r in titles if r['confidence'] >= .8), self.route_rules)
+        if current and not driver.title(image, layout, current['chatId']):
+            current = None
+        # Read visible chats directly. Try an unchanged entry badge once only;
+        # a failed navigation must not turn into repeated blind menu clicks.
+        # Key retries to calibration, not jittering OCR coordinates or badges.
+        signature = tuple(layout['notification']) if entry['box'] and entry['unread'] else None
+        if any(visible_routes) or current or candidates:
+            self.navigation_attempted = None
+        navigation_waiting = self.navigation_attempted is not None
+        navigated = False
+        if (signature and not candidates and not any(visible_routes) and not current
+                and not (self.active_route and self.key(self.active_route) in self.unread_pending)):
+            if signature == self.navigation_attempted:
+                navigation_waiting = True
+            elif time.monotonic() - self.last_navigation > 10:
+                def navigation_intent():
+                    self.navigation_attempted = signature
+                    self.last_navigation = time.monotonic()
+                image = driver.click_region(hwnd, layout, entry['box'], require_empty=False, before_click=navigation_intent)
+                navigation_waiting = True
+                navigated = True
+        if navigated:
             sidebar = driver.crop(image, layout['sidebar'])
-            candidates = conversation_candidates(driver.read(sidebar), red_badges(sidebar), self.route_rules)
+            lines, badges = driver.read(sidebar), red_badges(sidebar)
+            candidates = conversation_candidates(lines, badges, self.route_rules)
             candidates = [item for item in candidates if time.monotonic() >= self.retry_after.get(self.key(item[0]), 0)]
         route = self.active_route
         if route and self.key(route) in self.unread_pending:
@@ -144,21 +168,37 @@ class DesktopSession:
                 area = layout['sidebar']
                 box = [area[0]+row['x']/image.width, area[1]+row['y']/image.height,
                        area[0]+(row['x']+row['w'])/image.width, area[1]+(row['y']+row['h'])/image.height]
-                image = driver.click_region(hwnd, layout, box)
+                def conversation_intent():
+                    # A failed/uncertain navigation should not hammer the same
+                    # row every scan. Other unread conversations can continue.
+                    self.retry_after[self.key(route)] = time.monotonic() + 15
+                image = driver.click_region(hwnd, layout, box, before_click=conversation_intent)
             if not driver.title(image, layout, route['chatId']):
-                raise DesktopUnavailable('未读会话切换后的标题未命中名称，请核对框选区域')
+                raise DesktopUnavailable('未读会话切换后的标题未命中名称，已冷却 15 秒；请核对标题栏、会话栏及执行方式')
+            self.retry_after.pop(self.key(route), None)
             self.unread_pending.add(self.key(route))
             self.active_route = route
             self.store.data['unread'] = sorted(self.unread_pending)
             self.store.save()
         else:
-            titles = driver.read(driver.crop(image, layout['title']))
-            routes = [matching_route(r['text'], self.route_rules) for r in titles if r['confidence'] >= .8]
-            routes = [r for r in routes if r and driver.title(image, layout, r['chatId'])]
-            route = routes[0] if routes else None
+            route = current
+            if navigated:
+                titles = driver.read(driver.crop(image, layout['title']))
+                route = matching_route('\n'.join(r['text'] for r in titles if r['confidence'] >= .8), self.route_rules)
+                if route and not driver.title(image, layout, route['chatId']):
+                    route = None
             self.active_route = route
         if not route:
-            return ('online', '正在观察消息红点；没有可唯一匹配的已绑定未读会话')
+            if navigation_waiting:
+                return ('waiting', '已点击消息入口，但仍未找到已绑定会话；停止重复点击，请检查会话栏框选、绑定名称及后台点击兼容性')
+            if not entry['box']:
+                return ('waiting', entry['detail'])
+            headings = conversation_title_rows(lines, self.route_rules)
+            if not headings:
+                return ('waiting', '会话栏未识别到文字；请检查窗口画面和会话栏框选，实时识别预览可查看结果')
+            if not badges:
+                return ('online', f'会话栏识别到 {len(headings)} 行文字，未检测到未读红点；当前标题未匹配已绑定名称（DING、审批红点不作为聊天未读）')
+            return ('waiting', f'会话栏检测到 {len(badges)} 个红点，但未找到唯一的已绑定名称；请在实时识别预览核对会话名称、绑定规则和暂停状态')
         key = self.key(route)
         if key in self.unread_pending:
             self.unread_attempts[key] = self.unread_attempts.get(key, 0) + 1
@@ -184,7 +224,7 @@ class DesktopSession:
         image = driver.select_chat(hwnd, layout, route['chatId'])
         rect = driver.rect(hwnd)
         bubbles = driver.messages(image, layout)
-        driver.guard(hwnd, rect)
+        getattr(driver, 'observe_guard', driver.guard)(hwnd, rect)
         if not driver.title(driver.capture(hwnd), layout, route['chatId']):
             raise DesktopUnavailable('读取期间聊天标题变化，稍后重试')
         self.observe(route, bubbles)
