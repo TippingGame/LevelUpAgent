@@ -23,10 +23,23 @@
 - 聊天网关 Python 162 项通过；3D 资源 21 项（3 项跳过）、音频 9 项（2 项跳过）通过。
 - 720px 下浅色／深色与 Armor 开／关四种校准界面交互通过，覆盖执行模式、入口警告、识别结果和截图恢复。
 - 独立原生 Tauri QA 构建通过，验证六个区域和截图保存、重新编辑、关闭重启恢复，以及已有断开账号复用；未连接正式聊天账号。
-- 本地发布证据保存在 `artifacts/release-1.5.94/`；正式构建、签名和公开下载验证完成后补记。
+- 本地发布证据保存在 `artifacts/release-1.5.94/`。
 
 ## 平台签名
 
 Windows 自动更新使用 Tauri updater 签名，不是 Authenticode。macOS 包为 ad-hoc 签名，未做 Apple 公证；Linux 包未做发行版签名。
 
 发布页：https://github.com/TippingGame/LevelUpAgent/releases/tag/v1.5.94
+
+## 正式发布记录
+
+- 2026-11-06 21:22:00（Asia/Shanghai）正式发布并设为 Latest；tag `v1.5.94` 指向 `0e019b56422e607dea8704dd08ea951e3323f407`。
+- 三平台 CI `42220801973` 全部通过；四平台 Release `42220807051` 全部成功。Apple Silicon 首次已完成构建与签名，但上传遇到 GitHub HTTP 500；仅重跑失败作业后上传成功。
+- 10 个发布资产完整下载并通过 GitHub SHA-256 digest 校验。Windows EXE/MSI updater 签名、可信注释签名、版本和清单下载 URL 均验证通过。
+- 公开 `releases/latest/download/latest.json` 匿名返回 HTTP 200，版本为 1.5.94，内容与核验清单一致；全部 10 个资产地址匿名 HEAD 返回 HTTP 200。
+- Windows EXE/MSI 和解包主程序版本一致；79 个内置资源与发布源码一致（文本允许 Windows checkout 的换行差异），包含本次桌面驱动修复。内嵌 updater 公钥与更新地址已核验。
+- 两种 macOS 架构均通过应用签名、DMG 内签名和模拟复制安装签名检查。音频／3D 五份资源清单公开可用，资源 Release 保持 prerelease、不占 Latest。
+- 官方 Windows 安装包、版本 SHA256 清单、总清单和升级说明已同步到本机安装包目录，保留旧版本。
+- 本轮未覆盖本机正式安装，未进行生产环境应用内更新或 macOS/Linux 实体机交互安装。此前授权会话的真实收发与焦点测试范围见上文；本轮发布未再向联系人发送消息。
+
+Windows EXE SHA-256：`0c86a1191f3404e4bb409f1d5f103ef9ad8dd4251f42a4c08d1451438ac9e3c1`。
