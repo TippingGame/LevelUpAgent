@@ -22,6 +22,11 @@ from desktop_windows import DesktopDeferred, DesktopUnavailable
 
 MAX_FRAME = 65536
 PROTOCOL = sys.stdout
+PROTOCOL_LOCK = threading.Lock()
+
+
+class ObservationInterrupted(Exception):
+    """Yield at a read boundary; never overlap observation and delivery input."""
 
 
 class Store:
@@ -56,6 +61,8 @@ class DesktopSession:
         self.navigation_attempted = None
         self.unread_attempts = {}
         self.retry_after = {}
+        self.next_visible_check = 0
+        self.visible_index = 0
 
     def set_routes(self, routes):
         if any(r.get('scope', 'exact') != 'exact' for r in routes):
@@ -110,7 +117,7 @@ class DesktopSession:
         self.store.save()
 
     def poll_unread(self):
-        """Only enter unread registered conversations; observe the open chat too.
+        """Prioritize unread chats, then periodically check visible bound chats.
 
         Retain the unread token across the click that clears the badge and the
         two stable OCR frames. Unknown names never become routes implicitly.
@@ -149,7 +156,7 @@ class DesktopSession:
                 def navigation_intent():
                     self.navigation_attempted = signature
                     self.last_navigation = time.monotonic()
-                image = driver.click_region(hwnd, layout, entry['box'], require_empty=False, before_click=navigation_intent)
+                image = driver.click_region(hwnd, layout, entry['box'], before_click=navigation_intent)
                 navigation_waiting = True
                 navigated = True
         if navigated:
@@ -157,6 +164,14 @@ class DesktopSession:
             lines, badges = driver.read(sidebar), red_badges(sidebar)
             candidates = conversation_candidates(lines, badges, self.route_rules)
             candidates = [item for item in candidates if time.monotonic() >= self.retry_after.get(self.key(item[0]), 0)]
+        unread_candidates = bool(candidates)
+        if not candidates and time.monotonic() >= self.next_visible_check:
+            visible = conversation_candidates(lines, None, self.route_rules)
+            visible = [item for item in visible if time.monotonic() >= self.retry_after.get(self.key(item[0]), 0)]
+            if visible:
+                candidates = [visible[self.visible_index % len(visible)]]
+                self.visible_index += 1
+                self.next_visible_check = time.monotonic() + 15
         route = self.active_route
         if route and self.key(route) in self.unread_pending:
             # Finish reading this chat before consuming another badge.
@@ -172,11 +187,26 @@ class DesktopSession:
                     # A failed/uncertain navigation should not hammer the same
                     # row every scan. Other unread conversations can continue.
                     self.retry_after[self.key(route)] = time.monotonic() + 15
-                image = driver.click_region(hwnd, layout, box, before_click=conversation_intent)
+                    # The click may clear the badge before a queued send
+                    # interrupts the next capture/OCR. Keep that read intent.
+                    if unread_candidates:
+                        self.unread_pending.add(self.key(route))
+                        self.active_route = route
+                        self.store.data['unread'] = sorted(self.unread_pending)
+                        self.store.save()
+                try:
+                    image = driver.click_region(hwnd, layout, box, before_click=conversation_intent)
+                except ObservationInterrupted:
+                    raise
+                except Exception:
+                    self.active_route = None
+                    raise
             if not driver.title(image, layout, route['chatId']):
-                raise DesktopUnavailable('未读会话切换后的标题未命中名称，已冷却 15 秒；请核对标题栏、会话栏及执行方式')
+                self.active_route = None
+                raise DesktopUnavailable('绑定会话切换后的标题未命中名称，已冷却 15 秒；请核对标题栏、会话栏及执行方式')
             self.retry_after.pop(self.key(route), None)
-            self.unread_pending.add(self.key(route))
+            if unread_candidates:
+                self.unread_pending.add(self.key(route))
             self.active_route = route
             self.store.data['unread'] = sorted(self.unread_pending)
             self.store.save()
@@ -197,7 +227,7 @@ class DesktopSession:
             if not headings:
                 return ('waiting', '会话栏未识别到文字；请检查窗口画面和会话栏框选，实时识别预览可查看结果')
             if not badges:
-                return ('online', f'会话栏识别到 {len(headings)} 行文字，未检测到未读红点；当前标题未匹配已绑定名称（DING、审批红点不作为聊天未读）')
+                return ('waiting', f'会话栏识别到 {len(headings)} 行文字，未检测到未读红点；未找到可唯一进入的绑定会话，请检查绑定名称或将目标会话滚动到可见位置')
             return ('waiting', f'会话栏检测到 {len(badges)} 个红点，但未找到唯一的已绑定名称；请在实时识别预览核对会话名称、绑定规则和暂停状态')
         key = self.key(route)
         if key in self.unread_pending:
@@ -283,8 +313,9 @@ def emit(value):
     data = json.dumps(value, ensure_ascii=False, separators=(',', ':')) + '\n'
     if len(data.encode('utf-8')) > MAX_FRAME:
         raise ValueError('Frame too large')
-    PROTOCOL.write(data)
-    PROTOCOL.flush()
+    with PROTOCOL_LOCK:
+        PROTOCOL.write(data)
+        PROTOCOL.flush()
 
 
 def run(config, state_path):
@@ -294,6 +325,12 @@ def run(config, state_path):
     session = DesktopSession(config['account']['desktop'], Store(state_path), desktop_driver(config['account']['desktop']))
     session.set_routes(config.get('routes', []))
     frames, closed = queue.Queue(maxsize=64), threading.Event()
+    send_pending = threading.Event()
+    observing = False
+    def observation_checkpoint():
+        if observing and send_pending.is_set():
+            raise ObservationInterrupted()
+    session.driver.observation_checkpoint = observation_checkpoint
     session.driver.stopped = closed.is_set
     # Initialization cannot send or touch chats. Start the EOF guard before
     # any scanning/delivery, but only after native dependencies finish loading.
@@ -304,7 +341,12 @@ def run(config, state_path):
                 line = sys.stdin.buffer.readline(MAX_FRAME + 1)
                 if not line or len(line) > MAX_FRAME or not line.endswith(b'\n'):
                     break
-                frames.put(json.loads(line), timeout=3)
+                frame = json.loads(line)
+                if frame.get('type') == 'send':
+                    send_pending.set()
+                    emit(dict(type='delivery_progress', id=frame['delivery']['id'],
+                              detail='发送请求已收到；正在结束当前识别步骤，随后进入目标会话'))
+                frames.put(frame, timeout=3)
         finally:
             closed.set()
             # Host crash/exit must stop a blocked OCR/UIA call from later sending.
@@ -338,6 +380,7 @@ def run(config, state_path):
                 session.store.save()
             awaiting = None
         elif frame.get('type') == 'send':
+            send_pending.clear()
             delivery = frame['delivery']
             result = session.deliver(delivery, lambda detail: emit(dict(type='delivery_progress', id=delivery['id'], detail=detail[:300])))
             emit(dict(type='delivery', id=delivery['id'], status=result, detail=session.delivery_detail))
@@ -352,7 +395,7 @@ def run(config, state_path):
             request_id = uuid.uuid4().hex
             emit(dict(type='inbound', requestId=request_id, message=message))
             awaiting = (request_id, message['messageId'], time.monotonic())
-        if not awaiting and time.monotonic() >= next_scan:
+        if not awaiting and frames.empty() and not send_pending.is_set() and time.monotonic() >= next_scan:
             next_scan = time.monotonic() + 1.5
             if not session.routes:
                 status('waiting', '请开启机器人并绑定私聊或群聊标题')
@@ -360,14 +403,19 @@ def run(config, state_path):
             route = session.routes[index % len(session.routes)]
             index += 1
             try:
+                observing = True
                 if session.config['version'] == 2:
                     status(*session.poll_unread())
                 else:
                     bubbles = session.scan(route)
                     status(*session.scan_status(route, bubbles))
+            except ObservationInterrupted:
+                pass
             except Exception as exc:
                 # These diagnostics contain local adapter errors, never credentials.
                 status('waiting', str(exc)[:200])
+            finally:
+                observing = False
 
 
 def main():

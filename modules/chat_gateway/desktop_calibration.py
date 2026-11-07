@@ -103,8 +103,11 @@ def conversation_candidates(lines, badges, routes):
     corner). A candidate also needs a unique name among registered routes.
     """
     lines = conversation_title_rows(lines, routes)
-    candidates = []
-    for badge in badges:
+    # None means a periodic check of visible registered chats, without assuming
+    # they are unread. The caller must establish a normal history baseline.
+    candidates = [(route, row) for row in lines
+                  if (route := matching_route(row['text'], routes))] if badges is None else []
+    for badge in badges or []:
         cy = badge['y'] + badge['h']/2
         rows = [r for r in lines if r.get('confidence', 0) >= .80
                 and -max(8, r['h']*.5) <= r['y']+r['h']/2-cy <= max(18, r['h']*1.35)]

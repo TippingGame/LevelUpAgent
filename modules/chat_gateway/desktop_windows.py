@@ -259,6 +259,9 @@ def mention_action_text(rows, width, footer, padding=12):
 
 
 class WindowsDesktop:
+    def observation_checkpoint(self):
+        """The serial observer may yield to queued sends between native calls."""
+
     def delivery_progress(self, detail):
         """Optional host callback; never includes message text or account data."""
 
@@ -476,6 +479,7 @@ class WindowsDesktop:
         return foreground == hwnd or bool(foreground and self.user.GetAncestor(foreground, 2) == hwnd)
 
     def capture(self, hwnd):
+        self.observation_checkpoint()
         from PIL import Image, ImageGrab
         if not self.unlocked() or not self.user.IsWindow(hwnd) or self.user.IsIconic(hwnd):
             raise DesktopUnavailable('桌面锁定或窗口不可用')
@@ -525,13 +529,16 @@ class WindowsDesktop:
             self.ocr = RapidOCR()
 
     def read(self, image):
+        self.observation_checkpoint()
         self.prepare()
         import numpy as np
         result, _ = self.ocr(np.asarray(image))
+        self.observation_checkpoint()
         return [dict(text=text, confidence=float(confidence), x=min(p[0] for p in box), y=min(p[1] for p in box), w=max(p[0] for p in box)-min(p[0] for p in box), h=max(p[1] for p in box)-min(p[1] for p in box)) for box, text, confidence in (result or [])]
 
     def read_single_line(self, image):
         """Recognize one visible ink band without detector clipping punctuation."""
+        self.observation_checkpoint()
         import cv2
         import numpy as np
         pixels = np.asarray(image.convert('RGB'))
@@ -551,6 +558,7 @@ class WindowsDesktop:
         crop=image.crop((max(0,left-3),max(0,top-3),min(image.width,right+3),min(image.height,bottom+3)))
         self.prepare()
         rows, _ = self.ocr(np.asarray(crop), use_det=False, use_cls=False)
+        self.observation_checkpoint()
         if rows and len(rows)==1 and rows[0][1] >= .97:
             return str(rows[0][0])
         return None
@@ -1020,12 +1028,10 @@ class WindowsDesktop:
                 return 'sent'
         return 'delivery_unknown'
 
-    def click_region(self, hwnd, layout, box, require_empty=True, before_click=None):
-        """User-calibrated navigation, under the same idle/draft guards as send."""
+    def click_region(self, hwnd, layout, box, before_click=None):
+        """Navigate without touching drafts; validate the destination before typing."""
         rect = self.rect(hwnd)
         self.guard(hwnd, rect)
-        if require_empty and not self.verify_draft(hwnd, layout, ''):
-            raise DesktopDeferred('当前输入栏有草稿或无法确认空白，暂不切换会话')
         if getattr(self, 'config', {}).get('inputMode', 'foreground') == 'foreground':
             if self.idle() < 5 and self.last_input() != self.auto_input:
                 raise DesktopDeferred('前台兼容模式：等待键鼠空闲 5 秒后点击；钉钉可在执行方式中改为后台模式')

@@ -272,10 +272,21 @@ class CompatibleModeTests(unittest.TestCase):
         d.user.IsIconic=lambda _:True
         with self.assertRaises(DesktopUnavailable):d.guard(1,rect)
 
-    def test_chat_switch_never_leaves_an_unverified_draft(self):
-        d=self.driver();d.capture=lambda _:'image';d.title=lambda *_:False
-        d.verify_draft=lambda *_:False
-        with self.assertRaises(DesktopDeferred):d.select_chat(1,DEFAULT_LAYOUT,'other')
+    def test_navigation_does_not_inspect_or_change_the_previous_draft(self):
+        for cls in (CompatibleDesktop, BackgroundDesktop):
+            with self.subTest(driver=cls.__name__):
+                d=self.driver();d.__class__=cls
+                state={'current':False,'draft':'保留的草稿'}
+                d.capture=lambda _:SimpleNamespace(width=1000,height=800)
+                d.title=lambda *_:state['current'];d.idle=lambda:60
+                d.verify_draft=lambda *_:self.fail('Navigation must not inspect editor')
+                d.sidebar_matches=lambda *_:[dict(x=20,y=100,w=90,h=20)]
+                d.foreground=lambda _:None
+                d.click=lambda *_:state.update(current=True)
+                with patch('desktop_windows.time.sleep'):
+                    d.select_chat(1,DEFAULT_LAYOUT,'测试会话')
+                self.assertTrue(state['current'])
+                self.assertEqual(state['draft'],'保留的草稿')
 
     def test_send_uses_resolved_layout_and_foreground_guarded_implementation(self):
         d=self.driver();d.find=lambda _:1

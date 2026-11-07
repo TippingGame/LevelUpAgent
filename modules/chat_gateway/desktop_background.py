@@ -133,8 +133,6 @@ class BackgroundDesktop(WindowsDesktop):
         if self.title(image, layout, title):
             return image
         self.guard(hwnd, rect)
-        if not self.verify_draft(hwnd, layout, ''):
-            raise DesktopDeferred('无法确认当前输入框为空；请检查草稿，若为空请暂停连接并重新校准输入区')
         matches = self.sidebar_matches(image, layout, title)
         if len(matches) != 1:
             raise DesktopUnavailable('列表中未找到唯一包含该名称的会话；请使用更完整的名称，或调整会话栏框选')
@@ -243,14 +241,6 @@ class CompatibleDesktop(WindowsDesktop):
             raise DesktopUnavailable('桌面已锁定或宿主已停止')
         if not self.user.IsWindow(hwnd) or self.user.IsIconic(hwnd) or self.rect(hwnd) != rect:
             raise DesktopUnavailable('钉钉窗口关闭、最小化或布局变化')
-
-    def select_chat(self, hwnd, layout, title):
-        image = self.capture(hwnd)
-        if self.title(image, layout, title):
-            return image
-        if not self.verify_draft(hwnd, layout, ''):
-            raise DesktopDeferred('当前聊天输入框未确认空白；请先处理草稿再切换聊天')
-        return super().select_chat(hwnd, layout, title)
 
     def send_reply(self, config, title, text, before_dispatch):
         hwnd = self.find(config['windowTitle'])

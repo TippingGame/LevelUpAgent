@@ -189,8 +189,9 @@ class UnreadSessionTests(unittest.TestCase):
             driver.capture = lambda _: image
             session = self.session(directory, driver, cfg)
             status = session.poll_unread(); session.poll_unread()
-            self.assertEqual(driver.clicks, [])
-            self.assertIn('范围过大', status[1])
+            self.assertEqual(len(driver.clicks), 1)
+            self.assertGreater(driver.clicks[0][0], .1, 'Only the registered sidebar row may be clicked')
+            self.assertEqual(session.store.data['pending'], [], 'No badge means baseline, not unread history')
 
     def test_current_bound_chat_is_read_even_when_nav_region_is_invalid(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -239,8 +240,9 @@ class UnreadSessionTests(unittest.TestCase):
             driver.capture = lambda _: image
             session = self.session(directory, driver)
             status = session.poll_unread()
-            self.assertEqual(driver.clicks, [])
-            self.assertIn('未检测到未读红点', status[1])
+            self.assertEqual(len(driver.clicks), 1)
+            self.assertNotEqual(driver.clicks[0], config()['layout']['notification'])
+            self.assertEqual(driver.current, 'Alice · department')
 
     def entry_driver(self):
         driver = UnreadDriver(); driver.unread = False
@@ -361,11 +363,73 @@ class UnreadSessionTests(unittest.TestCase):
     def test_no_badge_and_unregistered_chat_does_not_navigate(self):
         with tempfile.TemporaryDirectory() as directory:
             driver = UnreadDriver(); driver.unread = False
+            driver.read = lambda _: [row('未绑定会话')]
             session = DesktopSession(config(), Store(Path(directory)/'state.json'), driver)
             session.set_routes([dict(chatId='Alice', chatType='direct')])
             session.poll_unread(); session.poll_unread()
             self.assertEqual(driver.clicks, [])
             self.assertEqual(session.store.data['pending'], [])
+
+    def test_visible_bound_chat_without_badge_establishes_baseline_then_receives_new_text(self):
+        with tempfile.TemporaryDirectory() as directory:
+            driver = UnreadDriver(); driver.unread = False
+            session = self.session(directory, driver)
+            session.poll_unread(); session.poll_unread()
+            self.assertEqual(len(driver.clicks), 1)
+            self.assertEqual(session.store.data['pending'], [])
+            self.assertEqual(session.unread_pending, set())
+            driver.bubbles.append(Bubble('new without badge', 'incoming'))
+            session.poll_unread(); session.poll_unread()
+            self.assertEqual([m['text'] for m in session.store.data['pending']], ['new without badge'])
+
+    def test_no_badge_fallback_skips_paused_and_duplicate_titles(self):
+        for rows, paused in (([row('Alice')], True), ([row('Alice',20),row('Alice',120)],False)):
+            with self.subTest(paused=paused), tempfile.TemporaryDirectory() as directory:
+                driver = UnreadDriver(); driver.unread = False
+                driver.read = lambda image:rows if image.width==250 else [row('other')]
+                session = self.session(directory, driver)
+                session.set_routes([dict(chatId='Alice',chatType='direct',paused=paused)])
+                session.poll_unread(); session.poll_unread()
+                self.assertEqual(driver.clicks, [])
+
+    def test_no_badge_checks_rotate_without_rapid_conversation_switches(self):
+        with tempfile.TemporaryDirectory() as directory:
+            driver=UnreadDriver();driver.unread=False
+            driver.read=lambda image:[row('Alice',20),row('Bob',120)] if image.width==250 else [row(driver.current)]
+            def click(h,l,box,before_click=None):
+                if before_click:before_click()
+                driver.clicks.append(box)
+                driver.current='Alice' if box[1]<.2 else 'Bob'
+                return driver.capture(h)
+            driver.click_region=click
+            session=self.session(directory,driver)
+            session.set_routes([dict(chatId=name,chatType='direct') for name in ('Alice','Bob')])
+            with patch('desktop_gateway.time.monotonic',return_value=100):
+                session.poll_unread();session.poll_unread()
+            self.assertEqual(driver.current,'Alice')
+            with patch('desktop_gateway.time.monotonic',return_value=114):session.poll_unread()
+            self.assertEqual(len(driver.clicks),1)
+            with patch('desktop_gateway.time.monotonic',return_value=116):
+                session.poll_unread();session.poll_unread()
+            self.assertEqual(driver.current,'Bob')
+            self.assertEqual(len(driver.clicks),2)
+            self.assertEqual(session.store.data['pending'],[])
+
+    def test_send_interrupt_after_click_preserves_cleared_unread_badge(self):
+        from desktop_gateway import ObservationInterrupted
+        with tempfile.TemporaryDirectory() as directory:
+            driver = UnreadDriver(); session = self.session(directory,driver)
+            click = driver.click_region
+            def interrupt(*args,**kwargs):
+                click(*args,**kwargs)
+                raise ObservationInterrupted()
+            driver.click_region = interrupt
+            with self.assertRaises(ObservationInterrupted): session.poll_unread()
+            self.assertFalse(driver.unread)
+            self.assertIn('direct:Alice',session.store.data['unread'])
+            driver.click_region = click
+            session.poll_unread(); session.poll_unread()
+            self.assertEqual([m['text'] for m in session.store.data['pending']], ['question'])
 
     def test_empty_unread_chat_cannot_starve_other_routes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -378,6 +442,19 @@ class UnreadSessionTests(unittest.TestCase):
 
 
 class CalibratedInputTests(unittest.TestCase):
+    def test_navigation_skips_draft_recognition_in_both_modes(self):
+        for mode in ('foreground', 'background'):
+            driver = WindowsDesktop.__new__(WindowsDesktop)
+            driver.config = dict(config(),inputMode=mode)
+            driver.rect = lambda _:(0,0,1000,800);driver.guard = lambda *_:None
+            driver.verify_draft = lambda *_:self.fail('Draft OCR must not run during navigation')
+            driver.idle = lambda:60;driver.foreground = lambda _:None
+            clicks=[];driver.click = lambda *args:clicks.append(args)
+            driver.capture = lambda _:'selected'
+            with patch('desktop_windows.time.sleep'):
+                self.assertEqual(driver.click_region(1,config()['layout'],[.1,.2,.3,.4]),'selected')
+            self.assertEqual(len(clicks),1)
+
     def test_navigation_intent_is_after_guard_and_before_uncertain_click(self):
         driver = WindowsDesktop.__new__(WindowsDesktop)
         driver.config = dict(config(), inputMode='background')
@@ -385,7 +462,7 @@ class CalibratedInputTests(unittest.TestCase):
         driver.guard = lambda *_: (_ for _ in ()).throw(DesktopDeferred('busy'))
         intent = []
         with self.assertRaises(DesktopDeferred):
-            driver.click_region(1, config()['layout'], [.01,.01,.1,.1], require_empty=False, before_click=lambda: intent.append(True))
+            driver.click_region(1, config()['layout'], [.01,.01,.1,.1], before_click=lambda: intent.append(True))
         self.assertEqual(intent, [])
         driver.guard = lambda *_: None
         def click(*_):
@@ -393,7 +470,7 @@ class CalibratedInputTests(unittest.TestCase):
             raise DesktopUnavailable('uncertain pointer result')
         driver.click = click
         with self.assertRaises(DesktopUnavailable):
-            driver.click_region(1, config()['layout'], [.01,.01,.1,.1], require_empty=False, before_click=lambda: intent.append(True))
+            driver.click_region(1, config()['layout'], [.01,.01,.1,.1], before_click=lambda: intent.append(True))
         self.assertEqual(intent, [True])
 
     def driver(self, *, draft='', wrong_focus=False, lose_focus=False):

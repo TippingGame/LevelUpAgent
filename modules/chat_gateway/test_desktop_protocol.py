@@ -162,5 +162,17 @@ class DesktopProtocolTests(unittest.TestCase):
         self.assertEqual(self.process.wait(timeout=5),0)
         self.assertEqual(self.state()['attempts']['blocked'],'delivery_unknown')
 
+    def test_send_preempts_observer_without_running_two_desktop_operations(self):
+        self.control.update(scanBlocked=True, revision=20)
+        self.save_control()
+        self.wait_for(lambda:any(row['revision']==20 for row in self.lines('observations.jsonl')))
+        self.send(dict(type='send', delivery=dict(id='priority-send',
+            inbound=dict(chatType='direct',chatId='private'),text='one reply')))
+        progress=self.frame('delivery_progress',timeout=3)
+        self.assertEqual(progress['id'],'priority-send')
+        self.assertIn('发送请求已收到',progress['detail'])
+        self.assertEqual(self.frame('delivery',timeout=3)['status'],'sent')
+        self.assertEqual(len(self.lines('dispatches.jsonl')),1)
+
 
 if __name__=='__main__':unittest.main()

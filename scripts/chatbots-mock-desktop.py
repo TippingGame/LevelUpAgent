@@ -46,6 +46,12 @@ class ProtocolFixture:
         # Record observations so tests can wait for an actual completed baseline.
         with (directory/'observations.jsonl').open('a', encoding='utf-8') as out:
             out.write(json.dumps(dict(title=title, revision=control['revision']))+'\n')
+        if control.get('scanBlocked'):
+            # Model a series of slow OCR steps. A send must interrupt at the
+            # next checkpoint instead of waiting for this whole scan to finish.
+            while self.control().get('scanBlocked'):
+                self.observation_checkpoint()
+                time.sleep(.02)
         return [Bubble(**b) for b in control.get('chats', {}).get(title, [])]
     def send_reply(self, config, title, text, intent):
         mode = self.control().get('sendMode', 'sent')
