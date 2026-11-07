@@ -259,6 +259,9 @@ def mention_action_text(rows, width, footer, padding=12):
 
 
 class WindowsDesktop:
+    def delivery_progress(self, detail):
+        """Optional host callback; never includes message text or account data."""
+
     def __init__(self, config=None):
         if os.name != 'nt':
             raise DesktopUnavailable('Windows only')
@@ -980,6 +983,7 @@ class WindowsDesktop:
             raise DesktopDeferred('前台兼容模式：等待键鼠空闲 5 秒后发送；钉钉可在执行方式中改为后台模式')
         hwnd = self.find(config['windowTitle'])
         layout = config['layout']
+        self.delivery_progress('正在打开目标会话')
         self.foreground(hwnd)
         image = self.select_chat(hwnd, layout, title)
         rect, stamp = self.rect(hwnd), self.last_input()
@@ -989,17 +993,22 @@ class WindowsDesktop:
         if not self.title(image, layout, title):
             raise DesktopUnavailable('写入前聊天标题核对失败，未发送')
         before = self.messages(image, layout)
+        self.delivery_progress('正在核对空输入栏')
         if not self.verify_draft(hwnd, layout, ''):
             raise DesktopDeferred('当前聊天输入框未确认空白；原回复保留排队，请先处理草稿')
         self.guard(hwnd, rect, stamp)
         before_dispatch()  # Durable intent before any typing/clicking.
+        self.delivery_progress('正在写入回复')
         stamp = self.type_reply(hwnd, layout, text)
+        self.delivery_progress('正在核对发送前标题与回复文字')
         image = self.capture(hwnd)
         if not self.title(image, layout, title) or not self.verify_draft(hwnd, layout, text):
             raise DesktopUnavailable('发送前聊天标题或草稿核对失败')
         self.guard(hwnd, rect, stamp)
+        self.delivery_progress('正在点击发送按钮')
         self.click(hwnd, *layout['send'])
         stamp = self.last_input()
+        self.delivery_progress('正在确认发出气泡与空输入栏；请勿手动重复发送')
         for _ in range(12):
             time.sleep(.3)
             self.guard(hwnd, rect, stamp)

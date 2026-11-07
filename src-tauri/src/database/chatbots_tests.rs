@@ -200,7 +200,24 @@ fn chatbots_desktop_preinput_deferral_keeps_reply_and_respects_pause() {
     let job = db.chat_claim().unwrap().unwrap();
     complete(&db, &job);
     let delivery = db.chat_delivery(&a.id).unwrap().unwrap();
-    db.chat_delivery_deferred(&a.id, &delivery.id).unwrap();
+    db.chat_delivery_progress(&a.id, &delivery.id, "正在核对输入栏")
+        .unwrap();
+    assert_eq!(
+        db.chat_dashboard().unwrap().messages[0].error.as_deref(),
+        Some("正在核对输入栏")
+    );
+    db.chat_delivery_deferred(&a.id, &delivery.id, "输入栏有草稿；请处理后等待自动检查")
+        .unwrap();
+    assert_eq!(
+        db.chat_dashboard().unwrap().messages[0].error.as_deref(),
+        Some("输入栏有草稿；请处理后等待自动检查")
+    );
+    db.chat_delivery_progress(&a.id, &delivery.id, "过期进度")
+        .unwrap();
+    assert_eq!(
+        db.chat_dashboard().unwrap().messages[0].error.as_deref(),
+        Some("输入栏有草稿；请处理后等待自动检查")
+    );
     assert!(
         db.chat_claim().unwrap().is_none(),
         "Deferral must not regenerate a reply"
@@ -208,15 +225,48 @@ fn chatbots_desktop_preinput_deferral_keeps_reply_and_respects_pause() {
     let retried = db.chat_delivery(&a.id).unwrap().unwrap();
     assert_eq!(retried.id, delivery.id);
     assert_eq!(retried.text, delivery.text);
+    assert!(db.chat_dashboard().unwrap().messages[0].error.is_none());
+    let other = account(&db, "different-account");
+    db.chat_delivery_result_detail(&other.id, &delivery.id, "failed", "wrong account")
+        .unwrap();
+    assert_eq!(
+        db.chat_dashboard().unwrap().messages[0].delivery.as_deref(),
+        Some("sending")
+    );
+    db.chat_delivery_result_detail(
+        &a.id,
+        &delivery.id,
+        "failed",
+        "后台输入栏窗口已变化，停止写入",
+    )
+    .unwrap();
+    assert_eq!(
+        db.chat_dashboard().unwrap().messages[0].error.as_deref(),
+        Some("后台输入栏窗口已变化，停止写入")
+    );
+    db.chat_delivery_progress(&a.id, &delivery.id, "late progress")
+        .unwrap();
+    assert_eq!(
+        db.chat_dashboard().unwrap().messages[0].delivery.as_deref(),
+        Some("failed")
+    );
+    // Separate pending reply verifies pause while a send is in flight.
+    db.chat_resolve_delivery(&job.id, false).unwrap();
+    db.chat_receive(&a.id, message("defer-next", &r.chat_id))
+        .unwrap();
+    let next = db.chat_claim().unwrap().unwrap();
+    complete(&db, &next);
+    let delivery = db.chat_delivery(&a.id).unwrap().unwrap();
     r.paused = true;
     db.chat_save_route(r).unwrap();
-    db.chat_delivery_deferred(&a.id, &delivery.id).unwrap();
+    db.chat_delivery_deferred(&a.id, &delivery.id, "busy")
+        .unwrap();
     assert!(db.chat_delivery(&a.id).unwrap().is_none());
     let d = db.chat_dashboard().unwrap();
     assert_eq!(d.messages[0].delivery.as_deref(), Some("cancelled"));
     let official = account(&db, "official");
     assert!(
-        db.chat_delivery_deferred(&official.id, &delivery.id)
+        db.chat_delivery_deferred(&official.id, &delivery.id, "busy")
             .is_err()
     );
 }

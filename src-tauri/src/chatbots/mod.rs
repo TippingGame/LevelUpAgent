@@ -1,4 +1,5 @@
 //! Desktop-owned external chat agents. Platform input never selects tools or providers.
+mod delivery;
 mod gateway;
 mod python;
 pub mod types;

@@ -29,6 +29,8 @@ class NativeStartupTests(unittest.TestCase):
             try:
                 child.stdin.write((json.dumps(config)+'\n').encode());child.stdin.flush()
                 first=frames.get(timeout=30)
+                self.assertEqual(first.get('type'),'ready',first)
+                first=frames.get(timeout=5)
                 self.assertEqual(first.get('status'),'waiting',first)
                 child.stdin.close()
                 self.assertEqual(child.wait(timeout=5),0)
@@ -134,6 +136,24 @@ class DesktopProtocolTests(unittest.TestCase):
         self.send(dict(type='send',delivery=uncertain))
         self.assertEqual(self.frame('delivery')['status'],'delivery_unknown')
         self.assertEqual(len(self.lines('dispatches.jsonl')),2)
+
+    def test_ready_controller_reports_send_progress_while_observer_is_waiting(self):
+        self.assertEqual(self.frame('ready')['type'],'ready')
+        self.assertEqual(self.frame('status')['status'],'waiting')
+        delivery=dict(id='waiting-observer',inbound=dict(chatType='direct',chatId='private'),text='queued reply')
+        self.control['sendMode']='deferred';self.save_control()
+        self.send(dict(type='send',delivery=delivery))
+        progress=self.frame('delivery_progress')
+        self.assertEqual(progress['id'],delivery['id'])
+        result=self.frame('delivery')
+        self.assertEqual(result['status'],'deferred')
+        self.assertIn('human activity',result['detail'])
+        self.control['sendMode']='sent';self.save_control()
+        self.send(dict(type='send',delivery=delivery))
+        self.assertEqual(self.frame('delivery')['status'],'sent')
+        self.send(dict(type='send',delivery=delivery))
+        self.assertEqual(self.frame('delivery')['status'],'sent')
+        self.assertEqual(len(self.lines('dispatches.jsonl')),1)
     def test_eof_terminates_child_while_driver_is_blocked(self):
         self.control['sendMode']='block';self.save_control()
         self.send(dict(type='send',delivery=dict(id='blocked',inbound=dict(chatType='direct',chatId='private'),text='test')))

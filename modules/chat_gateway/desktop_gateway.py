@@ -240,7 +240,7 @@ class DesktopSession:
         trigger = '群聊仅 @ 我的显示名时触发' if route['chatType'] == 'group' and route.get('mode', 'mention') != 'all' else '仅处理基线之后的新消息'
         return ('online', f'本地桌面监听中：{title}；识别 {len(bubbles)} 条（收到 {incoming} 条）；{trigger}')
 
-    def deliver(self, delivery):
+    def deliver(self, delivery, progress=None):
         self.delivery_detail = ''
         ident = delivery['id']
         attempts = self.store.data['attempts']
@@ -248,6 +248,7 @@ class DesktopSession:
             return attempts[ident] if attempts[ident] in ('sent', 'failed') else 'delivery_unknown'
         inbound = delivery['inbound']
         if not any(self.key(r) == self.key(inbound) for r in self.routes):
+            self.delivery_detail = '目标会话未绑定或已暂停；未发送'
             return 'failed'
         dispatched = False
         def intent():
@@ -255,7 +256,9 @@ class DesktopSession:
             attempts[ident] = 'delivery_unknown'
             self.store.save()
             dispatched = True
+        self.driver.delivery_progress = progress or (lambda detail: None)
         try:
+            self.driver.delivery_progress('正在定位目标会话并检查发送条件')
             status = self.driver.send_reply(self.config, inbound['chatId'], delivery['text'], intent)
         except DesktopDeferred as exc:
             self.delivery_detail = str(exc)[:200]
@@ -265,6 +268,8 @@ class DesktopSession:
         except Exception as exc:
             self.delivery_detail = str(exc)[:200] if isinstance(exc, DesktopUnavailable) else type(exc).__name__
             status = 'delivery_unknown' if dispatched else 'failed'
+        finally:
+            self.driver.delivery_progress = lambda detail: None
         attempts[ident] = status
         # Keep all uncertain intents; bounded confirmed history, host also deduplicates.
         confirmed = [k for k,v in attempts.items() if v != 'delivery_unknown']
@@ -305,6 +310,9 @@ def run(config, state_path):
             # Host crash/exit must stop a blocked OCR/UIA call from later sending.
             os._exit(0)
     threading.Thread(target=read, daemon=True).start()
+    # Transport readiness is not the same as finding readable inbound bubbles.
+    # Queued replies must still be checked when the observer reports waiting.
+    emit(dict(type='ready'))
     awaiting = None
     next_scan, index, last_status = 0, 0, None
     def status(state, detail):
@@ -331,7 +339,7 @@ def run(config, state_path):
             awaiting = None
         elif frame.get('type') == 'send':
             delivery = frame['delivery']
-            result = session.deliver(delivery)
+            result = session.deliver(delivery, lambda detail: emit(dict(type='delivery_progress', id=delivery['id'], detail=detail[:300])))
             emit(dict(type='delivery', id=delivery['id'], status=result, detail=session.delivery_detail))
             if result == 'deferred':
                 status('waiting', session.delivery_detail or '钉钉正在使用或有草稿；原回复保留排队')

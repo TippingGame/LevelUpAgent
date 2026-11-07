@@ -31,7 +31,27 @@ class BackgroundTests(unittest.TestCase):
 
     def test_human_in_dingtalk_defers_without_stealing_focus(self):
         d=self.driver();d.user.GetAncestor=lambda *_:1
-        d.idle=lambda:1
+        d.idle=lambda:1;d.last_input=lambda:7
+        with self.assertRaises(DesktopDeferred): d.guard(1,d.rect(1))
+
+    def test_client_self_activation_does_not_mistake_previous_input_for_human_typing(self):
+        d=self.driver();state={'foreground':99,'stamp':7}
+        d.user.GetForegroundWindow=lambda:state['foreground']
+        d.user.GetAncestor=lambda h,_:h
+        d.idle=lambda:1;d.last_input=lambda:state['stamp']
+        d.verify_pointer_target=lambda *_:None
+        calls=[]
+        def send(*args):
+            calls.append(args);state['foreground']=1
+            return 1
+        d.user.SendMessageTimeoutW=send
+        d.message(1,2,d.rect(1),0x201,1,0)
+        d.message(1,2,d.rect(1),0x202,0,0)
+        self.assertEqual(len(calls),2)
+        state['stamp']=8
+        with self.assertRaises(DesktopDeferred): d.message(1,2,d.rect(1),0x202,0,0)
+        self.assertEqual(len(calls),2)
+        d.activation_input=(3,8)
         with self.assertRaises(DesktopDeferred): d.guard(1,d.rect(1))
 
     def test_idle_foreground_dingtalk_can_continue_background_input(self):

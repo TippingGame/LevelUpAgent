@@ -378,12 +378,13 @@ async fn serve(
         }
     });
     let mut tick = tokio::time::interval(Duration::from_millis(400));
-    let mut online = false;
-    let mut in_flight: Option<(String, std::time::Instant)> = None;
+    let mut delivery_schedule = super::delivery::DeliverySchedule::new(desktop);
     let result=async{loop{tokio::select!{
         _=cancel.cancelled()=>break Ok(()),
         value=incoming.recv()=>{let Some(value)=value else{break Err("Gateway closed output".to_string())};match value["type"].as_str(){
-            Some("status")=>{let state=value["status"].as_str().unwrap_or("connecting");online=state=="online";
+            Some("ready") if desktop=>delivery_schedule.ready(),
+            Some("status")=>{let state=value["status"].as_str().unwrap_or("connecting");let online=state=="online";
+                delivery_schedule.status(online);
                 if desktop {
                     let state=if ["online","waiting","error","connecting"].contains(&state) {state} else {"waiting"};
                     let detail=value["detail"].as_str().unwrap_or("Desktop transport").chars().take(300).collect::<String>();
@@ -396,29 +397,37 @@ async fn serve(
                 write(&mut input,json!({"type":"ack","requestId":value["requestId"],"ok":result.is_ok()})).await?;
             },
             Some("delivery")=>{if let Some(id)=value["id"].as_str()
-                && in_flight.as_ref().is_some_and(|(known,_)|known==id){
-                    if desktop && value["status"].as_str()==Some("deferred") {
+                && delivery_schedule.matches(id){
+                    let deferred=desktop && value["status"].as_str()==Some("deferred");
+                    let detail=value["detail"].as_str().unwrap_or("");
+                    if deferred {
                         let runtime=app.state::<Runtime>();
                         let guard=tokio::select!{_=cancel.cancelled()=>break Ok(()),guard=runtime.gate.lock()=>guard};
-                        app.state::<Database>().chat_delivery_deferred(&account.id,id)?;
+                        app.state::<Database>().chat_delivery_deferred(&account.id,id,detail)?;
                         drop(guard);
-                        online=false; // Wait for a successful, idle scan before retry.
-                        status(app,&account.id,"waiting","钉钉正在使用或有草稿，原回复保留排队").await;
+                        status(app,&account.id,"waiting",if detail.is_empty(){"发送暂缓，5 秒后重新检查；原回复保留排队"}else{detail}).await;
                     } else {
-                        app.state::<Database>().chat_delivery_result(&account.id,id,value["status"].as_str().unwrap_or("delivery_unknown"))?;
+                        let result=value["status"].as_str().unwrap_or("delivery_unknown");
+                        if desktop { app.state::<Database>().chat_delivery_result_detail(&account.id,id,result,detail)?; }
+                        else { app.state::<Database>().chat_delivery_result(&account.id,id,result)?; }
                     }
-                    in_flight=None;
+                    delivery_schedule.finish(deferred,std::time::Instant::now());
+                }},
+            Some("delivery_progress") if desktop=>{if let (Some(id),Some(detail))=(value["id"].as_str(),value["detail"].as_str())
+                && delivery_schedule.progress(id,detail,std::time::Instant::now()) {
+                    app.state::<Database>().chat_delivery_progress(&account.id,id,detail)?;
                 }},
             _=>{}
         }},
         _=tick.tick()=>{
-            if in_flight.as_ref().is_some_and(|(_,started)|started.elapsed()>Duration::from_secs(45)){break Err("Send confirmation timed out".into());}
-            if online && in_flight.is_none(){
+            if delivery_schedule.timed_out(std::time::Instant::now()){break Err("Send confirmation timed out".into());}
+            if delivery_schedule.can_send(std::time::Instant::now()){
                 let runtime=app.state::<Runtime>();
                 // Cancellation remains responsive while configuration holds the send gate.
                 let guard=tokio::select!{_=cancel.cancelled()=>break Ok(()),guard=runtime.gate.lock()=>guard};
                 if let Some(delivery)=app.state::<Database>().chat_delivery(&account.id)? {
-                    in_flight=Some((delivery.id.clone(),std::time::Instant::now()));
+                    delivery_schedule.begin(delivery.id.clone(),std::time::Instant::now());
+                    if desktop { app.state::<Database>().chat_delivery_progress(&account.id,&delivery.id,"等待桌面控制器处理发送请求")?; }
                     write(&mut input,json!({"type":"send","delivery":delivery})).await?;
                 }
                 drop(guard);

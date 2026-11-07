@@ -53,6 +53,13 @@ fn one<T: DeserializeOwned>(c: &Connection, table: &str, id: &str) -> Result<Opt
 fn now() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
+fn delivery_detail(detail: &str, fallback: &str) -> String {
+    let detail = detail.trim();
+    crate::logging::safe_error(if detail.is_empty() { fallback } else { detail })
+        .chars()
+        .take(300)
+        .collect()
+}
 fn cancel(c: &Connection, column: &str, id: &str) -> Result<(), String> {
     c.execute(&format!("UPDATE chat_outbox SET status='cancelled' WHERE status='pending' AND inbox_id IN (SELECT id FROM chat_inbox WHERE {column}=?)"), [id]).map_err(database_error)?;
     c.execute(&format!("UPDATE chat_inbox SET status='cancelled' WHERE status IN ('queued','generating','generated') AND {column}=?"), [id]).map_err(database_error)?;
@@ -784,7 +791,7 @@ impl Database {
         };
         let permitted = active(&tx, &inbox)?;
         tx.execute(
-            "UPDATE chat_outbox SET status=?1 WHERE id=?2",
+            "UPDATE chat_outbox SET status=?1,error=NULL WHERE id=?2",
             params![if permitted { "sending" } else { "cancelled" }, id],
         )
         .map_err(database_error)?;
@@ -802,7 +809,12 @@ impl Database {
     }
     /// Only desktop pre-input deferrals can return an unchanged reply to pending.
     /// Never reuse this for an uncertain click, official API retry or reconnect.
-    pub fn chat_delivery_deferred(&self, account: &str, id: &str) -> Result<(), String> {
+    pub fn chat_delivery_deferred(
+        &self,
+        account: &str,
+        id: &str,
+        detail: &str,
+    ) -> Result<(), String> {
         let mut c = self.connection.lock().map_err(|e| e.to_string())?;
         let tx = c.transaction().map_err(database_error)?;
         let a = one::<Account>(&tx, "chat_accounts", account)?.ok_or("Account missing")?;
@@ -820,8 +832,19 @@ impl Database {
                 "cancelled"
             };
             tx.execute(
-                "UPDATE chat_outbox SET status=?1,error=NULL WHERE id=?2 AND status='sending'",
-                params![state, id],
+                "UPDATE chat_outbox SET status=?1,error=?3 WHERE id=?2 AND status='sending'",
+                params![
+                    state,
+                    id,
+                    if state == "pending" {
+                        Some(delivery_detail(
+                            detail,
+                            "发送暂缓，5 秒后重新检查；原回复保留排队",
+                        ))
+                    } else {
+                        None
+                    }
+                ],
             )
             .map_err(database_error)?;
         }
@@ -834,11 +857,37 @@ impl Database {
         id: &str,
         status: &str,
     ) -> Result<(), String> {
+        self.chat_delivery_result_detail(account, id, status, "")
+    }
+
+    pub fn chat_delivery_progress(
+        &self,
+        account: &str,
+        id: &str,
+        detail: &str,
+    ) -> Result<(), String> {
+        let c = self.connection.lock().map_err(|e| e.to_string())?;
+        let a = one::<Account>(&c, "chat_accounts", account)?.ok_or("Account missing")?;
+        if a.platform != "dingtalk_desktop" {
+            return Err("Only desktop controllers report local delivery progress".into());
+        }
+        c.execute("UPDATE chat_outbox SET error=?1 WHERE id=?2 AND status='sending' AND inbox_id IN (SELECT id FROM chat_inbox WHERE account_id=?3)",
+            params![delivery_detail(detail, "正在处理桌面发送"), id, account]).map_err(database_error)?;
+        Ok(())
+    }
+
+    pub fn chat_delivery_result_detail(
+        &self,
+        account: &str,
+        id: &str,
+        status: &str,
+        detail: &str,
+    ) -> Result<(), String> {
         if !["sent", "failed", "delivery_unknown", "cancelled"].contains(&status) {
             return Err("Invalid delivery state".into());
         }
         let c = self.connection.lock().map_err(|e| e.to_string())?;
-        let error = match status {
+        let fallback = match status {
             "failed" => {
                 Some("Platform rejected the send before confirmation; inspect account settings")
             }
@@ -847,6 +896,7 @@ impl Database {
             }
             _ => None,
         };
+        let error = fallback.map(|fallback| delivery_detail(detail, fallback));
         c.execute("UPDATE chat_outbox SET status=?1,error=?2 WHERE id=?3 AND status='sending' AND inbox_id IN (SELECT id FROM chat_inbox WHERE account_id=?4)",params![status,error,id,account]).map_err(database_error)?;
         c.execute("UPDATE chat_inbox SET status='sent' WHERE id IN (SELECT inbox_id FROM chat_outbox WHERE id=?1 AND status='sent')",[id]).map_err(database_error)?;
         Ok(())

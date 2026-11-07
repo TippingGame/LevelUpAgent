@@ -48,7 +48,11 @@ class BackgroundDesktop(WindowsDesktop):
         self.observe_guard(hwnd, rect)
         foreground = self.user.GetForegroundWindow()
         if (foreground == hwnd or (foreground and self.user.GetAncestor(foreground, 2) == hwnd)) and self.idle() < 5:
-            raise DesktopDeferred('钉钉后台模式：最近 5 秒正在操作钉钉，暂缓点击和发送；切换到其他应用可继续')
+            # A native click can activate DingTalk without any new user input.
+            # Do not mistake earlier input in another app for typing in DingTalk.
+            # Any subsequent physical input changes the stamp and still stops us.
+            if getattr(self, 'activation_input', None) != (hwnd, self.last_input()):
+                raise DesktopDeferred('钉钉后台模式：最近 5 秒正在操作钉钉，暂缓点击和发送；切换到其他应用可继续')
 
     def message(self, hwnd, target, rect, code, wparam, lparam):
         self.guard(hwnd, rect)
@@ -65,6 +69,8 @@ class BackgroundDesktop(WindowsDesktop):
                 if self.pointer_target(hwnd, point) != target:
                     raise DesktopUnavailable('后台输入栏窗口已变化，停止写入')
         self.verify_pointer_target(hwnd, target)
+        if not self.is_foreground(hwnd) and code in (0x0201, 0x0202):
+            self.activation_input = (hwnd, self.last_input())
         result = ctypes.c_size_t()
         # ABORTIFHUNG | ERRORONEXIT; timeout means uncertain mutation, no retry.
         if not self.user.SendMessageTimeoutW(target, code, wparam, lparam, 0x22, 1500, ctypes.byref(result)):
@@ -175,8 +181,11 @@ class BackgroundDesktop(WindowsDesktop):
             raise DesktopUnavailable('输入栏未定位到聊天子窗口，未写入')
         units = text.encode('utf-16-le')
         for offset in range(0, len(units), 2):
+            if offset % 160 == 0:
+                self.delivery_progress(f'正在写入回复（{offset//2}/{len(units)//2}）')
             self.message(hwnd, target, rect, 0x0102, int.from_bytes(units[offset:offset+2], 'little'), 1)
         self.guard(hwnd, rect)
+        self.delivery_progress('正在核对输入栏文字')
         if not self.verify_draft(hwnd, layout, text):
             raise DesktopUnavailable('后台写入结果未通过画面核对，保留草稿且不发送')
 
@@ -190,21 +199,27 @@ class BackgroundDesktop(WindowsDesktop):
             raise DesktopUnavailable('回复包含不支持的控制字符')
         hwnd = self.find(config['windowTitle'])
         layout = self.resolve_layout(hwnd, config['layout'])
+        self.delivery_progress('正在打开目标会话')
         self.select_chat(hwnd, layout, title)
         rect = self.rect(hwnd)
         self.guard(hwnd, rect)
         image = self.capture(hwnd)
+        self.delivery_progress('正在核对会话标题与空输入栏')
         if not self.title(image, layout, title) or not self.verify_draft(hwnd, layout, ''):
             raise DesktopDeferred('发送前标题或空草稿未通过核对，等待人工处理')
         self.native_target(hwnd)
         before = self.messages(image, layout)
         self.guard(hwnd, rect)
         before_dispatch()
+        self.delivery_progress('正在写入回复')
         self.type_reply(hwnd, layout, text)
+        self.delivery_progress('正在核对发送前标题与回复文字')
         if not self.title(self.capture(hwnd), layout, title) or not self.verify_draft(hwnd, layout, text):
             raise DesktopUnavailable('发送前聊天标题或草稿核对失败')
         self.guard(hwnd, rect)
+        self.delivery_progress('正在点击发送按钮')
         self.click(hwnd, *layout['send'])
+        self.delivery_progress('正在确认发出气泡与空输入栏；请勿手动重复发送')
         for _ in range(12):
             time.sleep(.3)
             self.guard(hwnd, rect)
