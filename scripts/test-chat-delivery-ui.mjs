@@ -71,7 +71,7 @@ async function verifyStates(page, name) {
   assert.match(await detail.innerText(), /正在观察消息红点/);
   await change('pending', null, false);
   await page.getByText(/账号未连接，回复已保留/).waitFor();
-  const deferred = '发送前标题或空草稿未通过核对，等待人工处理';
+  const deferred = '输入栏画面包含未识别内容，可能是提示文字、工具栏或草稿；请检查输入栏框选范围；原回复保留排队，核验为空后自动继续';
   await change('pending', deferred);
   await page.getByText(deferred, { exact: true }).waitFor();
   assert.match(await detail.getAttribute('class'), /chatbot-notice/);

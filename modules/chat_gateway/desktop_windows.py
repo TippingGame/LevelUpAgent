@@ -771,7 +771,8 @@ class WindowsDesktop:
         try:
             if getattr(self, 'config', {}).get('version') == 2:
                 empty = self.visual_draft(hwnd, layout)['empty']
-                return dict(readable=True, draftEmpty=empty, writable=True, detail='按框选区域检查输入栏；' + ('当前草稿为空' if empty else '存在内容或提示文字未核验，暂不发送'))
+                return dict(readable=True, draftEmpty=empty, writable=True,
+                            detail=getattr(self, 'editor_check_detail', '当前输入栏为空' if empty else '输入栏尚未核验为空'))
             import uiautomation as auto
             with auto.UIAutomationInitializerInThread():
                 control = self.editor(hwnd, layout)
@@ -792,17 +793,39 @@ class WindowsDesktop:
             return dict(readable=False, draftEmpty=False, writable=False, detail=str(exc)[:200])
 
     def editor_image(self, hwnd, layout):
-        """Capture the verified edit itself, excluding stale calibration margins."""
-        if getattr(self, 'config', {}).get('version') == 2:
+        """Use calibration to locate an edit, then inspect its whole document.
+
+        A hand-drawn box often includes toolbar icons and the send button. UIA
+        bounds refine this observation only; saved calibration is never changed.
+        Apps without a unique matching edit retain the calibrated OCR fallback.
+        """
+        calibrated = getattr(self, 'config', {}).get('version') == 2
+        if calibrated:
             self.resolve_layout(hwnd, layout)
-            return self.crop(self.capture(hwnd), layout['editor'])
-        import uiautomation as auto
         rect = self.rect(hwnd)
-        with auto.UIAutomationInitializerInThread():
-            bounds = self.editor(hwnd, layout).BoundingRectangle
-            left, top, right, bottom = (bounds.left-rect[0], bounds.top-rect[1],
-                                        bounds.right-rect[0], bounds.bottom-rect[1])
         width, height = rect[2:]
+        selected = tuple(value * (width if i % 2 == 0 else height)
+                         for i, value in enumerate(layout['editor']))
+        bounds = None
+        try:
+            import uiautomation as auto
+            with auto.UIAutomationInitializerInThread():
+                control = self.editor(hwnd, layout)
+                box = control.BoundingRectangle
+                candidate = (box.left-rect[0], box.top-rect[1],
+                             box.right-rect[0], box.bottom-rect[1])
+                # Both centers must agree with calibration. Inspect the whole
+                # edit rather than clipping a draft to the selected patch.
+                cx, cy = (candidate[0]+candidate[2])/2, (candidate[1]+candidate[3])/2
+                sx, sy = (selected[0]+selected[2])/2, (selected[1]+selected[3])/2
+                if (not calibrated or
+                        (selected[0] <= cx <= selected[2] and selected[1] <= cy <= selected[3]
+                         and candidate[0] <= sx <= candidate[2] and candidate[1] <= sy <= candidate[3])):
+                    bounds = candidate
+        except Exception:
+            if not calibrated:
+                raise
+        left, top, right, bottom = bounds if bounds is not None else selected
         if not (-2 <= left < right <= width+2 and -2 <= top < bottom <= height+2):
             raise DesktopUnavailable('输入框边界超出钉钉窗口，请还原窗口并重新校准')
         image = self.capture(hwnd)
@@ -815,6 +838,7 @@ class WindowsDesktop:
         import numpy as np
         from PIL import Image, ImageOps
         region = self.editor_image(hwnd, layout)
+        self.editor_check_detail = '输入栏画面包含未识别内容，可能是提示文字、工具栏或草稿；请检查输入栏框选范围'
         pixels = np.asarray(region.convert('RGB'))
         background = np.median(pixels.reshape(-1, 3), axis=0)
         mask = (np.max(np.abs(pixels.astype(np.int16)-background), axis=2)>35).astype('uint8')
@@ -822,6 +846,7 @@ class WindowsDesktop:
         components = [(int(x),int(y),int(w),int(h)) for x,y,w,h,count in stats[1:]
                       if count >= 3 and not (w <= 2 and h >= 20)]
         if not components:
+            self.editor_check_detail = '当前输入栏为空'
             return dict(empty=True,text='')
         left=min(x for x,y,w,h in components);top=min(y for x,y,w,h in components)
         right=max(x+w for x,y,w,h in components);bottom=max(y+h for x,y,w,h in components)
@@ -842,33 +867,43 @@ class WindowsDesktop:
                         ink = pixels[mask.astype(bool)]
                         contrast = abs(ink.mean(axis=0) - background).max() if ink.size else 0
                         if 35 < contrast < 155:
+                            self.editor_check_detail = '已核验空输入栏提示文字'
                             return dict(empty=True, text='')
-            except DesktopUnavailable:
+            except Exception:
                 pass
         if not expected and normalized(text) == '请输入消息':
             # The observed InputRichTextEdit renders its empty hint inside the
             # edit rectangle. Only accept that exact, light-gray, top-left hint
             # with an independently empty UIA value; dark typed text, images,
             # extra marks and unknown providers remain nonempty.
-            import uiautomation as auto
             hint_geometry = left <= 8 and top <= 8 and right <= 160 and bottom <= 40
             if hint_geometry and min(background) >= 240:
-                with auto.UIAutomationInitializerInThread():
-                    control = self.editor(hwnd, layout)
-                    if control.ClassName == 'im_chat::InputRichTextEdit' and not normalized(self.editor_text(control)):
-                        ink_mask = mask.astype(bool)
-                        # The focused caret touches the gray hint's first glyph,
-                        # merging into its component. Remove only the observed
-                        # single dark caret at the empty edit's origin.
-                        dark = (pixels.min(axis=2) < 110).astype('uint8')
-                        _, _, dark_stats, _ = cv2.connectedComponentsWithStats(dark, 8)
-                        if control.HasKeyboardFocus and len(dark_stats) == 2:
-                            dx, dy, dw, dh, count = map(int, dark_stats[1])
-                            if dx <= 2 and dy <= 4 and dw <= 2 and 16 <= dh <= 40 and count >= dw*dh*.9:
-                                ink_mask &= ~dark.astype(bool)
-                        ink = pixels[ink_mask]
-                        if ink.size and int(ink.min()) >= 110 and float(ink.mean()) >= 140:
-                            return dict(empty=True, text='')
+                try:
+                    import uiautomation as auto
+                    with auto.UIAutomationInitializerInThread():
+                        control = self.editor(hwnd, layout)
+                        if control.ClassName == 'im_chat::InputRichTextEdit' and not normalized(self.editor_text(control)):
+                            ink_mask = mask.astype(bool)
+                            # The focused caret touches the gray hint's first glyph,
+                            # merging into its component. Remove only the observed
+                            # single dark caret at the empty edit's origin.
+                            dark = (pixels.min(axis=2) < 110).astype('uint8')
+                            _, _, dark_stats, _ = cv2.connectedComponentsWithStats(dark, 8)
+                            if control.HasKeyboardFocus and len(dark_stats) == 2:
+                                dx, dy, dw, dh, count = map(int, dark_stats[1])
+                                if dx <= 2 and dy <= 4 and dw <= 2 and 16 <= dh <= 40 and count >= dw*dh*.9:
+                                    ink_mask &= ~dark.astype(bool)
+                            ink = pixels[ink_mask]
+                            if ink.size and int(ink.min()) >= 110 and float(ink.mean()) >= 140:
+                                self.editor_check_detail = '已核验空输入栏提示文字'
+                                return dict(empty=True, text='')
+                except Exception:
+                    pass
+        if not expected and text:
+            hints = ('请输入消息', config.get('editorPlaceholder'))
+            self.editor_check_detail = ('识别到输入提示文字，但未能核验空编辑控件；请检查输入栏框选范围'
+                                        if normalized(text) in [normalized(hint) for hint in hints if hint]
+                                        else '输入栏识别到文字内容；请检查实际草稿或输入栏框选是否包含其他文字')
         if expected:
             import re
             compact=lambda s:re.sub(r'\s+','',normalized(s))
@@ -883,6 +918,10 @@ class WindowsDesktop:
                     if candidate is not None and compact(candidate)==compact(expected):
                         text=candidate
         return dict(empty=False,text=text)
+
+    def draft_wait_detail(self):
+        detail = getattr(self, 'editor_check_detail', '输入栏尚未确认空白，请检查实际草稿及输入栏框选范围')
+        return detail + '；原回复保留排队，核验为空后自动继续'
 
     def focus_editor(self, hwnd, layout):
         # Some native DingTalk builds accept SetFocus without focusing the edit.
@@ -1003,7 +1042,7 @@ class WindowsDesktop:
         before = self.messages(image, layout)
         self.delivery_progress('正在核对空输入栏')
         if not self.verify_draft(hwnd, layout, ''):
-            raise DesktopDeferred('当前聊天输入框未确认空白；原回复保留排队，请先处理草稿')
+            raise DesktopDeferred(self.draft_wait_detail())
         self.guard(hwnd, rect, stamp)
         before_dispatch()  # Durable intent before any typing/clicking.
         self.delivery_progress('正在写入回复')

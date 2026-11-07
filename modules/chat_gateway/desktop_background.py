@@ -203,8 +203,10 @@ class BackgroundDesktop(WindowsDesktop):
         self.guard(hwnd, rect)
         image = self.capture(hwnd)
         self.delivery_progress('正在核对会话标题与空输入栏')
-        if not self.title(image, layout, title) or not self.verify_draft(hwnd, layout, ''):
-            raise DesktopDeferred('发送前标题或空草稿未通过核对，等待人工处理')
+        if not self.title(image, layout, title):
+            raise DesktopDeferred('发送前会话标题尚未匹配，原回复保留排队')
+        if not self.verify_draft(hwnd, layout, ''):
+            raise DesktopDeferred(self.draft_wait_detail())
         self.native_target(hwnd)
         before = self.messages(image, layout)
         self.guard(hwnd, rect)

@@ -471,6 +471,110 @@ class EditorCapabilityTests(unittest.TestCase):
             driver.visual_draft(1,DEFAULT_LAYOUT)
 
 
+class CalibratedEditorRegionTests(unittest.TestCase):
+    def setUp(self):
+        from PIL import Image, ImageDraw
+        self.image = Image.new('RGB', (1000,800), 'white')
+        draw = ImageDraw.Draw(self.image)
+        # A normal hand-drawn input area includes toolbar and send controls.
+        draw.rectangle((410,550,600,570), fill='black')
+        draw.rectangle((870,730,940,755), fill='blue')
+        self.layout = dict(DEFAULT_LAYOUT, editor=[.4,.54,.96,.96])
+        self.control = SimpleNamespace(
+            BoundingRectangle=SimpleNamespace(left=410,top=590,right=950,bottom=720),
+            ClassName='im_chat::InputRichTextEdit', HasKeyboardFocus=False)
+        self.driver = SendDriver()
+        self.driver.config = dict(version=2, referenceSize=[1000,800], layout=self.layout)
+        self.driver.capture = lambda _:self.image
+        self.driver.editor = lambda *_:self.control
+        self.driver.editor_text = lambda _:''
+        self.driver.read = lambda _:[]
+        self.driver.verify_draft = lambda h,l,t:WindowsDesktop.verify_draft(self.driver,h,l,t)
+        patcher = patch.dict(sys.modules, {'uiautomation':SimpleNamespace(UIAutomationInitializerInThread=nullcontext)})
+        patcher.start(); self.addCleanup(patcher.stop)
+
+    def test_toolbar_and_send_button_are_excluded_in_calibrated_mode(self):
+        original = dict(self.layout)
+        self.assertEqual(self.driver.editor_image(1,self.layout).size, (540,130))
+        self.assertTrue(self.driver.verify_draft(1,self.layout,''))
+        self.assertEqual(self.layout, original)
+
+    def test_real_glyph_is_not_ignored_even_when_uia_value_is_empty(self):
+        from PIL import ImageDraw
+        ImageDraw.Draw(self.image).rectangle((440,620,450,640),fill='black')
+        self.assertFalse(self.driver.verify_draft(1,self.layout,''))
+        self.assertIn('未识别内容',self.driver.draft_wait_detail())
+
+    def test_whole_editor_is_checked_even_when_calibration_covers_only_middle(self):
+        from PIL import ImageDraw
+        self.layout['editor'] = [.6,.78,.8,.88]
+        ImageDraw.Draw(self.image).rectangle((420,600,430,620),fill='black')
+        self.assertEqual(self.driver.editor_image(1,self.layout).size, (540,130))
+        self.assertFalse(self.driver.verify_draft(1,self.layout,''))
+
+    def test_native_placeholder_works_without_optional_placeholder_configuration(self):
+        from PIL import ImageDraw
+        draw = ImageDraw.Draw(self.image)
+        for x in range(412,496,18):
+            draw.rectangle((x,593,x+7,610),fill=(139,141,143))
+        self.driver.read = lambda _:[dict(text='请输入消息',confidence=.999,x=1,y=1)]
+        self.assertTrue(self.driver.verify_draft(1,self.layout,''))
+        self.driver.editor_text = lambda _:'请输入消息'
+        self.assertFalse(self.driver.verify_draft(1,self.layout,''))
+        self.assertIn('输入提示文字',self.driver.draft_wait_detail())
+
+    def test_unavailable_or_unrelated_control_preserves_manual_fallback(self):
+        from PIL import ImageDraw
+        self.layout['editor'] = [.42,.75,.94,.89]
+        def unavailable(*_): raise DesktopUnavailable('No unique editor')
+        for editor in (unavailable, lambda *_:SimpleNamespace(
+                BoundingRectangle=SimpleNamespace(left=10,top=10,right=200,bottom=80))):
+            with self.subTest(editor=editor):
+                self.driver.editor = editor
+                self.assertEqual(self.driver.editor_image(1,self.layout).size,(520,112))
+                self.assertTrue(self.driver.verify_draft(1,self.layout,''))
+        ImageDraw.Draw(self.image).rectangle((450,630,460,650),fill='black')
+        self.assertFalse(self.driver.verify_draft(1,self.layout,''))
+
+    def test_unknown_placeholder_provider_defers_instead_of_raising(self):
+        from PIL import ImageDraw
+        self.layout['editor'] = [.41,.7375,.95,.9]
+        def unavailable(*_): raise RuntimeError('Provider unavailable')
+        self.driver.editor = unavailable
+        for x in range(412,496,18):
+            ImageDraw.Draw(self.image).rectangle((x,593,x+7,610),fill=(139,141,143))
+        self.driver.read = lambda _:[dict(text='请输入消息',confidence=.999,x=1,y=1)]
+        self.assertFalse(self.driver.verify_draft(1,self.layout,''))
+        self.assertIn('未能核验',self.driver.draft_wait_detail())
+
+    def test_blank_refined_editor_reaches_typing_send_and_receipt_in_both_modes(self):
+        from PIL import ImageDraw
+        from desktop_background import BackgroundDesktop
+        driver = self.driver
+        driver.guard = lambda *_:None
+        driver.native_target = lambda _:2
+        driver.read = lambda _:[dict(text='reply',confidence=.999,x=1,y=1)] if driver.draft else []
+        driver.select_chat = lambda *_:self.image
+        driver.messages = lambda *_:[Bubble('reply','outgoing')] if driver.clicks else []
+        def write(h,l,text):
+            driver.draft = text
+            ImageDraw.Draw(self.image).rectangle((430,610,480,630),fill='black')
+            return 1
+        def click(*_):
+            self.assertEqual(driver.draft,'reply')
+            driver.clicks += 1; driver.draft = ''
+            ImageDraw.Draw(self.image).rectangle((410,590,949,719),fill='white')
+        driver.type_reply = write; driver.click = click
+        for send in (WindowsDesktop.send_reply, BackgroundDesktop.send_reply):
+            with self.subTest(mode=send.__qualname__), patch('time.sleep'):
+                driver.clicks = 0; intent = []
+                result = send(driver,dict(windowTitle='Test',layout=self.layout),'Test','reply',lambda:intent.append(True))
+                self.assertEqual(result,'sent')
+                self.assertEqual(intent,[True])
+                self.assertEqual(driver.clicks,1)
+                self.assertEqual(driver.draft,'')
+
+
 class SidebarTitleTests(unittest.TestCase):
     def match(self, text='111@好友', checked='111', colored=True, extra=()):
         from PIL import Image, ImageDraw
