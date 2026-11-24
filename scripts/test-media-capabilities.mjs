@@ -13,6 +13,23 @@ test("image sizes match the studio and discard incompatible saved values", () =>
   assert.equal(imageModelCapabilities("image-01-live-2K").dimensions.length, 0);
 });
 
+test("CTMOAI Seedance model resolution choices and version limits", () => {
+  for (const [model, tiers, seconds] of [
+    ["doubao-seedance-2-0-260128", ["720p", "1080p"], 15],
+    ["doubao-seedance-2-0-fast-260128", ["720p"], 15],
+    ["doubao-seedance-2-0-mini-260615", ["720p"], 15],
+    ["doubao-seedance-2-5-260628", ["720p", "1080p"], 30],
+    ["seedance-2.0-933", ["auto"], 15],
+    ["seedance-2.5-m", ["720p"], 30],
+    ["seedance-2.5-n", ["720p"], 30],
+  ]) {
+    const capabilities = videoModelCapabilities(model, "reference");
+    assert.deepEqual(capabilities.resolutions, tiers);
+    assert.equal(Math.max(...capabilities.durations), seconds);
+    assert.equal(capabilities.referenceLimit, seconds === 30 ? 30 : 9);
+  }
+});
+
 test("video output controls normalize saved options while retaining supported choices", () => {
   const h3 = videoOutputOptions("MiniMax-H3", "text", { videoResolution: "720p", videoAspectRatio: "invalid", seconds: 30 });
   assert.equal(h3.resolution, "768p");
@@ -58,6 +75,8 @@ test("prefixed MiniMax aliases remain native and select their fixed resolution",
     assert.equal(videoOutputOptions(model, "first_last", {}).aspectRatio, "adaptive");
   }
   assert.equal(mediaModelBaseId("seedance/Seedance-2.5"), "seedance-2.5");
+  assert.equal(mediaModelBaseId("seedance2.5-stable-480p"), "seedance-2.5");
+  assert.deepEqual(videoModelCapabilities("minimax-h3-comic-cf-4k").resolutions, ["4K"]);
   assert.equal(videoModelCapabilities("专线-MiniMax-H3-Max-768P").modes.includes("reference"), false);
   for (const model of ["notminimax-h3", "Seedance-2.6", "MiniMax-H30"]) {
     assert.equal(videoModelCapabilities(model).native, false);

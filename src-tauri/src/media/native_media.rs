@@ -7,7 +7,10 @@ pub(super) fn native_model_base_id(model: &str) -> String {
     let id = model
         .trim()
         .trim_start_matches("models/")
-        .to_ascii_lowercase();
+        .to_ascii_lowercase()
+        .replace("seedance2", "seedance-2")
+        .replace("seedance-2-0-", "seedance-2.0-")
+        .replace("seedance-2-5-", "seedance-2.5-");
     [
         "minimax-h3-max",
         "minimax-h3",
@@ -59,6 +62,20 @@ pub(super) fn is_seedance_video_model(model: &str) -> bool {
 
 fn model_video_resolution(model: &str) -> Option<String> {
     let id = model.trim().to_ascii_lowercase();
+    if id == "seedance-2.0-933" {
+        return Some("auto".to_owned());
+    }
+    if matches!(
+        id.as_str(),
+        "doubao-seedance-2-0-260128"
+            | "doubao-seedance-2-0-fast-260128"
+            | "doubao-seedance-2-0-mini-260615"
+            | "doubao-seedance-2-5-260628"
+            | "seedance-2.5-m"
+            | "seedance-2.5-n"
+    ) {
+        return Some("720p".to_owned());
+    }
     let (prefix, tier) = id.rsplit_once(['-', '_', '/'])?;
     (!prefix.is_empty()
         && matches!(
@@ -160,11 +177,15 @@ pub(super) fn validate_native_video_request(
     let resolution = native_video_resolution(model, request);
     let supported = if seedance {
         matches!(resolution.as_str(), "480p" | "720p" | "1080p")
+            || (resolution == "auto" && model.eq_ignore_ascii_case("seedance-2.0-933"))
             || (!version_25 && resolution == "4k")
     } else if max {
         matches!(resolution.as_str(), "480p" | "768p")
     } else {
-        matches!(resolution.as_str(), "720p" | "768p" | "1080p" | "1k" | "2k")
+        matches!(
+            resolution.as_str(),
+            "720p" | "768p" | "1080p" | "1k" | "2k" | "4k"
+        )
     };
     if !supported {
         return Err(format!("{model} does not support resolution {resolution}"));
@@ -323,7 +344,7 @@ pub(super) async fn create_native_video(
             "768p" | "2k"
         )
     {
-        return Err("720p, 1080p and 1K H3 require a compatible relay connection".to_owned());
+        return Err("720p, 1080p, 1K and 4K H3 require a compatible relay connection".to_owned());
     }
     let mut body = native_video_body(model, request, references)?;
     if is_minimax_video_model(model) && !direct_minimax {
@@ -579,6 +600,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ctmoai_seedance_aliases_keep_the_wire_id_and_version_limits() {
+        for (model, family, seconds, count) in [
+            ("doubao-seedance-2-0-260128", "seedance-2.0", 15, 9),
+            ("doubao-seedance-2-0-fast-260128", "seedance-2.0", 15, 9),
+            ("doubao-seedance-2-0-mini-260615", "seedance-2.0", 15, 9),
+            ("doubao-seedance-2-5-260628", "seedance-2.5", 30, 30),
+            ("seedance-2.0-933", "seedance-2.0", 15, 9),
+            ("seedance-2.5-m", "seedance-2.5", 30, 30),
+            ("seedance-2.5-n", "seedance-2.5", 30, 30),
+        ] {
+            let mut req = request(model);
+            req.seconds = Some(seconds);
+            req.video_mode = VideoGenerationMode::Reference;
+            req.reference_urls = (0..count)
+                .map(|i| format!("https://cdn.test/{i}.png"))
+                .collect();
+            assert_eq!(native_model_base_id(model), family);
+            let body = native_video_body(model, &req, &[]).unwrap();
+            assert_eq!(body["model"], model);
+            assert_eq!(body["duration"], seconds);
+            assert_eq!(
+                body["resolution"],
+                if model == "seedance-2.0-933" {
+                    "auto"
+                } else {
+                    "720p"
+                }
+            );
+            assert_eq!(body["referenceImages"], json!(req.reference_urls));
+        }
+    }
+
+    #[test]
     fn prefixed_video_aliases_default_to_suffix_but_allow_explicit_resolution() {
         for tier in ["1080P", "1K", "2K"] {
             let model = format!("无限制-MiniMax-H3-{tier}");
@@ -593,6 +647,12 @@ mod tests {
             assert_eq!(body["resolution"], "768P");
         }
         assert!(is_seedance_video_model("优惠-Seedance-2.5-720P"));
+        assert_eq!(
+            native_model_base_id("seedance2.5-stable-480p"),
+            "seedance-2.5"
+        );
+        let cf = request("minimax-h3-comic-cf-4k");
+        assert!(native_video_body("minimax-h3-comic-cf-4k", &cf, &[]).is_ok());
         for model in [
             "MiniMax-H30",
             "notminimax-h3",

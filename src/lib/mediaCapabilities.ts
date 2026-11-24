@@ -22,8 +22,8 @@ export const VIDEO_SIZE_OPTIONS = ["1280x720", "720x1280", "16:9", "9:16"];
 // Resolve capabilities only; requests and saved selections keep the full model ID.
 export function mediaModelBaseId(model: string) {
   const id = model.trim().replace(/^models\//i, "").toLowerCase();
-  const video = id.match(/(?:^|[^a-z0-9])(minimax-h3(?:-max)?|seedance-2(?:\.0|\.5)?)(?=$|[^a-z0-9.])/i)?.[1];
-  return video ?? ["image-01-live", "image-01"]
+  const video = id.match(/(?:^|[^a-z0-9])(minimax-h3(?:-max)?|seedance-?2(?:[.-][05])?)(?=$|[^a-z0-9.])/i)?.[1]?.replace(/2-([05])$/, "2.$1");
+  return video?.replace(/^seedance2/, "seedance-2") ?? ["image-01-live", "image-01"]
     .find((base) => id === base || id.startsWith(`${base}-`)) ?? id;
 }
 
@@ -95,6 +95,17 @@ export function videoOutputOptions(model: string, mode: VideoGenerationMode, sav
   };
 }
 
+// Defaults for CTMOAI relay models with no resolution suffix.
+const ctmoaiSeedanceOptions: Record<string, { resolutions: string[]; minSeconds: number }> = {
+  "doubao-seedance-2-0-260128": { resolutions: ["720p", "1080p"], minSeconds: 5 },
+  "doubao-seedance-2-0-fast-260128": { resolutions: ["720p"], minSeconds: 5 },
+  "doubao-seedance-2-0-mini-260615": { resolutions: ["720p"], minSeconds: 5 },
+  "doubao-seedance-2-5-260628": { resolutions: ["720p", "1080p"], minSeconds: 5 },
+  "seedance-2.0-933": { resolutions: ["auto"], minSeconds: 5 },
+  "seedance-2.5-m": { resolutions: ["720p"], minSeconds: 4 },
+  "seedance-2.5-n": { resolutions: ["720p"], minSeconds: 4 },
+};
+
 export function videoModelCapabilities(model: string, mode: VideoGenerationMode = "text") {
   const id = mediaModelBaseId(model);
   const minimax = /^minimax-h3(?:-max)?$/.test(id);
@@ -108,11 +119,12 @@ export function videoModelCapabilities(model: string, mode: VideoGenerationMode 
     ? max ? ["text", "image", "first_last"] : ["text", "image", "first_last", "reference"]
     : grok15 ? ["image"] : grok ? ["text", "image", "reference", "video"] : ["text"];
   const fixedResolution = native ? model.trim().match(/[-_/](480p|720p|768p|1080p|1k|2k|4k)$/i)?.[1].toLowerCase() : undefined;
-  const resolutions = fixedResolution ? [fixedResolution.endsWith("k") ? fixedResolution.toUpperCase() : fixedResolution]
+  const relay = ctmoaiSeedanceOptions[model.trim().replace(/^models\//i, "").toLowerCase()];
+  const resolutions = relay ? relay.resolutions : fixedResolution ? [fixedResolution.endsWith("k") ? fixedResolution.toUpperCase() : fixedResolution]
     : minimax ? max ? ["480p", "768p"] : ["768p", "2K"]
     : seedance ? version25 ? ["480p", "720p", "1080p"] : ["480p", "720p", "1080p", "4K"]
     : grok15 ? ["480p", "720p", "1080p"] : ["480p", "720p"];
-  const durations = native ? [max ? 5 : 4, ...(max ? [] : [5]), 8, 10, 12, 15, ...(version25 ? [20, 30] : [])]
+  const durations = native ? [...(max || relay?.minSeconds === 5 ? [] : [4]), 5, 8, 10, 12, 15, ...(version25 ? [20, 30] : [])]
     : grok ? mode === "reference" ? [4, 8, 10] : [4, 8, 10, 12, 15] : [4, 8, 12];
   const ratios = native ? ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"] : ["16:9", "9:16"];
   const referenceLimit = mode === "text" ? 0 : mode === "first_last" ? 2 : mode === "reference" ? version25 ? 30 : native ? 9 : 7 : 1;
